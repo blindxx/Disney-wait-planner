@@ -1,0 +1,10 @@
+{
+  "name": "disney-wait-planner",
+  "private": true,
+  "scripts": {
+    "dev": "pnpm run --parallel -r dev"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
