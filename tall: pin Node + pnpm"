@@ -1,0 +1,42 @@
+[1mdiff --git a/.nvmrc b/.nvmrc[m
+[1mnew file mode 100644[m
+[1mindex 0000000..209e3ef[m
+[1m--- /dev/null[m
+[1m+++ b/.nvmrc[m
+[36m@@ -0,0 +1 @@[m
+[32m+[m[32m20[m
+[1mdiff --git a/package.json b/package.json[m
+[1mindex 7ec6ab0..4759d44 100644[m
+[1m--- a/package.json[m
+[1m+++ b/package.json[m
+[36m@@ -6,5 +6,6 @@[m
+   },[m
+   "devDependencies": {[m
+     "typescript": "^5.3.3"[m
+[31m-  }[m
+[32m+[m[32m  },[m
+[32m+[m[32m  "packageManager": "pnpm@9.15.0"[m
+ }[m
+[1mdiff --git a/vercel.json b/vercel.json[m
+[1mnew file mode 100644[m
+[1mindex 0000000..6d05f77[m
+[1m--- /dev/null[m
+[1m+++ b/vercel.json[m
+[36m@@ -0,0 +1,17 @@[m
+[32m+[m[32m{[m
+[32m+[m[32m  "installCommand": "corepack enable && pnpm install --no-frozen-lockfile",[m
+[32m+[m[32m  "buildCommand": "pnpm -C apps/web build"[m
+[32m+[m[32m}[m
+[32m+[m[32mgit status15.0'; fs.writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');",'utf8')); p.packageManager=p.packageManager[m
+[32m+[m[32mOn branch main[m
+[32m+[m[32mYour branch is up to date with 'origin/main'.[m
+[32m+[m
+[32m+[m[32mChanges not staged for commit:[m
+[32m+[m[32m  (use "git add <file>..." to update what will be committed)[m
+[32m+[m[32m  (use "git restore <file>..." to discard changes in working directory)[m
+[32m+[m[32m        modified:   ap[m
+[32m+[m[32mcat > vercel.json <<'EOF'[m
+[32m+[m[32m{[m
+[32m+[m[32m  "installCommand": "corepack enable && pnpm install --no-frozen-lockfile",[m
+[32m+[m[32m  "buildCommand": "pnpm -C apps/web build"[m
+[32m+[m[32m}[m
