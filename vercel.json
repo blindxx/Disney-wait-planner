@@ -1,4 +1,0 @@
-{
-  "installCommand": "corepack enable && pnpm install --no-frozen-lockfile",
-  "buildCommand": "corepack enable && pnpm -C apps/web build"
-}
