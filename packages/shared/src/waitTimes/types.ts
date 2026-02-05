@@ -13,6 +13,8 @@ export type WaitStatus = "OPERATING" | "DOWN" | "CLOSED";
 export type AttractionWait = {
   /** Unique identifier for the attraction (e.g., "dl-space-mountain") */
   id: string;
+  /** ThemeParks.wiki entity ID placeholder (e.g., "TBD-dl-space-mountain") */
+  themeParksId: string;
   /** Display name of the attraction */
   name: string;
   /** Themed land where the attraction is located (optional) */

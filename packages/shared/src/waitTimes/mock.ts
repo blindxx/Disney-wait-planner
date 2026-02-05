@@ -28,6 +28,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Tomorrowland
   {
     id: "dl-space-mountain",
+    themeParksId: "TBD-dl-space-mountain",
     name: "Space Mountain",
     land: "Tomorrowland",
     parkId: "disneyland",
@@ -37,6 +38,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-buzz-lightyear",
+    themeParksId: "TBD-dl-buzz-lightyear",
     name: "Buzz Lightyear Astro Blasters",
     land: "Tomorrowland",
     parkId: "disneyland",
@@ -46,6 +48,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-finding-nemo",
+    themeParksId: "TBD-dl-finding-nemo",
     name: "Finding Nemo Submarine Voyage",
     land: "Tomorrowland",
     parkId: "disneyland",
@@ -57,6 +60,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Fantasyland
   {
     id: "dl-matterhorn",
+    themeParksId: "TBD-dl-matterhorn",
     name: "Matterhorn Bobsleds",
     land: "Fantasyland",
     parkId: "disneyland",
@@ -66,6 +70,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-its-a-small-world",
+    themeParksId: "TBD-dl-its-a-small-world",
     name: "\"it's a small world\"",
     land: "Fantasyland",
     parkId: "disneyland",
@@ -75,6 +80,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-alice-wonderland",
+    themeParksId: "TBD-dl-alice-wonderland",
     name: "Alice in Wonderland",
     land: "Fantasyland",
     parkId: "disneyland",
@@ -86,6 +92,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Adventureland
   {
     id: "dl-indiana-jones",
+    themeParksId: "TBD-dl-indiana-jones",
     name: "Indiana Jones Adventure",
     land: "Adventureland",
     parkId: "disneyland",
@@ -95,6 +102,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-jungle-cruise",
+    themeParksId: "TBD-dl-jungle-cruise",
     name: "Jungle Cruise",
     land: "Adventureland",
     parkId: "disneyland",
@@ -106,6 +114,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // New Orleans Square
   {
     id: "dl-haunted-mansion",
+    themeParksId: "TBD-dl-haunted-mansion",
     name: "Haunted Mansion",
     land: "New Orleans Square",
     parkId: "disneyland",
@@ -115,6 +124,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-pirates",
+    themeParksId: "TBD-dl-pirates",
     name: "Pirates of the Caribbean",
     land: "New Orleans Square",
     parkId: "disneyland",
@@ -125,7 +135,8 @@ export const mockAttractionWaits: AttractionWait[] = [
 
   // Critter Country
   {
-    id: "dl-splash-mountain",
+    id: "dl-tianas-bayou",
+    themeParksId: "TBD-dl-tianas-bayou",
     name: "Tiana's Bayou Adventure",
     land: "Critter Country",
     parkId: "disneyland",
@@ -137,6 +148,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Star Wars: Galaxy's Edge
   {
     id: "dl-rise-of-resistance",
+    themeParksId: "TBD-dl-rise-of-resistance",
     name: "Star Wars: Rise of the Resistance",
     land: "Star Wars: Galaxy's Edge",
     parkId: "disneyland",
@@ -146,6 +158,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dl-smugglers-run",
+    themeParksId: "TBD-dl-smugglers-run",
     name: "Millennium Falcon: Smugglers Run",
     land: "Star Wars: Galaxy's Edge",
     parkId: "disneyland",
@@ -157,6 +170,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Frontierland
   {
     id: "dl-big-thunder",
+    themeParksId: "TBD-dl-big-thunder",
     name: "Big Thunder Mountain Railroad",
     land: "Frontierland",
     parkId: "disneyland",
@@ -172,6 +186,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Avengers Campus
   {
     id: "dca-webslingers",
+    themeParksId: "TBD-dca-webslingers",
     name: "WEB SLINGERS: A Spider-Man Adventure",
     land: "Avengers Campus",
     parkId: "dca",
@@ -181,6 +196,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-guardians",
+    themeParksId: "TBD-dca-guardians",
     name: "Guardians of the Galaxy - Mission: BREAKOUT!",
     land: "Avengers Campus",
     parkId: "dca",
@@ -192,6 +208,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Cars Land
   {
     id: "dca-radiator-springs",
+    themeParksId: "TBD-dca-radiator-springs",
     name: "Radiator Springs Racers",
     land: "Cars Land",
     parkId: "dca",
@@ -201,6 +218,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-luigis",
+    themeParksId: "TBD-dca-luigis",
     name: "Luigi's Rollickin' Roadsters",
     land: "Cars Land",
     parkId: "dca",
@@ -210,6 +228,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-maters",
+    themeParksId: "TBD-dca-maters",
     name: "Mater's Junkyard Jamboree",
     land: "Cars Land",
     parkId: "dca",
@@ -221,6 +240,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Pixar Pier
   {
     id: "dca-incredicoaster",
+    themeParksId: "TBD-dca-incredicoaster",
     name: "Incredicoaster",
     land: "Pixar Pier",
     parkId: "dca",
@@ -230,6 +250,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-toy-story-midway",
+    themeParksId: "TBD-dca-toy-story-midway",
     name: "Toy Story Midway Mania!",
     land: "Pixar Pier",
     parkId: "dca",
@@ -239,6 +260,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-inside-out",
+    themeParksId: "TBD-dca-inside-out",
     name: "Inside Out Emotional Whirlwind",
     land: "Pixar Pier",
     parkId: "dca",
@@ -250,6 +272,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Grizzly Peak
   {
     id: "dca-grizzly-river",
+    themeParksId: "TBD-dca-grizzly-river",
     name: "Grizzly River Run",
     land: "Grizzly Peak",
     parkId: "dca",
@@ -259,6 +282,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-soarin",
+    themeParksId: "TBD-dca-soarin",
     name: "Soarin' Around the World",
     land: "Grizzly Peak",
     parkId: "dca",
@@ -270,6 +294,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Hollywood Land
   {
     id: "dca-monsters-inc",
+    themeParksId: "TBD-dca-monsters-inc",
     name: "Monsters, Inc. Mike & Sulley to the Rescue!",
     land: "Hollywood Land",
     parkId: "dca",
@@ -281,6 +306,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   // Paradise Gardens Park
   {
     id: "dca-little-mermaid",
+    themeParksId: "TBD-dca-little-mermaid",
     name: "The Little Mermaid ~ Ariel's Undersea Adventure",
     land: "Paradise Gardens Park",
     parkId: "dca",
@@ -290,6 +316,7 @@ export const mockAttractionWaits: AttractionWait[] = [
   },
   {
     id: "dca-goofy-sky-school",
+    themeParksId: "TBD-dca-goofy-sky-school",
     name: "Goofy's Sky School",
     land: "Paradise Gardens Park",
     parkId: "dca",
