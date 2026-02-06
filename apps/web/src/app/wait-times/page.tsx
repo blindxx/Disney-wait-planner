@@ -5,7 +5,10 @@
  * Displays current attraction wait times for Disneyland Resort parks.
  * Allows filtering by park, operating status, and sorting options.
  *
- * Mobile-first layout: full-width cards readable while walking in a park.
+ * Responsive layout:
+ *   Mobile  — full-width stacked card list
+ *   Tablet  — 2-column grid of cards
+ *   Desktop — 3-column grid, wider container, tighter density
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -38,6 +41,135 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "wait-desc", label: "Wait (Longest)" },
   { value: "name-asc", label: "Name (A-Z)" },
 ];
+
+// ============================================
+// RESPONSIVE CSS
+// ============================================
+
+/**
+ * All responsive styles live here so media queries can override properly.
+ * Inline styles have higher specificity than class selectors, so any
+ * property that changes across breakpoints MUST be in CSS only.
+ */
+const RESPONSIVE_CSS = `
+  /* ---- Animations ---- */
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  .skeleton-pulse {
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  /* ---- Page container ---- */
+  .wait-page {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 16px;
+    overflow-x: hidden;
+  }
+
+  /* ---- Park tab buttons ---- */
+  .park-tab {
+    flex: 1 1 0%;
+    padding: 10px 8px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    line-height: 1.2;
+    text-align: center;
+    transition: background-color 0.15s ease, color 0.15s ease;
+  }
+
+  /* ---- Grid container — mobile: bordered list ---- */
+  .wait-grid {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  /* ---- Card — mobile: stacked rows ---- */
+  .wait-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    min-height: 56px;
+    border-bottom: 1px solid #e5e7eb;
+    background-color: #fff;
+  }
+  .wait-card:last-child {
+    border-bottom: none;
+  }
+
+  /* ---- Empty state ---- */
+  .wait-empty {
+    padding: 48px 20px;
+    text-align: center;
+    color: #6b7280;
+    font-size: 15px;
+    background-color: #fff;
+  }
+
+  /* ============================================
+     Tablet — 768px+  (2-column grid)
+     ============================================ */
+  @media (min-width: 768px) {
+    .wait-page {
+      padding: 20px;
+    }
+
+    .park-tab {
+      flex: 0 1 auto;
+      padding: 10px 20px;
+    }
+
+    .wait-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      border: none;
+      border-radius: 0;
+      overflow: visible;
+    }
+
+    .wait-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    .wait-card:last-child {
+      border: 1px solid #e5e7eb;
+    }
+
+    .wait-empty {
+      grid-column: 1 / -1;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+  }
+
+  /* ============================================
+     Desktop — 1024px+  (3-column grid, wider)
+     ============================================ */
+  @media (min-width: 1024px) {
+    .wait-page {
+      max-width: 1100px;
+      padding: 24px;
+    }
+
+    .wait-grid {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .wait-card {
+      padding: 10px 14px;
+      min-height: 52px;
+    }
+  }
+`;
 
 // ============================================
 // HELPER COMPONENTS
@@ -100,22 +232,12 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
 }
 
 /**
- * AttractionCard — mobile-friendly attraction display.
- * Name + land on the left, wait badge on the right.
+ * AttractionCard — responsive attraction display.
+ * Layout and spacing adapt via .wait-card CSS class.
  */
 function AttractionCard({ attraction }: { attraction: AttractionWait }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "12px",
-        padding: "12px 16px",
-        minHeight: "56px",
-        borderBottom: "1px solid #e5e7eb",
-        backgroundColor: "#fff",
-      }}
-    >
+    <div className="wait-card">
       {/* Left: name + land */}
       <div style={{ flex: "1 1 0%", minWidth: 0 }}>
         <div
@@ -154,21 +276,11 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
 
 /**
  * SkeletonCard — placeholder shown while switching parks.
- * Matches AttractionCard height to prevent layout jump.
+ * Uses .wait-card class so skeletons match the responsive grid.
  */
 function SkeletonCard() {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "12px",
-        padding: "12px 16px",
-        minHeight: "56px",
-        borderBottom: "1px solid #e5e7eb",
-        backgroundColor: "#fff",
-      }}
-    >
+    <div className="wait-card">
       <div style={{ flex: "1 1 0%", minWidth: 0 }}>
         <div
           className="skeleton-pulse"
@@ -250,26 +362,10 @@ export default function WaitTimesPage() {
 
   return (
     <>
-      {/* Skeleton animation keyframes */}
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
-        }
-        .skeleton-pulse {
-          animation: pulse 1.5s ease-in-out infinite;
-        }
-      `}</style>
+      {/* Responsive styles — must be CSS (not inline) for media queries */}
+      <style>{RESPONSIVE_CSS}</style>
 
-      <div
-        style={{
-          maxWidth: "800px",
-          margin: "0 auto",
-          padding: "16px",
-          /* Prevent any horizontal scroll from long content */
-          overflowX: "hidden",
-        }}
-      >
+      <div className="wait-page">
         {/* Page Header */}
         <h1
           style={{
@@ -282,7 +378,7 @@ export default function WaitTimesPage() {
           Wait Times
         </h1>
 
-        {/* Park Tabs — equal width, short labels for mobile */}
+        {/* Park Tabs */}
         <div
           style={{
             display: "flex",
@@ -293,21 +389,12 @@ export default function WaitTimesPage() {
           {(Object.keys(PARK_NAMES) as ParkId[]).map((parkId) => (
             <button
               key={parkId}
+              className="park-tab"
               onClick={() => setSelectedPark(parkId)}
               style={{
-                flex: "1 1 0%",
-                padding: "10px 8px",
-                borderRadius: "8px",
-                border: "none",
-                cursor: "pointer",
-                fontWeight: 600,
-                fontSize: "14px",
-                lineHeight: "1.2",
-                textAlign: "center",
                 backgroundColor:
                   selectedPark === parkId ? "#2563eb" : "#f3f4f6",
                 color: selectedPark === parkId ? "#fff" : "#374151",
-                transition: "background-color 0.15s ease, color 0.15s ease",
               }}
             >
               {PARK_TAB_LABELS[parkId]}
@@ -376,28 +463,14 @@ export default function WaitTimesPage() {
           </div>
         </div>
 
-        {/* Attractions List */}
-        <div
-          style={{
-            border: "1px solid #e5e7eb",
-            borderRadius: "8px",
-            overflow: "hidden",
-          }}
-        >
+        {/* Attractions Grid / List */}
+        <div className="wait-grid">
           {isLoading ? (
-            /* Skeleton loading cards — stable height, no layout jump */
-            Array.from({ length: 8 }).map((_, i) => (
+            Array.from({ length: 9 }).map((_, i) => (
               <SkeletonCard key={i} />
             ))
           ) : filteredAttractions.length === 0 ? (
-            <div
-              style={{
-                padding: "48px 20px",
-                textAlign: "center",
-                color: "#6b7280",
-                fontSize: "15px",
-              }}
-            >
+            <div className="wait-empty">
               No attractions match your filters.
             </div>
           ) : (
