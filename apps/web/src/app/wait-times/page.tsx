@@ -325,6 +325,7 @@ export default function WaitTimesPage() {
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
   const [operatingOnly, setOperatingOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>("wait-desc");
+  const [selectedLand, setSelectedLand] = useState("");
   const [isLoading, setIsLoading] = useState(true);
 
   // Brief loading on mount and park switch for skeleton transition
@@ -332,6 +333,15 @@ export default function WaitTimesPage() {
     setIsLoading(true);
     const t = setTimeout(() => setIsLoading(false), 350);
     return () => clearTimeout(t);
+  }, [selectedPark]);
+
+  /** Unique sorted land names for the selected park */
+  const availableLands = useMemo(() => {
+    const lands = mockAttractionWaits
+      .filter((a) => a.parkId === selectedPark)
+      .map((a) => a.land)
+      .filter((l): l is string => !!l);
+    return [...new Set(lands)].sort();
   }, [selectedPark]);
 
   /**
@@ -347,6 +357,10 @@ export default function WaitTimesPage() {
       results = results.filter((a) => a.status === "OPERATING");
     }
 
+    if (selectedLand) {
+      results = results.filter((a) => a.land === selectedLand);
+    }
+
     results.sort((a, b) => {
       if (sortBy === "wait-desc") {
         const waitA = a.waitMins ?? -1;
@@ -358,7 +372,7 @@ export default function WaitTimesPage() {
     });
 
     return results;
-  }, [selectedPark, operatingOnly, sortBy]);
+  }, [selectedPark, operatingOnly, selectedLand, sortBy]);
 
   return (
     <>
@@ -390,7 +404,7 @@ export default function WaitTimesPage() {
             <button
               key={parkId}
               className="park-tab"
-              onClick={() => setSelectedPark(parkId)}
+              onClick={() => { setSelectedPark(parkId); setSelectedLand(""); }}
               style={{
                 backgroundColor:
                   selectedPark === parkId ? "#2563eb" : "#f3f4f6",
@@ -435,6 +449,30 @@ export default function WaitTimesPage() {
             />
             Operating only
           </label>
+
+          {/* Land Filter */}
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{ fontSize: "13px", color: "#6b7280" }}>Land:</span>
+            <select
+              value={selectedLand}
+              onChange={(e) => setSelectedLand(e.target.value)}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "6px",
+                border: "1px solid #d1d5db",
+                backgroundColor: "#fff",
+                fontSize: "14px",
+                cursor: "pointer",
+              }}
+            >
+              <option value="">All Lands</option>
+              {availableLands.map((land) => (
+                <option key={land} value={land}>
+                  {land}
+                </option>
+              ))}
+            </select>
+          </div>
 
           {/* Spacer pushes sort to the right when room allows */}
           <div style={{ flex: "1 1 0%", minWidth: "8px" }} />
