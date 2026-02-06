@@ -2,9 +2,16 @@
  * Mock Wait Times Data
  * Provides realistic sample data for development and testing.
  * In production, this would be replaced with real API data.
+ *
+ * RIDES ONLY — no shows, parades, fireworks, character meets,
+ * galleries, walkthroughs, trails, or play areas.
  */
 
-import type { AttractionWait } from "./types";
+import type { AttractionWait, ParkId, WaitStatus } from "./types";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 /**
  * Helper to generate a recent ISO timestamp.
@@ -16,312 +23,421 @@ function recentTimestamp(minutesAgo: number = 0): string {
   return now.toISOString();
 }
 
-/**
- * Mock attraction wait time data for both Disneyland Resort parks.
- * Includes a mix of operating, down, and closed attractions.
- */
-export const mockAttractionWaits: AttractionWait[] = [
-  // ============================================
-  // DISNEYLAND PARK ATTRACTIONS
-  // ============================================
+/** Minimal definition used to build mock data. */
+type RideDef = {
+  id: string;
+  name: string;
+  land: string;
+  /** Override default OPERATING status */
+  status?: WaitStatus;
+  /** Typical wait in minutes (null when non-OPERATING) */
+  waitMins?: number | null;
+};
 
-  // Tomorrowland
-  {
-    id: "dl-space-mountain",
-    themeParksId: "TBD-dl-space-mountain",
-    name: "Space Mountain",
-    land: "Tomorrowland",
-    parkId: "disneyland",
-    status: "OPERATING",
-    waitMins: 65,
-    updatedAt: recentTimestamp(1),
-  },
-  {
-    id: "dl-buzz-lightyear",
-    themeParksId: "TBD-dl-buzz-lightyear",
-    name: "Buzz Lightyear Astro Blasters",
-    land: "Tomorrowland",
-    parkId: "disneyland",
-    status: "OPERATING",
-    waitMins: 35,
-    updatedAt: recentTimestamp(2),
-  },
-  {
-    id: "dl-finding-nemo",
-    themeParksId: "TBD-dl-finding-nemo",
-    name: "Finding Nemo Submarine Voyage",
-    land: "Tomorrowland",
-    parkId: "disneyland",
-    status: "DOWN",
-    waitMins: null,
-    updatedAt: recentTimestamp(3),
-  },
+/** Expand a compact ride definition into a full AttractionWait object. */
+function toAttractionWait(
+  ride: RideDef,
+  parkId: ParkId,
+  index: number,
+): AttractionWait {
+  const status: WaitStatus = ride.status ?? "OPERATING";
+  return {
+    id: ride.id,
+    themeParksId: `TBD-${ride.id}`,
+    name: ride.name,
+    land: ride.land,
+    parkId,
+    status,
+    waitMins: status === "OPERATING" ? (ride.waitMins ?? 15) : null,
+    updatedAt: recentTimestamp(index % 5),
+  };
+}
 
-  // Fantasyland
+// ---------------------------------------------------------------------------
+// Disneyland Park — ALL ride attractions (35 rides)
+// ---------------------------------------------------------------------------
+
+const DISNEYLAND_RIDES: RideDef[] = [
+  // ---- Main Street, U.S.A. ----
   {
-    id: "dl-matterhorn",
-    themeParksId: "TBD-dl-matterhorn",
-    name: "Matterhorn Bobsleds",
-    land: "Fantasyland",
-    parkId: "disneyland",
-    status: "OPERATING",
-    waitMins: 75,
-    updatedAt: recentTimestamp(1),
+    id: "dl-disneyland-railroad",
+    name: "Disneyland Railroad",
+    land: "Main Street, U.S.A.",
+    waitMins: 10,
   },
   {
-    id: "dl-its-a-small-world",
-    themeParksId: "TBD-dl-its-a-small-world",
-    name: "\"it's a small world\"",
-    land: "Fantasyland",
-    parkId: "disneyland",
-    status: "OPERATING",
-    waitMins: 20,
-    updatedAt: recentTimestamp(2),
-  },
-  {
-    id: "dl-alice-wonderland",
-    themeParksId: "TBD-dl-alice-wonderland",
-    name: "Alice in Wonderland",
-    land: "Fantasyland",
-    parkId: "disneyland",
-    status: "OPERATING",
-    waitMins: 30,
-    updatedAt: recentTimestamp(1),
+    id: "dl-main-street-vehicles",
+    name: "Main Street Vehicles",
+    land: "Main Street, U.S.A.",
+    waitMins: 10,
   },
 
-  // Adventureland
+  // ---- Adventureland ----
   {
     id: "dl-indiana-jones",
-    themeParksId: "TBD-dl-indiana-jones",
-    name: "Indiana Jones Adventure",
+    name: "Indiana Jones\u2122 Adventure",
     land: "Adventureland",
-    parkId: "disneyland",
-    status: "OPERATING",
     waitMins: 90,
-    updatedAt: recentTimestamp(1),
   },
   {
     id: "dl-jungle-cruise",
-    themeParksId: "TBD-dl-jungle-cruise",
     name: "Jungle Cruise",
     land: "Adventureland",
-    parkId: "disneyland",
-    status: "OPERATING",
     waitMins: 45,
-    updatedAt: recentTimestamp(3),
   },
 
-  // New Orleans Square
+  // ---- New Orleans Square ----
+  // Seasonal overlay: Haunted Mansion Holiday (same ride, not a separate entry)
   {
     id: "dl-haunted-mansion",
-    themeParksId: "TBD-dl-haunted-mansion",
     name: "Haunted Mansion",
     land: "New Orleans Square",
-    parkId: "disneyland",
-    status: "OPERATING",
     waitMins: 55,
-    updatedAt: recentTimestamp(2),
   },
   {
     id: "dl-pirates",
-    themeParksId: "TBD-dl-pirates",
     name: "Pirates of the Caribbean",
     land: "New Orleans Square",
-    parkId: "disneyland",
-    status: "OPERATING",
     waitMins: 25,
-    updatedAt: recentTimestamp(1),
   },
 
-  // Critter Country
+  // ---- Critter Country ----
+  {
+    id: "dl-davy-crockett-canoes",
+    name: "Davy Crockett\u2019s Explorer Canoes",
+    land: "Critter Country",
+    waitMins: 30,
+  },
   {
     id: "dl-tianas-bayou",
-    themeParksId: "TBD-dl-tianas-bayou",
-    name: "Tiana's Bayou Adventure",
+    name: "Tiana\u2019s Bayou Adventure",
     land: "Critter Country",
-    parkId: "disneyland",
-    status: "OPERATING",
     waitMins: 85,
-    updatedAt: recentTimestamp(1),
   },
 
-  // Star Wars: Galaxy's Edge
+  // ---- Star Wars: Galaxy's Edge ----
   {
     id: "dl-rise-of-resistance",
-    themeParksId: "TBD-dl-rise-of-resistance",
     name: "Star Wars: Rise of the Resistance",
-    land: "Star Wars: Galaxy's Edge",
-    parkId: "disneyland",
-    status: "OPERATING",
+    land: "Star Wars: Galaxy\u2019s Edge",
     waitMins: 80,
-    updatedAt: recentTimestamp(1),
   },
   {
     id: "dl-smugglers-run",
-    themeParksId: "TBD-dl-smugglers-run",
     name: "Millennium Falcon: Smugglers Run",
-    land: "Star Wars: Galaxy's Edge",
-    parkId: "disneyland",
-    status: "CLOSED",
-    waitMins: null,
-    updatedAt: recentTimestamp(5),
+    land: "Star Wars: Galaxy\u2019s Edge",
+    waitMins: 60,
   },
 
-  // Frontierland
+  // ---- Frontierland ----
   {
     id: "dl-big-thunder",
-    themeParksId: "TBD-dl-big-thunder",
     name: "Big Thunder Mountain Railroad",
     land: "Frontierland",
-    parkId: "disneyland",
-    status: "OPERATING",
     waitMins: 50,
-    updatedAt: recentTimestamp(2),
+  },
+  {
+    id: "dl-mark-twain",
+    name: "Mark Twain Riverboat",
+    land: "Frontierland",
+    waitMins: 10,
+  },
+  {
+    id: "dl-sailing-ship-columbia",
+    name: "Sailing Ship Columbia",
+    land: "Frontierland",
+    status: "CLOSED", // seasonal operation
+    waitMins: null,
   },
 
-  // ============================================
-  // DISNEY CALIFORNIA ADVENTURE ATTRACTIONS
-  // ============================================
+  // ---- Fantasyland ----
+  {
+    id: "dl-alice-wonderland",
+    name: "Alice in Wonderland",
+    land: "Fantasyland",
+    waitMins: 30,
+  },
+  {
+    id: "dl-casey-jr",
+    name: "Casey Jr. Circus Train",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
+  {
+    id: "dl-dumbo",
+    name: "Dumbo the Flying Elephant",
+    land: "Fantasyland",
+    waitMins: 25,
+  },
+  {
+    id: "dl-its-a-small-world",
+    name: "\"it's a small world\"",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
+  {
+    id: "dl-king-arthur-carrousel",
+    name: "King Arthur Carrousel",
+    land: "Fantasyland",
+    waitMins: 10,
+  },
+  {
+    id: "dl-mad-tea-party",
+    name: "Mad Tea Party",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
+  {
+    id: "dl-matterhorn",
+    name: "Matterhorn Bobsleds",
+    land: "Fantasyland",
+    waitMins: 75,
+  },
+  {
+    id: "dl-mr-toads-wild-ride",
+    name: "Mr. Toad\u2019s Wild Ride",
+    land: "Fantasyland",
+    waitMins: 35,
+  },
+  {
+    id: "dl-peter-pan",
+    name: "Peter Pan\u2019s Flight",
+    land: "Fantasyland",
+    waitMins: 55,
+  },
+  {
+    id: "dl-pinocchio",
+    name: "Pinocchio\u2019s Daring Journey",
+    land: "Fantasyland",
+    waitMins: 15,
+  },
+  {
+    id: "dl-snow-white",
+    name: "Snow White\u2019s Enchanted Wish",
+    land: "Fantasyland",
+    waitMins: 30,
+  },
+  {
+    id: "dl-storybook-land",
+    name: "Storybook Land Canal Boats",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
 
-  // Avengers Campus
+  // ---- Mickey's Toontown ----
   {
-    id: "dca-webslingers",
-    themeParksId: "TBD-dca-webslingers",
-    name: "WEB SLINGERS: A Spider-Man Adventure",
-    land: "Avengers Campus",
-    parkId: "dca",
-    status: "OPERATING",
-    waitMins: 70,
-    updatedAt: recentTimestamp(1),
+    id: "dl-gadgetcoaster",
+    name: "Chip \u2019n\u2019 Dale\u2019s GADGETcoaster",
+    land: "Mickey\u2019s Toontown",
+    waitMins: 25,
   },
   {
-    id: "dca-guardians",
-    themeParksId: "TBD-dca-guardians",
-    name: "Guardians of the Galaxy - Mission: BREAKOUT!",
-    land: "Avengers Campus",
-    parkId: "dca",
-    status: "OPERATING",
-    waitMins: 60,
-    updatedAt: recentTimestamp(2),
+    id: "dl-runaway-railway",
+    name: "Mickey & Minnie\u2019s Runaway Railway",
+    land: "Mickey\u2019s Toontown",
+    waitMins: 65,
+  },
+  {
+    id: "dl-roger-rabbit",
+    name: "Roger Rabbit\u2019s Car Toon Spin",
+    land: "Mickey\u2019s Toontown",
+    waitMins: 35,
   },
 
-  // Cars Land
+  // ---- Tomorrowland ----
   {
-    id: "dca-radiator-springs",
-    themeParksId: "TBD-dca-radiator-springs",
-    name: "Radiator Springs Racers",
-    land: "Cars Land",
-    parkId: "dca",
-    status: "OPERATING",
-    waitMins: 90,
-    updatedAt: recentTimestamp(1),
+    id: "dl-astro-orbitor",
+    name: "Astro Orbitor",
+    land: "Tomorrowland",
+    waitMins: 20,
   },
   {
-    id: "dca-luigis",
-    themeParksId: "TBD-dca-luigis",
-    name: "Luigi's Rollickin' Roadsters",
-    land: "Cars Land",
-    parkId: "dca",
+    id: "dl-autopia",
+    name: "Autopia",
+    land: "Tomorrowland",
+    waitMins: 30,
+  },
+  {
+    id: "dl-buzz-lightyear",
+    name: "Buzz Lightyear Astro Blasters",
+    land: "Tomorrowland",
+    waitMins: 35,
+  },
+  {
+    id: "dl-disneyland-monorail",
+    name: "Disneyland Monorail",
+    land: "Tomorrowland",
+    waitMins: 10,
+  },
+  {
+    id: "dl-finding-nemo",
+    name: "Finding Nemo Submarine Voyage",
+    land: "Tomorrowland",
     status: "DOWN",
     waitMins: null,
-    updatedAt: recentTimestamp(4),
+  },
+  {
+    id: "dl-space-mountain",
+    name: "Space Mountain",
+    land: "Tomorrowland",
+    waitMins: 65,
+  },
+  {
+    id: "dl-star-tours",
+    name: "Star Tours \u2013 The Adventures Continue",
+    land: "Tomorrowland",
+    waitMins: 30,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Disney California Adventure — ALL ride attractions (20 rides)
+// ---------------------------------------------------------------------------
+
+const DCA_RIDES: RideDef[] = [
+  // ---- Buena Vista Street ----
+  {
+    id: "dca-red-car-trolley",
+    name: "Red Car Trolley",
+    land: "Buena Vista Street",
+    waitMins: 10,
+  },
+
+  // ---- Avengers Campus ----
+  {
+    id: "dca-guardians",
+    name: "Guardians of the Galaxy \u2013 Mission: BREAKOUT!",
+    land: "Avengers Campus",
+    waitMins: 60,
+  },
+  {
+    id: "dca-webslingers",
+    name: "WEB SLINGERS: A Spider-Man Adventure",
+    land: "Avengers Campus",
+    waitMins: 70,
+  },
+
+  // ---- Cars Land ----
+  {
+    id: "dca-luigis",
+    name: "Luigi\u2019s Rollickin\u2019 Roadsters",
+    land: "Cars Land",
+    status: "DOWN",
+    waitMins: null,
   },
   {
     id: "dca-maters",
-    themeParksId: "TBD-dca-maters",
-    name: "Mater's Junkyard Jamboree",
+    name: "Mater\u2019s Junkyard Jamboree",
     land: "Cars Land",
-    parkId: "dca",
-    status: "OPERATING",
     waitMins: 25,
-    updatedAt: recentTimestamp(2),
+  },
+  {
+    id: "dca-radiator-springs",
+    name: "Radiator Springs Racers",
+    land: "Cars Land",
+    waitMins: 90,
   },
 
-  // Pixar Pier
+  // ---- Pixar Pier ----
   {
     id: "dca-incredicoaster",
-    themeParksId: "TBD-dca-incredicoaster",
     name: "Incredicoaster",
     land: "Pixar Pier",
-    parkId: "dca",
-    status: "OPERATING",
     waitMins: 55,
-    updatedAt: recentTimestamp(1),
-  },
-  {
-    id: "dca-toy-story-midway",
-    themeParksId: "TBD-dca-toy-story-midway",
-    name: "Toy Story Midway Mania!",
-    land: "Pixar Pier",
-    parkId: "dca",
-    status: "OPERATING",
-    waitMins: 65,
-    updatedAt: recentTimestamp(2),
   },
   {
     id: "dca-inside-out",
-    themeParksId: "TBD-dca-inside-out",
     name: "Inside Out Emotional Whirlwind",
     land: "Pixar Pier",
-    parkId: "dca",
-    status: "OPERATING",
     waitMins: 15,
-    updatedAt: recentTimestamp(3),
+  },
+  {
+    id: "dca-jessies-carousel",
+    name: "Jessie\u2019s Critter Carousel",
+    land: "Pixar Pier",
+    waitMins: 10,
+  },
+  {
+    id: "dca-pixar-pal-a-round",
+    name: "Pixar Pal-A-Round",
+    land: "Pixar Pier",
+    waitMins: 25,
+  },
+  {
+    id: "dca-toy-story-midway",
+    name: "Toy Story Midway Mania!",
+    land: "Pixar Pier",
+    waitMins: 65,
   },
 
-  // Grizzly Peak
+  // ---- Grizzly Peak ----
   {
     id: "dca-grizzly-river",
-    themeParksId: "TBD-dca-grizzly-river",
     name: "Grizzly River Run",
     land: "Grizzly Peak",
-    parkId: "dca",
-    status: "CLOSED",
+    status: "CLOSED", // seasonal / weather-dependent
     waitMins: null,
-    updatedAt: recentTimestamp(5),
   },
   {
     id: "dca-soarin",
-    themeParksId: "TBD-dca-soarin",
-    name: "Soarin' Around the World",
+    name: "Soarin\u2019 Around the World",
     land: "Grizzly Peak",
-    parkId: "dca",
-    status: "OPERATING",
     waitMins: 40,
-    updatedAt: recentTimestamp(1),
   },
 
-  // Hollywood Land
+  // ---- Hollywood Land ----
   {
     id: "dca-monsters-inc",
-    themeParksId: "TBD-dca-monsters-inc",
     name: "Monsters, Inc. Mike & Sulley to the Rescue!",
     land: "Hollywood Land",
-    parkId: "dca",
-    status: "OPERATING",
     waitMins: 20,
-    updatedAt: recentTimestamp(2),
   },
 
-  // Paradise Gardens Park
+  // ---- Paradise Gardens Park ----
   {
-    id: "dca-little-mermaid",
-    themeParksId: "TBD-dca-little-mermaid",
-    name: "The Little Mermaid ~ Ariel's Undersea Adventure",
+    id: "dca-golden-zephyr",
+    name: "Golden Zephyr",
     land: "Paradise Gardens Park",
-    parkId: "dca",
-    status: "OPERATING",
-    waitMins: 10,
-    updatedAt: recentTimestamp(1),
+    waitMins: 15,
   },
   {
     id: "dca-goofy-sky-school",
-    themeParksId: "TBD-dca-goofy-sky-school",
-    name: "Goofy's Sky School",
+    name: "Goofy\u2019s Sky School",
     land: "Paradise Gardens Park",
-    parkId: "dca",
-    status: "OPERATING",
     waitMins: 35,
-    updatedAt: recentTimestamp(2),
   },
+  {
+    id: "dca-jumpin-jellyfish",
+    name: "Jumpin\u2019 Jellyfish",
+    land: "Paradise Gardens Park",
+    waitMins: 15,
+  },
+  {
+    id: "dca-little-mermaid",
+    name: "The Little Mermaid ~ Ariel\u2019s Undersea Adventure",
+    land: "Paradise Gardens Park",
+    waitMins: 10,
+  },
+  {
+    id: "dca-silly-symphony-swings",
+    name: "Silly Symphony Swings",
+    land: "Paradise Gardens Park",
+    waitMins: 20,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Exported mock data — same shape the UI already consumes
+// ---------------------------------------------------------------------------
+
+/**
+ * Mock attraction wait time data for both Disneyland Resort parks.
+ * Includes a mix of operating, down, and closed attractions.
+ *
+ * Disneyland Park:  35 rides
+ * Disney California Adventure:  19 rides (20 defs, but counts may shift with seasonal ops)
+ */
+export const mockAttractionWaits: AttractionWait[] = [
+  ...DISNEYLAND_RIDES.map((r, i) => toAttractionWait(r, "disneyland", i)),
+  ...DCA_RIDES.map((r, i) => toAttractionWait(r, "dca", i)),
 ];
