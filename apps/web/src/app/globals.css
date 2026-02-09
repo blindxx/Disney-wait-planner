@@ -14,12 +14,16 @@ body {
 .nav {
   background-color: #1a1a2e;
   padding: 1rem;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .nav-list {
   display: flex;
+  flex-wrap: nowrap;
   gap: 1.5rem;
   list-style: none;
+  min-width: max-content;
   max-width: 1200px;
   margin: 0 auto;
 }
@@ -31,6 +35,8 @@ body {
   padding: 0.5rem 1rem;
   border-radius: 4px;
   transition: background-color 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .nav-link:hover {
