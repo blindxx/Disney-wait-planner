@@ -308,10 +308,18 @@ export default function PlansPage() {
         .modal {
           background: #fff;
           border-radius: 16px 16px 0 0;
-          padding: 1.5rem 1.25rem 2rem;
           width: 100%;
           max-width: 480px;
           box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.15);
+          /* Constrain to visible viewport so keyboard doesn't bury the sheet.
+             dvh (dynamic viewport height) shrinks when the soft keyboard opens;
+             vh fallback for browsers that don't support dvh yet. */
+          max-height: 85vh;
+          max-height: 85dvh;
+          /* Flex column so title, scrollable body, and actions stack cleanly */
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
         }
         @media (min-width: 480px) {
           .modal {
@@ -322,7 +330,19 @@ export default function PlansPage() {
           font-size: 1.25rem;
           font-weight: 700;
           color: #1a1a2e;
+          padding: 1.5rem 1.25rem 0;
+          flex-shrink: 0;
           margin-bottom: 1.25rem;
+        }
+        /* Scrollable body — grows to fill available space between title and actions */
+        .modal-body {
+          flex: 1;
+          min-height: 0;
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
+          padding: 0 1.25rem;
+          /* scroll-padding keeps the focused input clear of the title bar */
+          scroll-padding-top: 0.5rem;
         }
         .form-field {
           margin-bottom: 1rem;
@@ -366,7 +386,11 @@ export default function PlansPage() {
         .modal-actions {
           display: flex;
           gap: 0.75rem;
-          margin-top: 1.5rem;
+          flex-shrink: 0;
+          padding: 1rem 1.25rem;
+          /* Keep safe distance from the home indicator on notched devices */
+          padding-bottom: max(1rem, env(safe-area-inset-bottom));
+          border-top: 1px solid #f3f4f6;
         }
         .btn-save {
           flex: 1;
@@ -501,41 +525,43 @@ export default function PlansPage() {
               {mode === "add" ? "Add activity" : "Edit activity"}
             </h2>
 
-            <div className="form-field">
-              <label className="form-label" htmlFor="plan-name">
-                Activity name <span style={{ color: "#dc2626" }}>*</span>
-              </label>
-              <input
-                id="plan-name"
-                className={`form-input${formError ? " error" : ""}`}
-                type="text"
-                placeholder="e.g. Space Mountain"
-                value={formName}
-                onChange={(e) => {
-                  setFormName(e.target.value);
-                  if (formError) setFormError("");
-                }}
-                autoFocus
-              />
-              {formError && <p className="form-error">{formError}</p>}
-            </div>
+            <div className="modal-body">
+              <div className="form-field">
+                <label className="form-label" htmlFor="plan-name">
+                  Activity name <span style={{ color: "#dc2626" }}>*</span>
+                </label>
+                <input
+                  id="plan-name"
+                  className={`form-input${formError ? " error" : ""}`}
+                  type="text"
+                  placeholder="e.g. Space Mountain"
+                  value={formName}
+                  onChange={(e) => {
+                    setFormName(e.target.value);
+                    if (formError) setFormError("");
+                  }}
+                  autoFocus
+                />
+                {formError && <p className="form-error">{formError}</p>}
+              </div>
 
-            <div className="form-field">
-              <label className="form-label" htmlFor="plan-time">
-                Time window{" "}
-                <span style={{ color: "#9ca3af", fontWeight: 400 }}>
-                  (optional)
-                </span>
-              </label>
-              <input
-                id="plan-time"
-                className="form-input"
-                type="text"
-                placeholder="e.g. Morning, 10:00 AM, 2:00 – 3:00 PM"
-                value={formTime}
-                onChange={(e) => setFormTime(e.target.value)}
-              />
-              <p className="form-hint">Free text — use whatever label makes sense.</p>
+              <div className="form-field">
+                <label className="form-label" htmlFor="plan-time">
+                  Time window{" "}
+                  <span style={{ color: "#9ca3af", fontWeight: 400 }}>
+                    (optional)
+                  </span>
+                </label>
+                <input
+                  id="plan-time"
+                  className="form-input"
+                  type="text"
+                  placeholder="e.g. Morning, 10:00 AM, 2:00 – 3:00 PM"
+                  value={formTime}
+                  onChange={(e) => setFormTime(e.target.value)}
+                />
+                <p className="form-hint">Free text — use whatever label makes sense.</p>
+              </div>
             </div>
 
             <div className="modal-actions">
