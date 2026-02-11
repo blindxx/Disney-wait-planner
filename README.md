@@ -1,64 +1,58 @@
 # Disney Wait Planner
 
-A personal Disney Parks planning tool that combines custom itineraries with live attraction wait times to suggest smarter day-of decisions.
+A mobile-first Disney park planning app focused on fast decisions, low cognitive load, and clean UX.
 
-## Project Structure
+Disney Wait Planner is intentionally built in disciplined, incremental phases to prevent scope creep and keep the experience focused.
 
-```
-apps/
-  web/      # Next.js frontend (port 3000)
-  api/      # Express backend (port 4000)
-packages/
-  shared/   # Shared types and utilities
-```
+The app answers two core questions:
 
-## Prerequisites
+- **What should I do right now?**
+- **What am I planning to do today?**
 
-- Node.js 18+
-- pnpm 8+
+---
 
-## Setup
+## 🚦 Current Status
 
-```bash
-# Install pnpm if you haven't already
-npm install -g pnpm
+### ✅ Phase 1 — Wait Times (Complete)
+- Mobile-first card layout
+- Sorting (shortest / longest)
+- Operating-only toggle
+- Land filter
+- Responsive tablet + desktop layout
+- Mock wait time data only
+- UI frozen until API phase
 
-# Install all dependencies
-pnpm install
-```
+### ✅ Phase 2 — Today (Home) (Complete)
+- Park selector (Disneyland / DCA)
+- Current time indicator
+- “Best options right now” list
+- Down/Closed rides excluded from best list
+- Clear visual hierarchy for fast scanning
+- Primary action → View all wait times
 
-## Development
+### ✅ Phase 3.1 — My Plans (Manual Timeline MVP)
+- Add activity (name required, optional time window)
+- Edit activity
+- Delete activity
+- Reorder activities
+- Mobile-safe bottom sheet (keyboard overlap fixed)
 
-Run both the web app and API server together:
+### 🚧 Phase 3.2 — Plan Import (Planned)
 
-```bash
-pnpm dev
-```
+---
 
-This starts:
-- Web app at http://localhost:3000
-- API server at http://localhost:4000
+## 🧱 Tech Stack
 
-### Health Check
+- **Next.js 14** (App Router)
+- **pnpm monorepo**
+- **Tailwind CSS**
+- **Vercel** (Preview deployments per branch, production from `main`)
 
-```bash
-curl http://localhost:4000/health
-```
+---
 
-## Individual Apps
+## 📁 Project Structure
 
-Run apps separately if needed:
+This is a pnpm monorepo.
 
-```bash
-# Web only
-pnpm --filter @disney-wait-planner/web dev
+The frontend app lives in:
 
-# API only
-pnpm --filter @disney-wait-planner/api dev
-```
-
-## Tech Stack
-
-- **Frontend**: Next.js 14 with App Router, TypeScript
-- **Backend**: Express, TypeScript
-- **Monorepo**: pnpm workspaces
