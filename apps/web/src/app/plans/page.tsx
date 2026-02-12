@@ -154,7 +154,8 @@ function stripTrailingTimeTokens(name: string, maxPasses = 2): string {
  * Rejected: "8:5", "8:60", "26:00", "24:00", "abc", "8:60-9:00", ...
  */
 function normalizeEditTimeLabel(raw: string): string | null {
-  const s = raw.trim();
+  // Normalize Unicode en/em dashes to ASCII hyphen before validation
+  const s = raw.trim().replace(/[\u2013\u2014]/g, "-");
   if (!s) return "";
 
   // 4-digit military shorthand: "HHMM"
@@ -632,11 +633,14 @@ export default function PlansPage() {
     closeModal();
   }
 
-  function handleImport() {
-    const lines = importText.split("\n");
+  // Shared pipeline for both paste and file import.
+  // Normalizes Unicode dashes per-line before calling parseLine.
+  function processImportText(text: string) {
+    const lines = text.split("\n");
     const newItems: PlanItem[] = [];
     for (const line of lines) {
-      const parsed = parseLine(line);
+      const normalized = line.replace(/[\u2013\u2014]/g, "-");
+      const parsed = parseLine(normalized);
       if (parsed) {
         newItems.push({
           id: makeId(),
@@ -655,6 +659,23 @@ export default function PlansPage() {
     });
     setImportText("");
     setMode("view");
+  }
+
+  function handleImport() {
+    processImportText(importText);
+  }
+
+  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = (ev.target?.result as string) ?? "";
+      processImportText(text);
+    };
+    reader.readAsText(file);
+    // Reset so selecting the same file again triggers onChange
+    e.target.value = "";
   }
 
   function handleDelete(id: string) {
@@ -1113,6 +1134,27 @@ export default function PlansPage() {
         .btn-cancel:active {
           background-color: #f3f4f6;
         }
+        .file-input-hidden {
+          display: none;
+        }
+        .btn-file-label {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.4rem;
+          background-color: #fff;
+          color: #374151;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          font-size: 0.9rem;
+          font-weight: 500;
+          padding: 0.6rem 1rem;
+          cursor: pointer;
+          min-height: 44px;
+          white-space: nowrap;
+        }
+        .btn-file-label:active {
+          background-color: #f3f4f6;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -1292,11 +1334,25 @@ export default function PlansPage() {
                   {importError && (
                     <p className="form-error">{importError}</p>
                   )}
-                  <p className="form-hint">
+                  <p className="form-hint" style={{ marginBottom: "0.75rem" }}>
                     Supports leading or trailing times in 24h (10:00) or AM/PM (10am, 10:00pm).
                     Ranges like 10am&ndash;11am or 10:00&ndash;11:00 are also supported.
+                    En/em dashes are handled automatically.
                     Punctuation-only and time-only lines are skipped.
                   </p>
+                  <p className="form-hint" style={{ marginBottom: "0.4rem" }}>
+                    — or upload a .txt file —
+                  </p>
+                  <label className="btn-file-label" htmlFor="file-import">
+                    📂 Choose .txt file
+                    <input
+                      id="file-import"
+                      type="file"
+                      accept=".txt"
+                      className="file-input-hidden"
+                      onChange={handleFile}
+                    />
+                  </label>
                 </div>
               ) : (
                 <>
