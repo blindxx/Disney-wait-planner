@@ -488,11 +488,45 @@ function saveToStorage(items: PlanItem[]): void {
   }
 }
 
+// ===== AUTO-SORT =====
+
+const SORT_KEY = "dwp.autoSort";
+
+function loadSortPref(): boolean {
+  try {
+    const raw = localStorage.getItem(SORT_KEY);
+    if (!raw) return false;
+    return JSON.parse(raw) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract the sort key (minutes from midnight) for a timeLabel.
+ * Ranges use the start time. Untimed / free-text items sink to the bottom.
+ */
+function sortKey(timeLabel: string): number {
+  if (!timeLabel) return Infinity;
+  // Range "H:MM-H:MM" → sort by start
+  const rangeMatch = timeLabel.match(/^(\d{1,2}:\d{2})-\d{1,2}:\d{2}$/);
+  const token = rangeMatch ? rangeMatch[1] : timeLabel;
+  const m = token.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return Infinity;
+  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+}
+
+/** Return a new array sorted earliest → latest. Stable for equal start times. */
+function sortPlanItems(items: PlanItem[]): PlanItem[] {
+  return items.slice().sort((a, b) => sortKey(a.timeLabel) - sortKey(b.timeLabel));
+}
+
 // ===== COMPONENT =====
 
 export default function PlansPage() {
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
+  const [autoSortEnabled, setAutoSortEnabled] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
   const [editTarget, setEditTarget] = useState<PlanItem | null>(null);
@@ -504,9 +538,10 @@ export default function PlansPage() {
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
-  // Load saved plan from localStorage once on mount (client-side only)
+  // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
     setItems(loadFromStorage());
+    setAutoSortEnabled(loadSortPref());
     setInitialized(true);
   }, []);
 
@@ -580,18 +615,19 @@ export default function PlansPage() {
     }
 
     if (mode === "add") {
-      setItems((prev) => [
-        ...prev,
-        { id: makeId(), name: trimmed, timeLabel: timeWindow },
-      ]);
+      setItems((prev) => {
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow }];
+        return autoSortEnabled ? sortPlanItems(next) : next;
+      });
     } else if (mode === "edit" && editTarget) {
-      setItems((prev) =>
-        prev.map((it) =>
+      setItems((prev) => {
+        const next = prev.map((it) =>
           it.id === editTarget.id
             ? { ...it, name: trimmed, timeLabel: timeWindow }
             : it
-        )
-      );
+        );
+        return autoSortEnabled ? sortPlanItems(next) : next;
+      });
     }
     closeModal();
   }
@@ -613,7 +649,10 @@ export default function PlansPage() {
       setImportError("No valid activities found. Check your text and try again.");
       return;
     }
-    setItems((prev) => [...prev, ...newItems]);
+    setItems((prev) => {
+      const next = [...prev, ...newItems];
+      return autoSortEnabled ? sortPlanItems(next) : next;
+    });
     setImportText("");
     setMode("view");
   }
@@ -645,6 +684,19 @@ export default function PlansPage() {
     setItems([]);
     setDeleteConfirmId(null);
     setClearConfirm(false);
+  }
+
+  function handleToggleSort(checked: boolean) {
+    setAutoSortEnabled(checked);
+    try {
+      localStorage.setItem(SORT_KEY, JSON.stringify(checked));
+    } catch {
+      // quota / security errors must not crash the app
+    }
+    // If enabling, re-sort the current list immediately
+    if (checked) {
+      setItems((prev) => sortPlanItems(prev));
+    }
   }
 
   return (
@@ -724,6 +776,28 @@ export default function PlansPage() {
         }
         .clear-confirm-row {
           margin-bottom: 1rem;
+        }
+        .sort-toggle-row {
+          display: flex;
+          align-items: center;
+          margin-bottom: 1rem;
+        }
+        .sort-toggle-label {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.875rem;
+          color: #374151;
+          cursor: pointer;
+          min-height: 44px;
+          user-select: none;
+        }
+        .sort-toggle-label input[type="checkbox"] {
+          width: 18px;
+          height: 18px;
+          cursor: pointer;
+          accent-color: #2563eb;
+          flex-shrink: 0;
         }
         .empty-state {
           text-align: center;
@@ -1059,6 +1133,17 @@ export default function PlansPage() {
               + Add
             </button>
           </div>
+        </div>
+
+        <div className="sort-toggle-row">
+          <label className="sort-toggle-label">
+            <input
+              type="checkbox"
+              checked={autoSortEnabled}
+              onChange={(e) => handleToggleSort(e.target.checked)}
+            />
+            Auto-sort by time
+          </label>
         </div>
 
         {clearConfirm && (
