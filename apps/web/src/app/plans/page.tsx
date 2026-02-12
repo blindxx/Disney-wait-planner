@@ -437,6 +437,66 @@ function formatTimeLabel(timeLabel: string): string {
   return timeLabel;
 }
 
+// ===== NAME POLISH HELPERS =====
+
+/**
+ * Strip a trailing "(en dash)" debug marker from an activity name, then trim.
+ * "Snack / Rest (en dash)" → "Snack / Rest"
+ * "Lunch (Plaza Inn)"      → unchanged
+ * "Blah (en dash) extra"   → unchanged (not at end)
+ */
+function stripEnDashSuffix(name: string): string {
+  return name.replace(/\s*\(en dash\)$/, "").trim();
+}
+
+/**
+ * Minimal CSV row splitter that handles double-quoted fields with embedded
+ * commas and escaped quotes (""). Returns an array of trimmed cell strings.
+ * Malformed input (e.g. unterminated quote) returns whatever was parsed so far.
+ */
+function parseCSVRow(line: string): string[] {
+  const cells: string[] = [];
+  let i = 0;
+  while (i <= line.length) {
+    if (i === line.length) {
+      // trailing comma produced an empty last cell — push and stop
+      if (cells.length > 0) cells.push("");
+      break;
+    }
+    if (line[i] === '"') {
+      // Quoted field
+      i++; // skip opening quote
+      let cell = "";
+      while (i < line.length) {
+        if (line[i] === '"') {
+          if (line[i + 1] === '"') {
+            cell += '"'; // escaped quote
+            i += 2;
+          } else {
+            i++; // skip closing quote
+            break;
+          }
+        } else {
+          cell += line[i++];
+        }
+      }
+      cells.push(cell.trim());
+      if (line[i] === ",") i++; // skip comma after quoted field
+    } else {
+      // Unquoted field
+      const end = line.indexOf(",", i);
+      if (end === -1) {
+        cells.push(line.slice(i).trim());
+        break;
+      } else {
+        cells.push(line.slice(i, end).trim());
+        i = end + 1;
+      }
+    }
+  }
+  return cells;
+}
+
 // ===== LOCALSTORAGE PERSISTENCE =====
 
 const STORAGE_KEY = "dwp.myPlans";
@@ -615,6 +675,13 @@ export default function PlansPage() {
       if (stripped) trimmed = stripped;
     }
 
+    // Strip trailing "(en dash)" debug marker if present, then re-validate.
+    trimmed = stripEnDashSuffix(trimmed);
+    if (!trimmed) {
+      setFormError("Activity name is required.");
+      return;
+    }
+
     if (mode === "add") {
       setItems((prev) => {
         const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow }];
@@ -644,7 +711,7 @@ export default function PlansPage() {
       if (parsed) {
         newItems.push({
           id: makeId(),
-          name: parsed.name,
+          name: stripEnDashSuffix(parsed.name),
           timeLabel: parsed.timeLabel,
         });
       }
@@ -675,6 +742,47 @@ export default function PlansPage() {
     };
     reader.readAsText(file);
     // Reset so selecting the same file again triggers onChange
+    e.target.value = "";
+  }
+
+  // Convert CSV rows into TXT-like lines and feed into the shared import pipeline.
+  // Format A (2+ cols): "<timeLabel> <name>" constructed from first two cells.
+  // Format B (1 col):   treat the single cell as a plain TXT line.
+  function processCSVText(text: string) {
+    const rows = text.split("\n");
+    const txtLines: string[] = [];
+    for (const row of rows) {
+      const trimmedRow = row.trim();
+      if (!trimmedRow) continue;
+      try {
+        const cells = parseCSVRow(trimmedRow);
+        if (cells.length === 0) continue;
+        if (cells.length >= 2 && cells[1]) {
+          // Two-column: time + name → assemble TXT-style line
+          const timeCell = cells[0];
+          const nameCell = cells[1];
+          txtLines.push(timeCell ? `${timeCell} ${nameCell}` : nameCell);
+        } else if (cells[0]) {
+          // Single column: treat as plain TXT line
+          txtLines.push(cells[0]);
+        }
+      } catch {
+        // Skip malformed rows without crashing
+      }
+    }
+    // Delegate to existing pipeline (handles empty-result error, sort, persist)
+    processImportText(txtLines.join("\n"));
+  }
+
+  function handleCSVFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = (ev.target?.result as string) ?? "";
+      processCSVText(text);
+    };
+    reader.readAsText(file);
     e.target.value = "";
   }
 
@@ -1341,18 +1449,30 @@ export default function PlansPage() {
                     Punctuation-only and time-only lines are skipped.
                   </p>
                   <p className="form-hint" style={{ marginBottom: "0.4rem" }}>
-                    — or upload a .txt file —
+                    — or upload a file —
                   </p>
-                  <label className="btn-file-label" htmlFor="file-import">
-                    📂 Choose .txt file
-                    <input
-                      id="file-import"
-                      type="file"
-                      accept=".txt"
-                      className="file-input-hidden"
-                      onChange={handleFile}
-                    />
-                  </label>
+                  <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                    <label className="btn-file-label" htmlFor="file-import">
+                      📂 .txt file
+                      <input
+                        id="file-import"
+                        type="file"
+                        accept=".txt"
+                        className="file-input-hidden"
+                        onChange={handleFile}
+                      />
+                    </label>
+                    <label className="btn-file-label" htmlFor="csv-import">
+                      📊 .csv file
+                      <input
+                        id="csv-import"
+                        type="file"
+                        accept=".csv,text/csv"
+                        className="file-input-hidden"
+                        onChange={handleCSVFile}
+                      />
+                    </label>
+                  </div>
                 </div>
               ) : (
                 <>
