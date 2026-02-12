@@ -66,25 +66,38 @@ function parse24hToken(str: string): string | null {
   return `${h}:${m[2]}`;
 }
 
+/**
+ * Parse a 4-digit military time token e.g. "1500" => "15:00", "0730" => "7:30".
+ * First two digits = hours (00–23), last two = minutes (00–59).
+ * Returns canonical "H:MM" (no leading zero on hour) or null if invalid.
+ */
+function parseMilToken(str: string): string | null {
+  if (!/^\d{4}$/.test(str)) return null;
+  const h = parseInt(str.slice(0, 2), 10);
+  const min = parseInt(str.slice(2), 10);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return `${h}:${String(min).padStart(2, "0")}`;
+}
+
 /** True if the string contains at least one alphanumeric character. */
 function hasValidName(s: string): boolean {
   return /[a-zA-Z0-9]/.test(s);
 }
 
 /**
- * Strip trailing valid time tokens (AM/PM or strict 24h H:MM) from the end of
- * a name string, up to `maxPasses` times. Each pass removes one token and only
- * keeps the result if the remainder still passes hasValidName. Stops early when
- * no valid token is found at the end or stripping would empty the name.
- *
- * Used so that after a leading time is locked in, any accidental trailing
- * time tokens in the remainder don't bleed into the activity title, and so
- * the edit modal can clean multi-token leftovers (e.g. "Space Mountain 10pm 22:00").
+ * Strip trailing valid time tokens from the end of a name string, up to
+ * `maxPasses` times. Recognised tokens per pass (tried in order):
+ *   1. AM/PM  — e.g. "10am", "10 pm", "10:00pm"
+ *   2. 24h    — strict "H:MM" with exactly 2 minute digits
+ *   3. Military — exactly 4 digits "HHMM" (e.g. "1500", "0730")
+ * Each pass keeps the stripped result only if the remainder still passes
+ * hasValidName. Stops early when nothing strippable is at the end.
  *
  * Test cases (maxPasses=2):
  *   "Space Mountain 22:00"          => "Space Mountain"
  *   "Space Mountain 10pm"           => "Space Mountain"
  *   "Space Mountain 10pm 22:00"     => "Space Mountain"    (2 passes)
+ *   "Space Mountain 0730 1500"      => "Space Mountain"    (2 passes, military)
  *   "Space Mountain 22:00 blah"     => unchanged            (token not at end)
  *   "Space Mountain 10pm blah"      => unchanged            (token not at end)
  *   "Space Mountain"                => unchanged            (no trailing token)
@@ -106,6 +119,15 @@ function stripTrailingTimeTokens(name: string, maxPasses = 2): string {
     if (h24Match) {
       const candidate = h24Match[1].trim();
       if (parse24hToken(h24Match[2]) !== null && hasValidName(candidate)) {
+        current = candidate;
+        continue;
+      }
+    }
+    // Try trailing 4-digit military token HHMM
+    const milMatch = current.match(/^(.*)\s+(\d{4})$/);
+    if (milMatch) {
+      const candidate = milMatch[1].trim();
+      if (parseMilToken(milMatch[2]) !== null && hasValidName(candidate)) {
         current = candidate;
         continue;
       }
@@ -167,17 +189,29 @@ function normalizeEditTimeLabel(raw: string): string | null {
  * Parse a single import line into { timeLabel, name } or null (ignored).
  *
  * Priority order:
- *   1. Leading AM/PM range   (both sides explicit am/pm, atomic)
- *   2. Leading AM/PM single
- *   3. Leading AM/PM time-only → null
- *   4. Leading 24h range     (permissive detection, strict validation, atomic)
- *   5. Leading 24h single
- *   6. Leading 24h time-only → null
- *   7. Trailing AM/PM range
- *   8. Trailing 24h range
- *   9. Trailing AM/PM single
- *  10. Trailing 24h single
- *  11. Name-only (timeLabel = "")
+ *   Leading (time at start, locks in; invalid single falls through):
+ *    1. Leading AM/PM range    (both sides explicit am/pm — atomic, no fall-through)
+ *    2. Leading AM/PM single   (invalid token => fall through)
+ *    3. Leading AM/PM time-only => null
+ *    4. Leading military range  (HHMM-HHMM — atomic, no fall-through)
+ *    5. Leading military single (invalid token => fall through)
+ *    6. Leading military time-only => null
+ *    7. Leading 24h range      (permissive detection — atomic, no fall-through)
+ *    8. Leading 24h single     (invalid token => fall through)
+ *    9. Leading 24h time-only  => null
+ *   Trailing (only reached if no leading time found):
+ *   10. Trailing AM/PM range
+ *   11. Trailing 24h range
+ *   12. Trailing military range
+ *   13. Trailing AM/PM single
+ *   14. Trailing 24h single
+ *   15. Trailing military single
+ *   16. Name-only (timeLabel = "")
+ *
+ * After any successful leading-time parse, stripTrailingTimeTokens(rest, 2)
+ * is applied to the remainder so duplicate trailing tokens are cleaned.
+ * After any successful trailing-time parse, stripTrailingTimeTokens(namePart, 2)
+ * is applied so tokens left of the matched time are also cleaned.
  *
  * "time-only" lines (valid time, no name) are returned as null (ignored).
  * Punctuation-only lines are returned as null.
@@ -186,8 +220,8 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
   const line = rawLine.trim();
   if (!line || !hasValidName(line)) return null;
 
-  // ---- LEADING AM/PM RANGE: AMPM - AMPM [name] ----
-  // Both sides must carry explicit am/pm suffix (no guessing).
+  // ---- LEADING AM/PM RANGE: AMPM-AMPM [name] ----
+  // Atomic: both sides must have valid am/pm; if either fails => name-only.
   let m = line.match(
     /^(\d{1,2}(?::\d{1,2})?\s*[ap]m)\s*-\s*(\d{1,2}(?::\d{1,2})?\s*[ap]m)\s*(.*)/i
   );
@@ -196,35 +230,63 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const end = parseAmPmToken(m[2]);
     const rest = m[3].trim();
     if (start && end) {
-      // time-only or garbage-only after removing times => ignored
       if (!rest || !hasValidName(rest)) return null;
-      // Leading time locked in — strip any accidental trailing time from name
       return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(rest) };
     }
-    // Atomic: at least one side invalid => whole line is name-only
     return { timeLabel: "", name: line };
   }
 
   // ---- LEADING AM/PM SINGLE: AMPM <space> name ----
+  // Invalid token => name-only (am/pm context is unambiguous, no fall-through).
   m = line.match(/^(\d{1,2}(?::\d{1,2})?\s*[ap]m)\s+(.*)/i);
   if (m) {
     const time = parseAmPmToken(m[1]);
     const rest = m[2].trim();
     if (time) {
       if (!rest || !hasValidName(rest)) return null;
-      // Leading time locked in — strip any accidental trailing time from name
       return { timeLabel: time, name: stripTrailingTimeTokens(rest) };
     }
     return { timeLabel: "", name: line };
   }
 
-  // ---- LEADING AM/PM TIME-ONLY (entire line) ----
+  // ---- LEADING AM/PM TIME-ONLY ----
   m = line.match(/^(\d{1,2}(?::\d{1,2})?\s*[ap]m)$/i);
   if (m && parseAmPmToken(m[1])) return null;
 
+  // ---- LEADING MILITARY RANGE: HHMM-HHMM [name] ----
+  // Atomic: both sides must be valid military times; if either fails => name-only.
+  m = line.match(/^(\d{4})\s*-\s*(\d{4})\s*(.*)/);
+  if (m) {
+    const start = parseMilToken(m[1]);
+    const end = parseMilToken(m[2]);
+    const rest = m[3].trim();
+    if (start && end) {
+      if (!rest || !hasValidName(rest)) return null;
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(rest) };
+    }
+    return { timeLabel: "", name: line };
+  }
+
+  // ---- LEADING MILITARY SINGLE: HHMM <space> name ----
+  // Invalid token (e.g. "9999") => fall through to trailing patterns.
+  m = line.match(/^(\d{4})\s+(.*)/);
+  if (m) {
+    const time = parseMilToken(m[1]);
+    const rest = m[2].trim();
+    if (time) {
+      if (!rest || !hasValidName(rest)) return null;
+      return { timeLabel: time, name: stripTrailingTimeTokens(rest) };
+    }
+    // Invalid military token — fall through to trailing patterns
+  }
+
+  // ---- LEADING MILITARY TIME-ONLY ----
+  m = line.match(/^(\d{4})$/);
+  if (m && parseMilToken(m[1])) return null;
+
   // ---- LEADING 24H RANGE (permissive detection for atomicity) ----
-  // Use \d{1,2}:\d{1,2} to detect range attempts even with single-digit minutes,
-  // then validate strictly with parse24hToken (requires \d{2} minutes).
+  // Uses \d{1,2}:\d{1,2} to catch malformed ends (e.g. "8:5"); validates
+  // strictly with parse24hToken. Atomic: if either side invalid => name-only.
   m = line.match(/^(\d{1,2}:\d{1,2})\s*-\s*(\d{1,2}:\d{1,2})\s*(.*)/);
   if (m) {
     const start = parse24hToken(m[1]);
@@ -232,31 +294,33 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const rest = m[3].trim();
     if (start && end) {
       if (!rest || !hasValidName(rest)) return null;
-      // Leading time locked in — strip any accidental trailing time from name
       return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(rest) };
     }
-    // Atomic: either side invalid => name-only (no partial salvage)
     return { timeLabel: "", name: line };
   }
 
   // ---- LEADING 24H SINGLE: H:MM <space> name ----
+  // Invalid token (e.g. "26:00") => fall through to trailing patterns so a
+  // valid trailing time on the same line (e.g. "22:00") can still be salvaged.
   m = line.match(/^(\d{1,2}:\d{2})\s+(.*)/);
   if (m) {
     const time = parse24hToken(m[1]);
     const rest = m[2].trim();
     if (time) {
       if (!rest || !hasValidName(rest)) return null;
-      // Leading time locked in — strip any accidental trailing time from name
       return { timeLabel: time, name: stripTrailingTimeTokens(rest) };
     }
-    return { timeLabel: "", name: line };
+    // Invalid 24h token — fall through to trailing patterns
   }
 
   // ---- LEADING 24H TIME-ONLY ----
   m = line.match(/^(\d{1,2}:\d{2})$/);
   if (m && parse24hToken(m[1])) return null;
 
-  // ---- TRAILING PATTERNS (only reached when no leading time matched) ----
+  // ---- TRAILING PATTERNS ----
+  // Only reached when no valid leading time was found.
+  // Each success path applies stripTrailingTimeTokens(namePart, 2) so any
+  // extra time tokens left of the matched trailing token are also cleaned.
 
   // Trailing AM/PM range: name <space> AMPM-AMPM
   m = line.match(
@@ -267,10 +331,9 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const start = parseAmPmToken(m[2]);
     const end = parseAmPmToken(m[3]);
     if (start && end && hasValidName(namePart)) {
-      return { timeLabel: `${start}-${end}`, name: namePart };
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(namePart) };
     }
     if (!hasValidName(namePart)) return null;
-    // Atomic: invalid time(s) => name-only
     return { timeLabel: "", name: line };
   }
 
@@ -281,7 +344,20 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const start = parse24hToken(m[2]);
     const end = parse24hToken(m[3]);
     if (start && end && hasValidName(namePart)) {
-      return { timeLabel: `${start}-${end}`, name: namePart };
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(namePart) };
+    }
+    if (!hasValidName(namePart)) return null;
+    return { timeLabel: "", name: line };
+  }
+
+  // Trailing military range: name <space> HHMM-HHMM
+  m = line.match(/^(.*)\s+(\d{4})\s*-\s*(\d{4})$/);
+  if (m) {
+    const namePart = m[1].trim();
+    const start = parseMilToken(m[2]);
+    const end = parseMilToken(m[3]);
+    if (start && end && hasValidName(namePart)) {
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(namePart) };
     }
     if (!hasValidName(namePart)) return null;
     return { timeLabel: "", name: line };
@@ -293,7 +369,7 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const namePart = m[1].trim();
     const time = parseAmPmToken(m[2]);
     if (time && hasValidName(namePart)) {
-      return { timeLabel: time, name: namePart };
+      return { timeLabel: time, name: stripTrailingTimeTokens(namePart) };
     }
     if (!hasValidName(namePart)) return null;
     return { timeLabel: "", name: line };
@@ -305,7 +381,19 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const namePart = m[1].trim();
     const time = parse24hToken(m[2]);
     if (time && hasValidName(namePart)) {
-      return { timeLabel: time, name: namePart };
+      return { timeLabel: time, name: stripTrailingTimeTokens(namePart) };
+    }
+    if (!hasValidName(namePart)) return null;
+    return { timeLabel: "", name: line };
+  }
+
+  // Trailing military single: name <space> HHMM
+  m = line.match(/^(.*)\s+(\d{4})$/);
+  if (m) {
+    const namePart = m[1].trim();
+    const time = parseMilToken(m[2]);
+    if (time && hasValidName(namePart)) {
+      return { timeLabel: time, name: stripTrailingTimeTokens(namePart) };
     }
     if (!hasValidName(namePart)) return null;
     return { timeLabel: "", name: line };
