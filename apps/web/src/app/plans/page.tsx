@@ -757,6 +757,11 @@ export default function PlansPage() {
       try {
         const cells = parseCSVRow(trimmedRow);
         if (cells.length === 0) continue;
+        // Skip exact CSV header rows (case-insensitive, trimmed comparison)
+        const c0 = cells[0].toLowerCase();
+        const c1 = cells.length >= 2 ? cells[1].toLowerCase() : "";
+        if (cells.length >= 2 && c0 === "timelabel" && c1 === "name") continue;
+        if (cells.length === 1 && c0 === "line") continue;
         if (cells.length >= 2 && cells[1]) {
           // Two-column: time + name → assemble TXT-style line
           const timeCell = cells[0];
