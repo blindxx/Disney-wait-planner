@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 type PlanItem = {
   id: string;
@@ -436,10 +436,63 @@ function formatTimeLabel(timeLabel: string): string {
   return timeLabel;
 }
 
+// ===== LOCALSTORAGE PERSISTENCE =====
+
+const STORAGE_KEY = "dwp.myPlans";
+const SCHEMA_VERSION = 1;
+
+function loadFromStorage(): PlanItem[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    // v1 shape: { version: 1, items: [...] }
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      typeof parsed.version === "number" &&
+      Array.isArray(parsed.items)
+    ) {
+      if (parsed.version === 1) {
+        return parsed.items as PlanItem[];
+      }
+      // Unknown future version — start empty
+      return [];
+    }
+    // v0 shape: raw array (unversioned legacy)
+    if (Array.isArray(parsed)) {
+      const migrated = { version: SCHEMA_VERSION, items: parsed };
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+      } catch {
+        // best-effort migration write — ignore quota errors
+      }
+      return parsed as PlanItem[];
+    }
+    // Corrupt or unrecognised — start empty
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+function saveToStorage(items: PlanItem[]): void {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ version: SCHEMA_VERSION, items })
+    );
+  } catch {
+    // Quota or security errors must not crash the app
+  }
+}
+
 // ===== COMPONENT =====
 
 export default function PlansPage() {
   const [items, setItems] = useState<PlanItem[]>([]);
+  const [initialized, setInitialized] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
   const [editTarget, setEditTarget] = useState<PlanItem | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -449,6 +502,18 @@ export default function PlansPage() {
   const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
+
+  // Load saved plan from localStorage once on mount (client-side only)
+  useEffect(() => {
+    setItems(loadFromStorage());
+    setInitialized(true);
+  }, []);
+
+  // Persist plan to localStorage on every mutation (after initial load)
+  useEffect(() => {
+    if (!initialized) return;
+    saveToStorage(items);
+  }, [items, initialized]);
 
   function openAdd() {
     setFormName("");
