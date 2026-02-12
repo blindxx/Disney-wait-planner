@@ -493,6 +493,7 @@ function saveToStorage(items: PlanItem[]): void {
 export default function PlansPage() {
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
+  const [clearConfirm, setClearConfirm] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
   const [editTarget, setEditTarget] = useState<PlanItem | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -640,6 +641,12 @@ export default function PlansPage() {
     });
   }
 
+  function handleClearAll() {
+    setItems([]);
+    setDeleteConfirmId(null);
+    setClearConfirm(false);
+  }
+
   return (
     <>
       <style>{`
@@ -694,6 +701,29 @@ export default function PlansPage() {
         }
         .btn-import:active {
           background-color: #eff6ff;
+        }
+        .btn-clear {
+          background-color: #fff;
+          color: #dc2626;
+          border: 1px solid #fca5a5;
+          border-radius: 8px;
+          font-size: 1rem;
+          font-weight: 600;
+          padding: 0.6rem 1.25rem;
+          cursor: pointer;
+          min-height: 44px;
+          min-width: 44px;
+          white-space: nowrap;
+        }
+        .btn-clear:active {
+          background-color: #fef2f2;
+        }
+        .btn-clear:disabled {
+          opacity: 0.3;
+          cursor: not-allowed;
+        }
+        .clear-confirm-row {
+          margin-bottom: 1rem;
         }
         .empty-state {
           text-align: center;
@@ -1015,6 +1045,13 @@ export default function PlansPage() {
         <div className="plans-header">
           <h1 className="plans-title">My Plans</h1>
           <div className="plans-header-actions">
+            <button
+              className="btn-clear"
+              disabled={items.length === 0}
+              onClick={() => setClearConfirm(true)}
+            >
+              Clear all
+            </button>
             <button className="btn-import" onClick={openImport}>
               Import
             </button>
@@ -1023,6 +1060,26 @@ export default function PlansPage() {
             </button>
           </div>
         </div>
+
+        {clearConfirm && (
+          <div className="clear-confirm-row">
+            <div className="confirm-row">
+              <span className="confirm-text">Clear all activities?</span>
+              <button
+                className="btn-cancel-delete"
+                onClick={() => setClearConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-confirm-delete"
+                onClick={handleClearAll}
+              >
+                Yes, clear all
+              </button>
+            </div>
+          </div>
+        )}
 
         {items.length === 0 ? (
           <div className="empty-state">
