@@ -72,39 +72,95 @@ function hasValidName(s: string): boolean {
 }
 
 /**
- * Strip ONE trailing time token from the end of a name string.
- * Removes the last AM/PM or strict 24h "H:MM" token if it is at the very end
- * (preceded by whitespace) and the remainder still passes hasValidName.
- * If stripping would leave an invalid/empty name, returns the original string.
+ * Strip trailing valid time tokens (AM/PM or strict 24h H:MM) from the end of
+ * a name string, up to `maxPasses` times. Each pass removes one token and only
+ * keeps the result if the remainder still passes hasValidName. Stops early when
+ * no valid token is found at the end or stripping would empty the name.
  *
  * Used so that after a leading time is locked in, any accidental trailing
- * time in the remainder (e.g. "Space Mountain 22:00") does not bleed into
- * the activity title.
+ * time tokens in the remainder don't bleed into the activity title, and so
+ * the edit modal can clean multi-token leftovers (e.g. "Space Mountain 10pm 22:00").
  *
- * Test cases:
- *   "Space Mountain 22:00"  => "Space Mountain"
- *   "Space Mountain 10pm"   => "Space Mountain"
- *   "Space Mountain 22:00 blah" => unchanged (token not at end)
- *   "Space Mountain"        => unchanged (no trailing token)
+ * Test cases (maxPasses=2):
+ *   "Space Mountain 22:00"          => "Space Mountain"
+ *   "Space Mountain 10pm"           => "Space Mountain"
+ *   "Space Mountain 10pm 22:00"     => "Space Mountain"    (2 passes)
+ *   "Space Mountain 22:00 blah"     => unchanged            (token not at end)
+ *   "Space Mountain 10pm blah"      => unchanged            (token not at end)
+ *   "Space Mountain"                => unchanged            (no trailing token)
  */
-function stripTrailingTimeToken(name: string): string {
-  // Try trailing AM/PM token (greedy: picks rightmost match)
-  const ampmMatch = name.match(/^(.*)\s+(\d{1,2}(?::\d{1,2})?\s*[ap]m)$/i);
-  if (ampmMatch) {
-    const candidate = ampmMatch[1].trim();
-    if (parseAmPmToken(ampmMatch[2]) !== null && hasValidName(candidate)) {
-      return candidate;
+function stripTrailingTimeTokens(name: string, maxPasses = 2): string {
+  let current = name;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    // Try trailing AM/PM token (greedy: picks rightmost match)
+    const ampmMatch = current.match(/^(.*)\s+(\d{1,2}(?::\d{1,2})?\s*[ap]m)$/i);
+    if (ampmMatch) {
+      const candidate = ampmMatch[1].trim();
+      if (parseAmPmToken(ampmMatch[2]) !== null && hasValidName(candidate)) {
+        current = candidate;
+        continue;
+      }
     }
-  }
-  // Try trailing strict 24h token H:MM (2-digit minutes required)
-  const h24Match = name.match(/^(.*)\s+(\d{1,2}:\d{2})$/);
-  if (h24Match) {
-    const candidate = h24Match[1].trim();
-    if (parse24hToken(h24Match[2]) !== null && hasValidName(candidate)) {
-      return candidate;
+    // Try trailing strict 24h token H:MM (2-digit minutes required)
+    const h24Match = current.match(/^(.*)\s+(\d{1,2}:\d{2})$/);
+    if (h24Match) {
+      const candidate = h24Match[1].trim();
+      if (parse24hToken(h24Match[2]) !== null && hasValidName(candidate)) {
+        current = candidate;
+        continue;
+      }
     }
+    // No strippable token at end — stop early
+    break;
   }
-  return name;
+  return current;
+}
+
+/**
+ * Validate and normalize a raw time string entered in the edit/add modal.
+ * Returns:
+ *   ""    — input was empty (no time label)
+ *   "H:MM" or "H:MM-H:MM" — normalized canonical 24h label
+ *   null  — input was non-empty but invalid (caller should show an error)
+ *
+ * Accepted forms:
+ *   "H:MM"          strict 24h single  (H 0–23, MM 00–59, exactly 2 min digits)
+ *   "H:MM-H:MM"     strict 24h range   (spaces around "-" are tolerated)
+ *   "H:MM - H:MM"   same range with spaces
+ *   "HHMM"          4-digit military   "1500"=>"15:00", "0730"=>"7:30"
+ *
+ * Rejected: "8:5", "8:60", "26:00", "24:00", "abc", "8:60-9:00", ...
+ */
+function normalizeEditTimeLabel(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return "";
+
+  // 4-digit military shorthand: "HHMM"
+  const mil = s.match(/^(\d{2})(\d{2})$/);
+  if (mil) {
+    const h = parseInt(mil[1], 10);
+    const min = parseInt(mil[2], 10);
+    if (h >= 0 && h <= 23 && min >= 0 && min <= 59) {
+      return `${h}:${String(min).padStart(2, "0")}`;
+    }
+    return null;
+  }
+
+  // Range: "H:MM - H:MM" or "H:MM-H:MM"
+  const rng = s.match(/^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/);
+  if (rng) {
+    const start = parse24hToken(rng[1]);
+    const end = parse24hToken(rng[2]);
+    if (start && end) return `${start}-${end}`;
+    return null;
+  }
+
+  // Single H:MM
+  const single = parse24hToken(s);
+  if (single !== null) return single;
+
+  // Everything else is invalid
+  return null;
 }
 
 /**
@@ -143,7 +199,7 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
       // time-only or garbage-only after removing times => ignored
       if (!rest || !hasValidName(rest)) return null;
       // Leading time locked in — strip any accidental trailing time from name
-      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeToken(rest) };
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(rest) };
     }
     // Atomic: at least one side invalid => whole line is name-only
     return { timeLabel: "", name: line };
@@ -157,7 +213,7 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     if (time) {
       if (!rest || !hasValidName(rest)) return null;
       // Leading time locked in — strip any accidental trailing time from name
-      return { timeLabel: time, name: stripTrailingTimeToken(rest) };
+      return { timeLabel: time, name: stripTrailingTimeTokens(rest) };
     }
     return { timeLabel: "", name: line };
   }
@@ -177,7 +233,7 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     if (start && end) {
       if (!rest || !hasValidName(rest)) return null;
       // Leading time locked in — strip any accidental trailing time from name
-      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeToken(rest) };
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeTokens(rest) };
     }
     // Atomic: either side invalid => name-only (no partial salvage)
     return { timeLabel: "", name: line };
@@ -191,7 +247,7 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     if (time) {
       if (!rest || !hasValidName(rest)) return null;
       // Leading time locked in — strip any accidental trailing time from name
-      return { timeLabel: time, name: stripTrailingTimeToken(rest) };
+      return { timeLabel: time, name: stripTrailingTimeTokens(rest) };
     }
     return { timeLabel: "", name: line };
   }
@@ -302,6 +358,7 @@ export default function PlansPage() {
   const [formName, setFormName] = useState("");
   const [formTime, setFormTime] = useState("");
   const [formError, setFormError] = useState("");
+  const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
@@ -309,6 +366,7 @@ export default function PlansPage() {
     setFormName("");
     setFormTime("");
     setFormError("");
+    setFormTimeError("");
     setEditTarget(null);
     setMode("add");
   }
@@ -317,6 +375,7 @@ export default function PlansPage() {
     setFormName(item.name);
     setFormTime(item.timeLabel);
     setFormError("");
+    setFormTimeError("");
     setEditTarget(item);
     setMode("edit");
   }
@@ -331,6 +390,7 @@ export default function PlansPage() {
     setMode("view");
     setEditTarget(null);
     setFormError("");
+    setFormTimeError("");
     setImportError("");
   }
 
@@ -340,15 +400,31 @@ export default function PlansPage() {
       setFormError("Activity name is required.");
       return;
     }
-    const timeWindow = formTime.trim();
-    // If a separate time window is set, strip any accidental trailing time
-    // token the user may have typed into the name field (e.g. "Space Mountain 10pm").
-    // Only strip the end token; never touch tokens in the middle of the name.
-    if (timeWindow) {
-      trimmed = stripTrailingTimeToken(trimmed);
-      // Guard: stripping must not empty the name
-      if (!trimmed) trimmed = formName.trim();
+
+    // Validate and normalize the time window field.
+    // normalizeEditTimeLabel returns:
+    //   ""    → no time (field was empty or cleared)
+    //   "H:MM" / "H:MM-H:MM" → canonical 24h label
+    //   null  → invalid input
+    const rawTime = formTime.trim();
+    let timeWindow = "";
+    if (rawTime) {
+      const normalized = normalizeEditTimeLabel(rawTime);
+      if (normalized === null) {
+        setFormTimeError("Enter a valid 24h time (e.g. 15:00 or 15:00-16:00).");
+        return;
+      }
+      timeWindow = normalized;
     }
+
+    // When saving with a time window, strip up to 2 trailing time tokens from
+    // the name so accidental leftovers (e.g. "Space Mountain 10pm 22:00") are
+    // cleaned. Guard: do not strip if it would empty the name.
+    if (timeWindow) {
+      const stripped = stripTrailingTimeTokens(trimmed, 2);
+      if (stripped) trimmed = stripped;
+    }
+
     if (mode === "add") {
       setItems((prev) => [
         ...prev,
@@ -958,15 +1034,22 @@ export default function PlansPage() {
                     </label>
                     <input
                       id="plan-time"
-                      className="form-input"
+                      className={`form-input${formTimeError ? " error" : ""}`}
                       type="text"
-                      placeholder="e.g. Morning, 10:00 AM, 2:00 – 3:00 PM"
+                      placeholder="e.g. 15:00 or 15:00-16:00"
                       value={formTime}
-                      onChange={(e) => setFormTime(e.target.value)}
+                      onChange={(e) => {
+                        setFormTime(e.target.value);
+                        if (formTimeError) setFormTimeError("");
+                      }}
                     />
-                    <p className="form-hint">
-                      Free text — use whatever label makes sense.
-                    </p>
+                    {formTimeError ? (
+                      <p className="form-error">{formTimeError}</p>
+                    ) : (
+                      <p className="form-hint">
+                        24h format. Single time (15:00) or range (15:00-16:00). Also accepts 4-digit shorthand (1500).
+                      </p>
+                    )}
                   </div>
                 </>
               )}
