@@ -72,6 +72,42 @@ function hasValidName(s: string): boolean {
 }
 
 /**
+ * Strip ONE trailing time token from the end of a name string.
+ * Removes the last AM/PM or strict 24h "H:MM" token if it is at the very end
+ * (preceded by whitespace) and the remainder still passes hasValidName.
+ * If stripping would leave an invalid/empty name, returns the original string.
+ *
+ * Used so that after a leading time is locked in, any accidental trailing
+ * time in the remainder (e.g. "Space Mountain 22:00") does not bleed into
+ * the activity title.
+ *
+ * Test cases:
+ *   "Space Mountain 22:00"  => "Space Mountain"
+ *   "Space Mountain 10pm"   => "Space Mountain"
+ *   "Space Mountain 22:00 blah" => unchanged (token not at end)
+ *   "Space Mountain"        => unchanged (no trailing token)
+ */
+function stripTrailingTimeToken(name: string): string {
+  // Try trailing AM/PM token (greedy: picks rightmost match)
+  const ampmMatch = name.match(/^(.*)\s+(\d{1,2}(?::\d{1,2})?\s*[ap]m)$/i);
+  if (ampmMatch) {
+    const candidate = ampmMatch[1].trim();
+    if (parseAmPmToken(ampmMatch[2]) !== null && hasValidName(candidate)) {
+      return candidate;
+    }
+  }
+  // Try trailing strict 24h token H:MM (2-digit minutes required)
+  const h24Match = name.match(/^(.*)\s+(\d{1,2}:\d{2})$/);
+  if (h24Match) {
+    const candidate = h24Match[1].trim();
+    if (parse24hToken(h24Match[2]) !== null && hasValidName(candidate)) {
+      return candidate;
+    }
+  }
+  return name;
+}
+
+/**
  * Parse a single import line into { timeLabel, name } or null (ignored).
  *
  * Priority order:
@@ -106,7 +142,8 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     if (start && end) {
       // time-only or garbage-only after removing times => ignored
       if (!rest || !hasValidName(rest)) return null;
-      return { timeLabel: `${start}-${end}`, name: rest };
+      // Leading time locked in — strip any accidental trailing time from name
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeToken(rest) };
     }
     // Atomic: at least one side invalid => whole line is name-only
     return { timeLabel: "", name: line };
@@ -119,7 +156,8 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const rest = m[2].trim();
     if (time) {
       if (!rest || !hasValidName(rest)) return null;
-      return { timeLabel: time, name: rest };
+      // Leading time locked in — strip any accidental trailing time from name
+      return { timeLabel: time, name: stripTrailingTimeToken(rest) };
     }
     return { timeLabel: "", name: line };
   }
@@ -138,7 +176,8 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const rest = m[3].trim();
     if (start && end) {
       if (!rest || !hasValidName(rest)) return null;
-      return { timeLabel: `${start}-${end}`, name: rest };
+      // Leading time locked in — strip any accidental trailing time from name
+      return { timeLabel: `${start}-${end}`, name: stripTrailingTimeToken(rest) };
     }
     // Atomic: either side invalid => name-only (no partial salvage)
     return { timeLabel: "", name: line };
@@ -151,7 +190,8 @@ function parseLine(rawLine: string): { timeLabel: string; name: string } | null 
     const rest = m[2].trim();
     if (time) {
       if (!rest || !hasValidName(rest)) return null;
-      return { timeLabel: time, name: rest };
+      // Leading time locked in — strip any accidental trailing time from name
+      return { timeLabel: time, name: stripTrailingTimeToken(rest) };
     }
     return { timeLabel: "", name: line };
   }
@@ -295,21 +335,30 @@ export default function PlansPage() {
   }
 
   function handleSave() {
-    const trimmed = formName.trim();
+    let trimmed = formName.trim();
     if (!trimmed) {
       setFormError("Activity name is required.");
       return;
     }
+    const timeWindow = formTime.trim();
+    // If a separate time window is set, strip any accidental trailing time
+    // token the user may have typed into the name field (e.g. "Space Mountain 10pm").
+    // Only strip the end token; never touch tokens in the middle of the name.
+    if (timeWindow) {
+      trimmed = stripTrailingTimeToken(trimmed);
+      // Guard: stripping must not empty the name
+      if (!trimmed) trimmed = formName.trim();
+    }
     if (mode === "add") {
       setItems((prev) => [
         ...prev,
-        { id: makeId(), name: trimmed, timeLabel: formTime.trim() },
+        { id: makeId(), name: trimmed, timeLabel: timeWindow },
       ]);
     } else if (mode === "edit" && editTarget) {
       setItems((prev) =>
         prev.map((it) =>
           it.id === editTarget.id
-            ? { ...it, name: trimmed, timeLabel: formTime.trim() }
+            ? { ...it, name: trimmed, timeLabel: timeWindow }
             : it
         )
       );
