@@ -731,10 +731,9 @@ export default function WaitTimesPage() {
               </h2>
               <div
                 style={{
-                  border: "1px solid #fef3c7",
+                  border: "1px solid #e5e7eb",
                   borderRadius: "8px",
                   overflow: "hidden",
-                  backgroundColor: "#fffef7",
                 }}
               >
                 {refurbs.map((refurb) => (
@@ -742,16 +741,21 @@ export default function WaitTimesPage() {
                     key={refurb.id}
                     style={{
                       padding: "12px 16px",
-                      borderBottom: "1px solid #fef3c7",
-                      backgroundColor: "transparent",
+                      borderBottom: "1px solid #e5e7eb",
+                      display: "flex",
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      gap: "0 8px",
                     }}
                   >
                     <div
                       style={{
                         fontWeight: 600,
                         fontSize: "15px",
-                        color: "#92400e",
+                        color: "#111827",
                         lineHeight: "1.3",
+                        flex: "1 1 auto",
+                        order: 1,
                       }}
                     >
                       {refurb.name}
@@ -760,8 +764,10 @@ export default function WaitTimesPage() {
                       <div
                         style={{
                           fontSize: "13px",
-                          color: "#b45309",
+                          color: "#6b7280",
                           marginTop: "2px",
+                          flex: "0 0 100%",
+                          order: 3,
                         }}
                       >
                         {refurb.land}
@@ -770,9 +776,15 @@ export default function WaitTimesPage() {
                     {refurb.dateRange && (
                       <div
                         style={{
-                          marginTop: "4px",
-                          fontSize: "13px",
-                          color: "#78350f",
+                          fontSize: "12px",
+                          color: "#6b7280",
+                          padding: "2px 8px",
+                          borderRadius: "4px",
+                          backgroundColor: "#f3f4f6",
+                          border: "1px solid #e5e7eb",
+                          whiteSpace: "nowrap",
+                          flex: "0 0 auto",
+                          order: 2,
                         }}
                       >
                         {refurb.dateRange}
