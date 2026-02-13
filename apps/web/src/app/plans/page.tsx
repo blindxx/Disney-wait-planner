@@ -659,11 +659,41 @@ const ALIASES_DLR: Record<string, string> = {
   "big thunder":      "big thunder mountain railroad",
   "thunder mountain": "big thunder mountain railroad",
   "runaway railway":  "mickey minnies runaway railway",
+  // Guardians variants (dash/colon/annotation forms normalize to these keys)
+  "guardians mission breakout": "guardians of the galaxy mission breakout",
+  "guardians breakout":         "guardians of the galaxy mission breakout",
+  // Rise of the Resistance shorthands
+  "rise":             "star wars rise of the resistance",
+  // Smugglers Run shorthands
+  "smuggler":         "millennium falcon smugglers run",
+  "smugglers":        "millennium falcon smugglers run",
+  "smugglers run":    "millennium falcon smugglers run",
 };
 
 // Placeholder for future WDW scope expansion
 const ALIASES_WDW: Record<string, string> = {};
 void ALIASES_WDW; // reserved, unused until WDW data is added
+
+/**
+ * When true, a matched plan item displays the official attraction name
+ * (from the wait dataset) as a secondary line below the plan title.
+ * Stored plan data is never mutated or persisted.
+ */
+const DISPLAY_CANONICAL_RIDE_NAME = false;
+
+/**
+ * Strip parenthetical and bracket annotations before matching.
+ * Applied only to the plan item key — never to displayed content.
+ * "Haunted Mansion (flex window)"  → "Haunted Mansion"
+ * "[rope drop] Space Mountain"     → "Space Mountain"
+ */
+function stripAnnotations(str: string): string {
+  return str
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 /**
  * Badge colors matching the Wait Times page exactly.
@@ -685,14 +715,16 @@ function getWaitBadgeStyle(
 /**
  * 3-stage deterministic wait lookup for a plan item name.
  * Order: Stage 1 (exact) → Stage 3 (alias) → Stage 2 (containment).
+ * Parenthetical/bracket annotations are stripped before matching.
  * Returns null on no match or ambiguous containment.
  */
 function lookupWait(
   planName: string,
-  waitMap: Map<string, { status: string; waitMins: number | null }>,
+  waitMap: Map<string, { status: string; waitMins: number | null; canonicalName: string }>,
   aliases: Record<string, string>,
-): { status: string; waitMins: number | null } | null {
-  const planKey = normalizeKey(planName);
+): { status: string; waitMins: number | null; canonicalName: string } | null {
+  // Strip annotations (flex windows, labels, etc.) before normalizing
+  const planKey = normalizeKey(stripAnnotations(planName));
 
   // Stage 1: exact normalized match
   const exact = waitMap.get(planKey);
@@ -709,7 +741,7 @@ function lookupWait(
   const planTokens = tokenize(planKey);
   if (planTokens.length < 2) return null;
 
-  const matches: Array<{ status: string; waitMins: number | null }> = [];
+  const matches: Array<{ status: string; waitMins: number | null; canonicalName: string }> = [];
   for (const [attrKey, info] of waitMap) {
     if (containsWholeWordSequence(attrKey, planTokens)) {
       matches.push(info);
@@ -742,10 +774,14 @@ export default function PlansPage() {
   // Keyed by normalizeKey(name); values carry status + waitMins.
   // Memoized because mock data is static — never recomputes after mount.
   const waitMap = useMemo(() => {
-    const map = new Map<string, { status: string; waitMins: number | null }>();
+    const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string }>();
     for (const a of mockAttractionWaits) {
       if (!DLR_PARK_IDS.has(a.parkId)) continue; // resort scope guard
-      map.set(normalizeKey(a.name), { status: a.status, waitMins: a.waitMins });
+      map.set(normalizeKey(a.name), {
+        status: a.status,
+        waitMins: a.waitMins,
+        canonicalName: a.name,
+      });
     }
     return map;
   }, []);
@@ -1523,12 +1559,25 @@ export default function PlansPage() {
                             w.waitMins != null    ? `${w.waitMins} min` : null;
                           if (!label) return null;
                           return (
-                            <span
-                              className="wait-badge"
-                              style={getWaitBadgeStyle(w.status, w.waitMins)}
-                            >
-                              {label}
-                            </span>
+                            <>
+                              <span
+                                className="wait-badge"
+                                style={getWaitBadgeStyle(w.status, w.waitMins)}
+                              >
+                                {label}
+                              </span>
+                              {DISPLAY_CANONICAL_RIDE_NAME && w.canonicalName !== item.name && (
+                                <span style={{
+                                  display: "block",
+                                  fontSize: "0.7rem",
+                                  color: "#9ca3af",
+                                  fontStyle: "italic",
+                                  lineHeight: 1.3,
+                                }}>
+                                  {w.canonicalName}
+                                </span>
+                              )}
+                            </>
                           );
                         })()}
                       </div>
