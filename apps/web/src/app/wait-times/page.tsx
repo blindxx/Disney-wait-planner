@@ -639,7 +639,7 @@ export default function WaitTimesPage() {
           );
           if (shows.length === 0) return null;
           return (
-            <div style={{ marginTop: "28px" }}>
+            <div style={{ marginTop: "20px" }}>
               <h2
                 style={{
                   fontSize: "16px",
@@ -699,7 +699,7 @@ export default function WaitTimesPage() {
                       {show.times.length === 1 ? (
                         <span>Next: {show.times[0]}</span>
                       ) : (
-                        <span>Today: {show.times.join(" \u2022 ")}</span>
+                        <span style={{ color: "#6b7280" }}>Today: {show.times.join(" \u2022 ")}</span>
                       )}
                     </div>
                   </div>
@@ -718,7 +718,7 @@ export default function WaitTimesPage() {
           );
           if (refurbs.length === 0) return null;
           return (
-            <div style={{ marginTop: "28px" }}>
+            <div style={{ marginTop: "20px" }}>
               <h2
                 style={{
                   fontSize: "16px",
@@ -731,10 +731,10 @@ export default function WaitTimesPage() {
               </h2>
               <div
                 style={{
-                  border: "1px solid #fde68a",
+                  border: "1px solid #fef3c7",
                   borderRadius: "8px",
                   overflow: "hidden",
-                  backgroundColor: "#fffbeb",
+                  backgroundColor: "#fffef7",
                 }}
               >
                 {refurbs.map((refurb) => (
@@ -742,7 +742,7 @@ export default function WaitTimesPage() {
                     key={refurb.id}
                     style={{
                       padding: "12px 16px",
-                      borderBottom: "1px solid #fde68a",
+                      borderBottom: "1px solid #fef3c7",
                       backgroundColor: "transparent",
                     }}
                   >
