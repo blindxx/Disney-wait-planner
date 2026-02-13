@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { mockAttractionWaits } from "@disney-wait-planner/shared";
 
 type PlanItem = {
   id: string;
@@ -582,6 +583,176 @@ function sortPlanItems(items: PlanItem[]): PlanItem[] {
   return items.slice().sort((a, b) => sortKey(a.timeLabel) - sortKey(b.timeLabel));
 }
 
+// ===== WAIT OVERLAY HELPERS =====
+
+/** Resort scope for the wait overlay (DLR = Disneyland Resort). */
+const RESORT_SCOPE = "DLR";
+const DLR_PARK_IDS = new Set(["disneyland", "dca"]);
+
+/**
+ * Normalize an attraction or plan item name to a stable lookup key.
+ * - Lowercase + trim
+ * - Remove apostrophes (typographic and ASCII) so "Tiana's" → "tianas"
+ * - Replace all remaining non-alphanumeric characters with a space
+ * - Collapse duplicate spaces
+ */
+function normalizeKey(str: string): string {
+  return str
+    .trim()
+    .toLowerCase()
+    .replace(/['\u2019\u2018]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const STOP_WORDS = new Set(["the", "of", "and", "a", "an", "to", "at"]);
+
+/** Tokens from a normalized key with stop words removed. */
+function tokenize(key: string): string[] {
+  return key.split(" ").filter((t) => t && !STOP_WORDS.has(t));
+}
+
+/**
+ * Stage 2 containment check.
+ * True when planTokens appear as a whole-word sequence inside the
+ * stop-word-filtered version of attrKey (prefix or interior match).
+ * Caller must ensure planTokens.length >= 2.
+ */
+function containsWholeWordSequence(
+  attrKey: string,
+  planTokens: string[],
+): boolean {
+  const planStr = planTokens.join(" ");
+  const attrFiltered = attrKey
+    .split(" ")
+    .filter((t) => t && !STOP_WORDS.has(t))
+    .join(" ");
+  return (" " + attrFiltered + " ").includes(" " + planStr + " ");
+}
+
+/**
+ * Manual alias map for DLR — acronyms and common shorthands.
+ * Keys: normalized alias string. Values: normalized full attraction name.
+ * These map exactly to the normalizeKey() output of the mock data names.
+ */
+const ALIASES_DLR: Record<string, string> = {
+  // Acronyms
+  rotr:  "star wars rise of the resistance",
+  mmrr:  "mickey minnies runaway railway",
+  btmrr: "big thunder mountain railroad",
+  btmr:  "big thunder mountain railroad",
+  potc:  "pirates of the caribbean",
+  iasw:  "its a small world",
+  mfsr:  "millennium falcon smugglers run",
+  hm:    "haunted mansion",
+  jc:    "jungle cruise",
+  sm:    "space mountain",
+  gotg:  "guardians of the galaxy mission breakout",
+  tsmm:  "toy story midway mania",
+  rac:   "radiator springs racers",
+  web:   "web slingers a spider man adventure",
+  grr:   "grizzly river run",
+  // Common shorthands
+  "pirates":          "pirates of the caribbean",
+  "guardians":        "guardians of the galaxy mission breakout",
+  "big thunder":      "big thunder mountain railroad",
+  "thunder mountain": "big thunder mountain railroad",
+  "runaway railway":  "mickey minnies runaway railway",
+  // Guardians variants (dash/colon/annotation forms normalize to these keys)
+  "guardians mission breakout": "guardians of the galaxy mission breakout",
+  "guardians breakout":         "guardians of the galaxy mission breakout",
+  // Rise of the Resistance shorthands
+  "rise":             "star wars rise of the resistance",
+  // Smugglers Run shorthands
+  "smuggler":         "millennium falcon smugglers run",
+  "smugglers":        "millennium falcon smugglers run",
+  "smugglers run":    "millennium falcon smugglers run",
+};
+
+// Placeholder for future WDW scope expansion
+const ALIASES_WDW: Record<string, string> = {};
+void ALIASES_WDW; // reserved, unused until WDW data is added
+
+/**
+ * When true, a matched plan item displays the official attraction name
+ * (from the wait dataset) as a secondary line below the plan title.
+ * Stored plan data is never mutated or persisted.
+ */
+const DISPLAY_CANONICAL_RIDE_NAME = true;
+
+/**
+ * Strip parenthetical and bracket annotations before matching.
+ * Applied only to the plan item key — never to displayed content.
+ * "Haunted Mansion (flex window)"  → "Haunted Mansion"
+ * "[rope drop] Space Mountain"     → "Space Mountain"
+ */
+function stripAnnotations(str: string): string {
+  return str
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Badge colors matching the Wait Times page exactly.
+ * DOWN → amber | CLOSED/null → grey
+ * ≤20 min → green | ≤45 min → yellow | >45 min → red
+ */
+function getWaitBadgeStyle(
+  status: string,
+  waitMins: number | null,
+): { backgroundColor: string; color: string } {
+  if (status === "DOWN")   return { backgroundColor: "#fef3c7", color: "#92400e" };
+  if (status === "CLOSED") return { backgroundColor: "#f3f4f6", color: "#6b7280" };
+  if (waitMins == null)    return { backgroundColor: "#f3f4f6", color: "#6b7280" };
+  if (waitMins <= 20) return { backgroundColor: "#dcfce7", color: "#166534" };
+  if (waitMins <= 45) return { backgroundColor: "#fef9c3", color: "#854d0e" };
+  return { backgroundColor: "#fee2e2", color: "#991b1b" };
+}
+
+/**
+ * 3-stage deterministic wait lookup for a plan item name.
+ * Order: Stage 1 (exact) → Stage 3 (alias) → Stage 2 (containment).
+ * Parenthetical/bracket annotations are stripped before matching.
+ * Returns null on no match or ambiguous containment.
+ */
+function lookupWait(
+  planName: string,
+  waitMap: Map<string, { status: string; waitMins: number | null; canonicalName: string }>,
+  aliases: Record<string, string>,
+): { status: string; waitMins: number | null; canonicalName: string } | null {
+  // Strip annotations (flex windows, labels, etc.) before normalizing
+  const planKey = normalizeKey(stripAnnotations(planName));
+
+  // Stage 1: exact normalized match
+  const exact = waitMap.get(planKey);
+  if (exact) return exact;
+
+  // Stage 3: manual alias lookup
+  const aliasTarget = aliases[planKey];
+  if (aliasTarget) {
+    const aliasResult = waitMap.get(aliasTarget);
+    if (aliasResult) return aliasResult;
+  }
+
+  // Stage 2: whole-word containment (≥2 meaningful tokens required)
+  const planTokens = tokenize(planKey);
+  if (planTokens.length < 2) return null;
+
+  const matches: Array<{ status: string; waitMins: number | null; canonicalName: string }> = [];
+  for (const [attrKey, info] of waitMap) {
+    if (containsWholeWordSequence(attrKey, planTokens)) {
+      matches.push(info);
+    }
+  }
+
+  // Ambiguous → fail silently
+  if (matches.length !== 1) return null;
+  return matches[0];
+}
+
 // ===== COMPONENT =====
 
 export default function PlansPage() {
@@ -598,6 +769,22 @@ export default function PlansPage() {
   const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
+
+  // Build a deterministic wait lookup map scoped to RESORT_SCOPE (DLR).
+  // Keyed by normalizeKey(name); values carry status + waitMins.
+  // Memoized because mock data is static — never recomputes after mount.
+  const waitMap = useMemo(() => {
+    const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string }>();
+    for (const a of mockAttractionWaits) {
+      if (!DLR_PARK_IDS.has(a.parkId)) continue; // resort scope guard
+      map.set(normalizeKey(a.name), {
+        status: a.status,
+        waitMins: a.waitMins,
+        canonicalName: a.name,
+      });
+    }
+    return map;
+  }, []);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
@@ -1010,7 +1197,15 @@ export default function PlansPage() {
           font-size: 1rem;
           font-weight: 600;
           color: #111827;
-          flex: 1;
+          word-break: break-word;
+          overflow-wrap: break-word;
+        }
+        .item-canonical {
+          font-size: 0.7rem;
+          color: #9ca3af;
+          font-style: italic;
+          line-height: 1.3;
+          margin-top: 0.1rem;
           word-break: break-word;
         }
         .item-time {
@@ -1268,6 +1463,30 @@ export default function PlansPage() {
         .btn-file-label:active {
           background-color: #f3f4f6;
         }
+        .item-name-row {
+          display: flex;
+          align-items: baseline;
+          flex-wrap: wrap;
+          gap: 0.35rem;
+        }
+        /* Structural properties only — colors applied via inline style
+           to stay in exact parity with the Wait Times page WaitBadge. */
+        .wait-badge {
+          display: inline-flex;
+          align-items: center;
+          font-size: 0.7rem;
+          font-weight: 600;
+          padding: 0.15rem 0.45rem;
+          border-radius: 4px;
+          white-space: nowrap;
+          line-height: 1.4;
+          flex-shrink: 0;
+        }
+        .wait-scope-label {
+          font-size: 0.7rem;
+          color: #9ca3af;
+          margin: -0.4rem 0 0.75rem;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -1300,6 +1519,8 @@ export default function PlansPage() {
             Auto-sort by time
           </label>
         </div>
+
+        <p className="wait-scope-label">Wait overlay: {RESORT_SCOPE}</p>
 
         {clearConfirm && (
           <div className="clear-confirm-row">
@@ -1334,8 +1555,37 @@ export default function PlansPage() {
                 <div className="step-circle">{index + 1}</div>
                 <div className="item-card">
                   <div className="item-top">
-                    <div style={{ flex: 1 }}>
-                      <div className="item-name">{item.name}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="item-name-row">
+                        <span className="item-name">{item.name}</span>
+                        {(() => {
+                          const w = lookupWait(item.name, waitMap, ALIASES_DLR);
+                          if (!w) return null;
+                          const label =
+                            w.status === "DOWN"   ? "Down"  :
+                            w.status === "CLOSED" ? "Closed" :
+                            w.waitMins != null    ? `${w.waitMins} min` : null;
+                          if (!label) return null;
+                          return (
+                            <span
+                              className="wait-badge"
+                              style={getWaitBadgeStyle(w.status, w.waitMins)}
+                            >
+                              {label}
+                            </span>
+                          );
+                        })()}
+                      </div>
+                      {DISPLAY_CANONICAL_RIDE_NAME && (() => {
+                        const w = lookupWait(item.name, waitMap, ALIASES_DLR);
+                        if (!w || w.canonicalName === item.name) return null;
+                        const hasLabel =
+                          w.status === "DOWN" || w.status === "CLOSED" || w.waitMins != null;
+                        if (!hasLabel) return null;
+                        return (
+                          <div className="item-canonical">{w.canonicalName}</div>
+                        );
+                      })()}
                       {item.timeLabel && (
                         <div className="item-time">
                           {formatTimeLabel(item.timeLabel)}
