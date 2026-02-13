@@ -679,7 +679,7 @@ void ALIASES_WDW; // reserved, unused until WDW data is added
  * (from the wait dataset) as a secondary line below the plan title.
  * Stored plan data is never mutated or persisted.
  */
-const DISPLAY_CANONICAL_RIDE_NAME = false;
+const DISPLAY_CANONICAL_RIDE_NAME = true;
 
 /**
  * Strip parenthetical and bracket annotations before matching.
