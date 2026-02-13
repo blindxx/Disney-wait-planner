@@ -1,6 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import {
+  parseAmPmToken,
+  parse24hToken,
+  parseMilToken,
+  formatSingleTime,
+} from "@/lib/timeUtils";
 
 // ===== TYPES =====
 
@@ -59,67 +65,8 @@ function makeId(): string {
   return `ll-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-// ===== TIME PARSING (same strict pattern as My Plans) =====
-
-/** Strip internal whitespace and lowercase for AM/PM token comparison */
-function normalizeAmPmStr(str: string): string {
-  return str.replace(/\s+/g, "").toLowerCase();
-}
-
-/**
- * Parse an AM/PM time token (e.g. "10am", "10 pm", "10:00am").
- * Returns internal 24h string "H:MM" or null if invalid.
- * Hours must be 1–12. Single-digit minutes => treated as 00 (strict).
- */
-function parseAmPmToken(raw: string): string | null {
-  const s = normalizeAmPmStr(raw);
-  const m = s.match(/^(\d{1,2})(?::(\d{1,2}))?([ap]m)$/);
-  if (!m) return null;
-  let h = parseInt(m[1], 10);
-  const rawMin = m[2];
-  const meridiem = m[3];
-
-  if (h < 1 || h > 12) return null;
-
-  let min = 0;
-  if (rawMin !== undefined) {
-    // Single-digit minute is treated strictly as 00
-    min = rawMin.length === 1 ? 0 : parseInt(rawMin, 10);
-    if (min < 0 || min > 59) return null;
-  }
-
-  if (meridiem === "am") {
-    if (h === 12) h = 0; // 12am => midnight
-  } else {
-    if (h !== 12) h += 12; // 1–11pm => +12; 12pm stays 12
-  }
-  return `${h}:${String(min).padStart(2, "0")}`;
-}
-
-/**
- * Parse a strict 24h time token "H:MM" or "HH:MM" (must have exactly 2 digit minutes).
- * Returns "H:MM" string or null if invalid.
- */
-function parse24hToken(str: string): string | null {
-  const m = str.match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const h = parseInt(m[1], 10);
-  const min = parseInt(m[2], 10);
-  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
-  return `${h}:${m[2]}`;
-}
-
-/**
- * Parse a 4-digit military time token e.g. "1500" => "15:00", "0730" => "7:30".
- * Returns canonical "H:MM" (no leading zero on hour) or null if invalid.
- */
-function parseMilToken(str: string): string | null {
-  if (!/^\d{4}$/.test(str)) return null;
-  const h = parseInt(str.slice(0, 2), 10);
-  const min = parseInt(str.slice(2), 10);
-  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
-  return `${h}:${String(min).padStart(2, "0")}`;
-}
+// Time parsing helpers (parseAmPmToken, parse24hToken, parseMilToken,
+// formatSingleTime) are imported from @/lib/timeUtils.
 
 /**
  * Validate and normalize a single time input from the Lightning Lane form.
@@ -147,20 +94,6 @@ function normalizeTimeInput(raw: string): string | null {
   if (ampm !== null) return ampm;
 
   return null;
-}
-
-// ===== DISPLAY FORMATTER =====
-
-/** Format internal "H:MM" (24h) to "h:MM AM/PM" for display */
-function formatTime(t: string): string {
-  const m = t.match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return t;
-  let h = parseInt(m[1], 10);
-  const min = m[2];
-  const meridiem = h < 12 ? "AM" : "PM";
-  if (h === 0) h = 12;
-  else if (h > 12) h -= 12;
-  return `${h}:${min} ${meridiem}`;
 }
 
 // ===== COUNTDOWN HELPERS =====
@@ -532,8 +465,8 @@ function ReservationCard({
               marginBottom: "0.6rem",
             }}
           >
-            {formatTime(item.startTime)}
-            {item.endTime ? `\u2013${formatTime(item.endTime)}` : ""}
+            {formatSingleTime(item.startTime)}
+            {item.endTime ? `\u2013${formatSingleTime(item.endTime)}` : ""}
           </div>
 
           {/* Status indicators */}
