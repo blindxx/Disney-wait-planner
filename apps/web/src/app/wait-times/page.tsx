@@ -19,6 +19,103 @@ import {
 } from "@disney-wait-planner/shared";
 
 // ============================================
+// SHOW + REFURB TYPES
+// ============================================
+
+type Show = {
+  id: string;
+  name: string;
+  parkId: ParkId;
+  land?: string;
+  times: string[];
+};
+
+type Refurb = {
+  id: string;
+  name: string;
+  parkId: ParkId;
+  land?: string;
+  dateRange?: string;
+};
+
+// ============================================
+// MOCK SHOWS DATA
+// ============================================
+
+const MOCK_SHOWS: Show[] = [
+  {
+    id: "fantasmic",
+    name: "Fantasmic!",
+    parkId: "disneyland",
+    land: "New Orleans Square",
+    times: ["9:00 PM"],
+  },
+  {
+    id: "magic-happens",
+    name: "Magic Happens Parade",
+    parkId: "disneyland",
+    land: "Main Street, U.S.A.",
+    times: ["11:00 AM", "3:00 PM"],
+  },
+  {
+    id: "msep",
+    name: "Main Street Electrical Parade",
+    parkId: "disneyland",
+    land: "Main Street, U.S.A.",
+    times: ["7:45 PM", "9:45 PM"],
+  },
+  {
+    id: "royal-cavalcade",
+    name: "Royal Princess Cavalcade",
+    parkId: "disneyland",
+    land: "Fantasyland",
+    times: ["10:30 AM", "1:30 PM", "4:30 PM"],
+  },
+  {
+    id: "together-forever",
+    name: "Together Forever — A Pixar Nighttime Spectacular",
+    parkId: "dca",
+    land: "Paradise Gardens Park",
+    times: ["9:00 PM"],
+  },
+  {
+    id: "pixar-pals",
+    name: "Better Together: A Pixar Pals Celebration!",
+    parkId: "dca",
+    land: "Hollywood Land",
+    times: ["11:30 AM", "2:30 PM", "5:00 PM"],
+  },
+];
+
+// ============================================
+// MOCK REFURBISHMENTS DATA
+// ============================================
+
+const MOCK_REFURBS: Refurb[] = [
+  {
+    id: "pirates",
+    name: "Pirates of the Caribbean",
+    parkId: "disneyland",
+    land: "New Orleans Square",
+    dateRange: "Jan 6 – Mar 14, 2026",
+  },
+  {
+    id: "matterhorn",
+    name: "Matterhorn Bobsleds",
+    parkId: "disneyland",
+    land: "Fantasyland",
+    dateRange: "Feb 3 – Apr 4, 2026",
+  },
+  {
+    id: "radiator-springs",
+    name: "Radiator Springs Racers",
+    parkId: "dca",
+    land: "Cars Land",
+    dateRange: "Jan 20 – Feb 28, 2026",
+  },
+];
+
+// ============================================
 // CONSTANTS
 // ============================================
 
@@ -532,6 +629,173 @@ export default function WaitTimesPage() {
             {filteredAttractions.length !== 1 ? "s" : ""}
           </div>
         )}
+
+        {/* ---- Entertainment (Shows) ---- */}
+        {(() => {
+          const shows = MOCK_SHOWS.filter(
+            (s) =>
+              s.parkId === selectedPark &&
+              (!selectedLand || s.land === selectedLand)
+          );
+          if (shows.length === 0) return null;
+          return (
+            <div style={{ marginTop: "20px" }}>
+              <h2
+                style={{
+                  fontSize: "16px",
+                  fontWeight: 700,
+                  color: "#111827",
+                  marginBottom: "10px",
+                }}
+              >
+                Entertainment
+              </h2>
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: "8px",
+                  overflow: "hidden",
+                }}
+              >
+                {shows.map((show) => (
+                  <div
+                    key={show.id}
+                    style={{
+                      padding: "12px 16px",
+                      borderBottom: "1px solid #e5e7eb",
+                      backgroundColor: "#fff",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: "15px",
+                        color: "#111827",
+                        lineHeight: "1.3",
+                      }}
+                    >
+                      {show.name}
+                    </div>
+                    {show.land && (
+                      <div
+                        style={{
+                          fontSize: "13px",
+                          color: "#6b7280",
+                          marginTop: "2px",
+                        }}
+                      >
+                        {show.land}
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        marginTop: "6px",
+                        fontSize: "13px",
+                        color: "#374151",
+                        lineHeight: "1.5",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {show.times.length === 1 ? (
+                        <span>Next: {show.times[0]}</span>
+                      ) : (
+                        <span style={{ color: "#6b7280" }}>Today: {show.times.join(" \u2022 ")}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ---- Planned Closures (Refurbishments) ---- */}
+        {(() => {
+          const refurbs = MOCK_REFURBS.filter(
+            (r) =>
+              r.parkId === selectedPark &&
+              (!selectedLand || r.land === selectedLand)
+          );
+          if (refurbs.length === 0) return null;
+          return (
+            <div style={{ marginTop: "20px" }}>
+              <h2
+                style={{
+                  fontSize: "16px",
+                  fontWeight: 700,
+                  color: "#111827",
+                  marginBottom: "10px",
+                }}
+              >
+                Planned Closures
+              </h2>
+              <div
+                style={{
+                  border: "1px solid #e5e7eb",
+                  borderRadius: "8px",
+                  overflow: "hidden",
+                }}
+              >
+                {refurbs.map((refurb) => (
+                  <div
+                    key={refurb.id}
+                    style={{
+                      padding: "12px 16px",
+                      borderBottom: "1px solid #e5e7eb",
+                      display: "flex",
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      gap: "0 8px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontWeight: 600,
+                        fontSize: "15px",
+                        color: "#111827",
+                        lineHeight: "1.3",
+                        flex: "1 1 auto",
+                        order: 1,
+                      }}
+                    >
+                      {refurb.name}
+                    </div>
+                    {refurb.land && (
+                      <div
+                        style={{
+                          fontSize: "13px",
+                          color: "#6b7280",
+                          marginTop: "2px",
+                          flex: "0 0 100%",
+                          order: 3,
+                        }}
+                      >
+                        {refurb.land}
+                      </div>
+                    )}
+                    {refurb.dateRange && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "#6b7280",
+                          padding: "2px 8px",
+                          borderRadius: "4px",
+                          backgroundColor: "#f3f4f6",
+                          border: "1px solid #e5e7eb",
+                          whiteSpace: "nowrap",
+                          flex: "0 0 auto",
+                          order: 2,
+                        }}
+                      >
+                        {refurb.dateRange}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </>
   );
