@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { mockAttractionWaits } from "@disney-wait-planner/shared";
 
 type PlanItem = {
   id: string;
@@ -598,6 +599,17 @@ export default function PlansPage() {
   const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
+
+  // Build a deterministic wait lookup map from mock data.
+  // Keyed by normalized (trim + lowercase) attraction name.
+  // Memoized because mock data is static — recomputes only on mount.
+  const waitMap = useMemo(() => {
+    const map = new Map<string, { status: string; waitMins: number | null }>();
+    for (const a of mockAttractionWaits) {
+      map.set(a.name.trim().toLowerCase(), { status: a.status, waitMins: a.waitMins });
+    }
+    return map;
+  }, []);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
@@ -1268,6 +1280,38 @@ export default function PlansPage() {
         .btn-file-label:active {
           background-color: #f3f4f6;
         }
+        .item-name-row {
+          display: flex;
+          align-items: baseline;
+          flex-wrap: wrap;
+          gap: 0.35rem;
+        }
+        .wait-badge {
+          display: inline-flex;
+          align-items: center;
+          font-size: 0.7rem;
+          font-weight: 600;
+          padding: 0.1rem 0.4rem;
+          border-radius: 4px;
+          white-space: nowrap;
+          line-height: 1.5;
+          flex-shrink: 0;
+        }
+        .wait-badge-normal {
+          background: #f3f4f6;
+          color: #6b7280;
+          border: 1px solid #e5e7eb;
+        }
+        .wait-badge-caution {
+          background: #fffbeb;
+          color: #b45309;
+          border: 1px solid #fde68a;
+        }
+        .wait-badge-down {
+          background: #fef9c3;
+          color: #854d0e;
+          border: 1px solid #fef08a;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -1334,8 +1378,25 @@ export default function PlansPage() {
                 <div className="step-circle">{index + 1}</div>
                 <div className="item-card">
                   <div className="item-top">
-                    <div style={{ flex: 1 }}>
-                      <div className="item-name">{item.name}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="item-name-row">
+                        <span className="item-name">{item.name}</span>
+                        {(() => {
+                          const w = waitMap.get(item.name.trim().toLowerCase());
+                          if (!w) return null;
+                          if (w.status === "DOWN") {
+                            return <span className="wait-badge wait-badge-down">Down</span>;
+                          }
+                          if (w.waitMins !== null) {
+                            return (
+                              <span className={`wait-badge ${w.waitMins > 60 ? "wait-badge-caution" : "wait-badge-normal"}`}>
+                                {w.waitMins} min
+                              </span>
+                            );
+                          }
+                          return null;
+                        })()}
+                      </div>
                       {item.timeLabel && (
                         <div className="item-time">
                           {formatTimeLabel(item.timeLabel)}
