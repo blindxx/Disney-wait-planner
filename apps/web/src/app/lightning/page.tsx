@@ -498,7 +498,7 @@ function ReservationCard({
         padding: "1rem 1.25rem",
         boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
         opacity: bucket === "expired" ? 0.7 : 1,
-        borderLeft: `4px solid ${borderColor}`,
+        borderLeft: `${bucket === "soon" ? 6 : 4}px solid ${borderColor}`,
       }}
     >
       <div
@@ -558,7 +558,7 @@ function ReservationCard({
             <div style={{ display: "flex", alignItems: "baseline", gap: "0.35rem" }}>
               <span
                 style={{
-                  fontSize: "1.6rem",
+                  fontSize: bucket === "soon" ? "1.9rem" : "1.6rem",
                   fontWeight: 700,
                   color: countdownColor,
                   lineHeight: 1,
