@@ -1197,7 +1197,15 @@ export default function PlansPage() {
           font-size: 1rem;
           font-weight: 600;
           color: #111827;
-          flex: 1;
+          word-break: break-word;
+          overflow-wrap: break-word;
+        }
+        .item-canonical {
+          font-size: 0.7rem;
+          color: #9ca3af;
+          font-style: italic;
+          line-height: 1.3;
+          margin-top: 0.1rem;
           word-break: break-word;
         }
         .item-time {
@@ -1559,28 +1567,25 @@ export default function PlansPage() {
                             w.waitMins != null    ? `${w.waitMins} min` : null;
                           if (!label) return null;
                           return (
-                            <>
-                              <span
-                                className="wait-badge"
-                                style={getWaitBadgeStyle(w.status, w.waitMins)}
-                              >
-                                {label}
-                              </span>
-                              {DISPLAY_CANONICAL_RIDE_NAME && w.canonicalName !== item.name && (
-                                <span style={{
-                                  display: "block",
-                                  fontSize: "0.7rem",
-                                  color: "#9ca3af",
-                                  fontStyle: "italic",
-                                  lineHeight: 1.3,
-                                }}>
-                                  {w.canonicalName}
-                                </span>
-                              )}
-                            </>
+                            <span
+                              className="wait-badge"
+                              style={getWaitBadgeStyle(w.status, w.waitMins)}
+                            >
+                              {label}
+                            </span>
                           );
                         })()}
                       </div>
+                      {DISPLAY_CANONICAL_RIDE_NAME && (() => {
+                        const w = lookupWait(item.name, waitMap, ALIASES_DLR);
+                        if (!w || w.canonicalName === item.name) return null;
+                        const hasLabel =
+                          w.status === "DOWN" || w.status === "CLOSED" || w.waitMins != null;
+                        if (!hasLabel) return null;
+                        return (
+                          <div className="item-canonical">{w.canonicalName}</div>
+                        );
+                      })()}
                       {item.timeLabel && (
                         <div className="item-time">
                           {formatTimeLabel(item.timeLabel)}
