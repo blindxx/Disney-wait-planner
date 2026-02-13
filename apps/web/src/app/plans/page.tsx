@@ -432,7 +432,7 @@ export default function PlansPage() {
     if (rawTime) {
       const normalized = normalizeEditTimeLabel(rawTime);
       if (normalized === null) {
-        setFormTimeError("Enter a valid 24h time (e.g. 15:00 or 15:00-16:00).");
+        setFormTimeError("Enter a valid time (e.g. 3pm, 15:00, or 15:00-16:00).");
         return;
       }
       timeWindow = normalized;
@@ -1357,7 +1357,7 @@ export default function PlansPage() {
                       <p className="form-error">{formTimeError}</p>
                     ) : (
                       <p className="form-hint">
-                        24h format. Single time (15:00) or range (15:00-16:00). Also accepts 4-digit shorthand (1500).
+                        Single time (3pm, 15:00, 1500) or range (3pm-4pm, 15:00-16:00).
                       </p>
                     )}
                   </div>

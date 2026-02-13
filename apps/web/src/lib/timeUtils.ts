@@ -160,6 +160,8 @@ export function stripTrailingTimeTokens(name: string, maxPasses = 2): string {
  *   "H:MM-H:MM"     strict 24h range   (spaces around "-" are tolerated)
  *   "H:MM - H:MM"   same range with spaces
  *   "HHMM"          4-digit military   "1500"=>"15:00", "0730"=>"7:30", "0000"=>"0:00"
+ *   "Xpm" / "X:XXpm" / "X:XX PM"   AM/PM single  (via parseAmPmToken)
+ *   "Xpm-Ypm"        AM/PM range   (via parseAmPmToken on each side)
  *
  * Rejected: "8:5", "8:60", "26:00", "24:00", "2400", "2460", "abc", "8:60-9:00"
  */
@@ -172,6 +174,22 @@ export function normalizeEditTimeLabel(raw: string): string | null {
   if (milResult !== null) return milResult;
   // Explicitly reject 4-digit strings that failed parseMilToken (e.g. "2460", "2400")
   if (/^\d{4}$/.test(s)) return null;
+
+  // AM/PM range: "Xpm-Yam" or "X:XXpm - Y:XXam" (en/em dashes already normalized)
+  // Matches two am/pm tokens separated by a dash with optional surrounding spaces.
+  const ampmRng = s.match(
+    /^(\d{1,2}(?::\d{1,2})?\s*[ap]m)\s*-\s*(\d{1,2}(?::\d{1,2})?\s*[ap]m)$/i
+  );
+  if (ampmRng) {
+    const start = parseAmPmToken(ampmRng[1]);
+    const end = parseAmPmToken(ampmRng[2]);
+    if (start && end) return `${start}-${end}`;
+    return null;
+  }
+
+  // AM/PM single: "1pm", "10:15pm", "1:00 PM", etc.
+  const ampmSingle = parseAmPmToken(s);
+  if (ampmSingle !== null) return ampmSingle;
 
   // Range: "H:MM - H:MM" or "H:MM-H:MM"
   const rng = s.match(/^(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})$/);
