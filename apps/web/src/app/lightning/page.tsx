@@ -172,11 +172,21 @@ function toMinutes(t: string): number {
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 }
 
-type ItemStatus = "upcoming" | "now" | "expired";
+// Bucket 0=now, 1=soon (≤30m), 2=upcoming (>30m), 3=expired
+type Bucket = "now" | "soon" | "upcoming" | "expired";
 
-function getStatus(item: LightningItem, nowMinutes: number): ItemStatus {
+const BUCKET_ORDER: Record<Bucket, number> = {
+  now: 0,
+  soon: 1,
+  upcoming: 2,
+  expired: 3,
+};
+
+function getBucket(item: LightningItem, nowMinutes: number): Bucket {
   const start = toMinutes(item.startTime);
-  if (nowMinutes < start) return "upcoming";
+  if (nowMinutes < start) {
+    return start - nowMinutes <= 30 ? "soon" : "upcoming";
+  }
   if (item.endTime) {
     const end = toMinutes(item.endTime);
     if (nowMinutes > end) return "expired";
@@ -184,7 +194,22 @@ function getStatus(item: LightningItem, nowMinutes: number): ItemStatus {
   return "now";
 }
 
-/** Format a countdown string like "2h 30m" or "45m" for upcoming reservations */
+/**
+ * Return a sorted copy of items — never mutates state.
+ * Sort key: (bucket priority, startTime ascending, id for stability).
+ * Based only on startTime + id so items don't reshuffle on every 10s tick.
+ */
+function sortedItems(items: LightningItem[], nowMinutes: number): LightningItem[] {
+  return [...items].sort((a, b) => {
+    const orderDiff = BUCKET_ORDER[getBucket(a, nowMinutes)] - BUCKET_ORDER[getBucket(b, nowMinutes)];
+    if (orderDiff !== 0) return orderDiff;
+    const startDiff = toMinutes(a.startTime) - toMinutes(b.startTime);
+    if (startDiff !== 0) return startDiff;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/** Format a countdown string like "2h 30m" or "45m" for upcoming/soon reservations */
 function formatCountdown(item: LightningItem, nowMinutes: number): string {
   const start = toMinutes(item.startTime);
   const diff = start - nowMinutes;
@@ -420,13 +445,13 @@ export default function LightningPage() {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-          {items.map((item) => {
-            const status = getStatus(item, now);
+          {sortedItems(items, now).map((item) => {
+            const bucket = getBucket(item, now);
             return (
               <ReservationCard
                 key={item.id}
                 item={item}
-                status={status}
+                bucket={bucket}
                 now={now}
                 onRemove={() => handleRemove(item.id)}
               />
@@ -442,32 +467,37 @@ export default function LightningPage() {
 
 function ReservationCard({
   item,
-  status,
+  bucket,
   now,
   onRemove,
 }: {
   item: LightningItem;
-  status: ItemStatus;
+  bucket: Bucket;
   now: number;
   onRemove: () => void;
 }) {
-  const countdown = status === "upcoming" ? formatCountdown(item, now) : "";
+  const showCountdown = bucket === "soon" || bucket === "upcoming";
+  const countdown = showCountdown ? formatCountdown(item, now) : "";
 
   const borderColor =
-    status === "now"
+    bucket === "now"
       ? "#16a34a"
-      : status === "upcoming"
+      : bucket === "soon"
+      ? "#d97706"
+      : bucket === "upcoming"
       ? "#2563eb"
       : "#d1d5db";
+
+  const countdownColor = bucket === "soon" ? "#d97706" : "#2563eb";
 
   return (
     <div
       style={{
-        background: status === "expired" ? "#f9fafb" : "#fff",
+        background: bucket === "expired" ? "#f9fafb" : "#fff",
         borderRadius: 12,
         padding: "1rem 1.25rem",
         boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
-        opacity: status === "expired" ? 0.7 : 1,
+        opacity: bucket === "expired" ? 0.7 : 1,
         borderLeft: `4px solid ${borderColor}`,
       }}
     >
@@ -486,7 +516,7 @@ function ReservationCard({
             style={{
               fontWeight: 600,
               fontSize: "1.05rem",
-              color: status === "expired" ? "#6b7280" : "#1a1a2e",
+              color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
               marginBottom: "0.2rem",
               wordBreak: "break-word",
             }}
@@ -507,7 +537,7 @@ function ReservationCard({
           </div>
 
           {/* Status indicators */}
-          {status === "now" && (
+          {bucket === "now" && (
             <span
               style={{
                 display: "inline-block",
@@ -524,13 +554,13 @@ function ReservationCard({
             </span>
           )}
 
-          {status === "upcoming" && countdown && (
+          {showCountdown && countdown && (
             <div style={{ display: "flex", alignItems: "baseline", gap: "0.35rem" }}>
               <span
                 style={{
                   fontSize: "1.6rem",
                   fontWeight: 700,
-                  color: "#2563eb",
+                  color: countdownColor,
                   lineHeight: 1,
                 }}
               >
@@ -542,7 +572,7 @@ function ReservationCard({
             </div>
           )}
 
-          {status === "expired" && (
+          {bucket === "expired" && (
             <span
               style={{
                 fontSize: "0.8rem",
