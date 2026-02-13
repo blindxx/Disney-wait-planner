@@ -1346,7 +1346,7 @@ export default function PlansPage() {
                       id="plan-time"
                       className={`form-input${formTimeError ? " error" : ""}`}
                       type="text"
-                      placeholder="e.g. 15:00 or 15:00-16:00"
+                      placeholder="e.g. 3pm, 15:00 or 15:00-16:00"
                       value={formTime}
                       onChange={(e) => {
                         setFormTime(e.target.value);
