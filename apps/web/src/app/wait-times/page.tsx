@@ -194,6 +194,34 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 ];
 
 // ============================================
+// PERSISTENCE HELPERS
+// ============================================
+
+const STORAGE_RESORT_KEY = "dwp.selectedResort";
+const STORAGE_PARK_KEY = "dwp.selectedPark";
+
+/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+function loadStoredResort(): ResortId {
+  try {
+    const v = localStorage.getItem(STORAGE_RESORT_KEY);
+    if (v === "DLR" || v === "WDW") return v;
+  } catch {}
+  return "DLR";
+}
+
+/**
+ * Read and validate park from localStorage for the given resort.
+ * Falls back to first park in the resort if missing or no longer valid.
+ */
+function loadStoredPark(resort: ResortId): ParkId {
+  try {
+    const v = localStorage.getItem(STORAGE_PARK_KEY);
+    if (v && (RESORT_PARKS[resort] as string[]).includes(v)) return v as ParkId;
+  } catch {}
+  return RESORT_PARKS[resort][0];
+}
+
+// ============================================
 // RESPONSIVE CSS
 // ============================================
 
@@ -492,12 +520,31 @@ function SkeletonCard() {
 
 export default function WaitTimesPage() {
   // State for resort, park, filter, and sort
+  // Initial values are server-safe defaults; localStorage hydration runs in useEffect.
   const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
   const [operatingOnly, setOperatingOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>("wait-desc");
   const [selectedLand, setSelectedLand] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+
+  // Hydrate resort + park from localStorage on client mount (runs once).
+  useEffect(() => {
+    const resort = loadStoredResort();
+    const park = loadStoredPark(resort);
+    setSelectedResort(resort);
+    setSelectedPark(park);
+  }, []);
+
+  // Persist resort whenever it changes.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
+  }, [selectedResort]);
+
+  // Persist park whenever it changes.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_PARK_KEY, selectedPark); } catch {}
+  }, [selectedPark]);
 
   /** Handle resort change — reset park to first in new resort and clear land filter */
   function handleResortChange(resort: ResortId) {

@@ -175,6 +175,19 @@ const RESORT_LABELS: Record<ResortId, string> = {
   WDW: "Walt Disney World",
 };
 
+// ===== RESORT PERSISTENCE =====
+
+const STORAGE_RESORT_KEY = "dwp.selectedResort";
+
+/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+function loadStoredResort(): ResortId {
+  try {
+    const v = localStorage.getItem(STORAGE_RESORT_KEY);
+    if (v === "DLR" || v === "WDW") return v;
+  } catch {}
+  return "DLR";
+}
+
 /**
  * Normalize an attraction or plan item name to a stable lookup key.
  * - Lowercase + trim
@@ -283,8 +296,13 @@ const ALIASES_WDW: Record<string, string> = {
   "slinky":             "slinky dog dash",
   "slinky dog":         "slinky dog dash",
   "frozen":             "frozen ever after",
-  "ratatouille":        "remys ratatouille adventure",
-  "remy":               "remys ratatouille adventure",
+  "ratatouille":           "remys ratatouille adventure",
+  "ratatouillie":          "remys ratatouille adventure",  // common misspelling
+  "ratatoullie":           "remys ratatouille adventure",  // common misspelling
+  "remy":                  "remys ratatouille adventure",
+  "remys":                 "remys ratatouille adventure",  // remy's / remys
+  "remy ratatouille":      "remys ratatouille adventure",
+  "remys ratatouille":     "remys ratatouille adventure",
   "tower of terror":    "the twilight zone tower of terror",
   "rise":               "star wars rise of the resistance",
   "smugglers run":      "millennium falcon smugglers run",
@@ -373,6 +391,7 @@ function lookupWait(
 // ===== COMPONENT =====
 
 export default function PlansPage() {
+  // Initial value is server-safe default; localStorage hydration runs in useEffect.
   const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
@@ -387,6 +406,16 @@ export default function PlansPage() {
   const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
+
+  // Hydrate selectedResort from localStorage on client mount (runs once).
+  useEffect(() => {
+    setSelectedResort(loadStoredResort());
+  }, []);
+
+  // Persist selectedResort whenever it changes.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
+  }, [selectedResort]);
 
   // Build a deterministic wait lookup map scoped to selectedResort.
   // Keyed by normalizeKey(name); values carry status + waitMins.
