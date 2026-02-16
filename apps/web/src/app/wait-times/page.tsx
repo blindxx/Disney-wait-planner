@@ -14,11 +14,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  mockAttractionWaits,
   type AttractionWait,
   type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
+import { getWaitDataset } from "../../lib/liveWaitApi";
 
 // ============================================
 // SHOW + REFURB TYPES
@@ -527,6 +527,8 @@ export default function WaitTimesPage() {
   const [sortBy, setSortBy] = useState<SortOption>("wait-desc");
   const [selectedLand, setSelectedLand] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  /** Attraction data for the current resort+park (live or mock). */
+  const [attractions, setAttractions] = useState<AttractionWait[]>([]);
 
   // Hydrate resort + park from localStorage on client mount (runs once).
   useEffect(() => {
@@ -553,34 +555,43 @@ export default function WaitTimesPage() {
     setSelectedLand("");
   }
 
-  // Brief loading on mount and park switch for skeleton transition
+  // Fetch wait data when resort or park changes.
+  // Uses getWaitDataset which returns live data (if enabled + reachable) or
+  // falls back to mock — no crashes, same shape either way.
   useEffect(() => {
+    let cancelled = false;
     setIsLoading(true);
-    const t = setTimeout(() => setIsLoading(false), 350);
-    return () => clearTimeout(t);
-  }, [selectedPark]);
+
+    getWaitDataset({ resortId: selectedResort, parkId: selectedPark }).then(
+      ({ data }) => {
+        if (!cancelled) {
+          setAttractions(data);
+          setIsLoading(false);
+        }
+      },
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedResort, selectedPark]);
 
   /** Parks available for the currently selected resort */
   const resortParks = RESORT_PARKS[selectedResort];
 
-  /** Unique sorted land names for the selected park (scoped to resort) */
+  /** Unique sorted land names for the selected park (derived from loaded data). */
   const availableLands = useMemo(() => {
-    const lands = mockAttractionWaits
-      .filter((a) => a.resortId === selectedResort && a.parkId === selectedPark)
-      .map((a) => a.land)
-      .filter((l): l is string => !!l);
+    const lands = attractions.map((a) => a.land).filter((l): l is string => !!l);
     return [...new Set(lands)].sort();
-  }, [selectedResort, selectedPark]);
+  }, [attractions]);
 
   /**
    * Filter and sort attractions based on current settings.
    * Scoped strictly to selectedResort — no cross-resort data can appear.
    */
   const filteredAttractions = useMemo(() => {
-    // Resort scope guard: only attractions belonging to the selected resort+park
-    let results = mockAttractionWaits.filter(
-      (a) => a.resortId === selectedResort && a.parkId === selectedPark
-    );
+    // attractions is already scoped to selectedResort+selectedPark by getWaitDataset
+    let results = attractions.slice();
 
     if (operatingOnly) {
       results = results.filter((a) => a.status === "OPERATING");
@@ -601,7 +612,7 @@ export default function WaitTimesPage() {
     });
 
     return results;
-  }, [selectedResort, selectedPark, operatingOnly, selectedLand, sortBy]);
+  }, [attractions, operatingOnly, selectedLand, sortBy]);
 
   return (
     <>
