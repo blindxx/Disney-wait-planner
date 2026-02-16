@@ -18,7 +18,7 @@ import {
   type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
-import { getWaitDataset } from "../../lib/liveWaitApi";
+import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 
 // ============================================
 // SHOW + REFURB TYPES
@@ -126,28 +126,49 @@ const MOCK_SHOWS: Show[] = [
 // MOCK REFURBISHMENTS DATA
 // ============================================
 
+// Planned closures manually updated Feb 2026
 const MOCK_REFURBS: Refurb[] = [
-  // ---- DLR ----
+  // ---- DLR: Disneyland Park ----
   {
-    id: "pirates",
-    name: "Pirates of the Caribbean",
+    id: "jungle-cruise",
+    name: "Jungle Cruise",
     parkId: "disneyland",
-    land: "New Orleans Square",
-    dateRange: "Jan 6 \u2013 Mar 14, 2026",
+    land: "Adventureland",
+    dateRange: "Feb 17, 2026 \u2013 TBD",
   },
   {
-    id: "matterhorn",
-    name: "Matterhorn Bobsleds",
+    id: "space-mountain",
+    name: "Space Mountain",
     parkId: "disneyland",
-    land: "Fantasyland",
-    dateRange: "Feb 3 \u2013 Apr 4, 2026",
+    land: "Tomorrowland",
+    dateRange: "Feb 23 \u2013 26, 2026",
   },
   {
-    id: "radiator-springs",
-    name: "Radiator Springs Racers",
+    id: "great-moments-lincoln",
+    name: "Great Moments with Mr. Lincoln",
+    parkId: "disneyland",
+    land: "Main Street, U.S.A.",
+  },
+  // ---- DLR: Disney California Adventure ----
+  {
+    id: "grizzly-river-run",
+    name: "Grizzly River Run",
     parkId: "dca",
-    land: "Cars Land",
-    dateRange: "Jan 20 \u2013 Feb 28, 2026",
+    land: "Grizzly Peak",
+  },
+  {
+    id: "jumpin-jellyfish",
+    name: "Jumpin\u2019 Jellyfish",
+    parkId: "dca",
+    land: "Paradise Gardens Park",
+    dateRange: "Feb 23 \u2013 Mar 5, 2026",
+  },
+  {
+    id: "golden-zephyr",
+    name: "Golden Zephyr",
+    parkId: "dca",
+    land: "Paradise Gardens Park",
+    dateRange: "Mar 9 \u2013 17, 2026",
   },
   // ---- WDW ----
   {
@@ -966,6 +987,28 @@ export default function WaitTimesPage() {
           );
         })()}
       </div>
+
+      {/* Attribution — shown only when live data is enabled */}
+      {LIVE_ENABLED && (
+        <div
+          style={{
+            marginTop: "16px",
+            textAlign: "center",
+            fontSize: "12px",
+            color: "#9ca3af",
+          }}
+        >
+          Wait times powered by{" "}
+          <a
+            href="https://queue-times.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#6b7280", textDecoration: "underline" }}
+          >
+            Queue-Times.com
+          </a>
+        </div>
+      )}
     </>
   );
 }

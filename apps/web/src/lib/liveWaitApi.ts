@@ -1,19 +1,23 @@
 /**
- * liveWaitApi.ts — Live Wait Times API Foundation
+ * liveWaitApi.ts — Live Wait Times API (Queue-Times.com integration)
  *
  * Single entry point: getWaitDataset({ resortId, parkId })
  * Returns normalized AttractionWait[] with metadata about the data source.
  *
+ * Data source: Queue-Times.com via the local proxy at /api/waits/queue-times
+ * Attribution: "Powered by Queue-Times.com" must be shown when live mode is on.
+ *
  * Config (env vars):
  *   NEXT_PUBLIC_WAIT_API_ENABLED   "true" | "false"  (default: false)
- *   NEXT_PUBLIC_WAIT_API_BASE_URL  string (required only if enabled)
+ *   NEXT_PUBLIC_WAIT_API_BASE_URL  string (optional; defaults to same-origin "")
  *
  * Behavior:
- *   - Live API disabled or base URL missing  → returns mock data
- *   - Live API enabled + cache valid         → returns cached data
- *   - Live API enabled + cache stale         → fetches, caches 60 s, returns live
- *   - Live fetch fails (any error)           → falls back to mock, never throws
- *   - In-flight deduplication               → one request per key at a time
+ *   - Live disabled                → returns mock data, no fetch
+ *   - Park has no mapping          → returns mock data, no fetch
+ *   - Cache valid (< 60 s)         → returns cached data immediately, no fetch
+ *   - Cache stale                  → fetches via proxy, caches, returns live data
+ *   - Any fetch failure            → silently falls back to mock, never throws
+ *   - In-flight deduplication      → one request per resortId:parkId at a time
  */
 
 import {
@@ -29,16 +33,60 @@ import {
 // ============================================
 
 const API_ENABLED = process.env.NEXT_PUBLIC_WAIT_API_ENABLED === "true";
-const API_BASE_URL = process.env.NEXT_PUBLIC_WAIT_API_BASE_URL ?? "";
 
-/** Live mode is only active when explicitly enabled AND a base URL is provided. */
-const LIVE_ENABLED = API_ENABLED && API_BASE_URL.trim() !== "";
+/**
+ * Optional base URL override for the proxy (default: same origin "").
+ * Trailing slash is stripped to allow consistent path joining.
+ */
+const API_BASE_URL = (process.env.NEXT_PUBLIC_WAIT_API_BASE_URL ?? "").replace(
+  /\/$/,
+  "",
+);
 
-/** Fetch abort timeout in milliseconds. */
-const REQUEST_TIMEOUT_MS = 8_000;
+/** Live mode active when explicitly enabled. Base URL is optional (defaults to same origin). */
+export const LIVE_ENABLED = API_ENABLED;
+
+/** Fetch abort timeout in milliseconds (5 seconds). */
+const REQUEST_TIMEOUT_MS = 5_000;
 
 /** Cache TTL in milliseconds (60 seconds). */
 const CACHE_TTL_MS = 60_000;
+
+// ============================================
+// QUEUE-TIMES PARK MAPPING
+// ============================================
+
+/**
+ * Maps app (resortId, parkId) pairs to Queue-Times.com park IDs.
+ * IDs verified from https://queue-times.com/parks.json on 2026-02-16.
+ */
+const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
+  "DLR:disneyland": 16, // Queue-Times: Disneyland
+  "DLR:dca": 17,        // Queue-Times: Disney California Adventure
+  "WDW:mk": 6,          // Queue-Times: Disney Magic Kingdom
+  "WDW:epcot": 5,       // Queue-Times: Epcot
+  "WDW:hs": 7,          // Queue-Times: Disney Hollywood Studios
+  "WDW:ak": 8,          // Queue-Times: Animal Kingdom
+};
+
+/**
+ * Planned closure lookup keyed by `${parkId}:${lowercaseName}`.
+ * Manually updated Feb 2026. Must stay in sync with MOCK_REFURBS in page.tsx.
+ *
+ * Used in live mode only: if a ride's key is here, its status is always
+ * "CLOSED" (planned refurbishment) rather than "DOWN" (temporary outage).
+ */
+const PLANNED_CLOSURE_NAMES = new Set<string>([
+  // Disneyland Park
+  "disneyland:jungle cruise",
+  "disneyland:space mountain",
+  // Disney California Adventure
+  "dca:grizzly river run",
+  "dca:jumpin\u2019 jellyfish", // curly apostrophe matches mock.ts
+  "dca:golden zephyr",
+  // Walt Disney World — EPCOT
+  "epcot:test track",
+]);
 
 // ============================================
 // PUBLIC RETURN TYPE
@@ -73,90 +121,92 @@ function cacheKey(resortId: ResortId, parkId: ParkId): string {
 }
 
 // ============================================
-// NORMALIZATION
+// QUEUE-TIMES RESPONSE NORMALIZATION
 // ============================================
 
 /**
- * Expected shape of a single attraction from the live API.
- * Centralized here so future API shape changes only require editing this one
- * function — pages and components are fully decoupled from the wire format.
+ * Queue-Times.com queue_times.json shape:
+ * { lands: [{ id, name, rides: [{ id, name, is_open, wait_time, last_updated }] }] }
  *
- * Assumed API contract (default mapping):
- *   id           — string  unique attraction identifier
- *   name         — string  display name
- *   wait         — number | null  current wait in minutes
- *   status       — "OPERATING" | "DOWN" | "CLOSED"
- *   land         — string?  themed land (optional)
- *   parkId       — string   e.g. "disneyland"
- *   resortId     — string   e.g. "DLR"
- *   themeParksId — string?  (optional, falls back to id)
- *   updatedAt    — string?  ISO timestamp (optional)
- */
-type ApiAttractionRaw = Record<string, unknown>;
-
-function normalizeStatus(raw: unknown): WaitStatus {
-  if (raw === "OPERATING" || raw === "DOWN" || raw === "CLOSED") return raw;
-  return "OPERATING";
-}
-
-function normalizeAttraction(
-  raw: ApiAttractionRaw,
-  fallbackResortId: ResortId,
-  fallbackParkId: ParkId,
-): AttractionWait {
-  const id = String(raw.id ?? "");
-  const status = normalizeStatus(raw.status);
-  return {
-    id,
-    themeParksId: String(raw.themeParksId ?? raw.id ?? ""),
-    name: String(raw.name ?? "Unknown"),
-    land: raw.land != null ? String(raw.land) : undefined,
-    resortId: (raw.resortId as ResortId) ?? fallbackResortId,
-    parkId: (raw.parkId as ParkId) ?? fallbackParkId,
-    status,
-    waitMins:
-      status === "OPERATING" && raw.wait != null ? Number(raw.wait) : null,
-    updatedAt:
-      raw.updatedAt != null ? String(raw.updatedAt) : new Date().toISOString(),
-  };
-}
-
-/**
- * Normalize an unknown API response body into AttractionWait[].
+ * Normalization strategy: overlay live data onto the mock attraction list.
+ * - Start with all mock rides for this park (preserves id, land, themeParksId).
+ * - For each mock ride, match by name (case-insensitive) to a live ride.
+ * - If matched: update status, waitMins, updatedAt from live data.
+ * - If not matched: keep mock values unchanged.
  *
- * Supports three common shapes:
- *   - Flat array:             [ { id, name, wait, ... }, ... ]
- *   - Wrapped attractions:    { attractions: [ ... ] }
- *   - Wrapped data:           { data: [ ... ] }
+ * This ensures the UI always sees the full expected set of rides.
  */
-function normalizeResponse(
+
+type QTRide = {
+  id: number;
+  name: string;
+  is_open: boolean;
+  wait_time: number;
+  last_updated: string;
+};
+
+type QTLand = {
+  id: number;
+  name: string;
+  rides: QTRide[];
+};
+
+type QTResponse = {
+  lands: QTLand[];
+};
+
+function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
   parkId: ParkId,
 ): AttractionWait[] {
-  let items: unknown[];
+  const mockPark = mockAttractionWaits.filter(
+    (a) => a.resortId === resortId && a.parkId === parkId,
+  );
 
-  if (Array.isArray(body)) {
-    items = body;
-  } else if (body !== null && typeof body === "object") {
-    const obj = body as Record<string, unknown>;
-    if (Array.isArray(obj.attractions)) {
-      items = obj.attractions;
-    } else if (Array.isArray(obj.data)) {
-      items = obj.data;
-    } else {
-      return [];
-    }
-  } else {
-    return [];
+  // Guard: must be an object with a lands array
+  if (
+    body === null ||
+    typeof body !== "object" ||
+    !Array.isArray((body as QTResponse).lands)
+  ) {
+    return mockPark;
   }
 
-  return items
-    .filter(
-      (item): item is ApiAttractionRaw =>
-        item !== null && typeof item === "object",
-    )
-    .map((item) => normalizeAttraction(item, resortId, parkId));
+  const qt = body as QTResponse;
+
+  // Build case-insensitive name → live ride lookup
+  const liveByName = new Map<string, QTRide>();
+  for (const land of qt.lands) {
+    for (const ride of land.rides ?? []) {
+      liveByName.set(ride.name.toLowerCase(), ride);
+    }
+  }
+
+  // Overlay live values onto mock rides; keep mock where no match exists.
+  // Status priority:
+  //   1. Planned closure list  → "CLOSED" (refurbishment, always wins)
+  //   2. Live says not open    → "DOWN"   (temporary outage)
+  //   3. Live says open        → "OPERATING" with live wait time
+  return mockPark.map((mockRide): AttractionWait => {
+    const closureKey = `${parkId}:${mockRide.name.toLowerCase()}`;
+
+    // Planned closure: always CLOSED regardless of live status
+    if (PLANNED_CLOSURE_NAMES.has(closureKey)) {
+      return { ...mockRide, status: "CLOSED", waitMins: null };
+    }
+
+    const live = liveByName.get(mockRide.name.toLowerCase());
+    if (!live) return mockRide; // no live data: keep mock values
+
+    const status: WaitStatus = live.is_open ? "OPERATING" : "DOWN";
+    return {
+      ...mockRide,
+      status,
+      waitMins: live.is_open ? live.wait_time : null,
+      updatedAt: live.last_updated,
+    };
+  });
 }
 
 // ============================================
@@ -167,7 +217,12 @@ async function fetchLiveData(
   resortId: ResortId,
   parkId: ParkId,
 ): Promise<WaitDataset> {
-  const url = `${API_BASE_URL}/waits?resortId=${encodeURIComponent(resortId)}&parkId=${encodeURIComponent(parkId)}`;
+  const qtParkId = QUEUE_TIMES_PARK_MAP[`${resortId}:${parkId}`];
+  if (qtParkId === undefined) {
+    throw new Error(`No Queue-Times mapping for ${resortId}:${parkId}`);
+  }
+
+  const url = `${API_BASE_URL}/api/waits/queue-times?qtParkId=${qtParkId}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -185,7 +240,7 @@ async function fetchLiveData(
       throw new Error("JSON parse failure");
     }
 
-    const data = normalizeResponse(body, resortId, parkId);
+    const data = normalizeQueueTimesResponse(body, resortId, parkId);
     const lastUpdated = Date.now();
     return { data, dataSource: "live", lastUpdated };
   } finally {
@@ -215,8 +270,9 @@ function getMockDataset(resortId: ResortId, parkId: ParkId): WaitDataset {
  * Returns wait time data for the given resort + park.
  *
  * - LIVE_ENABLED = false  → returns mock data immediately (no fetch)
+ * - No park mapping       → returns mock data immediately (no fetch)
  * - Cache valid           → returns cached data immediately (no fetch)
- * - Cache stale           → fetches live data; on success caches + returns live
+ * - Cache stale           → fetches via proxy; on success caches + returns live
  * - Fetch fails           → returns mock data (never throws to caller)
  * - Concurrent calls      → in-flight deduplication (one Promise per key)
  */
@@ -227,8 +283,13 @@ export async function getWaitDataset({
   resortId: ResortId;
   parkId: ParkId;
 }): Promise<WaitDataset> {
-  // Short-circuit: live API disabled or no base URL configured
+  // Short-circuit: live API disabled
   if (!LIVE_ENABLED) {
+    return getMockDataset(resortId, parkId);
+  }
+
+  // Short-circuit: no mapping for this park (returns mock silently)
+  if (QUEUE_TIMES_PARK_MAP[`${resortId}:${parkId}`] === undefined) {
     return getMockDataset(resortId, parkId);
   }
 
@@ -258,7 +319,7 @@ export async function getWaitDataset({
       return result;
     })
     .catch((): WaitDataset => {
-      // Any fetch error (network, timeout, non-2xx, parse) → mock fallback
+      // Any fetch error (network, timeout, non-2xx, parse, no mapping) → mock fallback
       return getMockDataset(resortId, parkId);
     })
     .finally(() => {
