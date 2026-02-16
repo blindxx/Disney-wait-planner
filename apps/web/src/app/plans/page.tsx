@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { mockAttractionWaits } from "@disney-wait-planner/shared";
+import { mockAttractionWaits, type ResortId } from "@disney-wait-planner/shared";
 import {
   normalizeEditTimeLabel,
   parseLine,
@@ -169,9 +169,11 @@ function sortPlanItems(items: PlanItem[]): PlanItem[] {
 
 // ===== WAIT OVERLAY HELPERS =====
 
-/** Resort scope for the wait overlay (DLR = Disneyland Resort). */
-const RESORT_SCOPE = "DLR";
-const DLR_PARK_IDS = new Set(["disneyland", "dca"]);
+/** Resort labels shown in the toggle — matches Wait Times page. */
+const RESORT_LABELS: Record<ResortId, string> = {
+  DLR: "Disneyland Resort",
+  WDW: "Walt Disney World",
+};
 
 /**
  * Normalize an attraction or plan item name to a stable lookup key.
@@ -288,7 +290,6 @@ const ALIASES_WDW: Record<string, string> = {
   "smugglers run":      "millennium falcon smugglers run",
   "runaway railway":    "mickey minnies runaway railway",
 };
-void ALIASES_WDW; // wired up when WDW overlay scope is added to Plans page
 
 /**
  * When true, a matched plan item displays the official attraction name
@@ -372,6 +373,7 @@ function lookupWait(
 // ===== COMPONENT =====
 
 export default function PlansPage() {
+  const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
   const [autoSortEnabled, setAutoSortEnabled] = useState(false);
@@ -386,13 +388,13 @@ export default function PlansPage() {
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
-  // Build a deterministic wait lookup map scoped to RESORT_SCOPE (DLR).
+  // Build a deterministic wait lookup map scoped to selectedResort.
   // Keyed by normalizeKey(name); values carry status + waitMins.
-  // Memoized because mock data is static — never recomputes after mount.
+  // Recomputes when selectedResort changes — no cross-resort data enters the map.
   const waitMap = useMemo(() => {
     const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string }>();
     for (const a of mockAttractionWaits) {
-      if (!DLR_PARK_IDS.has(a.parkId)) continue; // resort scope guard
+      if (a.resortId !== selectedResort) continue; // resort scope guard
       map.set(normalizeKey(a.name), {
         status: a.status,
         waitMins: a.waitMins,
@@ -400,7 +402,7 @@ export default function PlansPage() {
       });
     }
     return map;
-  }, []);
+  }, [selectedResort]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
@@ -1103,6 +1105,25 @@ export default function PlansPage() {
           color: #9ca3af;
           margin: -0.4rem 0 0.75rem;
         }
+        /* Resort toggle — matches Wait Times page visual style */
+        .plans-resort-row {
+          display: flex;
+          gap: 8px;
+          margin-bottom: 0.75rem;
+        }
+        .plans-resort-tab {
+          flex: 1 1 0%;
+          padding: 8px 6px;
+          border-radius: 8px;
+          border: 1px solid #d1d5db;
+          cursor: pointer;
+          font-weight: 600;
+          font-size: 13px;
+          line-height: 1.2;
+          text-align: center;
+          transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+          min-height: 36px;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -1125,6 +1146,26 @@ export default function PlansPage() {
           </div>
         </div>
 
+        {/* Resort Toggle — scopes the wait overlay to the selected resort */}
+        <div className="plans-resort-row">
+          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
+            <button
+              key={resortId}
+              className="plans-resort-tab"
+              onClick={() => setSelectedResort(resortId)}
+              style={{
+                backgroundColor:
+                  selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
+                color: selectedResort === resortId ? "#fff" : "#374151",
+                borderColor:
+                  selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+              }}
+            >
+              {RESORT_LABELS[resortId]}
+            </button>
+          ))}
+        </div>
+
         <div className="sort-toggle-row">
           <label className="sort-toggle-label">
             <input
@@ -1136,7 +1177,7 @@ export default function PlansPage() {
           </label>
         </div>
 
-        <p className="wait-scope-label">Wait overlay: {RESORT_SCOPE}</p>
+        <p className="wait-scope-label">Wait overlay: {selectedResort}</p>
 
         {clearConfirm && (
           <div className="clear-confirm-row">
@@ -1175,7 +1216,7 @@ export default function PlansPage() {
                       <div className="item-name-row">
                         <span className="item-name">{item.name}</span>
                         {(() => {
-                          const w = lookupWait(item.name, waitMap, ALIASES_DLR);
+                          const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
                           if (!w) return null;
                           const label =
                             w.status === "DOWN"   ? "Down"  :
@@ -1193,7 +1234,7 @@ export default function PlansPage() {
                         })()}
                       </div>
                       {DISPLAY_CANONICAL_RIDE_NAME && (() => {
-                        const w = lookupWait(item.name, waitMap, ALIASES_DLR);
+                        const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
                         if (!w || w.canonicalName === item.name) return null;
                         const hasLabel =
                           w.status === "DOWN" || w.status === "CLOSED" || w.waitMins != null;
