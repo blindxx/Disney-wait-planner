@@ -26,7 +26,8 @@ import {
 // CONSTANTS
 // ============================================
 
-const PARK_NAMES: Record<ParkId, string> = {
+// Home page is DLR-only; typed narrowly to avoid requiring WDW park entries
+const PARK_NAMES: Record<"disneyland" | "dca", string> = {
   disneyland: "Disneyland",
   dca: "California Adventure",
 };
@@ -230,7 +231,7 @@ export default function TodayPage() {
 
         {/* Park Selector */}
         <div className="park-selector">
-          {(Object.keys(PARK_NAMES) as ParkId[]).map((parkId) => (
+          {(Object.keys(PARK_NAMES) as ("disneyland" | "dca")[]).map((parkId) => (
             <button
               key={parkId}
               className="park-btn"

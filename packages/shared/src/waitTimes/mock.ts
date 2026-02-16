@@ -7,7 +7,7 @@
  * galleries, walkthroughs, trails, or play areas.
  */
 
-import type { AttractionWait, ParkId, WaitStatus } from "./types";
+import type { AttractionWait, ParkId, ResortId, WaitStatus } from "./types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -38,6 +38,7 @@ type RideDef = {
 function toAttractionWait(
   ride: RideDef,
   parkId: ParkId,
+  resortId: ResortId,
   index: number,
 ): AttractionWait {
   const status: WaitStatus = ride.status ?? "OPERATING";
@@ -46,6 +47,7 @@ function toAttractionWait(
     themeParksId: `TBD-${ride.id}`,
     name: ride.name,
     land: ride.land,
+    resortId,
     parkId,
     status,
     waitMins: status === "OPERATING" ? (ride.waitMins ?? 15) : null,
@@ -427,17 +429,199 @@ const DCA_RIDES: RideDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Walt Disney World — Magic Kingdom (5 rides)
+// ---------------------------------------------------------------------------
+
+const MK_RIDES: RideDef[] = [
+  // ---- Fantasyland ----
+  {
+    id: "mk-its-a-small-world",
+    name: "\"it's a small world\"",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
+  {
+    id: "mk-peter-pan",
+    name: "Peter Pan\u2019s Flight",
+    land: "Fantasyland",
+    waitMins: 60,
+  },
+
+  // ---- Frontierland ----
+  {
+    id: "mk-big-thunder",
+    name: "Big Thunder Mountain Railroad",
+    land: "Frontierland",
+    waitMins: 45,
+  },
+
+  // ---- Liberty Square ----
+  {
+    id: "mk-haunted-mansion",
+    name: "Haunted Mansion",
+    land: "Liberty Square",
+    waitMins: 50,
+  },
+
+  // ---- Tomorrowland ----
+  {
+    id: "mk-space-mountain",
+    name: "Space Mountain",
+    land: "Tomorrowland",
+    waitMins: 70,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Walt Disney World — EPCOT (4 rides)
+// ---------------------------------------------------------------------------
+
+const EPCOT_RIDES: RideDef[] = [
+  // ---- World Discovery ----
+  {
+    id: "epcot-guardians",
+    name: "Guardians of the Galaxy: Cosmic Rewind",
+    land: "World Discovery",
+    waitMins: 85,
+  },
+  {
+    id: "epcot-test-track",
+    name: "Test Track",
+    land: "World Discovery",
+    status: "CLOSED",
+    waitMins: null,
+  },
+
+  // ---- World Nature ----
+  {
+    id: "epcot-soarin",
+    name: "Soarin\u2019 Around the World",
+    land: "World Nature",
+    waitMins: 40,
+  },
+
+  // ---- World Showcase ----
+  {
+    id: "epcot-frozen",
+    name: "Frozen Ever After",
+    land: "World Showcase",
+    waitMins: 55,
+  },
+  {
+    id: "epcot-remys",
+    name: "Remy\u2019s Ratatouille Adventure",
+    land: "World Showcase",
+    waitMins: 35,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Walt Disney World — Hollywood Studios (5 rides)
+// ---------------------------------------------------------------------------
+
+const HS_RIDES: RideDef[] = [
+  // ---- Hollywood Boulevard ----
+  {
+    id: "hs-tower-of-terror",
+    name: "The Twilight Zone Tower of Terror",
+    land: "Hollywood Boulevard",
+    waitMins: 50,
+  },
+  {
+    id: "hs-runaway-railway",
+    name: "Mickey \u0026 Minnie\u2019s Runaway Railway",
+    land: "Hollywood Boulevard",
+    waitMins: 45,
+  },
+
+  // ---- Star Wars: Galaxy's Edge ----
+  {
+    id: "hs-rise-of-resistance",
+    name: "Star Wars: Rise of the Resistance",
+    land: "Star Wars: Galaxy\u2019s Edge",
+    waitMins: 75,
+  },
+  {
+    id: "hs-smugglers-run",
+    name: "Millennium Falcon: Smugglers Run",
+    land: "Star Wars: Galaxy\u2019s Edge",
+    waitMins: 55,
+  },
+
+  // ---- Toy Story Land ----
+  {
+    id: "hs-slinky-dog",
+    name: "Slinky Dog Dash",
+    land: "Toy Story Land",
+    waitMins: 80,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Walt Disney World — Animal Kingdom (5 rides)
+// ---------------------------------------------------------------------------
+
+const AK_RIDES: RideDef[] = [
+  // ---- Pandora ----
+  {
+    id: "ak-flight-of-passage",
+    name: "Avatar Flight of Passage",
+    land: "Pandora \u2013 The World of Avatar",
+    waitMins: 90,
+  },
+  {
+    id: "ak-navi-river",
+    name: "Na\u2019vi River Journey",
+    land: "Pandora \u2013 The World of Avatar",
+    waitMins: 40,
+  },
+
+  // ---- Asia ----
+  {
+    id: "ak-expedition-everest",
+    name: "Expedition Everest",
+    land: "Asia",
+    waitMins: 60,
+  },
+
+  // ---- Africa ----
+  {
+    id: "ak-kilimanjaro",
+    name: "Kilimanjaro Safaris",
+    land: "Africa",
+    waitMins: 25,
+  },
+
+  // ---- DinoLand U.S.A. ----
+  {
+    id: "ak-dinosaur",
+    name: "DINOSAUR",
+    land: "DinoLand U.S.A.",
+    status: "DOWN",
+    waitMins: null,
+  },
+];
+
+// ---------------------------------------------------------------------------
 // Exported mock data — same shape the UI already consumes
 // ---------------------------------------------------------------------------
 
 /**
- * Mock attraction wait time data for both Disneyland Resort parks.
+ * Mock attraction wait time data for Disneyland Resort and Walt Disney World.
  * Includes a mix of operating, down, and closed attractions.
  *
- * Disneyland Park:  35 rides
- * Disney California Adventure:  19 rides (20 defs, but counts may shift with seasonal ops)
+ * DLR — Disneyland Park:               35 rides
+ * DLR — Disney California Adventure:   19 rides
+ * WDW — Magic Kingdom:                  5 rides
+ * WDW — EPCOT:                          5 rides
+ * WDW — Hollywood Studios:              5 rides
+ * WDW — Animal Kingdom:                 5 rides
  */
 export const mockAttractionWaits: AttractionWait[] = [
-  ...DISNEYLAND_RIDES.map((r, i) => toAttractionWait(r, "disneyland", i)),
-  ...DCA_RIDES.map((r, i) => toAttractionWait(r, "dca", i)),
+  ...DISNEYLAND_RIDES.map((r, i) => toAttractionWait(r, "disneyland", "DLR", i)),
+  ...DCA_RIDES.map((r, i) => toAttractionWait(r, "dca", "DLR", i)),
+  ...MK_RIDES.map((r, i) => toAttractionWait(r, "mk", "WDW", i)),
+  ...EPCOT_RIDES.map((r, i) => toAttractionWait(r, "epcot", "WDW", i)),
+  ...HS_RIDES.map((r, i) => toAttractionWait(r, "hs", "WDW", i)),
+  ...AK_RIDES.map((r, i) => toAttractionWait(r, "ak", "WDW", i)),
 ];

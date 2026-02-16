@@ -254,9 +254,41 @@ const ALIASES_DLR: Record<string, string> = {
   "smugglers run":    "millennium falcon smugglers run",
 };
 
-// Placeholder for future WDW scope expansion
-const ALIASES_WDW: Record<string, string> = {};
-void ALIASES_WDW; // reserved, unused until WDW data is added
+/**
+ * Manual alias map for WDW — acronyms and common shorthands.
+ * Separate from ALIASES_DLR — never merged.
+ * Values must match normalizeKey() output of WDW mock ride names.
+ * Reserved for future WDW overlay scope on the Plans page.
+ */
+const ALIASES_WDW: Record<string, string> = {
+  // Acronyms
+  fop:   "avatar flight of passage",
+  rotr:  "star wars rise of the resistance",
+  mmrr:  "mickey minnies runaway railway",
+  btmrr: "big thunder mountain railroad",
+  btmr:  "big thunder mountain railroad",
+  hm:    "haunted mansion",
+  tott:  "the twilight zone tower of terror",
+  tot:   "the twilight zone tower of terror",
+  nrj:   "navi river journey",
+  mfsr:  "millennium falcon smugglers run",
+  // Common shorthands
+  "flight of passage":  "avatar flight of passage",
+  "everest":            "expedition everest",
+  "safaris":            "kilimanjaro safaris",
+  "cosmic rewind":      "guardians of the galaxy cosmic rewind",
+  "guardians":          "guardians of the galaxy cosmic rewind",
+  "slinky":             "slinky dog dash",
+  "slinky dog":         "slinky dog dash",
+  "frozen":             "frozen ever after",
+  "ratatouille":        "remys ratatouille adventure",
+  "remy":               "remys ratatouille adventure",
+  "tower of terror":    "the twilight zone tower of terror",
+  "rise":               "star wars rise of the resistance",
+  "smugglers run":      "millennium falcon smugglers run",
+  "runaway railway":    "mickey minnies runaway railway",
+};
+void ALIASES_WDW; // wired up when WDW overlay scope is added to Plans page
 
 /**
  * When true, a matched plan item displays the official attraction name

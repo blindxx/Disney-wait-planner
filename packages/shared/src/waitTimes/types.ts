@@ -3,8 +3,19 @@
  * Defines the shape of attraction wait time data for Disney parks.
  */
 
+/** Supported resort identifiers */
+export type ResortId = "DLR" | "WDW";
+
 /** Supported park identifiers */
-export type ParkId = "disneyland" | "dca";
+export type ParkId =
+  // Disneyland Resort (DLR)
+  | "disneyland"
+  | "dca"
+  // Walt Disney World (WDW)
+  | "mk"
+  | "epcot"
+  | "hs"
+  | "ak";
 
 /** Possible operational statuses for an attraction */
 export type WaitStatus = "OPERATING" | "DOWN" | "CLOSED";
@@ -19,6 +30,8 @@ export type AttractionWait = {
   name: string;
   /** Themed land where the attraction is located (optional) */
   land?: string;
+  /** Which resort this attraction belongs to */
+  resortId: ResortId;
   /** Which park this attraction belongs to */
   parkId: ParkId;
   /** Current operational status */
