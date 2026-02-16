@@ -18,7 +18,7 @@ import {
   type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
-import { getWaitDataset } from "../../lib/liveWaitApi";
+import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 
 // ============================================
 // SHOW + REFURB TYPES
@@ -966,6 +966,28 @@ export default function WaitTimesPage() {
           );
         })()}
       </div>
+
+      {/* Attribution — shown only when live data is enabled */}
+      {LIVE_ENABLED && (
+        <div
+          style={{
+            marginTop: "16px",
+            textAlign: "center",
+            fontSize: "12px",
+            color: "#9ca3af",
+          }}
+        >
+          Wait times powered by{" "}
+          <a
+            href="https://queue-times.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "#6b7280", textDecoration: "underline" }}
+          >
+            Queue-Times.com
+          </a>
+        </div>
+      )}
     </>
   );
 }
