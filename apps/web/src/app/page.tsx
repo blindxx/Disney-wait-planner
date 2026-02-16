@@ -16,11 +16,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import {
-  mockAttractionWaits,
-  type AttractionWait,
-  type ParkId,
-} from "@disney-wait-planner/shared";
+import { type AttractionWait, type ParkId } from "@disney-wait-planner/shared";
+import { getWaitDataset } from "../lib/liveWaitApi";
 
 // ============================================
 // CONSTANTS
@@ -172,6 +169,8 @@ const RESPONSIVE_CSS = `
 export default function TodayPage() {
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
   const [currentTime, setCurrentTime] = useState("");
+  const [attractions, setAttractions] = useState<AttractionWait[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
   // Update current time every minute
   useEffect(() => {
@@ -190,16 +189,31 @@ export default function TodayPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Fetch wait data for the selected DLR park on mount and park switch.
+  // getWaitDataset returns live data when enabled, or mock on any failure.
+  useEffect(() => {
+    let cancelled = false;
+    getWaitDataset({ resortId: "DLR", parkId: selectedPark }).then(
+      ({ data, lastUpdated: lu }) => {
+        if (!cancelled) {
+          setAttractions(data);
+          setLastUpdated(lu);
+        }
+      },
+    );
+    return () => { cancelled = true; };
+  }, [selectedPark]);
+
   // Get best options: lowest wait times for selected park.
   // Excludes Down/Closed attractions — only OPERATING with a valid wait time.
   // If fewer than BEST_OPTIONS_COUNT qualify, show fewer (no backfill).
   const bestOptions = useMemo(() => {
-    return mockAttractionWaits
-      .filter((a) => a.parkId === selectedPark && a.status === "OPERATING")
+    return attractions
+      .filter((a) => a.status === "OPERATING")
       .filter((a) => a.waitMins != null)
       .sort((a, b) => (a.waitMins ?? 999) - (b.waitMins ?? 999))
       .slice(0, BEST_OPTIONS_COUNT);
-  }, [selectedPark]);
+  }, [attractions]);
 
   return (
     <>
@@ -218,7 +232,7 @@ export default function TodayPage() {
           Today
         </h1>
 
-        {/* Current Time */}
+        {/* Current Time + optional live data freshness */}
         <div
           style={{
             fontSize: "15px",
@@ -227,6 +241,15 @@ export default function TodayPage() {
           }}
         >
           Now: {currentTime}
+          {lastUpdated !== null && (
+            <span style={{ marginLeft: "12px", fontSize: "13px" }}>
+              · Updated:{" "}
+              {new Date(lastUpdated).toLocaleTimeString([], {
+                hour: "numeric",
+                minute: "2-digit",
+              })}
+            </span>
+          )}
         </div>
 
         {/* Park Selector */}
