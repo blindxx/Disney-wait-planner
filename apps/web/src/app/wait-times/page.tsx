@@ -2,8 +2,9 @@
 
 /**
  * Wait Times Page
- * Displays current attraction wait times for Disneyland Resort parks.
- * Allows filtering by park, operating status, and sorting options.
+ * Displays current attraction wait times for Disneyland Resort (DLR) and
+ * Walt Disney World (WDW) parks.
+ * Allows filtering by resort, park, operating status, land, and sorting.
  *
  * Responsive layout:
  *   Mobile  — full-width stacked card list
@@ -16,6 +17,7 @@ import {
   mockAttractionWaits,
   type AttractionWait,
   type ParkId,
+  type ResortId,
 } from "@disney-wait-planner/shared";
 
 // ============================================
@@ -43,6 +45,7 @@ type Refurb = {
 // ============================================
 
 const MOCK_SHOWS: Show[] = [
+  // ---- DLR: Disneyland Park ----
   {
     id: "fantasmic",
     name: "Fantasmic!",
@@ -71,9 +74,10 @@ const MOCK_SHOWS: Show[] = [
     land: "Fantasyland",
     times: ["10:30 AM", "1:30 PM", "4:30 PM"],
   },
+  // ---- DLR: Disney California Adventure ----
   {
     id: "together-forever",
-    name: "Together Forever — A Pixar Nighttime Spectacular",
+    name: "Together Forever \u2014 A Pixar Nighttime Spectacular",
     parkId: "dca",
     land: "Paradise Gardens Park",
     times: ["9:00 PM"],
@@ -85,6 +89,37 @@ const MOCK_SHOWS: Show[] = [
     land: "Hollywood Land",
     times: ["11:30 AM", "2:30 PM", "5:00 PM"],
   },
+  // ---- WDW: Magic Kingdom ----
+  {
+    id: "mk-festival-of-fantasy",
+    name: "Festival of Fantasy Parade",
+    parkId: "mk",
+    land: "Main Street, U.S.A.",
+    times: ["3:00 PM"],
+  },
+  {
+    id: "mk-happily-ever-after",
+    name: "Happily Ever After",
+    parkId: "mk",
+    land: "Main Street, U.S.A.",
+    times: ["9:00 PM"],
+  },
+  // ---- WDW: Hollywood Studios ----
+  {
+    id: "hs-fantasmic",
+    name: "Fantasmic!",
+    parkId: "hs",
+    land: "Hollywood Hills Amphitheater",
+    times: ["9:30 PM"],
+  },
+  // ---- WDW: Animal Kingdom ----
+  {
+    id: "ak-finding-nemo",
+    name: "Finding Nemo: The Big Blue... and Beyond!",
+    parkId: "ak",
+    land: "Discovery Island",
+    times: ["11:00 AM", "1:30 PM", "4:00 PM"],
+  },
 ];
 
 // ============================================
@@ -92,43 +127,62 @@ const MOCK_SHOWS: Show[] = [
 // ============================================
 
 const MOCK_REFURBS: Refurb[] = [
+  // ---- DLR ----
   {
     id: "pirates",
     name: "Pirates of the Caribbean",
     parkId: "disneyland",
     land: "New Orleans Square",
-    dateRange: "Jan 6 – Mar 14, 2026",
+    dateRange: "Jan 6 \u2013 Mar 14, 2026",
   },
   {
     id: "matterhorn",
     name: "Matterhorn Bobsleds",
     parkId: "disneyland",
     land: "Fantasyland",
-    dateRange: "Feb 3 – Apr 4, 2026",
+    dateRange: "Feb 3 \u2013 Apr 4, 2026",
   },
   {
     id: "radiator-springs",
     name: "Radiator Springs Racers",
     parkId: "dca",
     land: "Cars Land",
-    dateRange: "Jan 20 – Feb 28, 2026",
+    dateRange: "Jan 20 \u2013 Feb 28, 2026",
+  },
+  // ---- WDW ----
+  {
+    id: "epcot-test-track",
+    name: "Test Track",
+    parkId: "epcot",
+    land: "World Discovery",
+    dateRange: "Jan 9 \u2013 Late 2026",
   },
 ];
 
 // ============================================
-// CONSTANTS
+// RESORT + PARK CONSTANTS
 // ============================================
 
-/** Display names for each park */
-const PARK_NAMES: Record<ParkId, string> = {
-  disneyland: "Disneyland Park",
-  dca: "Disney California Adventure",
+/** Parks grouped by resort */
+const RESORT_PARKS: Record<ResortId, ParkId[]> = {
+  DLR: ["disneyland", "dca"],
+  WDW: ["mk", "epcot", "hs", "ak"],
+};
+
+/** Short label for each resort toggle button */
+const RESORT_LABELS: Record<ResortId, string> = {
+  DLR: "Disneyland Resort",
+  WDW: "Walt Disney World",
 };
 
 /** Short tab labels that fit on narrow screens */
 const PARK_TAB_LABELS: Record<ParkId, string> = {
   disneyland: "Disneyland",
   dca: "California Adventure",
+  mk: "Magic Kingdom",
+  epcot: "EPCOT",
+  hs: "Hollywood Studios",
+  ak: "Animal Kingdom",
 };
 
 /** Available sort options */
@@ -138,6 +192,34 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: "wait-desc", label: "Wait (Longest)" },
   { value: "name-asc", label: "Name (A-Z)" },
 ];
+
+// ============================================
+// PERSISTENCE HELPERS
+// ============================================
+
+const STORAGE_RESORT_KEY = "dwp.selectedResort";
+const STORAGE_PARK_KEY = "dwp.selectedPark";
+
+/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+function loadStoredResort(): ResortId {
+  try {
+    const v = localStorage.getItem(STORAGE_RESORT_KEY);
+    if (v === "DLR" || v === "WDW") return v;
+  } catch {}
+  return "DLR";
+}
+
+/**
+ * Read and validate park from localStorage for the given resort.
+ * Falls back to first park in the resort if missing or no longer valid.
+ */
+function loadStoredPark(resort: ResortId): ParkId {
+  try {
+    const v = localStorage.getItem(STORAGE_PARK_KEY);
+    if (v && (RESORT_PARKS[resort] as string[]).includes(v)) return v as ParkId;
+  } catch {}
+  return RESORT_PARKS[resort][0];
+}
 
 // ============================================
 // RESPONSIVE CSS
@@ -164,6 +246,20 @@ const RESPONSIVE_CSS = `
     margin: 0 auto;
     padding: 16px;
     overflow-x: hidden;
+  }
+
+  /* ---- Resort toggle buttons ---- */
+  .resort-tab {
+    flex: 1 1 0%;
+    padding: 8px 6px;
+    border-radius: 8px;
+    border: 1px solid #d1d5db;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    line-height: 1.2;
+    text-align: center;
+    transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   }
 
   /* ---- Park tab buttons ---- */
@@ -216,6 +312,11 @@ const RESPONSIVE_CSS = `
   @media (min-width: 768px) {
     .wait-page {
       padding: 20px;
+    }
+
+    .resort-tab {
+      flex: 0 1 auto;
+      padding: 8px 16px;
     }
 
     .park-tab {
@@ -418,12 +519,39 @@ function SkeletonCard() {
 // ============================================
 
 export default function WaitTimesPage() {
-  // State for park selection, filter, and sort
+  // State for resort, park, filter, and sort
+  // Initial values are server-safe defaults; localStorage hydration runs in useEffect.
+  const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
   const [operatingOnly, setOperatingOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>("wait-desc");
   const [selectedLand, setSelectedLand] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+
+  // Hydrate resort + park from localStorage on client mount (runs once).
+  useEffect(() => {
+    const resort = loadStoredResort();
+    const park = loadStoredPark(resort);
+    setSelectedResort(resort);
+    setSelectedPark(park);
+  }, []);
+
+  // Persist resort whenever it changes.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
+  }, [selectedResort]);
+
+  // Persist park whenever it changes.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_PARK_KEY, selectedPark); } catch {}
+  }, [selectedPark]);
+
+  /** Handle resort change — reset park to first in new resort and clear land filter */
+  function handleResortChange(resort: ResortId) {
+    setSelectedResort(resort);
+    setSelectedPark(RESORT_PARKS[resort][0]);
+    setSelectedLand("");
+  }
 
   // Brief loading on mount and park switch for skeleton transition
   useEffect(() => {
@@ -432,22 +560,26 @@ export default function WaitTimesPage() {
     return () => clearTimeout(t);
   }, [selectedPark]);
 
-  /** Unique sorted land names for the selected park */
+  /** Parks available for the currently selected resort */
+  const resortParks = RESORT_PARKS[selectedResort];
+
+  /** Unique sorted land names for the selected park (scoped to resort) */
   const availableLands = useMemo(() => {
     const lands = mockAttractionWaits
-      .filter((a) => a.parkId === selectedPark)
+      .filter((a) => a.resortId === selectedResort && a.parkId === selectedPark)
       .map((a) => a.land)
       .filter((l): l is string => !!l);
     return [...new Set(lands)].sort();
-  }, [selectedPark]);
+  }, [selectedResort, selectedPark]);
 
   /**
    * Filter and sort attractions based on current settings.
-   * Uses useMemo to avoid recalculating on every render.
+   * Scoped strictly to selectedResort — no cross-resort data can appear.
    */
   const filteredAttractions = useMemo(() => {
+    // Resort scope guard: only attractions belonging to the selected resort+park
     let results = mockAttractionWaits.filter(
-      (a) => a.parkId === selectedPark
+      (a) => a.resortId === selectedResort && a.parkId === selectedPark
     );
 
     if (operatingOnly) {
@@ -469,7 +601,7 @@ export default function WaitTimesPage() {
     });
 
     return results;
-  }, [selectedPark, operatingOnly, selectedLand, sortBy]);
+  }, [selectedResort, selectedPark, operatingOnly, selectedLand, sortBy]);
 
   return (
     <>
@@ -489,7 +621,33 @@ export default function WaitTimesPage() {
           Wait Times
         </h1>
 
-        {/* Park Tabs */}
+        {/* Resort Toggle — DLR | WDW */}
+        <div
+          style={{
+            display: "flex",
+            gap: "8px",
+            marginBottom: "10px",
+          }}
+        >
+          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
+            <button
+              key={resortId}
+              className="resort-tab"
+              onClick={() => handleResortChange(resortId)}
+              style={{
+                backgroundColor:
+                  selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
+                color: selectedResort === resortId ? "#fff" : "#374151",
+                borderColor:
+                  selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+              }}
+            >
+              {RESORT_LABELS[resortId]}
+            </button>
+          ))}
+        </div>
+
+        {/* Park Tabs — scoped to selected resort */}
         <div
           style={{
             display: "flex",
@@ -497,7 +655,7 @@ export default function WaitTimesPage() {
             marginBottom: "12px",
           }}
         >
-          {(Object.keys(PARK_NAMES) as ParkId[]).map((parkId) => (
+          {resortParks.map((parkId) => (
             <button
               key={parkId}
               className="park-tab"
