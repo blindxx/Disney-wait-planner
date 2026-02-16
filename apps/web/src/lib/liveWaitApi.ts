@@ -69,6 +69,25 @@ const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
   "WDW:ak": 8,          // Queue-Times: Animal Kingdom
 };
 
+/**
+ * Planned closure lookup keyed by `${parkId}:${lowercaseName}`.
+ * Manually updated Feb 2026. Must stay in sync with MOCK_REFURBS in page.tsx.
+ *
+ * Used in live mode only: if a ride's key is here, its status is always
+ * "CLOSED" (planned refurbishment) rather than "DOWN" (temporary outage).
+ */
+const PLANNED_CLOSURE_NAMES = new Set<string>([
+  // Disneyland Park
+  "disneyland:jungle cruise",
+  "disneyland:space mountain",
+  // Disney California Adventure
+  "dca:grizzly river run",
+  "dca:jumpin\u2019 jellyfish", // curly apostrophe matches mock.ts
+  "dca:golden zephyr",
+  // Walt Disney World — EPCOT
+  "epcot:test track",
+]);
+
 // ============================================
 // PUBLIC RETURN TYPE
 // ============================================
@@ -164,12 +183,23 @@ function normalizeQueueTimesResponse(
     }
   }
 
-  // Overlay live values onto mock rides; keep mock where no match exists
+  // Overlay live values onto mock rides; keep mock where no match exists.
+  // Status priority:
+  //   1. Planned closure list  → "CLOSED" (refurbishment, always wins)
+  //   2. Live says not open    → "DOWN"   (temporary outage)
+  //   3. Live says open        → "OPERATING" with live wait time
   return mockPark.map((mockRide): AttractionWait => {
-    const live = liveByName.get(mockRide.name.toLowerCase());
-    if (!live) return mockRide;
+    const closureKey = `${parkId}:${mockRide.name.toLowerCase()}`;
 
-    const status: WaitStatus = live.is_open ? "OPERATING" : "CLOSED";
+    // Planned closure: always CLOSED regardless of live status
+    if (PLANNED_CLOSURE_NAMES.has(closureKey)) {
+      return { ...mockRide, status: "CLOSED", waitMins: null };
+    }
+
+    const live = liveByName.get(mockRide.name.toLowerCase());
+    if (!live) return mockRide; // no live data: keep mock values
+
+    const status: WaitStatus = live.is_open ? "OPERATING" : "DOWN";
     return {
       ...mockRide,
       status,
