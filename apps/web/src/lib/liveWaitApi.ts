@@ -84,29 +84,39 @@ function normalizeToDayKeyLocal(d: Date): string {
 }
 
 /**
- * Parses "YYYY-MM-DD - YYYY-MM-DD" into { startKey, endKey }.
- * Returns null for any other format.
- * Swaps start/end if needed (defensive).
+ * Parses a dateRange string into { startKey, endKey? }.
+ * endKey is omitted for open-ended ranges (e.g. "YYYY-MM-DD - TBD").
+ *
+ * Supported formats:
+ *   "YYYY-MM-DD - YYYY-MM-DD"  → bounded range { startKey, endKey }
+ *   "YYYY-MM-DD - TBD"         → open-ended    { startKey }
+ *
+ * Returns null if no parseable ISO date is found (conservative).
  */
 function parseClosureDateRange(
   dateRange: string,
-): { startKey: string; endKey: string } | null {
-  const match = dateRange
-    .trim()
-    .match(/^(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})$/);
-  if (!match) return null;
-  const [, a, b] = match;
-  return { startKey: a <= b ? a : b, endKey: a <= b ? b : a };
+): { startKey: string; endKey?: string } | null {
+  const dates = dateRange.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
+  if (dates.length >= 2) {
+    const a = dates[0] as string;
+    const b = dates[1] as string;
+    return { startKey: a <= b ? a : b, endKey: a <= b ? b : a };
+  }
+  if (dates.length === 1 && /tbd/i.test(dateRange)) {
+    // Open-ended: start is known, end is TBD
+    return { startKey: dates[0] as string };
+  }
+  return null; // no parseable date — conservative
 }
 
 /**
  * Returns when a planned closure applies relative to `now`.
  *
- * - No dateRange  → "ACTIVE" (conservative: always force-closed)
- * - Unparseable   → "ACTIVE" (conservative: preserve prior behavior)
- * - today < start → "UPCOMING" (closure has not started)
- * - start ≤ today ≤ end → "ACTIVE" (currently closed)
- * - today > end   → "ENDED"  (closure is over)
+ * - undefined dateRange     → "ACTIVE" (conservative: always force-closed)
+ * - Unparseable             → "ACTIVE" (conservative: preserve prior behavior)
+ * - today < start           → "UPCOMING" (closure has not started — do NOT override)
+ * - endKey set, today > end → "ENDED"   (closure is over — do NOT override)
+ * - otherwise               → "ACTIVE"  (includes open-ended on/after start)
  */
 export function getClosureTiming(
   dateRange: string | undefined,
@@ -117,23 +127,28 @@ export function getClosureTiming(
   if (!range) return "ACTIVE";
   const todayKey = normalizeToDayKeyLocal(now);
   if (todayKey < range.startKey) return "UPCOMING";
-  if (todayKey > range.endKey) return "ENDED";
+  if (range.endKey !== undefined && todayKey > range.endKey) return "ENDED";
   return "ACTIVE";
 }
 
 // Dev-only sanity checks (stripped in production builds)
 if (process.env.NODE_ENV !== "production") {
   const _t = new Date("2026-02-17T12:00:00");
-  console.debug("[closureTiming] ACTIVE  :", getClosureTiming("2026-02-16 - 2026-02-20", _t));
-  console.debug("[closureTiming] UPCOMING:", getClosureTiming("2026-02-18 - 2026-02-20", _t));
-  console.debug("[closureTiming] ENDED   :", getClosureTiming("2026-02-10 - 2026-02-12", _t));
+  // Bounded range
+  console.debug("[closureTiming] ACTIVE  :", getClosureTiming("2026-02-16 - 2026-02-20", _t)); // => ACTIVE
+  console.debug("[closureTiming] UPCOMING:", getClosureTiming("2026-02-18 - 2026-02-20", _t)); // => UPCOMING
+  console.debug("[closureTiming] ENDED   :", getClosureTiming("2026-02-10 - 2026-02-12", _t)); // => ENDED
+  // Open-ended (TBD)
+  console.debug("[closureTiming] TBD/UPC :", getClosureTiming("2026-02-23 - TBD", _t));        // => UPCOMING (start in future)
+  console.debug("[closureTiming] TBD/ACT :", getClosureTiming("2026-02-01 - TBD", _t));        // => ACTIVE   (past start, no end)
 }
 
 /**
  * Planned closure lookup keyed by `${parkId}:${lowercaseName}`.
- * Value = ISO dateRange string ("YYYY-MM-DD - YYYY-MM-DD") or undefined.
- *   - undefined → always CLOSED (no date-range enforcement)
- *   - ISO range → CLOSED only when today falls within range
+ * Value = dateRange string or undefined.
+ *   - undefined              → always CLOSED (conservative, no date enforcement)
+ *   - "YYYY-MM-DD - YYYY-MM-DD" → CLOSED only within bounded range
+ *   - "YYYY-MM-DD - TBD"    → CLOSED from start date onwards (open-ended)
  *
  * Keys use straight punctuation (normalizeAttractionName output).
  * Manually updated Feb 2026. Must stay in sync with MOCK_REFURBS in page.tsx.
@@ -141,18 +156,18 @@ if (process.env.NODE_ENV !== "production") {
 const PLANNED_CLOSURES = new Map<string, string | undefined>([
   // Disneyland Park
   ["disneyland:jungle cruise", undefined],
-  ["disneyland:space mountain", undefined],
+  ["disneyland:space mountain", "2026-02-23 - 2026-02-26"],
   // Disney California Adventure
   ["dca:grizzly river run", undefined],
   ["dca:jumpin' jellyfish", undefined], // straight apostrophe (normalized form)
   ["dca:golden zephyr", undefined],
-  // Walt Disney World — EPCOT
-  ["epcot:test track", undefined],
   // Walt Disney World — Magic Kingdom
   ["mk:big thunder mountain railroad", "2025-01-01 - 2026-05-01"],
   ["mk:buzz lightyear's space ranger spin", "2025-08-04 - 2026-05-01"],
   // Walt Disney World — Hollywood Studios
   ["hs:rock 'n' roller coaster starring aerosmith", "2026-03-02 - 2026-07-15"],
+  // Walt Disney World — Animal Kingdom
+  ["ak:dinosaur", "2026-02-02 - TBD"],
 ]);
 
 // ============================================
@@ -244,6 +259,35 @@ function normalizeAttractionName(name: string): string {
     ;
 }
 
+/**
+ * WDW-only alias map: normalized-alias → canonical-normalized-mock-name.
+ *
+ * Queue-Times may use a shorter or slightly different name than our mock data.
+ * After building liveByName from live data, aliases are resolved so that
+ * mock-ride lookups (using the canonical name) still find the live entry.
+ *
+ * Keys and values must both be in normalizeAttractionName() output form
+ * (lowercase, straight punctuation, whitespace collapsed).
+ */
+const ALIASES_WDW = new Map<string, string>([
+  // Rock 'n' Roller Coaster Starring Aerosmith (Hollywood Studios)
+  ["rnr",                                        "rock 'n' roller coaster starring aerosmith"],
+  ["rock n roller",                              "rock 'n' roller coaster starring aerosmith"],
+  ["rock n roller coaster",                      "rock 'n' roller coaster starring aerosmith"],
+  ["rock 'n' roller coaster",                    "rock 'n' roller coaster starring aerosmith"],
+  ["rockin roller coaster",                      "rock 'n' roller coaster starring aerosmith"],
+  ["aerosmith",                                  "rock 'n' roller coaster starring aerosmith"],
+  ["rock n roller coaster starring aerosmith",   "rock 'n' roller coaster starring aerosmith"],
+  // Buzz Lightyear's Space Ranger Spin (Magic Kingdom)
+  ["buzz",                                       "buzz lightyear's space ranger spin"],
+  ["buzz lightyear",                             "buzz lightyear's space ranger spin"],
+  ["space ranger spin",                          "buzz lightyear's space ranger spin"],
+  ["space ranger",                               "buzz lightyear's space ranger spin"],
+  ["blsrs",                                      "buzz lightyear's space ranger spin"],
+  ["buzz lightyear space ranger spin",           "buzz lightyear's space ranger spin"],
+  ["buzz lightyear's space ranger spin",         "buzz lightyear's space ranger spin"],
+]);
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -270,6 +314,16 @@ function normalizeQueueTimesResponse(
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
       liveByName.set(normalizeAttractionName(ride.name), ride);
+    }
+  }
+
+  // WDW alias expansion: if Queue-Times uses a short/alternate name, map it to
+  // the canonical mock name so the per-ride lookup below finds the live entry.
+  if (resortId === "WDW") {
+    for (const [alias, canonical] of ALIASES_WDW) {
+      if (!liveByName.has(canonical) && liveByName.has(alias)) {
+        liveByName.set(canonical, liveByName.get(alias)!);
+      }
     }
   }
 

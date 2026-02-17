@@ -141,7 +141,7 @@ const MOCK_REFURBS: Refurb[] = [
     name: "Space Mountain",
     parkId: "disneyland",
     land: "Tomorrowland",
-    dateRange: "Feb 23 \u2013 26, 2026",
+    dateRange: "2026-02-23 - 2026-02-26",
   },
   {
     id: "great-moments-lincoln",
@@ -170,14 +170,6 @@ const MOCK_REFURBS: Refurb[] = [
     land: "Paradise Gardens Park",
     dateRange: "Mar 9 \u2013 17, 2026",
   },
-  // ---- WDW: EPCOT ----
-  {
-    id: "epcot-test-track",
-    name: "Test Track",
-    parkId: "epcot",
-    land: "World Discovery",
-    dateRange: "Jan 9 \u2013 Late 2026",
-  },
   // ---- WDW: Magic Kingdom ----
   {
     id: "mk-big-thunder",
@@ -200,6 +192,14 @@ const MOCK_REFURBS: Refurb[] = [
     parkId: "hs",
     land: "Hollywood Boulevard",
     dateRange: "2026-03-02 - 2026-07-15",
+  },
+  // ---- WDW: Animal Kingdom ----
+  {
+    id: "ak-dinosaur",
+    name: "DINOSAUR",
+    parkId: "ak",
+    land: "DinoLand U.S.A.",
+    dateRange: "2026-02-02 - TBD",
   },
 ];
 
