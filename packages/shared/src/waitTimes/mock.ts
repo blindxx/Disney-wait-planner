@@ -461,6 +461,12 @@ const MK_RIDES: RideDef[] = [
     land: "Tomorrowland",
     waitMins: 70,
   },
+  {
+    id: "mk-buzz-lightyear",
+    name: "Buzz Lightyear\u2019s Space Ranger Spin",
+    land: "Tomorrowland",
+    waitMins: 35,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -545,6 +551,14 @@ const HS_RIDES: RideDef[] = [
     name: "Slinky Dog Dash",
     land: "Toy Story Land",
     waitMins: 80,
+  },
+
+  // ---- Sunset Boulevard ----
+  {
+    id: "hs-rock-n-roller-coaster",
+    name: "Rock 'n' Roller Coaster Starring Aerosmith",
+    land: "Sunset Boulevard",
+    waitMins: 60,
   },
 ];
 
