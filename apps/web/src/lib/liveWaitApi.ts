@@ -172,6 +172,7 @@ function normalizeAttractionName(name: string): string {
     .replace(/[\u2018\u2019]/g, "'") // curly apostrophes → straight
     .replace(/[\u201c\u201d]/g, '"') // curly quotes → straight
     .replace(/[\u2013\u2014]/g, "-") // en-dash / em-dash → hyphen
+    .replace(/~/g, "-")             // tilde separator → hyphen (e.g. "~ Ariel's")
     ;
 }
 

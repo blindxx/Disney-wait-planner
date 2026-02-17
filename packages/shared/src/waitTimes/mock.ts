@@ -293,18 +293,10 @@ const DISNEYLAND_RIDES: RideDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Disney California Adventure — ALL ride attractions (20 rides)
+// Disney California Adventure — ALL ride attractions (19 rides)
 // ---------------------------------------------------------------------------
 
 const DCA_RIDES: RideDef[] = [
-  // ---- Buena Vista Street ----
-  {
-    id: "dca-red-car-trolley",
-    name: "Red Car Trolley",
-    land: "Buena Vista Street",
-    waitMins: 10,
-  },
-
   // ---- Avengers Campus ----
   {
     id: "dca-guardians",
@@ -360,10 +352,16 @@ const DCA_RIDES: RideDef[] = [
     waitMins: 10,
   },
   {
-    id: "dca-pixar-pal-a-round",
-    name: "Pixar Pal-A-Round",
+    id: "dca-pixar-pal-a-round-swinging",
+    name: "Pixar Pal-A-Round - Swinging",
     land: "Pixar Pier",
     waitMins: 25,
+  },
+  {
+    id: "dca-pixar-pal-a-round-non-swinging",
+    name: "Pixar Pal-A-Round \u2013 Non-Swinging", // en-dash matches Queue-Times feed
+    land: "Pixar Pier",
+    waitMins: 20,
   },
   {
     id: "dca-toy-story-midway",
