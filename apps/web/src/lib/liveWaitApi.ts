@@ -173,6 +173,9 @@ function normalizeAttractionName(name: string): string {
     .replace(/[\u201c\u201d]/g, '"') // curly quotes → straight
     .replace(/[\u2013\u2014]/g, "-") // en-dash / em-dash → hyphen
     .replace(/~/g, "-")             // tilde separator → hyphen (e.g. "~ Ariel's")
+    .replace(/\u2122/g, "")        // ™ — e.g. "Indiana Jones™ Adventure"
+    .replace(/\u00ae/g, "")        // ®
+    .replace(/\u00a9/g, "")        // ©
     ;
 }
 
@@ -202,6 +205,17 @@ function normalizeQueueTimesResponse(
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
       liveByName.set(normalizeAttractionName(ride.name), ride);
+    }
+  }
+
+  // Dev-only: warn about live rides that have no mock counterpart.
+  // Helps identify attractions we should add or rename in mock.ts.
+  if (process.env.NODE_ENV !== "production") {
+    const mockNames = new Set(mockPark.map((a) => normalizeAttractionName(a.name)));
+    for (const [normLiveName, ride] of liveByName) {
+      if (!mockNames.has(normLiveName) && (ride.is_open || ride.wait_time > 0)) {
+        console.warn("[LiveWaitApi] Unmatched live attraction:", ride.name);
+      }
     }
   }
 
