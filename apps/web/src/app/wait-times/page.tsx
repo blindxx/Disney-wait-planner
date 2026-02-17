@@ -843,12 +843,23 @@ export default function WaitTimesPage() {
         {/* ---- Planned Closures (Refurbishments) ---- */}
         {(() => {
           const now = new Date();
-          const refurbs = Array.from(PLANNED_CLOSURES.entries()).filter(
-            ([, entry]) =>
-              entry.parkId === selectedPark &&
-              (!selectedLand || entry.land === selectedLand) &&
-              getClosureTiming(entry.dateRange, now) !== "ENDED",
-          );
+          const refurbs = Array.from(PLANNED_CLOSURES.entries())
+            .filter(
+              ([, entry]) =>
+                entry.parkId === selectedPark &&
+                (!selectedLand || entry.land === selectedLand) &&
+                getClosureTiming(entry.dateRange, now) !== "ENDED",
+            )
+            .sort(([, a], [, b]) => {
+              const timingOrder = { ACTIVE: 0, UPCOMING: 1, ENDED: 2 } as const;
+              const ta = timingOrder[getClosureTiming(a.dateRange, now)];
+              const tb = timingOrder[getClosureTiming(b.dateRange, now)];
+              if (ta !== tb) return ta - tb;
+              // Within same timing group, sort by start date (earlier first).
+              const sa = a.dateRange ? a.dateRange.slice(0, 10) : "";
+              const sb = b.dateRange ? b.dateRange.slice(0, 10) : "";
+              return sa.localeCompare(sb);
+            });
           if (refurbs.length === 0) return null;
           return (
             <div style={{ marginTop: "20px" }}>

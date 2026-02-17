@@ -171,4 +171,15 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       displayDateRange: "Jan 9 \u2013 Late 2026",
     },
   ],
+  // ---- WDW: Animal Kingdom ----
+  [
+    "ak:dinosaur",
+    {
+      name: "DINOSAUR",
+      parkId: "ak",
+      land: "DinoLand U.S.A.",
+      dateRange: "2026-02-02 - TBD",
+      displayDateRange: "Feb 2, 2026 \u2013 TBD",
+    },
+  ],
 ]);
