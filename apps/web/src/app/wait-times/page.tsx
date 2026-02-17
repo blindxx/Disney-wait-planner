@@ -843,22 +843,25 @@ export default function WaitTimesPage() {
         {/* ---- Planned Closures (Refurbishments) ---- */}
         {(() => {
           const now = new Date();
+          const timingOrder = { ACTIVE: 0, UPCOMING: 1, ENDED: 2 } as const;
           const refurbs = Array.from(PLANNED_CLOSURES.entries())
+            .map(([key, entry]) => ({
+              key,
+              entry,
+              timing: getClosureTiming(entry.dateRange, now),
+              startKey: entry.dateRange?.slice(0, 10) ?? "",
+            }))
             .filter(
-              ([, entry]) =>
+              ({ entry, timing }) =>
                 entry.parkId === selectedPark &&
                 (!selectedLand || entry.land === selectedLand) &&
-                getClosureTiming(entry.dateRange, now) !== "ENDED",
+                timing !== "ENDED",
             )
-            .sort(([, a], [, b]) => {
-              const timingOrder = { ACTIVE: 0, UPCOMING: 1, ENDED: 2 } as const;
-              const ta = timingOrder[getClosureTiming(a.dateRange, now)];
-              const tb = timingOrder[getClosureTiming(b.dateRange, now)];
+            .sort((a, b) => {
+              const ta = timingOrder[a.timing];
+              const tb = timingOrder[b.timing];
               if (ta !== tb) return ta - tb;
-              // Within same timing group, sort by start date (earlier first).
-              const sa = a.dateRange ? a.dateRange.slice(0, 10) : "";
-              const sb = b.dateRange ? b.dateRange.slice(0, 10) : "";
-              return sa.localeCompare(sb);
+              return a.startKey.localeCompare(b.startKey);
             });
           if (refurbs.length === 0) return null;
           return (
@@ -880,7 +883,7 @@ export default function WaitTimesPage() {
                   overflow: "hidden",
                 }}
               >
-                {refurbs.map(([key, entry]) => (
+                {refurbs.map(({ key, entry }) => (
                   <div
                     key={key}
                     style={{
