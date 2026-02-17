@@ -202,6 +202,25 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       dateRange: "2026-03-09 - 2026-03-17",
     },
   ],
+  // ---- WDW: Magic Kingdom ----
+  [
+    "mk:big thunder mountain railroad",
+    {
+      name: "Big Thunder Mountain Railroad",
+      parkId: "mk",
+      land: "Frontierland",
+      dateRange: "2025-01-01 - 2026-05-01",
+    },
+  ],
+  [
+    "mk:buzz lightyear's space ranger spin",
+    {
+      name: "Buzz Lightyear\u2019s Space Ranger Spin",
+      parkId: "mk",
+      land: "Tomorrowland",
+      dateRange: "2025-08-04 - 2026-05-01",
+    },
+  ],
   // ---- WDW: EPCOT ----
   [
     "epcot:test track",
@@ -210,6 +229,16 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "epcot",
       land: "World Discovery",
       dateRange: "2026-01-09 - TBD",
+    },
+  ],
+  // ---- WDW: Hollywood Studios ----
+  [
+    "hs:rock 'n' roller coaster starring aerosmith",
+    {
+      name: "Rock \u2019n\u2019 Roller Coaster Starring Aerosmith",
+      parkId: "hs",
+      land: "Hollywood Boulevard",
+      dateRange: "2026-03-02 - 2026-07-15",
     },
   ],
   // ---- WDW: Animal Kingdom ----

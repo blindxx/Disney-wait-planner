@@ -884,7 +884,7 @@ export default function WaitTimesPage() {
                   overflow: "hidden",
                 }}
               >
-                {refurbs.map(({ key, entry }) => (
+                {refurbs.map(({ key, entry, timing }) => (
                   <div
                     key={key}
                     style={{
@@ -921,7 +921,7 @@ export default function WaitTimesPage() {
                         {entry.land}
                       </div>
                     )}
-                    {entry.dateRange && (
+                    {entry.dateRange && timing !== "UPCOMING" && (
                       <div
                         style={{
                           fontSize: "12px",
@@ -936,6 +936,23 @@ export default function WaitTimesPage() {
                         }}
                       >
                         {formatClosureDateRangeForDisplay(entry.dateRange)}
+                      </div>
+                    )}
+                    {timing === "UPCOMING" && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "#1d4ed8",
+                          padding: "2px 8px",
+                          borderRadius: "4px",
+                          backgroundColor: "#eff6ff",
+                          border: "1px solid #bfdbfe",
+                          whiteSpace: "nowrap",
+                          flex: "0 0 auto",
+                          order: 2,
+                        }}
+                      >
+                        Upcoming Closure
                       </div>
                     )}
                   </div>

@@ -161,6 +161,35 @@ function normalizeAttractionName(name: string): string {
     ;
 }
 
+/**
+ * WDW-only alias map: normalized-alias → canonical-normalized-mock-name.
+ *
+ * Queue-Times may use a shorter or slightly different name than our mock data.
+ * After building liveByName from live data, aliases are resolved so that
+ * mock-ride lookups (using the canonical name) still find the live entry.
+ *
+ * Keys and values must both be in normalizeAttractionName() output form
+ * (lowercase, straight punctuation, whitespace collapsed).
+ */
+const ALIASES_WDW = new Map<string, string>([
+  // Rock 'n' Roller Coaster Starring Aerosmith (Hollywood Studios)
+  ["rnr",                                        "rock 'n' roller coaster starring aerosmith"],
+  ["rock n roller",                              "rock 'n' roller coaster starring aerosmith"],
+  ["rock n roller coaster",                      "rock 'n' roller coaster starring aerosmith"],
+  ["rock 'n' roller coaster",                    "rock 'n' roller coaster starring aerosmith"],
+  ["rockin roller coaster",                      "rock 'n' roller coaster starring aerosmith"],
+  ["aerosmith",                                  "rock 'n' roller coaster starring aerosmith"],
+  ["rock n roller coaster starring aerosmith",   "rock 'n' roller coaster starring aerosmith"],
+  // Buzz Lightyear's Space Ranger Spin (Magic Kingdom)
+  ["buzz",                                       "buzz lightyear's space ranger spin"],
+  ["buzz lightyear",                             "buzz lightyear's space ranger spin"],
+  ["space ranger spin",                          "buzz lightyear's space ranger spin"],
+  ["space ranger",                               "buzz lightyear's space ranger spin"],
+  ["blsrs",                                      "buzz lightyear's space ranger spin"],
+  ["buzz lightyear space ranger spin",           "buzz lightyear's space ranger spin"],
+  ["buzz lightyear's space ranger spin",         "buzz lightyear's space ranger spin"],
+]);
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -187,6 +216,16 @@ function normalizeQueueTimesResponse(
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
       liveByName.set(normalizeAttractionName(ride.name), ride);
+    }
+  }
+
+  // WDW alias expansion: if Queue-Times uses a short/alternate name, map it to
+  // the canonical mock name so the per-ride lookup below finds the live entry.
+  if (resortId === "WDW") {
+    for (const [alias, canonical] of ALIASES_WDW) {
+      if (!liveByName.has(canonical) && liveByName.has(alias)) {
+        liveByName.set(canonical, liveByName.get(alias)!);
+      }
     }
   }
 
