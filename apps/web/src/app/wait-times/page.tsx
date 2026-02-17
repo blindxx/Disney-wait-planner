@@ -18,10 +18,15 @@ import {
   type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
-import { getWaitDataset, getClosureTiming, LIVE_ENABLED } from "../../lib/liveWaitApi";
+import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
+import {
+  PLANNED_CLOSURES,
+  getClosureTiming,
+  formatClosureDateRangeForDisplay,
+} from "@/lib/plannedClosures";
 
 // ============================================
-// SHOW + REFURB TYPES
+// SHOW TYPE
 // ============================================
 
 type Show = {
@@ -30,14 +35,6 @@ type Show = {
   parkId: ParkId;
   land?: string;
   times: string[];
-};
-
-type Refurb = {
-  id: string;
-  name: string;
-  parkId: ParkId;
-  land?: string;
-  dateRange?: string;
 };
 
 // ============================================
@@ -122,86 +119,8 @@ const MOCK_SHOWS: Show[] = [
   },
 ];
 
-// ============================================
-// MOCK REFURBISHMENTS DATA
-// ============================================
-
-// Planned closures manually updated Feb 2026
-const MOCK_REFURBS: Refurb[] = [
-  // ---- DLR: Disneyland Park ----
-  {
-    id: "jungle-cruise",
-    name: "Jungle Cruise",
-    parkId: "disneyland",
-    land: "Adventureland",
-    dateRange: "Feb 17, 2026 \u2013 TBD",
-  },
-  {
-    id: "space-mountain",
-    name: "Space Mountain",
-    parkId: "disneyland",
-    land: "Tomorrowland",
-    dateRange: "2026-02-23 - 2026-02-26",
-  },
-  {
-    id: "great-moments-lincoln",
-    name: "Great Moments with Mr. Lincoln",
-    parkId: "disneyland",
-    land: "Main Street, U.S.A.",
-  },
-  // ---- DLR: Disney California Adventure ----
-  {
-    id: "grizzly-river-run",
-    name: "Grizzly River Run",
-    parkId: "dca",
-    land: "Grizzly Peak",
-  },
-  {
-    id: "jumpin-jellyfish",
-    name: "Jumpin\u2019 Jellyfish",
-    parkId: "dca",
-    land: "Paradise Gardens Park",
-    dateRange: "Feb 23 \u2013 Mar 5, 2026",
-  },
-  {
-    id: "golden-zephyr",
-    name: "Golden Zephyr",
-    parkId: "dca",
-    land: "Paradise Gardens Park",
-    dateRange: "Mar 9 \u2013 17, 2026",
-  },
-  // ---- WDW: Magic Kingdom ----
-  {
-    id: "mk-big-thunder",
-    name: "Big Thunder Mountain Railroad",
-    parkId: "mk",
-    land: "Frontierland",
-    dateRange: "2025-01-01 - 2026-05-01",
-  },
-  {
-    id: "mk-buzz-lightyear",
-    name: "Buzz Lightyear\u2019s Space Ranger Spin",
-    parkId: "mk",
-    land: "Tomorrowland",
-    dateRange: "2025-08-04 - 2026-05-01",
-  },
-  // ---- WDW: Hollywood Studios ----
-  {
-    id: "hs-rock-n-roller-coaster",
-    name: "Rock \u2019n\u2019 Roller Coaster Starring Aerosmith",
-    parkId: "hs",
-    land: "Hollywood Boulevard",
-    dateRange: "2026-03-02 - 2026-07-15",
-  },
-  // ---- WDW: Animal Kingdom ----
-  {
-    id: "ak-dinosaur",
-    name: "DINOSAUR",
-    parkId: "ak",
-    land: "DinoLand U.S.A.",
-    dateRange: "2026-02-02 - TBD",
-  },
-];
+// PLANNED_CLOSURES is the single source of truth for refurbishment data.
+// Imported from @/lib/plannedClosures — no local duplication.
 
 // ============================================
 // RESORT + PARK CONSTANTS
@@ -924,11 +843,27 @@ export default function WaitTimesPage() {
 
         {/* ---- Planned Closures (Refurbishments) ---- */}
         {(() => {
-          const refurbs = MOCK_REFURBS.filter(
-            (r) =>
-              r.parkId === selectedPark &&
-              (!selectedLand || r.land === selectedLand)
-          );
+          const now = new Date();
+          const timingOrder = { ACTIVE: 0, UPCOMING: 1, ENDED: 2 } as const;
+          const refurbs = Array.from(PLANNED_CLOSURES.entries())
+            .map(([key, entry]) => ({
+              key,
+              entry,
+              timing: getClosureTiming(entry.dateRange, now),
+              startKey: entry.dateRange?.slice(0, 10) ?? "",
+            }))
+            .filter(
+              ({ entry, timing }) =>
+                entry.parkId === selectedPark &&
+                (!selectedLand || entry.land === selectedLand) &&
+                timing !== "ENDED",
+            )
+            .sort((a, b) => {
+              const ta = timingOrder[a.timing];
+              const tb = timingOrder[b.timing];
+              if (ta !== tb) return ta - tb;
+              return a.startKey.localeCompare(b.startKey);
+            });
           if (refurbs.length === 0) return null;
           return (
             <div style={{ marginTop: "20px" }}>
@@ -949,11 +884,9 @@ export default function WaitTimesPage() {
                   overflow: "hidden",
                 }}
               >
-                {refurbs.map((refurb) => {
-                  const timing = getClosureTiming(refurb.dateRange, new Date());
-                  return (
+                {refurbs.map(({ key, entry, timing }) => (
                   <div
-                    key={refurb.id}
+                    key={key}
                     style={{
                       padding: "12px 16px",
                       borderBottom: "1px solid #e5e7eb",
@@ -973,9 +906,9 @@ export default function WaitTimesPage() {
                         order: 1,
                       }}
                     >
-                      {refurb.name}
+                      {entry.name}
                     </div>
-                    {refurb.land && (
+                    {entry.land && (
                       <div
                         style={{
                           fontSize: "13px",
@@ -985,10 +918,10 @@ export default function WaitTimesPage() {
                           order: 3,
                         }}
                       >
-                        {refurb.land}
+                        {entry.land}
                       </div>
                     )}
-                    {refurb.dateRange && (
+                    {entry.dateRange && (
                       <div
                         style={{
                           fontSize: "12px",
@@ -1002,7 +935,7 @@ export default function WaitTimesPage() {
                           order: 2,
                         }}
                       >
-                        {refurb.dateRange}
+                        {formatClosureDateRangeForDisplay(entry.dateRange)}
                       </div>
                     )}
                     {timing === "UPCOMING" && (
@@ -1023,8 +956,7 @@ export default function WaitTimesPage() {
                       </div>
                     )}
                   </div>
-                  );
-                })}
+                ))}
               </div>
             </div>
           );
