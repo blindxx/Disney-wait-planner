@@ -12,7 +12,7 @@
  *   Desktop — 3-column grid, wider container, tighter density
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AttractionWait,
   type ParkId,
@@ -493,6 +493,13 @@ export default function WaitTimesPage() {
   /** Attraction data for the current resort+park (live or mock). */
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
 
+  // Refs always hold the latest resort/park so refreshData stays stable
+  // (avoids re-registering listeners on every selection change).
+  const selectedResortRef = useRef(selectedResort);
+  const selectedParkRef = useRef(selectedPark);
+  useEffect(() => { selectedResortRef.current = selectedResort; }, [selectedResort]);
+  useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
+
   // Hydrate resort + park from localStorage on client mount (runs once).
   useEffect(() => {
     const resort = loadStoredResort();
@@ -538,6 +545,42 @@ export default function WaitTimesPage() {
       cancelled = true;
     };
   }, [selectedResort, selectedPark]);
+
+  // Silent refresh — reads current resort/park from refs; intentionally does
+  // NOT call setIsLoading so the existing list stays visible (no flicker).
+  const refreshData = useCallback(() => {
+    getWaitDataset({
+      resortId: selectedResortRef.current,
+      parkId: selectedParkRef.current,
+    }).then(({ data }) => {
+      setAttractions(data);
+    });
+  }, []); // stable — resort/park read from refs
+
+  // Phase 6.3 — Tab focus refresh (primary trigger).
+  // Fires once when the user returns to this tab; TTL cache in getWaitDataset
+  // ensures no redundant network request if data is still fresh.
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === "visible" && LIVE_ENABLED) {
+        refreshData();
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [refreshData]);
+
+  // Phase 6.3 — Guarded 120 s interval (secondary trigger).
+  // Only active when live mode is on; skips tick if tab is hidden.
+  useEffect(() => {
+    if (!LIVE_ENABLED) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refreshData();
+      }
+    }, 120_000);
+    return () => clearInterval(id);
+  }, [refreshData]);
 
   /** Parks available for the currently selected resort */
   const resortParks = RESORT_PARKS[selectedResort];
