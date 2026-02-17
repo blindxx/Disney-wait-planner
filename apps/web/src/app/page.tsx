@@ -14,10 +14,10 @@
  *   - Primary action: "View all wait times"
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { type AttractionWait, type ParkId } from "@disney-wait-planner/shared";
-import { getWaitDataset } from "../lib/liveWaitApi";
+import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 
 // ============================================
 // CONSTANTS
@@ -172,6 +172,11 @@ export default function TodayPage() {
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
 
+  // Ref always holds the latest park value so refreshData stays stable
+  // (avoids re-registering listeners on every park switch).
+  const selectedParkRef = useRef(selectedPark);
+  useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
+
   // Update current time every minute
   useEffect(() => {
     const updateTime = () => {
@@ -203,6 +208,42 @@ export default function TodayPage() {
     );
     return () => { cancelled = true; };
   }, [selectedPark]);
+
+  // Silent refresh — reads current park from ref; does not set any loading
+  // state so the UI never clears or flickers during background refreshes.
+  const refreshData = useCallback(() => {
+    getWaitDataset({ resortId: "DLR", parkId: selectedParkRef.current }).then(
+      ({ data, lastUpdated: lu }) => {
+        setAttractions(data);
+        setLastUpdated(lu);
+      },
+    );
+  }, []); // stable — park read from ref
+
+  // Phase 6.3 — Tab focus refresh (primary trigger).
+  // Fires once when the user returns to this tab; TTL cache in getWaitDataset
+  // ensures no redundant network request if data is still fresh.
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === "visible") {
+        refreshData();
+      }
+    };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [refreshData]);
+
+  // Phase 6.3 — Guarded 120 s interval (secondary trigger).
+  // Only active when live mode is on; skips tick if tab is hidden.
+  useEffect(() => {
+    if (!LIVE_ENABLED) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        refreshData();
+      }
+    }, 120_000);
+    return () => clearInterval(id);
+  }, [refreshData]);
 
   // Get best options: lowest wait times for selected park.
   // Excludes Down/Closed attractions — only OPERATING with a valid wait time.
