@@ -2,9 +2,10 @@
  * plannedClosures.ts — Single source of truth for planned attraction closures.
  *
  * Exports:
- *   PLANNED_CLOSURES  — Map<key, ClosureEntry> for all known refurbishments.
- *   getClosureTiming  — Date-aware timing: "UPCOMING" | "ACTIVE" | "ENDED".
- *   ClosureTiming     — Type for the timing result.
+ *   PLANNED_CLOSURES                  — Map<key, ClosureEntry>
+ *   getClosureTiming                  — "UPCOMING" | "ACTIVE" | "ENDED"
+ *   formatClosureDateRangeForDisplay  — ISO dateRange → human-readable label
+ *   ClosureTiming                     — type
  *
  * Key format: `${parkId}:${normalizedAttractionName}` (lowercase, straight punctuation).
  * This matches the output of normalizeAttractionName() in liveWaitApi.ts.
@@ -28,13 +29,11 @@ export type ClosureEntry = {
   parkId: ParkId;
   land?: string;
   /**
-   * ISO date range for timing logic.
+   * ISO date range for timing logic AND display (via formatClosureDateRangeForDisplay).
    * Format: "YYYY-MM-DD - YYYY-MM-DD" or "YYYY-MM-DD - TBD" (open-ended).
    * Undefined = indefinite closure (always ACTIVE).
    */
   dateRange?: string;
-  /** Human-readable date range for UI display (e.g., "Feb 17, 2026 \u2013 TBD"). */
-  displayDateRange?: string;
 };
 
 // ============================================
@@ -91,6 +90,53 @@ export function getClosureTiming(
 }
 
 // ============================================
+// DISPLAY FORMATTER
+// ============================================
+
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/**
+ * Format an ISO date string "YYYY-MM-DD" as "Mon D, YYYY" (no leading zero on day).
+ * Returns the original string if it cannot be parsed.
+ */
+function formatIsoDate(iso: string): string {
+  const parts = iso.split("-");
+  if (parts.length !== 3) return iso;
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  if (isNaN(y) || isNaN(m) || isNaN(d) || m < 1 || m > 12) return iso;
+  return `${MONTHS[m - 1]} ${d}, ${y}`;
+}
+
+/**
+ * Convert an ISO dateRange to a human-readable display label.
+ *
+ * Examples:
+ *   undefined              → "TBD"
+ *   "2026-02-17 - TBD"    → "Feb 17, 2026 – TBD"
+ *   "2026-02-23 - 2026-02-26" → "Feb 23, 2026 – Feb 26, 2026"
+ *
+ * Never throws — returns the raw string (or "TBD") on any parse failure.
+ */
+export function formatClosureDateRangeForDisplay(
+  dateRange: string | undefined,
+): string {
+  if (!dateRange) return "TBD";
+  try {
+    const { start, end } = parseClosureDateRange(dateRange);
+    const startLabel = formatIsoDate(start);
+    const endLabel = end === null ? "TBD" : formatIsoDate(end);
+    return `${startLabel} \u2013 ${endLabel}`;
+  } catch {
+    return dateRange || "TBD";
+  }
+}
+
+// ============================================
 // PLANNED CLOSURES DATA
 // ============================================
 
@@ -110,7 +156,6 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "disneyland",
       land: "Adventureland",
       dateRange: "2026-02-17 - TBD",
-      displayDateRange: "Feb 17, 2026 \u2013 TBD",
     },
   ],
   [
@@ -120,7 +165,6 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "disneyland",
       land: "Tomorrowland",
       dateRange: "2026-02-23 - 2026-02-26",
-      displayDateRange: "Feb 23 \u2013 26, 2026",
     },
   ],
   [
@@ -147,7 +191,6 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "dca",
       land: "Paradise Gardens Park",
       dateRange: "2026-02-23 - 2026-03-05",
-      displayDateRange: "Feb 23 \u2013 Mar 5, 2026",
     },
   ],
   [
@@ -157,7 +200,6 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "dca",
       land: "Paradise Gardens Park",
       dateRange: "2026-03-09 - 2026-03-17",
-      displayDateRange: "Mar 9 \u2013 17, 2026",
     },
   ],
   // ---- WDW: EPCOT ----
@@ -168,7 +210,6 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "epcot",
       land: "World Discovery",
       dateRange: "2026-01-09 - TBD",
-      displayDateRange: "Jan 9 \u2013 Late 2026",
     },
   ],
   // ---- WDW: Animal Kingdom ----
@@ -179,7 +220,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "ak",
       land: "DinoLand U.S.A.",
       dateRange: "2026-02-02 - TBD",
-      displayDateRange: "Feb 2, 2026 \u2013 TBD",
     },
   ],
 ]);
+

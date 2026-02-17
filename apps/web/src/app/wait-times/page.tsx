@@ -22,6 +22,7 @@ import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
+  formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
 
 // ============================================
@@ -920,7 +921,7 @@ export default function WaitTimesPage() {
                         {entry.land}
                       </div>
                     )}
-                    {entry.displayDateRange && (
+                    {entry.dateRange && (
                       <div
                         style={{
                           fontSize: "12px",
@@ -934,7 +935,7 @@ export default function WaitTimesPage() {
                           order: 2,
                         }}
                       >
-                        {entry.displayDateRange}
+                        {formatClosureDateRangeForDisplay(entry.dateRange)}
                       </div>
                     )}
                   </div>
