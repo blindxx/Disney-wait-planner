@@ -18,7 +18,7 @@ import {
   type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
-import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
+import { getWaitDataset, getClosureTiming, LIVE_ENABLED } from "../../lib/liveWaitApi";
 
 // ============================================
 // SHOW + REFURB TYPES
@@ -170,13 +170,36 @@ const MOCK_REFURBS: Refurb[] = [
     land: "Paradise Gardens Park",
     dateRange: "Mar 9 \u2013 17, 2026",
   },
-  // ---- WDW ----
+  // ---- WDW: EPCOT ----
   {
     id: "epcot-test-track",
     name: "Test Track",
     parkId: "epcot",
     land: "World Discovery",
     dateRange: "Jan 9 \u2013 Late 2026",
+  },
+  // ---- WDW: Magic Kingdom ----
+  {
+    id: "mk-big-thunder",
+    name: "Big Thunder Mountain Railroad",
+    parkId: "mk",
+    land: "Frontierland",
+    dateRange: "2025-01-01 - 2026-05-01",
+  },
+  {
+    id: "mk-buzz-lightyear",
+    name: "Buzz Lightyear\u2019s Space Ranger Spin",
+    parkId: "mk",
+    land: "Tomorrowland",
+    dateRange: "2025-08-04 - 2026-05-01",
+  },
+  // ---- WDW: Hollywood Studios ----
+  {
+    id: "hs-rock-n-roller-coaster",
+    name: "Rock \u2019n\u2019 Roller Coaster Starring Aerosmith",
+    parkId: "hs",
+    land: "Hollywood Boulevard",
+    dateRange: "2026-03-02 - 2026-07-15",
   },
 ];
 
@@ -926,7 +949,9 @@ export default function WaitTimesPage() {
                   overflow: "hidden",
                 }}
               >
-                {refurbs.map((refurb) => (
+                {refurbs.map((refurb) => {
+                  const timing = getClosureTiming(refurb.dateRange, new Date());
+                  return (
                   <div
                     key={refurb.id}
                     style={{
@@ -980,8 +1005,26 @@ export default function WaitTimesPage() {
                         {refurb.dateRange}
                       </div>
                     )}
+                    {timing === "UPCOMING" && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "#1d4ed8",
+                          padding: "2px 8px",
+                          borderRadius: "4px",
+                          backgroundColor: "#eff6ff",
+                          border: "1px solid #bfdbfe",
+                          whiteSpace: "nowrap",
+                          flex: "0 0 auto",
+                          order: 2,
+                        }}
+                      >
+                        Upcoming Closure
+                      </div>
+                    )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );

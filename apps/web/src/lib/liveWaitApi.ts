@@ -69,25 +69,90 @@ const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
   "WDW:ak": 8,          // Queue-Times: Animal Kingdom
 };
 
+// ============================================
+// CLOSURE DATE RANGE HELPERS
+// ============================================
+
+export type ClosureTiming = "ACTIVE" | "UPCOMING" | "ENDED";
+
+/** Returns local YYYY-MM-DD string (uses local clock, not UTC). */
+function normalizeToDayKeyLocal(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Parses "YYYY-MM-DD - YYYY-MM-DD" into { startKey, endKey }.
+ * Returns null for any other format.
+ * Swaps start/end if needed (defensive).
+ */
+function parseClosureDateRange(
+  dateRange: string,
+): { startKey: string; endKey: string } | null {
+  const match = dateRange
+    .trim()
+    .match(/^(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})$/);
+  if (!match) return null;
+  const [, a, b] = match;
+  return { startKey: a <= b ? a : b, endKey: a <= b ? b : a };
+}
+
+/**
+ * Returns when a planned closure applies relative to `now`.
+ *
+ * - No dateRange  → "ACTIVE" (conservative: always force-closed)
+ * - Unparseable   → "ACTIVE" (conservative: preserve prior behavior)
+ * - today < start → "UPCOMING" (closure has not started)
+ * - start ≤ today ≤ end → "ACTIVE" (currently closed)
+ * - today > end   → "ENDED"  (closure is over)
+ */
+export function getClosureTiming(
+  dateRange: string | undefined,
+  now: Date,
+): ClosureTiming {
+  if (!dateRange) return "ACTIVE";
+  const range = parseClosureDateRange(dateRange);
+  if (!range) return "ACTIVE";
+  const todayKey = normalizeToDayKeyLocal(now);
+  if (todayKey < range.startKey) return "UPCOMING";
+  if (todayKey > range.endKey) return "ENDED";
+  return "ACTIVE";
+}
+
+// Dev-only sanity checks (stripped in production builds)
+if (process.env.NODE_ENV !== "production") {
+  const _t = new Date("2026-02-17T12:00:00");
+  console.debug("[closureTiming] ACTIVE  :", getClosureTiming("2026-02-16 - 2026-02-20", _t));
+  console.debug("[closureTiming] UPCOMING:", getClosureTiming("2026-02-18 - 2026-02-20", _t));
+  console.debug("[closureTiming] ENDED   :", getClosureTiming("2026-02-10 - 2026-02-12", _t));
+}
+
 /**
  * Planned closure lookup keyed by `${parkId}:${lowercaseName}`.
- * Manually updated Feb 2026. Must stay in sync with MOCK_REFURBS in page.tsx.
+ * Value = ISO dateRange string ("YYYY-MM-DD - YYYY-MM-DD") or undefined.
+ *   - undefined → always CLOSED (no date-range enforcement)
+ *   - ISO range → CLOSED only when today falls within range
  *
- * Used in live mode only: if a ride's key is here, its status is always
- * "CLOSED" (planned refurbishment) rather than "DOWN" (temporary outage).
+ * Keys use straight punctuation (normalizeAttractionName output).
+ * Manually updated Feb 2026. Must stay in sync with MOCK_REFURBS in page.tsx.
  */
-// Keys use straight punctuation because they are compared against
-// normalizeAttractionName() output, which has already been canonicalized.
-const PLANNED_CLOSURE_NAMES = new Set<string>([
+const PLANNED_CLOSURES = new Map<string, string | undefined>([
   // Disneyland Park
-  "disneyland:jungle cruise",
-  "disneyland:space mountain",
+  ["disneyland:jungle cruise", undefined],
+  ["disneyland:space mountain", undefined],
   // Disney California Adventure
-  "dca:grizzly river run",
-  "dca:jumpin' jellyfish", // straight apostrophe (normalized form)
-  "dca:golden zephyr",
+  ["dca:grizzly river run", undefined],
+  ["dca:jumpin' jellyfish", undefined], // straight apostrophe (normalized form)
+  ["dca:golden zephyr", undefined],
   // Walt Disney World — EPCOT
-  "epcot:test track",
+  ["epcot:test track", undefined],
+  // Walt Disney World — Magic Kingdom
+  ["mk:big thunder mountain railroad", "2025-01-01 - 2026-05-01"],
+  ["mk:buzz lightyear's space ranger spin", "2025-08-04 - 2026-05-01"],
+  // Walt Disney World — Hollywood Studios
+  ["hs:rock 'n' roller coaster starring aerosmith", "2026-03-02 - 2026-07-15"],
 ]);
 
 // ============================================
@@ -219,18 +284,25 @@ function normalizeQueueTimesResponse(
     }
   }
 
+  const now = new Date();
+
   // Overlay live values onto mock rides; keep mock where no match exists.
   // Status priority:
-  //   1. Planned closure list  → "CLOSED" (refurbishment, always wins)
-  //   2. Live says not open    → "DOWN"   (temporary outage)
-  //   3. Live says open        → "OPERATING" with live wait time
+  //   1. Planned closure (ACTIVE timing) → "CLOSED" (refurbishment, always wins)
+  //   2. Planned closure (UPCOMING/ENDED) → fall through to live status
+  //   3. Live says not open              → "DOWN"   (temporary outage)
+  //   4. Live says open                  → "OPERATING" with live wait time
   return mockPark.map((mockRide): AttractionWait => {
     const normName = normalizeAttractionName(mockRide.name);
     const closureKey = `${parkId}:${normName}`;
 
-    // Planned closure: always CLOSED regardless of live status
-    if (PLANNED_CLOSURE_NAMES.has(closureKey)) {
-      return { ...mockRide, status: "CLOSED", waitMins: null };
+    if (PLANNED_CLOSURES.has(closureKey)) {
+      const timing = getClosureTiming(PLANNED_CLOSURES.get(closureKey), now);
+      if (timing === "ACTIVE") {
+        // Closure is in effect: force CLOSED regardless of live status.
+        return { ...mockRide, status: "CLOSED", waitMins: null };
+      }
+      // UPCOMING or ENDED: do not suppress live wait time — fall through.
     }
 
     const live = liveByName.get(normName);
