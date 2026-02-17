@@ -56,7 +56,7 @@ function toAttractionWait(
 }
 
 // ---------------------------------------------------------------------------
-// Disneyland Park — ALL ride attractions (35 rides)
+// Disneyland Park — ALL ride attractions (34 rides)
 // ---------------------------------------------------------------------------
 
 const DISNEYLAND_RIDES: RideDef[] = [
@@ -67,13 +67,6 @@ const DISNEYLAND_RIDES: RideDef[] = [
     land: "Main Street, U.S.A.",
     waitMins: 10,
   },
-  {
-    id: "dl-main-street-vehicles",
-    name: "Main Street Vehicles",
-    land: "Main Street, U.S.A.",
-    waitMins: 10,
-  },
-
   // ---- Adventureland ----
   {
     id: "dl-indiana-jones",
@@ -608,7 +601,7 @@ const AK_RIDES: RideDef[] = [
  * Mock attraction wait time data for Disneyland Resort and Walt Disney World.
  * Includes a mix of operating, down, and closed attractions.
  *
- * DLR — Disneyland Park:               35 rides
+ * DLR — Disneyland Park:               34 rides
  * DLR — Disney California Adventure:   19 rides
  * WDW — Magic Kingdom:                  5 rides
  * WDW — EPCOT:                          5 rides
