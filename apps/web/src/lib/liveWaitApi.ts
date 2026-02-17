@@ -27,6 +27,7 @@ import {
   type ResortId,
   type WaitStatus,
 } from "@disney-wait-planner/shared";
+import { PLANNED_CLOSURES, getClosureTiming } from "./plannedClosures";
 
 // ============================================
 // CONFIG
@@ -69,26 +70,7 @@ const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
   "WDW:ak": 8,          // Queue-Times: Animal Kingdom
 };
 
-/**
- * Planned closure lookup keyed by `${parkId}:${lowercaseName}`.
- * Manually updated Feb 2026. Must stay in sync with MOCK_REFURBS in page.tsx.
- *
- * Used in live mode only: if a ride's key is here, its status is always
- * "CLOSED" (planned refurbishment) rather than "DOWN" (temporary outage).
- */
-// Keys use straight punctuation because they are compared against
-// normalizeAttractionName() output, which has already been canonicalized.
-const PLANNED_CLOSURE_NAMES = new Set<string>([
-  // Disneyland Park
-  "disneyland:jungle cruise",
-  "disneyland:space mountain",
-  // Disney California Adventure
-  "dca:grizzly river run",
-  "dca:jumpin' jellyfish", // straight apostrophe (normalized form)
-  "dca:golden zephyr",
-  // Walt Disney World — EPCOT
-  "epcot:test track",
-]);
+// PLANNED_CLOSURES and getClosureTiming are imported from ./plannedClosures.
 
 // ============================================
 // PUBLIC RETURN TYPE
@@ -219,21 +201,40 @@ function normalizeQueueTimesResponse(
     }
   }
 
+  const now = new Date();
+
   // Overlay live values onto mock rides; keep mock where no match exists.
   // Status priority:
-  //   1. Planned closure list  → "CLOSED" (refurbishment, always wins)
-  //   2. Live says not open    → "DOWN"   (temporary outage)
-  //   3. Live says open        → "OPERATING" with live wait time
+  //   1. Planned closure (ACTIVE timing) → "CLOSED" (unless sanity override)
+  //   2. Planned closure (UPCOMING/ENDED) → fall through to live
+  //   3. Live says not open              → "DOWN"   (temporary outage)
+  //   4. Live says open                  → "OPERATING" with live wait time
   return mockPark.map((mockRide): AttractionWait => {
     const normName = normalizeAttractionName(mockRide.name);
     const closureKey = `${parkId}:${normName}`;
+    const live = liveByName.get(normName);
 
-    // Planned closure: always CLOSED regardless of live status
-    if (PLANNED_CLOSURE_NAMES.has(closureKey)) {
-      return { ...mockRide, status: "CLOSED", waitMins: null };
+    if (PLANNED_CLOSURES.has(closureKey)) {
+      const entry = PLANNED_CLOSURES.get(closureKey);
+      const timing = getClosureTiming(entry?.dateRange, now);
+
+      if (timing === "ACTIVE") {
+        // SANITY OVERRIDE: if live clearly reports the ride is operating
+        // (is_open=true AND wait_time>0), do NOT force CLOSED — live data wins.
+        if (!isClearlyOperatingFromLive(live)) {
+          return { ...mockRide, status: "CLOSED", waitMins: null };
+        }
+        if (process.env.NODE_ENV !== "production") {
+          console.debug("[closure] sanity override: live operating", {
+            key: closureKey,
+            wait: live?.wait_time,
+          });
+        }
+        // Fall through to live status below.
+      }
+      // UPCOMING or ENDED: fall through to live status below.
     }
 
-    const live = liveByName.get(normName);
     if (!live) return mockRide; // no match: keep mock values unchanged
 
     // Ride not operating: explicitly clear wait time so no stale/mock minutes leak.
@@ -254,6 +255,28 @@ function normalizeQueueTimesResponse(
       updatedAt: live.last_updated,
     };
   });
+}
+
+// ============================================
+// SANITY OVERRIDE HELPER
+// ============================================
+
+/**
+ * Returns true ONLY when live data unambiguously shows the ride is operating:
+ *   is_open === true AND wait_time is a positive number.
+ *
+ * Used to bypass planned-closure enforcement when stale/incorrect closure
+ * data would otherwise incorrectly hide an operating attraction.
+ * In mock mode live is undefined → returns false → no regression.
+ */
+function isClearlyOperatingFromLive(
+  live: { is_open?: boolean; wait_time?: number | null } | undefined,
+): boolean {
+  return (
+    live?.is_open === true &&
+    typeof live.wait_time === "number" &&
+    live.wait_time > 0
+  );
 }
 
 // ============================================

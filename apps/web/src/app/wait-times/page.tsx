@@ -19,9 +19,13 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
+import {
+  PLANNED_CLOSURES,
+  getClosureTiming,
+} from "@/lib/plannedClosures";
 
 // ============================================
-// SHOW + REFURB TYPES
+// SHOW TYPE
 // ============================================
 
 type Show = {
@@ -30,14 +34,6 @@ type Show = {
   parkId: ParkId;
   land?: string;
   times: string[];
-};
-
-type Refurb = {
-  id: string;
-  name: string;
-  parkId: ParkId;
-  land?: string;
-  dateRange?: string;
 };
 
 // ============================================
@@ -122,63 +118,8 @@ const MOCK_SHOWS: Show[] = [
   },
 ];
 
-// ============================================
-// MOCK REFURBISHMENTS DATA
-// ============================================
-
-// Planned closures manually updated Feb 2026
-const MOCK_REFURBS: Refurb[] = [
-  // ---- DLR: Disneyland Park ----
-  {
-    id: "jungle-cruise",
-    name: "Jungle Cruise",
-    parkId: "disneyland",
-    land: "Adventureland",
-    dateRange: "Feb 17, 2026 \u2013 TBD",
-  },
-  {
-    id: "space-mountain",
-    name: "Space Mountain",
-    parkId: "disneyland",
-    land: "Tomorrowland",
-    dateRange: "Feb 23 \u2013 26, 2026",
-  },
-  {
-    id: "great-moments-lincoln",
-    name: "Great Moments with Mr. Lincoln",
-    parkId: "disneyland",
-    land: "Main Street, U.S.A.",
-  },
-  // ---- DLR: Disney California Adventure ----
-  {
-    id: "grizzly-river-run",
-    name: "Grizzly River Run",
-    parkId: "dca",
-    land: "Grizzly Peak",
-  },
-  {
-    id: "jumpin-jellyfish",
-    name: "Jumpin\u2019 Jellyfish",
-    parkId: "dca",
-    land: "Paradise Gardens Park",
-    dateRange: "Feb 23 \u2013 Mar 5, 2026",
-  },
-  {
-    id: "golden-zephyr",
-    name: "Golden Zephyr",
-    parkId: "dca",
-    land: "Paradise Gardens Park",
-    dateRange: "Mar 9 \u2013 17, 2026",
-  },
-  // ---- WDW ----
-  {
-    id: "epcot-test-track",
-    name: "Test Track",
-    parkId: "epcot",
-    land: "World Discovery",
-    dateRange: "Jan 9 \u2013 Late 2026",
-  },
-];
+// PLANNED_CLOSURES is the single source of truth for refurbishment data.
+// Imported from @/lib/plannedClosures — no local duplication.
 
 // ============================================
 // RESORT + PARK CONSTANTS
@@ -901,10 +842,12 @@ export default function WaitTimesPage() {
 
         {/* ---- Planned Closures (Refurbishments) ---- */}
         {(() => {
-          const refurbs = MOCK_REFURBS.filter(
-            (r) =>
-              r.parkId === selectedPark &&
-              (!selectedLand || r.land === selectedLand)
+          const now = new Date();
+          const refurbs = Array.from(PLANNED_CLOSURES.entries()).filter(
+            ([, entry]) =>
+              entry.parkId === selectedPark &&
+              (!selectedLand || entry.land === selectedLand) &&
+              getClosureTiming(entry.dateRange, now) !== "ENDED",
           );
           if (refurbs.length === 0) return null;
           return (
@@ -926,9 +869,9 @@ export default function WaitTimesPage() {
                   overflow: "hidden",
                 }}
               >
-                {refurbs.map((refurb) => (
+                {refurbs.map(([key, entry]) => (
                   <div
-                    key={refurb.id}
+                    key={key}
                     style={{
                       padding: "12px 16px",
                       borderBottom: "1px solid #e5e7eb",
@@ -948,9 +891,9 @@ export default function WaitTimesPage() {
                         order: 1,
                       }}
                     >
-                      {refurb.name}
+                      {entry.name}
                     </div>
-                    {refurb.land && (
+                    {entry.land && (
                       <div
                         style={{
                           fontSize: "13px",
@@ -960,10 +903,10 @@ export default function WaitTimesPage() {
                           order: 3,
                         }}
                       >
-                        {refurb.land}
+                        {entry.land}
                       </div>
                     )}
-                    {refurb.dateRange && (
+                    {entry.displayDateRange && (
                       <div
                         style={{
                           fontSize: "12px",
@@ -977,7 +920,7 @@ export default function WaitTimesPage() {
                           order: 2,
                         }}
                       >
-                        {refurb.dateRange}
+                        {entry.displayDateRange}
                       </div>
                     )}
                   </div>
