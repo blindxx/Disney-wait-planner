@@ -197,13 +197,23 @@ function normalizeQueueTimesResponse(
     }
 
     const live = liveByName.get(mockRide.name.toLowerCase());
-    if (!live) return mockRide; // no live data: keep mock values
+    if (!live) return mockRide; // no match: keep mock values unchanged
 
-    const status: WaitStatus = live.is_open ? "OPERATING" : "DOWN";
+    // Ride not operating: explicitly clear wait time so no stale/mock minutes leak.
+    if (!live.is_open) {
+      return {
+        ...mockRide,
+        status: "DOWN",
+        waitMins: null,
+        updatedAt: live.last_updated,
+      };
+    }
+
+    // Ride operating: apply live wait time.
     return {
       ...mockRide,
-      status,
-      waitMins: live.is_open ? live.wait_time : null,
+      status: "OPERATING",
+      waitMins: live.wait_time,
       updatedAt: live.last_updated,
     };
   });
