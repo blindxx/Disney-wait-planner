@@ -76,13 +76,15 @@ const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
  * Used in live mode only: if a ride's key is here, its status is always
  * "CLOSED" (planned refurbishment) rather than "DOWN" (temporary outage).
  */
+// Keys use straight punctuation because they are compared against
+// normalizeAttractionName() output, which has already been canonicalized.
 const PLANNED_CLOSURE_NAMES = new Set<string>([
   // Disneyland Park
   "disneyland:jungle cruise",
   "disneyland:space mountain",
   // Disney California Adventure
   "dca:grizzly river run",
-  "dca:jumpin\u2019 jellyfish", // curly apostrophe matches mock.ts
+  "dca:jumpin' jellyfish", // straight apostrophe (normalized form)
   "dca:golden zephyr",
   // Walt Disney World — EPCOT
   "epcot:test track",
@@ -155,6 +157,28 @@ type QTResponse = {
   lands: QTLand[];
 };
 
+/**
+ * Normalize an attraction name for comparison.
+ * Queue-Times uses straight punctuation; mock data uses smart/typographic variants.
+ * Without this, names like "Tiana's …" vs "Tiana's …" or
+ * "Star Tours – …" vs "Star Tours - …" fail to match.
+ */
+function normalizeAttractionName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/\u00a0/g, " ")         // NBSP → space
+    .replace(/\s+/g, " ")            // collapse whitespace
+    .replace(/[\u2018\u2019]/g, "'") // curly apostrophes → straight
+    .replace(/[\u201c\u201d]/g, '"') // curly quotes → straight
+    .replace(/[\u2013\u2014]/g, "-") // en-dash / em-dash → hyphen
+    .replace(/~/g, "-")             // tilde separator → hyphen (e.g. "~ Ariel's")
+    .replace(/\u2122/g, "")        // ™ — e.g. "Indiana Jones™ Adventure"
+    .replace(/\u00ae/g, "")        // ®
+    .replace(/\u00a9/g, "")        // ©
+    ;
+}
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -175,11 +199,23 @@ function normalizeQueueTimesResponse(
 
   const qt = body as QTResponse;
 
-  // Build case-insensitive name → live ride lookup
+  // Build normalized name → live ride lookup.
+  // Keys are canonicalized so smart vs straight punctuation variants match.
   const liveByName = new Map<string, QTRide>();
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
-      liveByName.set(ride.name.toLowerCase(), ride);
+      liveByName.set(normalizeAttractionName(ride.name), ride);
+    }
+  }
+
+  // Dev-only: warn about live rides that have no mock counterpart.
+  // Helps identify attractions we should add or rename in mock.ts.
+  if (process.env.NODE_ENV !== "production") {
+    const mockNames = new Set(mockPark.map((a) => normalizeAttractionName(a.name)));
+    for (const [normLiveName, ride] of liveByName) {
+      if (!mockNames.has(normLiveName) && (ride.is_open || ride.wait_time > 0)) {
+        console.warn("[LiveWaitApi] Unmatched live attraction:", ride.name);
+      }
     }
   }
 
@@ -189,21 +225,32 @@ function normalizeQueueTimesResponse(
   //   2. Live says not open    → "DOWN"   (temporary outage)
   //   3. Live says open        → "OPERATING" with live wait time
   return mockPark.map((mockRide): AttractionWait => {
-    const closureKey = `${parkId}:${mockRide.name.toLowerCase()}`;
+    const normName = normalizeAttractionName(mockRide.name);
+    const closureKey = `${parkId}:${normName}`;
 
     // Planned closure: always CLOSED regardless of live status
     if (PLANNED_CLOSURE_NAMES.has(closureKey)) {
       return { ...mockRide, status: "CLOSED", waitMins: null };
     }
 
-    const live = liveByName.get(mockRide.name.toLowerCase());
-    if (!live) return mockRide; // no live data: keep mock values
+    const live = liveByName.get(normName);
+    if (!live) return mockRide; // no match: keep mock values unchanged
 
-    const status: WaitStatus = live.is_open ? "OPERATING" : "DOWN";
+    // Ride not operating: explicitly clear wait time so no stale/mock minutes leak.
+    if (!live.is_open) {
+      return {
+        ...mockRide,
+        status: "DOWN",
+        waitMins: null,
+        updatedAt: live.last_updated,
+      };
+    }
+
+    // Ride operating: apply live wait time.
     return {
       ...mockRide,
-      status,
-      waitMins: live.is_open ? live.wait_time : null,
+      status: "OPERATING",
+      waitMins: live.wait_time,
       updatedAt: live.last_updated,
     };
   });

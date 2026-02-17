@@ -56,7 +56,7 @@ function toAttractionWait(
 }
 
 // ---------------------------------------------------------------------------
-// Disneyland Park — ALL ride attractions (35 rides)
+// Disneyland Park — ALL ride attractions (34 rides)
 // ---------------------------------------------------------------------------
 
 const DISNEYLAND_RIDES: RideDef[] = [
@@ -67,13 +67,6 @@ const DISNEYLAND_RIDES: RideDef[] = [
     land: "Main Street, U.S.A.",
     waitMins: 10,
   },
-  {
-    id: "dl-main-street-vehicles",
-    name: "Main Street Vehicles",
-    land: "Main Street, U.S.A.",
-    waitMins: 10,
-  },
-
   // ---- Adventureland ----
   {
     id: "dl-indiana-jones",
@@ -293,18 +286,10 @@ const DISNEYLAND_RIDES: RideDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Disney California Adventure — ALL ride attractions (20 rides)
+// Disney California Adventure — ALL ride attractions (19 rides)
 // ---------------------------------------------------------------------------
 
 const DCA_RIDES: RideDef[] = [
-  // ---- Buena Vista Street ----
-  {
-    id: "dca-red-car-trolley",
-    name: "Red Car Trolley",
-    land: "Buena Vista Street",
-    waitMins: 10,
-  },
-
   // ---- Avengers Campus ----
   {
     id: "dca-guardians",
@@ -360,10 +345,16 @@ const DCA_RIDES: RideDef[] = [
     waitMins: 10,
   },
   {
-    id: "dca-pixar-pal-a-round",
-    name: "Pixar Pal-A-Round",
+    id: "dca-pixar-pal-a-round-swinging",
+    name: "Pixar Pal-A-Round - Swinging",
     land: "Pixar Pier",
     waitMins: 25,
+  },
+  {
+    id: "dca-pixar-pal-a-round-non-swinging",
+    name: "Pixar Pal-A-Round \u2013 Non-Swinging", // en-dash matches Queue-Times feed
+    land: "Pixar Pier",
+    waitMins: 20,
   },
   {
     id: "dca-toy-story-midway",
@@ -610,7 +601,7 @@ const AK_RIDES: RideDef[] = [
  * Mock attraction wait time data for Disneyland Resort and Walt Disney World.
  * Includes a mix of operating, down, and closed attractions.
  *
- * DLR — Disneyland Park:               35 rides
+ * DLR — Disneyland Park:               34 rides
  * DLR — Disney California Adventure:   19 rides
  * WDW — Magic Kingdom:                  5 rides
  * WDW — EPCOT:                          5 rides
