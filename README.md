@@ -13,7 +13,7 @@ The app answers two core questions:
 
 ## 🧠 Architecture Overview
 
-Disney Wait Planner is now a real-time operational planner with a deterministic data boundary and safe fallback behavior.
+Disney Wait Planner has evolved from a mock-only MVP into a real-time operational planner with a deterministic data boundary and safe fallback behavior.
 
 ### Data Flow
 
@@ -23,55 +23,122 @@ UI (Today / Wait Times)
 
 All wait-time data flows through:
 
-# Disney Wait Planner
 
-A mobile-first Disney park planning app focused on fast decisions, low cognitive load, and clean UX.
+This guarantees:
 
-Disney Wait Planner is intentionally built in disciplined, incremental phases to prevent scope creep and keep the experience focused.
+- Unified data shape  
+- Deterministic status semantics  
+- Safe fallback to mock on failure  
+- Controlled refresh behavior  
+- No request storms  
 
-The app answers two core questions:
+---
 
-- **What should I do right now?**
-- **What am I planning to do today?**
+## 📡 Live Data System
+
+Live waits are powered by the Queue-Times Real Time API via a server-side proxy:
+
+
+### Why a Proxy?
+
+- Avoids CORS issues  
+- Insulates UI from provider changes  
+- Enables cache control  
+- Prevents direct client dependency on third-party API  
+
+### Environment Variable
+
+
+The timestamp reflects true dataset freshness — not render time.
+
+---
+
+## 🏗 Status Semantics
+
+Operational states are deterministic and prioritized:
+
+1. Planned closure (within ISO date range) → Closed  
+2. Live provider reports not operating → Down  
+3. Otherwise → Operating with wait time  
+
+Planned closures are ISO-driven and date-range enforced.  
+Display formatting is derived from ISO values (single source of truth).
+
+---
+
+## 🏰 Name Matching & Canonical Identity
+
+Live and mock attraction names may differ due to:
+
+- Long-form titles  
+- Trademark symbols (™ ® ©)  
+- Unicode punctuation  
+- Dash variants  
+- Whitespace differences  
+
+The system includes:
+
+- `normalizeAttractionName()` layer  
+- Alias mapping support  
+- Dev-only unmatched ride logger  
+
+This ensures live overlay remains resilient to provider drift.
 
 ---
 
 ## 🚦 Current Status
 
 ### ✅ Phase 1 — Wait Times (Complete)
-- Mobile-first card layout
-- Sorting (shortest / longest)
-- Operating-only toggle
-- Land filter
-- Responsive tablet + desktop layout
-- Mock wait time data only
-- UI frozen until API phase
+- Mobile-first card layout  
+- Sorting (shortest / longest)  
+- Operating-only toggle  
+- Land filter  
+- Responsive tablet + desktop layout  
 
 ### ✅ Phase 2 — Today (Home) (Complete)
-- Park selector (Disneyland / DCA)
-- Current time indicator
-- “Best options right now” list
-- Down/Closed rides excluded from best list
-- Clear visual hierarchy for fast scanning
-- Primary action → View all wait times
+- Park selector  
+- Current time indicator  
+- “Best options right now” list  
+- Down/Closed rides excluded from best list  
+- Primary action → View all wait times  
 
-### ✅ Phase 3.1 — My Plans (Manual Timeline MVP)
-- Add activity (name required, optional time window)
-- Edit activity
-- Delete activity
-- Reorder activities
-- Mobile-safe bottom sheet (keyboard overlap fixed)
+### ✅ Phase 3 — My Plans (Complete)
+- Manual timeline  
+- Edit / delete / reorder  
+- Robust TXT + CSV import  
+- Deterministic time normalization  
+- Versioned localStorage persistence  
 
-### 🚧 Phase 3.2 — Plan Import (Planned)
+### ✅ Phase 4 — Lightning (Complete)
+- Manual reservation tracking  
+- Countdown engine  
+- Deterministic bucket sorting  
+- Versioned persistence  
+
+### ✅ Phase 5 — Multi-Resort Expansion (Complete)
+- Disneyland Resort + Walt Disney World  
+- Scoped alias maps  
+- Resort + park persistence  
+- No cross-resort matching  
+
+### ✅ Phase 6 — Live API (Complete)
+- Data boundary via `liveWaitApi.ts`  
+- Queue-Times proxy integration  
+- 60s TTL + dedupe  
+- Safe fallback to mock  
+- Honest freshness UI  
+- Closure date enforcement  
+- Canonical name normalization  
+- Storage persistence across reload/mobile lifecycle  
 
 ---
 
 ## 🧱 Tech Stack
 
-- **Next.js 14** (App Router)
-- **pnpm monorepo**
-- **Tailwind CSS**
-- **Vercel** (Preview deployments per branch, production from `main`)
+- **Next.js 14** (App Router)  
+- **pnpm monorepo**  
+- **Tailwind CSS**  
+- **Vercel** (Preview deployments per branch, production from `main`)  
 
 ---
 
@@ -81,3 +148,11 @@ This is a pnpm monorepo.
 
 The frontend app lives in:
 
+
+Next.js App Router root:
+
+
+Run locally with:
+
+
+Never run build/dev at the repo root without `--filter web`.
