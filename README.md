@@ -22,6 +22,7 @@ UI (Today / Wait Times)
 → Live provider (Queue-Times) OR Mock dataset  
 
 All wait-time data flows through:
+apps/web/src/lib/liveWaitApi.ts
 
 
 This guarantees:
@@ -37,6 +38,7 @@ This guarantees:
 ## 📡 Live Data System
 
 Live waits are powered by the Queue-Times Real Time API via a server-side proxy:
+apps/web/src/app/api/waits/queue-times/route.ts
 
 
 ### Why a Proxy?
@@ -46,7 +48,8 @@ Live waits are powered by the Queue-Times Real Time API via a server-side proxy:
 - Enables cache control  
 - Prevents direct client dependency on third-party API  
 
-### Environment Variable
+NEXT_PUBLIC_WAIT_API_ENABLED=true
+
 
 
 The timestamp reflects true dataset freshness — not render time.
@@ -147,12 +150,16 @@ This ensures live overlay remains resilient to provider drift.
 This is a pnpm monorepo.
 
 The frontend app lives in:
+apps/web
 
 
 Next.js App Router root:
+apps/web/src/app
 
 
 Run locally with:
+pnpm install
+pnpm --filter web dev
 
 
 Never run build/dev at the repo root without `--filter web`.
