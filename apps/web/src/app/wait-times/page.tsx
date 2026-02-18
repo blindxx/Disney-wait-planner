@@ -347,8 +347,8 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
 
   if (attraction.status === "DOWN") {
     label = "Down";
-    bg = "#fef3c7";
-    color = "#92400e";
+    bg = "#ffedd5";
+    color = "#c2410c";
   } else if (attraction.status === "CLOSED") {
     label = "Closed";
     bg = "#f3f4f6";
@@ -383,6 +383,8 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
         lineHeight: "1.2",
         whiteSpace: "nowrap",
         flexShrink: 0,
+        minWidth: "64px",
+        textAlign: "center",
         backgroundColor: bg,
         color,
       }}
