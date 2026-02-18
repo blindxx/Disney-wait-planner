@@ -303,6 +303,42 @@ const ALIASES_WDW = new Map<string, string>([
   // "it's a small world" (Magic Kingdom) — mock name has surrounding typographic quotes;
   // Queue-Times omits them. Both sides normalized, value retains the literal " chars.
   ["it's a small world",                         "\"it's a small world\""],
+  // Pirates of the Caribbean (Magic Kingdom) — common shortening
+  ["pirates",                                    "pirates of the caribbean"],
+  // The Many Adventures of Winnie the Pooh (Magic Kingdom)
+  ["winnie the pooh",                            "the many adventures of winnie the pooh"],
+  ["pooh",                                       "the many adventures of winnie the pooh"],
+  ["many adventures of winnie the pooh",         "the many adventures of winnie the pooh"],
+  // Seven Dwarfs Mine Train (Magic Kingdom)
+  ["seven dwarfs",                               "seven dwarfs mine train"],
+  ["mine train",                                 "seven dwarfs mine train"],
+  // TRON Lightcycle / Run (Magic Kingdom) — Queue-Times may omit slash
+  ["tron lightcycle run",                        "tron lightcycle / run"],
+  ["tron",                                       "tron lightcycle / run"],
+  // Under the Sea – Journey of the Little Mermaid (Magic Kingdom)
+  ["little mermaid",                             "under the sea - journey of the little mermaid"],
+  ["journey of the little mermaid",              "under the sea - journey of the little mermaid"],
+  ["under the sea journey of the little mermaid","under the sea - journey of the little mermaid"],
+  // Tomorrowland Transit Authority PeopleMover (Magic Kingdom)
+  ["peoplemover",                                "tomorrowland transit authority peoplemover"],
+  ["tomorrowland transit",                       "tomorrowland transit authority peoplemover"],
+  ["tta",                                        "tomorrowland transit authority peoplemover"],
+  // Mission: SPACE (EPCOT) — Queue-Times may omit colon
+  ["mission space",                              "mission: space"],
+  // Journey Into Imagination With Figment (EPCOT)
+  ["figment",                                    "journey into imagination with figment"],
+  ["journey into imagination",                   "journey into imagination with figment"],
+  // Gran Fiesta Tour Starring The Three Caballeros (EPCOT) — subtitle truncation
+  ["gran fiesta tour",                           "gran fiesta tour starring the three caballeros"],
+  ["three caballeros",                           "gran fiesta tour starring the three caballeros"],
+  ["gran fiesta tour starring three caballeros", "gran fiesta tour starring the three caballeros"],
+  // Star Tours – The Adventures Continue (Hollywood Studios) — subtitle truncation
+  ["star tours",                                 "star tours - the adventures continue"],
+  ["star tours the adventures continue",         "star tours - the adventures continue"],
+  // Kali River Rapids (Animal Kingdom) — common shortening
+  ["kali river",                                 "kali river rapids"],
+  // TriceraTop Spin (Animal Kingdom) — common misspelling with trailing 's'
+  ["triceratops spin",                           "triceratop spin"],
 ]);
 
 /**
