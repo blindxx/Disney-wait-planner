@@ -105,6 +105,68 @@ function cacheKey(resortId: ResortId, parkId: ParkId): string {
 }
 
 // ============================================
+// SESSION STORAGE PERSISTENCE
+// ============================================
+
+/**
+ * Namespace prefix for all sessionStorage keys.
+ * Scoped per-tab; clears automatically when the tab/session closes.
+ */
+const SS_PREFIX = "dwp:wt:";
+
+/** Shape of the value stored in sessionStorage — kept minimal. */
+type StoredEntry = {
+  data: AttractionWait[];
+  dataSource: "live" | "mock";
+  lastUpdated: number | null;
+  expiresAt: number;
+};
+
+/**
+ * Read a cache entry from sessionStorage.
+ * Returns null on any error, missing key, or type mismatch.
+ * Safe to call during SSR (typeof window guard).
+ */
+function readSessionCache(key: string): CacheEntry | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const raw = sessionStorage.getItem(SS_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredEntry>;
+    if (!Array.isArray(parsed.data) || typeof parsed.expiresAt !== "number") {
+      return null;
+    }
+    return {
+      data: parsed.data as AttractionWait[],
+      dataSource: parsed.dataSource === "live" ? "live" : "mock",
+      lastUpdated: typeof parsed.lastUpdated === "number" ? parsed.lastUpdated : null,
+      expiresAt: parsed.expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist a cache entry to sessionStorage.
+ * Silently ignores any error (quota exceeded, restricted environment, SSR).
+ */
+function writeSessionCache(key: string, entry: CacheEntry): void {
+  try {
+    if (typeof window === "undefined") return;
+    const stored: StoredEntry = {
+      data: entry.data,
+      dataSource: entry.dataSource,
+      lastUpdated: entry.lastUpdated,
+      expiresAt: entry.expiresAt,
+    };
+    sessionStorage.setItem(SS_PREFIX + key, JSON.stringify(stored));
+  } catch {
+    // sessionStorage unavailable (private browsing, quota, iframe) — in-memory only
+  }
+}
+
+// ============================================
 // QUEUE-TIMES RESPONSE NORMALIZATION
 // ============================================
 
@@ -423,7 +485,7 @@ export async function getWaitDataset({
   const key = cacheKey(resortId, parkId);
   const now = Date.now();
 
-  // Return valid cached entry immediately (no fetch)
+  // 1. Return valid in-memory cached entry immediately (no fetch)
   const cached = cache.get(key);
   if (cached && now < cached.expiresAt) {
     return {
@@ -433,20 +495,35 @@ export async function getWaitDataset({
     };
   }
 
-  // Deduplicate: return the in-flight Promise if a request is already running
+  // 2. Deduplicate: return the in-flight Promise if a request is already running
   const existing = inFlight.get(key);
   if (existing) {
     return existing;
   }
 
-  // Start a new fetch, register as in-flight
+  // 3. In-memory miss (e.g. after F5 reload) — try sessionStorage before fetching.
+  //    If still within TTL, hydrate in-memory and return without a network request.
+  const session = readSessionCache(key);
+  if (session && now < session.expiresAt) {
+    cache.set(key, session); // re-warm in-memory for subsequent calls this session
+    return {
+      data: session.data,
+      dataSource: session.dataSource,
+      lastUpdated: session.lastUpdated,
+    };
+  }
+
+  // 4. Start a new fetch, register as in-flight
   const request = fetchLiveData(resortId, parkId)
     .then((result) => {
-      cache.set(key, { ...result, expiresAt: now + CACHE_TTL_MS });
+      const entry: CacheEntry = { ...result, expiresAt: now + CACHE_TTL_MS };
+      cache.set(key, entry);
+      writeSessionCache(key, entry); // persist so F5 within TTL returns same timestamp
       return result;
     })
     .catch((): WaitDataset => {
-      // Any fetch error (network, timeout, non-2xx, parse, no mapping) → mock fallback
+      // Any fetch error (network, timeout, non-2xx, parse, no mapping) → mock fallback.
+      // Not persisted to sessionStorage: a failed fetch should be retried next page load.
       return getMockDataset(resortId, parkId);
     })
     .finally(() => {
