@@ -492,6 +492,8 @@ export default function WaitTimesPage() {
   const [isLoading, setIsLoading] = useState(true);
   /** Attraction data for the current resort+park (live or mock). */
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
   // Refs always hold the latest resort/park so refreshData stays stable
   // (avoids re-registering listeners on every selection change).
@@ -533,9 +535,11 @@ export default function WaitTimesPage() {
     setIsLoading(true);
 
     getWaitDataset({ resortId: selectedResort, parkId: selectedPark }).then(
-      ({ data }) => {
+      ({ data, dataSource: ds, lastUpdated: lu }) => {
         if (!cancelled) {
           setAttractions(data);
+          setDataSource(ds);
+          setLastUpdated(lu);
           setIsLoading(false);
         }
       },
@@ -552,8 +556,10 @@ export default function WaitTimesPage() {
     getWaitDataset({
       resortId: selectedResortRef.current,
       parkId: selectedParkRef.current,
-    }).then(({ data }) => {
+    }).then(({ data, dataSource: ds, lastUpdated: lu }) => {
       setAttractions(data);
+      setDataSource(ds);
+      setLastUpdated(lu);
     });
   }, []); // stable — resort/park read from refs
 
@@ -790,18 +796,41 @@ export default function WaitTimesPage() {
           )}
         </div>
 
-        {/* Results Summary */}
+        {/* Results Summary + last-updated trust affordance */}
         {!isLoading && (
           <div
             style={{
               marginTop: "10px",
-              fontSize: "13px",
-              color: "#9ca3af",
-              textAlign: "center",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: "4px",
             }}
           >
-            Showing {filteredAttractions.length} attraction
-            {filteredAttractions.length !== 1 ? "s" : ""}
+            <div
+              style={{
+                fontSize: "13px",
+                color: "#9ca3af",
+              }}
+            >
+              Showing {filteredAttractions.length} attraction
+              {filteredAttractions.length !== 1 ? "s" : ""}
+            </div>
+            <div
+              style={{
+                fontSize: "12px",
+                color: "#9ca3af",
+              }}
+            >
+              {dataSource === "live" ? "Live" : "Mock"} &bull; Updated{" "}
+              {lastUpdated != null
+                ? new Date(lastUpdated).toLocaleTimeString([], {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })
+                : "\u2014"}
+            </div>
           </div>
         )}
 

@@ -12,6 +12,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
+// Prevent Next.js / Vercel edge from statically caching this route.
+// The only throttling mechanism is the 60 s in-memory TTL in liveWaitApi.ts.
+export const dynamic = "force-dynamic";
+
 const UPSTREAM_BASE = "https://queue-times.com/parks";
 
 export async function GET(request: NextRequest) {
@@ -30,8 +34,8 @@ export async function GET(request: NextRequest) {
   let upstream: Response;
   try {
     upstream = await fetch(url, {
-      // Next.js fetch cache: revalidate every 60 seconds at the edge
-      next: { revalidate: 60 },
+      // Bypass Next.js fetch cache entirely; liveWaitApi.ts owns the 60 s TTL.
+      cache: "no-store",
     });
   } catch (err) {
     return NextResponse.json(
@@ -59,8 +63,8 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json(body, {
     headers: {
-      // Allow edge/CDN caching: fresh for 60 s, serve stale up to 5 min while revalidating
-      "Cache-Control": "s-maxage=60, stale-while-revalidate=300",
+      // Prevent edge/CDN caching; freshness is managed by liveWaitApi.ts TTL.
+      "Cache-Control": "no-store, max-age=0",
     },
   });
 }

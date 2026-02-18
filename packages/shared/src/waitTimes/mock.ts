@@ -56,7 +56,7 @@ function toAttractionWait(
 }
 
 // ---------------------------------------------------------------------------
-// Disneyland Park — ALL ride attractions (34 rides)
+// Disneyland Park — ALL ride attractions (35 rides)
 // ---------------------------------------------------------------------------
 
 const DISNEYLAND_RIDES: RideDef[] = [
@@ -96,17 +96,23 @@ const DISNEYLAND_RIDES: RideDef[] = [
     waitMins: 25,
   },
 
-  // ---- Critter Country ----
+  // ---- Bayou Country ----
   {
     id: "dl-davy-crockett-canoes",
     name: "Davy Crockett\u2019s Explorer Canoes",
-    land: "Critter Country",
+    land: "Bayou Country",
     waitMins: 30,
+  },
+  {
+    id: "dl-pooh",
+    name: "The Many Adventures of Winnie the Pooh",
+    land: "Bayou Country",
+    waitMins: 35,
   },
   {
     id: "dl-tianas-bayou",
     name: "Tiana\u2019s Bayou Adventure",
-    land: "Critter Country",
+    land: "Bayou Country",
     waitMins: 85,
   },
 
@@ -615,7 +621,7 @@ const AK_RIDES: RideDef[] = [
  * Mock attraction wait time data for Disneyland Resort and Walt Disney World.
  * Includes a mix of operating, down, and closed attractions.
  *
- * DLR — Disneyland Park:               34 rides
+ * DLR — Disneyland Park:               35 rides
  * DLR — Disney California Adventure:   19 rides
  * WDW — Magic Kingdom:                  5 rides
  * WDW — EPCOT:                          5 rides

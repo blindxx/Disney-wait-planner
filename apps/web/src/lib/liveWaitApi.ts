@@ -105,6 +105,116 @@ function cacheKey(resortId: ResortId, parkId: ParkId): string {
 }
 
 // ============================================
+// SESSION STORAGE PERSISTENCE
+// ============================================
+
+/**
+ * Namespace prefix for all sessionStorage keys.
+ * Scoped per-tab; clears automatically when the tab/session closes.
+ */
+const SS_PREFIX = "dwp:wt:";
+
+/** Shape of the value stored in sessionStorage — kept minimal. */
+type StoredEntry = {
+  data: AttractionWait[];
+  dataSource: "live" | "mock";
+  lastUpdated: number | null;
+  expiresAt: number;
+};
+
+/**
+ * Read a cache entry from sessionStorage.
+ * Returns null on any error, missing key, or type mismatch.
+ * Safe to call during SSR (typeof window guard).
+ */
+function readSessionCache(key: string): CacheEntry | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const raw = sessionStorage.getItem(SS_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredEntry>;
+    if (!Array.isArray(parsed.data) || typeof parsed.expiresAt !== "number") {
+      return null;
+    }
+    return {
+      data: parsed.data as AttractionWait[],
+      dataSource: parsed.dataSource === "live" ? "live" : "mock",
+      lastUpdated: typeof parsed.lastUpdated === "number" ? parsed.lastUpdated : null,
+      expiresAt: parsed.expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist a cache entry to sessionStorage.
+ * Silently ignores any error (quota exceeded, restricted environment, SSR).
+ */
+function writeSessionCache(key: string, entry: CacheEntry): void {
+  try {
+    if (typeof window === "undefined") return;
+    const stored: StoredEntry = {
+      data: entry.data,
+      dataSource: entry.dataSource,
+      lastUpdated: entry.lastUpdated,
+      expiresAt: entry.expiresAt,
+    };
+    sessionStorage.setItem(SS_PREFIX + key, JSON.stringify(stored));
+  } catch {
+    // sessionStorage unavailable (private browsing, quota, iframe) — in-memory only
+  }
+}
+
+// ============================================
+// LOCAL STORAGE PERSISTENCE (tertiary)
+// ============================================
+
+/**
+ * Read a cache entry from localStorage.
+ * Tertiary fallback: survives full browser close/reopen (mobile Chrome, etc.).
+ * Same schema and validation as readSessionCache.
+ */
+function readLocalCache(key: string): CacheEntry | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const raw = localStorage.getItem(SS_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredEntry>;
+    if (!Array.isArray(parsed.data) || typeof parsed.expiresAt !== "number") {
+      return null;
+    }
+    return {
+      data: parsed.data as AttractionWait[],
+      dataSource: parsed.dataSource === "live" ? "live" : "mock",
+      lastUpdated: typeof parsed.lastUpdated === "number" ? parsed.lastUpdated : null,
+      expiresAt: parsed.expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist a cache entry to localStorage.
+ * Silently ignores any error (quota exceeded, restricted environment, SSR).
+ */
+function writeLocalCache(key: string, entry: CacheEntry): void {
+  try {
+    if (typeof window === "undefined") return;
+    const stored: StoredEntry = {
+      data: entry.data,
+      dataSource: entry.dataSource,
+      lastUpdated: entry.lastUpdated,
+      expiresAt: entry.expiresAt,
+    };
+    localStorage.setItem(SS_PREFIX + key, JSON.stringify(stored));
+  } catch {
+    // localStorage unavailable (private browsing, quota, iframe) — continue without
+  }
+}
+
+// ============================================
 // QUEUE-TIMES RESPONSE NORMALIZATION
 // ============================================
 
@@ -190,6 +300,17 @@ const ALIASES_WDW = new Map<string, string>([
   ["buzz lightyear's space ranger spin",         "buzz lightyear's space ranger spin"],
 ]);
 
+/**
+ * DLR-only alias map: normalized-alias → canonical-normalized-mock-name.
+ * Same contract as ALIASES_WDW — keys and values in normalizeAttractionName() form.
+ */
+const ALIASES_DLR = new Map<string, string>([
+  // The Many Adventures of Winnie the Pooh (Disneyland Park)
+  ["winnie the pooh",                            "the many adventures of winnie the pooh"],
+  ["pooh",                                       "the many adventures of winnie the pooh"],
+  ["many adventures of winnie the pooh",         "the many adventures of winnie the pooh"],
+]);
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -219,10 +340,17 @@ function normalizeQueueTimesResponse(
     }
   }
 
-  // WDW alias expansion: if Queue-Times uses a short/alternate name, map it to
+  // Alias expansion: if Queue-Times uses a short/alternate name, map it to
   // the canonical mock name so the per-ride lookup below finds the live entry.
   if (resortId === "WDW") {
     for (const [alias, canonical] of ALIASES_WDW) {
+      if (!liveByName.has(canonical) && liveByName.has(alias)) {
+        liveByName.set(canonical, liveByName.get(alias)!);
+      }
+    }
+  }
+  if (resortId === "DLR") {
+    for (const [alias, canonical] of ALIASES_DLR) {
       if (!liveByName.has(canonical) && liveByName.has(alias)) {
         liveByName.set(canonical, liveByName.get(alias)!);
       }
@@ -405,7 +533,7 @@ export async function getWaitDataset({
   const key = cacheKey(resortId, parkId);
   const now = Date.now();
 
-  // Return valid cached entry immediately (no fetch)
+  // 1. Return valid in-memory cached entry immediately (no fetch)
   const cached = cache.get(key);
   if (cached && now < cached.expiresAt) {
     return {
@@ -415,20 +543,46 @@ export async function getWaitDataset({
     };
   }
 
-  // Deduplicate: return the in-flight Promise if a request is already running
+  // 2. Deduplicate: return the in-flight Promise if a request is already running
   const existing = inFlight.get(key);
   if (existing) {
     return existing;
   }
 
-  // Start a new fetch, register as in-flight
+  // 3. In-memory miss — try sessionStorage (survives F5 within same tab session).
+  const session = readSessionCache(key);
+  if (session && now < session.expiresAt) {
+    cache.set(key, session); // re-warm in-memory for subsequent calls this session
+    return {
+      data: session.data,
+      dataSource: session.dataSource,
+      lastUpdated: session.lastUpdated,
+    };
+  }
+
+  // 4. sessionStorage miss — try localStorage (survives full browser close/reopen).
+  const local = readLocalCache(key);
+  if (local && now < local.expiresAt) {
+    cache.set(key, local); // re-warm in-memory for subsequent calls this session
+    return {
+      data: local.data,
+      dataSource: local.dataSource,
+      lastUpdated: local.lastUpdated,
+    };
+  }
+
+  // 5. Start a new fetch, register as in-flight
   const request = fetchLiveData(resortId, parkId)
     .then((result) => {
-      cache.set(key, { ...result, expiresAt: now + CACHE_TTL_MS });
+      const entry: CacheEntry = { ...result, expiresAt: now + CACHE_TTL_MS };
+      cache.set(key, entry);
+      writeSessionCache(key, entry); // survives F5
+      writeLocalCache(key, entry);   // survives browser restart
       return result;
     })
     .catch((): WaitDataset => {
-      // Any fetch error (network, timeout, non-2xx, parse, no mapping) → mock fallback
+      // Any fetch error (network, timeout, non-2xx, parse, no mapping) → mock fallback.
+      // Not persisted to sessionStorage: a failed fetch should be retried next page load.
       return getMockDataset(resortId, parkId);
     })
     .finally(() => {
