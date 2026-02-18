@@ -190,6 +190,17 @@ const ALIASES_WDW = new Map<string, string>([
   ["buzz lightyear's space ranger spin",         "buzz lightyear's space ranger spin"],
 ]);
 
+/**
+ * DLR-only alias map: normalized-alias → canonical-normalized-mock-name.
+ * Same contract as ALIASES_WDW — keys and values in normalizeAttractionName() form.
+ */
+const ALIASES_DLR = new Map<string, string>([
+  // The Many Adventures of Winnie the Pooh (Disneyland Park)
+  ["winnie the pooh",                            "the many adventures of winnie the pooh"],
+  ["pooh",                                       "the many adventures of winnie the pooh"],
+  ["many adventures of winnie the pooh",         "the many adventures of winnie the pooh"],
+]);
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -219,10 +230,17 @@ function normalizeQueueTimesResponse(
     }
   }
 
-  // WDW alias expansion: if Queue-Times uses a short/alternate name, map it to
+  // Alias expansion: if Queue-Times uses a short/alternate name, map it to
   // the canonical mock name so the per-ride lookup below finds the live entry.
   if (resortId === "WDW") {
     for (const [alias, canonical] of ALIASES_WDW) {
+      if (!liveByName.has(canonical) && liveByName.has(alias)) {
+        liveByName.set(canonical, liveByName.get(alias)!);
+      }
+    }
+  }
+  if (resortId === "DLR") {
+    for (const [alias, canonical] of ALIASES_DLR) {
       if (!liveByName.has(canonical) && liveByName.has(alias)) {
         liveByName.set(canonical, liveByName.get(alias)!);
       }

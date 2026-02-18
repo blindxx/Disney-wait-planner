@@ -171,6 +171,7 @@ export default function TodayPage() {
   const [currentTime, setCurrentTime] = useState("");
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
   // Ref always holds the latest park value so refreshData stays stable
   // (avoids re-registering listeners on every park switch).
@@ -199,9 +200,10 @@ export default function TodayPage() {
   useEffect(() => {
     let cancelled = false;
     getWaitDataset({ resortId: "DLR", parkId: selectedPark }).then(
-      ({ data, lastUpdated: lu }) => {
+      ({ data, dataSource: ds, lastUpdated: lu }) => {
         if (!cancelled) {
           setAttractions(data);
+          setDataSource(ds);
           setLastUpdated(lu);
         }
       },
@@ -213,8 +215,9 @@ export default function TodayPage() {
   // state so the UI never clears or flickers during background refreshes.
   const refreshData = useCallback(() => {
     getWaitDataset({ resortId: "DLR", parkId: selectedParkRef.current }).then(
-      ({ data, lastUpdated: lu }) => {
+      ({ data, dataSource: ds, lastUpdated: lu }) => {
         setAttractions(data);
+        setDataSource(ds);
         setLastUpdated(lu);
       },
     );
@@ -388,6 +391,24 @@ export default function TodayPage() {
         <Link href="/wait-times" className="primary-btn">
           View all wait times
         </Link>
+
+        {/* Last-updated trust affordance */}
+        <div
+          style={{
+            marginTop: "12px",
+            fontSize: "12px",
+            color: "#9ca3af",
+            textAlign: "right",
+          }}
+        >
+          {dataSource === "live" ? "Live" : "Mock"} &bull; Updated{" "}
+          {lastUpdated != null
+            ? new Date(lastUpdated).toLocaleTimeString([], {
+                hour: "numeric",
+                minute: "2-digit",
+              })
+            : "\u2014"}
+        </div>
       </div>
     </>
   );
