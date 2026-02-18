@@ -11,48 +11,15 @@ The app answers two core questions:
 
 ---
 
-## 🚦 Current Status
+## 🧠 Architecture Overview
 
-### ✅ Phase 1 — Wait Times (Complete)
-- Mobile-first card layout
-- Sorting (shortest / longest)
-- Operating-only toggle
-- Land filter
-- Responsive tablet + desktop layout
-- Mock wait time data only
-- UI frozen until API phase
+Disney Wait Planner is now a real-time operational planner with a deterministic data boundary and safe fallback behavior.
 
-### ✅ Phase 2 — Today (Home) (Complete)
-- Park selector (Disneyland / DCA)
-- Current time indicator
-- “Best options right now” list
-- Down/Closed rides excluded from best list
-- Clear visual hierarchy for fast scanning
-- Primary action → View all wait times
+### Data Flow
 
-### ✅ Phase 3.1 — My Plans (Manual Timeline MVP)
-- Add activity (name required, optional time window)
-- Edit activity
-- Delete activity
-- Reorder activities
-- Mobile-safe bottom sheet (keyboard overlap fixed)
+UI (Today / Wait Times)  
+→ `getWaitDataset({ resortId, parkId })`  
+→ Live provider (Queue-Times) OR Mock dataset  
 
-### 🚧 Phase 3.2 — Plan Import (Planned)
-
----
-
-## 🧱 Tech Stack
-
-- **Next.js 14** (App Router)
-- **pnpm monorepo**
-- **Tailwind CSS**
-- **Vercel** (Preview deployments per branch, production from `main`)
-
----
-
-## 📁 Project Structure
-
-This is a pnpm monorepo.
-
-The frontend app lives in:
+All wait-time data flows through:
 
