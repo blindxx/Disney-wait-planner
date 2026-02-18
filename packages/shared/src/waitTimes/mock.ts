@@ -426,25 +426,45 @@ const DCA_RIDES: RideDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Walt Disney World — Magic Kingdom (5 rides)
+// Walt Disney World — Magic Kingdom (23 rides)
 // ---------------------------------------------------------------------------
 
 const MK_RIDES: RideDef[] = [
-  // ---- Fantasyland ----
+  // ---- Main Street, U.S.A. ----
   {
-    id: "mk-its-a-small-world",
-    name: "\"it's a small world\"",
-    land: "Fantasyland",
-    waitMins: 20,
+    id: "mk-wdw-railroad",
+    name: "Walt Disney World Railroad",
+    land: "Main Street, U.S.A.",
+    waitMins: 10,
+  },
+
+  // ---- Adventureland ----
+  {
+    id: "mk-jungle-cruise",
+    name: "Jungle Cruise",
+    land: "Adventureland",
+    waitMins: 45,
   },
   {
-    id: "mk-peter-pan",
-    name: "Peter Pan\u2019s Flight",
-    land: "Fantasyland",
-    waitMins: 60,
+    id: "mk-pirates",
+    name: "Pirates of the Caribbean",
+    land: "Adventureland",
+    waitMins: 35,
+  },
+  {
+    id: "mk-magic-carpets",
+    name: "Magic Carpets of Aladdin",
+    land: "Adventureland",
+    waitMins: 20,
   },
 
   // ---- Frontierland ----
+  {
+    id: "mk-tianas-bayou",
+    name: "Tiana\u2019s Bayou Adventure",
+    land: "Frontierland",
+    waitMins: 75,
+  },
   {
     id: "mk-big-thunder",
     name: "Big Thunder Mountain Railroad",
@@ -459,8 +479,76 @@ const MK_RIDES: RideDef[] = [
     land: "Liberty Square",
     waitMins: 50,
   },
+  {
+    id: "mk-liberty-belle",
+    name: "Liberty Belle Riverboat",
+    land: "Liberty Square",
+    waitMins: 5,
+  },
+
+  // ---- Fantasyland ----
+  {
+    id: "mk-its-a-small-world",
+    name: "\"it's a small world\"",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
+  {
+    id: "mk-peter-pan",
+    name: "Peter Pan\u2019s Flight",
+    land: "Fantasyland",
+    waitMins: 60,
+  },
+  {
+    id: "mk-dumbo",
+    name: "Dumbo the Flying Elephant",
+    land: "Fantasyland",
+    waitMins: 30,
+  },
+  {
+    id: "mk-pooh",
+    name: "The Many Adventures of Winnie the Pooh",
+    land: "Fantasyland",
+    waitMins: 35,
+  },
+  {
+    id: "mk-mad-tea-party",
+    name: "Mad Tea Party",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
+  {
+    id: "mk-carrousel",
+    name: "Prince Charming Regal Carrousel",
+    land: "Fantasyland",
+    waitMins: 15,
+  },
+  {
+    id: "mk-barnstormer",
+    name: "The Barnstormer",
+    land: "Fantasyland",
+    waitMins: 30,
+  },
+  {
+    id: "mk-seven-dwarfs-mine-train",
+    name: "Seven Dwarfs Mine Train",
+    land: "Fantasyland",
+    waitMins: 85,
+  },
+  {
+    id: "mk-little-mermaid",
+    name: "Under the Sea \u2013 Journey of the Little Mermaid",
+    land: "Fantasyland",
+    waitMins: 20,
+  },
 
   // ---- Tomorrowland ----
+  {
+    id: "mk-tron",
+    name: "TRON Lightcycle / Run",
+    land: "Tomorrowland",
+    waitMins: 90,
+  },
   {
     id: "mk-space-mountain",
     name: "Space Mountain",
@@ -473,10 +561,28 @@ const MK_RIDES: RideDef[] = [
     land: "Tomorrowland",
     waitMins: 35,
   },
+  {
+    id: "mk-tomorrowland-speedway",
+    name: "Tomorrowland Speedway",
+    land: "Tomorrowland",
+    waitMins: 30,
+  },
+  {
+    id: "mk-peoplemover",
+    name: "Tomorrowland Transit Authority PeopleMover",
+    land: "Tomorrowland",
+    waitMins: 10,
+  },
+  {
+    id: "mk-astro-orbiter",
+    name: "Astro Orbiter",
+    land: "Tomorrowland",
+    waitMins: 20,
+  },
 ];
 
 // ---------------------------------------------------------------------------
-// Walt Disney World — EPCOT (4 rides)
+// Walt Disney World — EPCOT (9 rides)
 // ---------------------------------------------------------------------------
 
 const EPCOT_RIDES: RideDef[] = [
@@ -494,6 +600,12 @@ const EPCOT_RIDES: RideDef[] = [
     status: "CLOSED",
     waitMins: null,
   },
+  {
+    id: "epcot-mission-space",
+    name: "Mission: SPACE",
+    land: "World Discovery",
+    waitMins: 35,
+  },
 
   // ---- World Nature ----
   {
@@ -502,8 +614,28 @@ const EPCOT_RIDES: RideDef[] = [
     land: "World Nature",
     waitMins: 40,
   },
+  {
+    id: "epcot-living-with-the-land",
+    name: "Living with the Land",
+    land: "World Nature",
+    waitMins: 25,
+  },
+
+  // ---- World Celebration ----
+  {
+    id: "epcot-figment",
+    name: "Journey Into Imagination With Figment",
+    land: "World Celebration",
+    waitMins: 25,
+  },
 
   // ---- World Showcase ----
+  {
+    id: "epcot-gran-fiesta-tour",
+    name: "Gran Fiesta Tour Starring The Three Caballeros",
+    land: "World Showcase",
+    waitMins: 15,
+  },
   {
     id: "epcot-frozen",
     name: "Frozen Ever After",
@@ -519,7 +651,7 @@ const EPCOT_RIDES: RideDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Walt Disney World — Hollywood Studios (5 rides)
+// Walt Disney World — Hollywood Studios (9 rides)
 // ---------------------------------------------------------------------------
 
 const HS_RIDES: RideDef[] = [
@@ -535,6 +667,14 @@ const HS_RIDES: RideDef[] = [
     name: "Mickey \u0026 Minnie\u2019s Runaway Railway",
     land: "Hollywood Boulevard",
     waitMins: 45,
+  },
+
+  // ---- Echo Lake ----
+  {
+    id: "hs-star-tours",
+    name: "Star Tours \u2013 The Adventures Continue",
+    land: "Echo Lake",
+    waitMins: 40,
   },
 
   // ---- Star Wars: Galaxy's Edge ----
@@ -558,6 +698,18 @@ const HS_RIDES: RideDef[] = [
     land: "Toy Story Land",
     waitMins: 80,
   },
+  {
+    id: "hs-toy-story-mania",
+    name: "Toy Story Mania!",
+    land: "Toy Story Land",
+    waitMins: 50,
+  },
+  {
+    id: "hs-alien-swirling-saucers",
+    name: "Alien Swirling Saucers",
+    land: "Toy Story Land",
+    waitMins: 25,
+  },
 
   // ---- Sunset Boulevard ----
   {
@@ -569,11 +721,11 @@ const HS_RIDES: RideDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// Walt Disney World — Animal Kingdom (5 rides)
+// Walt Disney World — Animal Kingdom (8 rides)
 // ---------------------------------------------------------------------------
 
 const AK_RIDES: RideDef[] = [
-  // ---- Pandora ----
+  // ---- Pandora – The World of Avatar ----
   {
     id: "ak-flight-of-passage",
     name: "Avatar Flight of Passage",
@@ -587,6 +739,14 @@ const AK_RIDES: RideDef[] = [
     waitMins: 40,
   },
 
+  // ---- Africa ----
+  {
+    id: "ak-kilimanjaro",
+    name: "Kilimanjaro Safaris",
+    land: "Africa",
+    waitMins: 25,
+  },
+
   // ---- Asia ----
   {
     id: "ak-expedition-everest",
@@ -594,13 +754,19 @@ const AK_RIDES: RideDef[] = [
     land: "Asia",
     waitMins: 60,
   },
-
-  // ---- Africa ----
   {
-    id: "ak-kilimanjaro",
-    name: "Kilimanjaro Safaris",
-    land: "Africa",
-    waitMins: 25,
+    id: "ak-kali-river",
+    name: "Kali River Rapids",
+    land: "Asia",
+    waitMins: 40,
+  },
+
+  // ---- Rafiki's Planet Watch ----
+  {
+    id: "ak-wildlife-express",
+    name: "Wildlife Express Train",
+    land: "Rafiki\u2019s Planet Watch",
+    waitMins: 10,
   },
 
   // ---- DinoLand U.S.A. ----
@@ -610,6 +776,12 @@ const AK_RIDES: RideDef[] = [
     land: "DinoLand U.S.A.",
     status: "DOWN",
     waitMins: null,
+  },
+  {
+    id: "ak-triceratop-spin",
+    name: "TriceraTop Spin",
+    land: "DinoLand U.S.A.",
+    waitMins: 20,
   },
 ];
 
@@ -623,10 +795,10 @@ const AK_RIDES: RideDef[] = [
  *
  * DLR — Disneyland Park:               35 rides
  * DLR — Disney California Adventure:   19 rides
- * WDW — Magic Kingdom:                  5 rides
- * WDW — EPCOT:                          5 rides
- * WDW — Hollywood Studios:              5 rides
- * WDW — Animal Kingdom:                 5 rides
+ * WDW — Magic Kingdom:                 23 rides
+ * WDW — EPCOT:                          9 rides
+ * WDW — Hollywood Studios:              9 rides
+ * WDW — Animal Kingdom:                 8 rides
  */
 export const mockAttractionWaits: AttractionWait[] = [
   ...DISNEYLAND_RIDES.map((r, i) => toAttractionWait(r, "disneyland", "DLR", i)),
