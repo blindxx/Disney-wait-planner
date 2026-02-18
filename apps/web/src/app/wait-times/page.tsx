@@ -347,8 +347,8 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
 
   if (attraction.status === "DOWN") {
     label = "Down";
-    bg = "#fef3c7";
-    color = "#92400e";
+    bg = "#ffedd5";
+    color = "#c2410c";
   } else if (attraction.status === "CLOSED") {
     label = "Closed";
     bg = "#f3f4f6";
@@ -360,10 +360,10 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
   } else {
     const mins = attraction.waitMins;
     label = `${mins} min`;
-    if (mins <= 20) {
+    if (mins < 30) {
       bg = "#dcfce7";
       color = "#166534";
-    } else if (mins <= 45) {
+    } else if (mins < 60) {
       bg = "#fef9c3";
       color = "#854d0e";
     } else {
@@ -383,6 +383,8 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
         lineHeight: "1.2",
         whiteSpace: "nowrap",
         flexShrink: 0,
+        minWidth: "64px",
+        textAlign: "center",
         backgroundColor: bg,
         color,
       }}

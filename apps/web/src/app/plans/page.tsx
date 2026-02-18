@@ -333,17 +333,17 @@ function stripAnnotations(str: string): string {
 /**
  * Badge colors matching the Wait Times page exactly.
  * DOWN → amber | CLOSED/null → grey
- * ≤20 min → green | ≤45 min → yellow | >45 min → red
+ * <30 min → green | 30–59 min → yellow | ≥60 min → red
  */
 function getWaitBadgeStyle(
   status: string,
   waitMins: number | null,
 ): { backgroundColor: string; color: string } {
-  if (status === "DOWN")   return { backgroundColor: "#fef3c7", color: "#92400e" };
+  if (status === "DOWN")   return { backgroundColor: "#ffedd5", color: "#c2410c" };
   if (status === "CLOSED") return { backgroundColor: "#f3f4f6", color: "#6b7280" };
   if (waitMins == null)    return { backgroundColor: "#f3f4f6", color: "#6b7280" };
-  if (waitMins <= 20) return { backgroundColor: "#dcfce7", color: "#166534" };
-  if (waitMins <= 45) return { backgroundColor: "#fef9c3", color: "#854d0e" };
+  if (waitMins < 30) return { backgroundColor: "#dcfce7", color: "#166534" };
+  if (waitMins < 60) return { backgroundColor: "#fef9c3", color: "#854d0e" };
   return { backgroundColor: "#fee2e2", color: "#991b1b" };
 }
 
@@ -1121,6 +1121,7 @@ export default function PlansPage() {
         .wait-badge {
           display: inline-flex;
           align-items: center;
+          justify-content: center;
           font-size: 0.7rem;
           font-weight: 600;
           padding: 0.15rem 0.45rem;
@@ -1128,6 +1129,8 @@ export default function PlansPage() {
           white-space: nowrap;
           line-height: 1.4;
           flex-shrink: 0;
+          min-width: 52px;
+          text-align: center;
         }
         .wait-scope-label {
           font-size: 0.7rem;
