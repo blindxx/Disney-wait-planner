@@ -19,6 +19,7 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
+import { getWaitBadgeProps } from "../../lib/waitBadge";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -341,36 +342,12 @@ const RESPONSIVE_CSS = `
  * Color-coded by wait length for at-a-glance readability.
  */
 function WaitBadge({ attraction }: { attraction: AttractionWait }) {
-  let label: string;
-  let bg: string;
-  let color: string;
-
-  if (attraction.status === "DOWN") {
-    label = "Down";
-    bg = "#ffedd5";
-    color = "#c2410c";
-  } else if (attraction.status === "CLOSED") {
-    label = "Closed";
-    bg = "#f3f4f6";
-    color = "#6b7280";
-  } else if (attraction.waitMins == null) {
-    label = "\u2014";
-    bg = "#f3f4f6";
-    color = "#6b7280";
-  } else {
-    const mins = attraction.waitMins;
-    label = `${mins} min`;
-    if (mins < 30) {
-      bg = "#dcfce7";
-      color = "#166534";
-    } else if (mins < 60) {
-      bg = "#fef9c3";
-      color = "#854d0e";
-    } else {
-      bg = "#fee2e2";
-      color = "#991b1b";
-    }
-  }
+  const badge = getWaitBadgeProps({ status: attraction.status, waitMins: attraction.waitMins });
+  // Fallback for OPERATING attractions whose waitMins is unexpectedly null
+  const { label, style } = badge ?? {
+    label: "\u2014",
+    style: { backgroundColor: "#f3f4f6", color: "#6b7280" },
+  };
 
   return (
     <span
@@ -385,8 +362,7 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
         flexShrink: 0,
         minWidth: "64px",
         textAlign: "center",
-        backgroundColor: bg,
-        color,
+        ...style,
       }}
     >
       {label}

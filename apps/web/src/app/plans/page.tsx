@@ -8,6 +8,7 @@ import {
   formatTimeLabel,
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
+import { getWaitBadgeProps } from "@/lib/waitBadge";
 
 type PlanItem = {
   id: string;
@@ -330,22 +331,6 @@ function stripAnnotations(str: string): string {
     .trim();
 }
 
-/**
- * Badge colors matching the Wait Times page exactly.
- * DOWN → amber | CLOSED/null → grey
- * <30 min → green | 30–59 min → yellow | ≥60 min → red
- */
-function getWaitBadgeStyle(
-  status: string,
-  waitMins: number | null,
-): { backgroundColor: string; color: string } {
-  if (status === "DOWN")   return { backgroundColor: "#ffedd5", color: "#c2410c" };
-  if (status === "CLOSED") return { backgroundColor: "#f3f4f6", color: "#6b7280" };
-  if (waitMins == null)    return { backgroundColor: "#f3f4f6", color: "#6b7280" };
-  if (waitMins < 30) return { backgroundColor: "#dcfce7", color: "#166534" };
-  if (waitMins < 60) return { backgroundColor: "#fef9c3", color: "#854d0e" };
-  return { backgroundColor: "#fee2e2", color: "#991b1b" };
-}
 
 /**
  * 3-stage deterministic wait lookup for a plan item name.
@@ -1250,17 +1235,14 @@ export default function PlansPage() {
                         {(() => {
                           const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
                           if (!w) return null;
-                          const label =
-                            w.status === "DOWN"   ? "Down"  :
-                            w.status === "CLOSED" ? "Closed" :
-                            w.waitMins != null    ? `${w.waitMins} min` : null;
-                          if (!label) return null;
+                          const badge = getWaitBadgeProps({ status: w.status, waitMins: w.waitMins });
+                          if (!badge) return null;
                           return (
                             <span
                               className="wait-badge"
-                              style={getWaitBadgeStyle(w.status, w.waitMins)}
+                              style={badge.style}
                             >
-                              {label}
+                              {badge.label}
                             </span>
                           );
                         })()}
