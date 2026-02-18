@@ -167,6 +167,54 @@ function writeSessionCache(key: string, entry: CacheEntry): void {
 }
 
 // ============================================
+// LOCAL STORAGE PERSISTENCE (tertiary)
+// ============================================
+
+/**
+ * Read a cache entry from localStorage.
+ * Tertiary fallback: survives full browser close/reopen (mobile Chrome, etc.).
+ * Same schema and validation as readSessionCache.
+ */
+function readLocalCache(key: string): CacheEntry | null {
+  try {
+    if (typeof window === "undefined") return null;
+    const raw = localStorage.getItem(SS_PREFIX + key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredEntry>;
+    if (!Array.isArray(parsed.data) || typeof parsed.expiresAt !== "number") {
+      return null;
+    }
+    return {
+      data: parsed.data as AttractionWait[],
+      dataSource: parsed.dataSource === "live" ? "live" : "mock",
+      lastUpdated: typeof parsed.lastUpdated === "number" ? parsed.lastUpdated : null,
+      expiresAt: parsed.expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist a cache entry to localStorage.
+ * Silently ignores any error (quota exceeded, restricted environment, SSR).
+ */
+function writeLocalCache(key: string, entry: CacheEntry): void {
+  try {
+    if (typeof window === "undefined") return;
+    const stored: StoredEntry = {
+      data: entry.data,
+      dataSource: entry.dataSource,
+      lastUpdated: entry.lastUpdated,
+      expiresAt: entry.expiresAt,
+    };
+    localStorage.setItem(SS_PREFIX + key, JSON.stringify(stored));
+  } catch {
+    // localStorage unavailable (private browsing, quota, iframe) — continue without
+  }
+}
+
+// ============================================
 // QUEUE-TIMES RESPONSE NORMALIZATION
 // ============================================
 
@@ -501,8 +549,7 @@ export async function getWaitDataset({
     return existing;
   }
 
-  // 3. In-memory miss (e.g. after F5 reload) — try sessionStorage before fetching.
-  //    If still within TTL, hydrate in-memory and return without a network request.
+  // 3. In-memory miss — try sessionStorage (survives F5 within same tab session).
   const session = readSessionCache(key);
   if (session && now < session.expiresAt) {
     cache.set(key, session); // re-warm in-memory for subsequent calls this session
@@ -513,12 +560,24 @@ export async function getWaitDataset({
     };
   }
 
-  // 4. Start a new fetch, register as in-flight
+  // 4. sessionStorage miss — try localStorage (survives full browser close/reopen).
+  const local = readLocalCache(key);
+  if (local && now < local.expiresAt) {
+    cache.set(key, local); // re-warm in-memory for subsequent calls this session
+    return {
+      data: local.data,
+      dataSource: local.dataSource,
+      lastUpdated: local.lastUpdated,
+    };
+  }
+
+  // 5. Start a new fetch, register as in-flight
   const request = fetchLiveData(resortId, parkId)
     .then((result) => {
       const entry: CacheEntry = { ...result, expiresAt: now + CACHE_TTL_MS };
       cache.set(key, entry);
-      writeSessionCache(key, entry); // persist so F5 within TTL returns same timestamp
+      writeSessionCache(key, entry); // survives F5
+      writeLocalCache(key, entry);   // survives browser restart
       return result;
     })
     .catch((): WaitDataset => {
