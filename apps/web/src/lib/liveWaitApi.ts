@@ -282,6 +282,8 @@ function normalizeAttractionName(name: string): string {
  * (lowercase, straight punctuation, whitespace collapsed).
  */
 const ALIASES_WDW = new Map<string, string>([
+  // Expedition Everest (Animal Kingdom) — Queue-Times uses full ride subtitle
+  ["expedition everest - legend of the forbidden mountain", "expedition everest"],
   // Rock 'n' Roller Coaster Starring Aerosmith (Hollywood Studios)
   ["rnr",                                        "rock 'n' roller coaster starring aerosmith"],
   ["rock n roller",                              "rock 'n' roller coaster starring aerosmith"],
@@ -298,6 +300,9 @@ const ALIASES_WDW = new Map<string, string>([
   ["blsrs",                                      "buzz lightyear's space ranger spin"],
   ["buzz lightyear space ranger spin",           "buzz lightyear's space ranger spin"],
   ["buzz lightyear's space ranger spin",         "buzz lightyear's space ranger spin"],
+  // "it's a small world" (Magic Kingdom) — mock name has surrounding typographic quotes;
+  // Queue-Times omits them. Both sides normalized, value retains the literal " chars.
+  ["it's a small world",                         "\"it's a small world\""],
 ]);
 
 /**
@@ -309,6 +314,9 @@ const ALIASES_DLR = new Map<string, string>([
   ["winnie the pooh",                            "the many adventures of winnie the pooh"],
   ["pooh",                                       "the many adventures of winnie the pooh"],
   ["many adventures of winnie the pooh",         "the many adventures of winnie the pooh"],
+  // "it's a small world" (Disneyland) — mock name has surrounding typographic quotes;
+  // Queue-Times omits them. Both sides normalized, value retains the literal " chars.
+  ["it's a small world",                         "\"it's a small world\""],
 ]);
 
 function normalizeQueueTimesResponse(

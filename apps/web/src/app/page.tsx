@@ -276,7 +276,7 @@ export default function TodayPage() {
           Today
         </h1>
 
-        {/* Current Time + optional live data freshness */}
+        {/* Current Time */}
         <div
           style={{
             fontSize: "15px",
@@ -285,15 +285,6 @@ export default function TodayPage() {
           }}
         >
           Now: {currentTime}
-          {lastUpdated !== null && (
-            <span style={{ marginLeft: "12px", fontSize: "13px" }}>
-              · Updated:{" "}
-              {new Date(lastUpdated).toLocaleTimeString([], {
-                hour: "numeric",
-                minute: "2-digit",
-              })}
-            </span>
-          )}
         </div>
 
         {/* Park Selector */}
