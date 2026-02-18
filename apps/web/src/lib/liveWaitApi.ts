@@ -337,8 +337,6 @@ const ALIASES_WDW = new Map<string, string>([
   ["star tours the adventures continue",         "star tours - the adventures continue"],
   // Kali River Rapids (Animal Kingdom) — common shortening
   ["kali river",                                 "kali river rapids"],
-  // TriceraTop Spin (Animal Kingdom) — common misspelling with trailing 's'
-  ["triceratops spin",                           "triceratop spin"],
 ]);
 
 /**

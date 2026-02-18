@@ -321,11 +321,11 @@ export default function TodayPage() {
         <div className="options-list">
           {bestOptions.map((attraction, index) => {
             const isTopPick = index === 0;
-            // Color code wait time: green <=20, amber <=45, red >45
+            // Color code wait time: green <30, amber 30-59, red >=60
             const waitColor =
-              (attraction.waitMins ?? 0) <= 20
+              (attraction.waitMins ?? 0) < 30
                 ? "#16a34a"
-                : (attraction.waitMins ?? 0) <= 45
+                : (attraction.waitMins ?? 0) < 60
                   ? "#d97706"
                   : "#dc2626";
 

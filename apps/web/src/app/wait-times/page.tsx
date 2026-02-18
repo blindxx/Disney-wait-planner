@@ -360,10 +360,10 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
   } else {
     const mins = attraction.waitMins;
     label = `${mins} min`;
-    if (mins <= 20) {
+    if (mins < 30) {
       bg = "#dcfce7";
       color = "#166534";
-    } else if (mins <= 45) {
+    } else if (mins < 60) {
       bg = "#fef9c3";
       color = "#854d0e";
     } else {

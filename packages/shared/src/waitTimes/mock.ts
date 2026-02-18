@@ -479,12 +479,6 @@ const MK_RIDES: RideDef[] = [
     land: "Liberty Square",
     waitMins: 50,
   },
-  {
-    id: "mk-liberty-belle",
-    name: "Liberty Belle Riverboat",
-    land: "Liberty Square",
-    waitMins: 5,
-  },
 
   // ---- Fantasyland ----
   {
@@ -659,7 +653,7 @@ const HS_RIDES: RideDef[] = [
   {
     id: "hs-tower-of-terror",
     name: "The Twilight Zone Tower of Terror",
-    land: "Hollywood Boulevard",
+    land: "Sunset Boulevard",
     waitMins: 50,
   },
   {
@@ -761,27 +755,12 @@ const AK_RIDES: RideDef[] = [
     waitMins: 40,
   },
 
-  // ---- Rafiki's Planet Watch ----
+  // ---- Africa ----
   {
     id: "ak-wildlife-express",
     name: "Wildlife Express Train",
-    land: "Rafiki\u2019s Planet Watch",
+    land: "Africa",
     waitMins: 10,
-  },
-
-  // ---- DinoLand U.S.A. ----
-  {
-    id: "ak-dinosaur",
-    name: "DINOSAUR",
-    land: "DinoLand U.S.A.",
-    status: "DOWN",
-    waitMins: null,
-  },
-  {
-    id: "ak-triceratop-spin",
-    name: "TriceraTop Spin",
-    land: "DinoLand U.S.A.",
-    waitMins: 20,
   },
 ];
 
@@ -795,10 +774,10 @@ const AK_RIDES: RideDef[] = [
  *
  * DLR — Disneyland Park:               35 rides
  * DLR — Disney California Adventure:   19 rides
- * WDW — Magic Kingdom:                 23 rides
+ * WDW — Magic Kingdom:                 22 rides
  * WDW — EPCOT:                          9 rides
  * WDW — Hollywood Studios:              9 rides
- * WDW — Animal Kingdom:                 8 rides
+ * WDW — Animal Kingdom:                 6 rides
  */
 export const mockAttractionWaits: AttractionWait[] = [
   ...DISNEYLAND_RIDES.map((r, i) => toAttractionWait(r, "disneyland", "DLR", i)),
