@@ -636,3 +636,43 @@ export async function getWaitDataset({
   inFlight.set(key, request);
   return request;
 }
+
+// ============================================
+// RESORT-LEVEL HELPERS (used by My Plans)
+// ============================================
+
+/**
+ * All parks per resort, in display order.
+ * Exported so consumers (e.g. My Plans) can iterate parks without
+ * duplicating the list.
+ */
+export const RESORT_PARKS: Record<ResortId, ParkId[]> = {
+  DLR: ["disneyland", "dca"],
+  WDW: ["mk", "epcot", "hs", "ak"],
+};
+
+/**
+ * Fetch and merge live wait data for EVERY park in a resort.
+ *
+ * Uses the same per-park TTL cache as getWaitDataset so concurrent calls
+ * (e.g. Wait Times page already loaded one park) share cached results.
+ *
+ * dataSource is "live" if at least one park returned live data.
+ * lastUpdated is the earliest (oldest) timestamp across parks.
+ * Falls back transparently to mock if live is disabled or a park fails.
+ */
+export async function getWaitDatasetForResort(
+  resortId: ResortId,
+): Promise<WaitDataset> {
+  const parks = RESORT_PARKS[resortId];
+  const results = await Promise.all(
+    parks.map((parkId) => getWaitDataset({ resortId, parkId })),
+  );
+  const data = results.flatMap((r) => r.data);
+  const isLive = results.some((r) => r.dataSource === "live");
+  const lastUpdated = results.reduce<number | null>((acc, r) => {
+    if (r.lastUpdated == null) return acc;
+    return acc == null ? r.lastUpdated : Math.min(acc, r.lastUpdated);
+  }, null);
+  return { data, dataSource: isLive ? "live" : "mock", lastUpdated };
+}

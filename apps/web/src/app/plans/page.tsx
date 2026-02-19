@@ -1,7 +1,11 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { mockAttractionWaits, type ResortId } from "@disney-wait-planner/shared";
+import {
+  mockAttractionWaits,
+  type AttractionWait,
+  type ResortId,
+} from "@disney-wait-planner/shared";
 import {
   normalizeEditTimeLabel,
   parseLine,
@@ -9,6 +13,13 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
+import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import {
+  normalizeKey,
+  ALIASES_DLR,
+  ALIASES_WDW,
+  lookupWait,
+} from "@/lib/plansMatching";
 
 type PlanItem = {
   id: string;
@@ -190,188 +201,11 @@ function loadStoredResort(): ResortId {
 }
 
 /**
- * Normalize an attraction or plan item name to a stable lookup key.
- * - Lowercase + trim
- * - Remove apostrophes (typographic and ASCII) so "Tiana's" → "tianas"
- * - Replace all remaining non-alphanumeric characters with a space
- * - Collapse duplicate spaces
- */
-function normalizeKey(str: string): string {
-  return str
-    .trim()
-    .toLowerCase()
-    .replace(/['\u2019\u2018]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-const STOP_WORDS = new Set(["the", "of", "and", "a", "an", "to", "at"]);
-
-/** Tokens from a normalized key with stop words removed. */
-function tokenize(key: string): string[] {
-  return key.split(" ").filter((t) => t && !STOP_WORDS.has(t));
-}
-
-/**
- * Stage 2 containment check.
- * True when planTokens appear as a whole-word sequence inside the
- * stop-word-filtered version of attrKey (prefix or interior match).
- * Caller must ensure planTokens.length >= 2.
- */
-function containsWholeWordSequence(
-  attrKey: string,
-  planTokens: string[],
-): boolean {
-  const planStr = planTokens.join(" ");
-  const attrFiltered = attrKey
-    .split(" ")
-    .filter((t) => t && !STOP_WORDS.has(t))
-    .join(" ");
-  return (" " + attrFiltered + " ").includes(" " + planStr + " ");
-}
-
-/**
- * Manual alias map for DLR — acronyms and common shorthands.
- * Keys: normalized alias string. Values: normalized full attraction name.
- * These map exactly to the normalizeKey() output of the mock data names.
- */
-const ALIASES_DLR: Record<string, string> = {
-  // Acronyms
-  rotr:  "star wars rise of the resistance",
-  mmrr:  "mickey minnies runaway railway",
-  btmrr: "big thunder mountain railroad",
-  btmr:  "big thunder mountain railroad",
-  potc:  "pirates of the caribbean",
-  iasw:  "its a small world",
-  mfsr:  "millennium falcon smugglers run",
-  hm:    "haunted mansion",
-  jc:    "jungle cruise",
-  sm:    "space mountain",
-  gotg:  "guardians of the galaxy mission breakout",
-  tsmm:  "toy story midway mania",
-  rac:   "radiator springs racers",
-  web:   "web slingers a spider man adventure",
-  grr:   "grizzly river run",
-  // Common shorthands
-  "pirates":          "pirates of the caribbean",
-  "guardians":        "guardians of the galaxy mission breakout",
-  "big thunder":      "big thunder mountain railroad",
-  "thunder mountain": "big thunder mountain railroad",
-  "runaway railway":  "mickey minnies runaway railway",
-  // Guardians variants (dash/colon/annotation forms normalize to these keys)
-  "guardians mission breakout": "guardians of the galaxy mission breakout",
-  "guardians breakout":         "guardians of the galaxy mission breakout",
-  // Rise of the Resistance shorthands
-  "rise":             "star wars rise of the resistance",
-  // Smugglers Run shorthands
-  "smuggler":         "millennium falcon smugglers run",
-  "smugglers":        "millennium falcon smugglers run",
-  "smugglers run":    "millennium falcon smugglers run",
-};
-
-/**
- * Manual alias map for WDW — acronyms and common shorthands.
- * Separate from ALIASES_DLR — never merged.
- * Values must match normalizeKey() output of WDW mock ride names.
- * Reserved for future WDW overlay scope on the Plans page.
- */
-const ALIASES_WDW: Record<string, string> = {
-  // Acronyms
-  fop:   "avatar flight of passage",
-  rotr:  "star wars rise of the resistance",
-  mmrr:  "mickey minnies runaway railway",
-  btmrr: "big thunder mountain railroad",
-  btmr:  "big thunder mountain railroad",
-  hm:    "haunted mansion",
-  tott:  "the twilight zone tower of terror",
-  tot:   "the twilight zone tower of terror",
-  nrj:   "navi river journey",
-  mfsr:  "millennium falcon smugglers run",
-  // Common shorthands
-  "flight of passage":  "avatar flight of passage",
-  "everest":            "expedition everest",
-  "safaris":            "kilimanjaro safaris",
-  "cosmic rewind":      "guardians of the galaxy cosmic rewind",
-  "guardians":          "guardians of the galaxy cosmic rewind",
-  "slinky":             "slinky dog dash",
-  "slinky dog":         "slinky dog dash",
-  "frozen":             "frozen ever after",
-  "ratatouille":           "remys ratatouille adventure",
-  "ratatouillie":          "remys ratatouille adventure",  // common misspelling
-  "ratatoullie":           "remys ratatouille adventure",  // common misspelling
-  "remy":                  "remys ratatouille adventure",
-  "remys":                 "remys ratatouille adventure",  // remy's / remys
-  "remy ratatouille":      "remys ratatouille adventure",
-  "remys ratatouille":     "remys ratatouille adventure",
-  "tower of terror":    "the twilight zone tower of terror",
-  "rise":               "star wars rise of the resistance",
-  "smugglers run":      "millennium falcon smugglers run",
-  "runaway railway":    "mickey minnies runaway railway",
-};
-
-/**
  * When true, a matched plan item displays the official attraction name
  * (from the wait dataset) as a secondary line below the plan title.
  * Stored plan data is never mutated or persisted.
  */
 const DISPLAY_CANONICAL_RIDE_NAME = true;
-
-/**
- * Strip parenthetical and bracket annotations before matching.
- * Applied only to the plan item key — never to displayed content.
- * "Haunted Mansion (flex window)"  → "Haunted Mansion"
- * "[rope drop] Space Mountain"     → "Space Mountain"
- */
-function stripAnnotations(str: string): string {
-  return str
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/\[[^\]]*\]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-
-/**
- * 3-stage deterministic wait lookup for a plan item name.
- * Order: Stage 1 (exact) → Stage 3 (alias) → Stage 2 (containment).
- * Parenthetical/bracket annotations are stripped before matching.
- * Returns null on no match or ambiguous containment.
- */
-function lookupWait(
-  planName: string,
-  waitMap: Map<string, { status: string; waitMins: number | null; canonicalName: string }>,
-  aliases: Record<string, string>,
-): { status: string; waitMins: number | null; canonicalName: string } | null {
-  // Strip annotations (flex windows, labels, etc.) before normalizing
-  const planKey = normalizeKey(stripAnnotations(planName));
-
-  // Stage 1: exact normalized match
-  const exact = waitMap.get(planKey);
-  if (exact) return exact;
-
-  // Stage 3: manual alias lookup
-  const aliasTarget = aliases[planKey];
-  if (aliasTarget) {
-    const aliasResult = waitMap.get(aliasTarget);
-    if (aliasResult) return aliasResult;
-  }
-
-  // Stage 2: whole-word containment (≥2 meaningful tokens required)
-  const planTokens = tokenize(planKey);
-  if (planTokens.length < 2) return null;
-
-  const matches: Array<{ status: string; waitMins: number | null; canonicalName: string }> = [];
-  for (const [attrKey, info] of waitMap) {
-    if (containsWholeWordSequence(attrKey, planTokens)) {
-      matches.push(info);
-    }
-  }
-
-  // Ambiguous → fail silently
-  if (matches.length !== 1) return null;
-  return matches[0];
-}
 
 // ===== COMPONENT =====
 
@@ -392,6 +226,10 @@ export default function PlansPage() {
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
+  // Live wait data for the selected resort (all parks merged).
+  // Empty when live is disabled; waitMap falls back to mock in that case.
+  const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
+
   // Hydrate selectedResort from localStorage on client mount (runs once).
   useEffect(() => {
     setSelectedResort(loadStoredResort());
@@ -402,12 +240,31 @@ export default function PlansPage() {
     try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
   }, [selectedResort]);
 
+  // Fetch live wait data for all parks in the selected resort.
+  // Uses the same TTL cache as the Wait Times page (results are shared).
+  // No-ops when live API is disabled — waitMap falls back to mock.
+  useEffect(() => {
+    if (!LIVE_ENABLED) return;
+    let cancelled = false;
+    getWaitDatasetForResort(selectedResort).then(({ data }) => {
+      if (!cancelled) setLiveAttractions(data);
+    });
+    return () => { cancelled = true; };
+  }, [selectedResort]);
+
   // Build a deterministic wait lookup map scoped to selectedResort.
+  // Source: live data (when enabled + available) or mock (fallback).
   // Keyed by normalizeKey(name); values carry status + waitMins.
-  // Recomputes when selectedResort changes — no cross-resort data enters the map.
+  // Park-scoping within a resort is preserved: getWaitDatasetForResort
+  // fetches each park independently, so cross-park collisions cannot occur
+  // across resorts (DLR vs WDW), and same-name attractions within one
+  // resort resolve deterministically (last writer wins, acceptable because
+  // duplicate names within one resort do not exist in the dataset).
   const waitMap = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
     const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string }>();
-    for (const a of mockAttractionWaits) {
+    for (const a of source) {
       if (a.resortId !== selectedResort) continue; // resort scope guard
       map.set(normalizeKey(a.name), {
         status: a.status,
@@ -416,7 +273,7 @@ export default function PlansPage() {
       });
     }
     return map;
-  }, [selectedResort]);
+  }, [selectedResort, liveAttractions]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
@@ -1469,3 +1326,5 @@ export default function PlansPage() {
     </>
   );
 }
+
+// ============================================================
