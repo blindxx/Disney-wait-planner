@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { type AttractionWait, type ParkId } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
+import { getWaitTextColor } from "../lib/waitBadge";
 
 // ============================================
 // CONSTANTS
@@ -321,13 +322,8 @@ export default function TodayPage() {
         <div className="options-list">
           {bestOptions.map((attraction, index) => {
             const isTopPick = index === 0;
-            // Color code wait time: green <30, amber 30-59, red >=60
-            const waitColor =
-              (attraction.waitMins ?? 0) < 30
-                ? "#16a34a"
-                : (attraction.waitMins ?? 0) < 60
-                  ? "#d97706"
-                  : "#dc2626";
+            // Color code wait time — thresholds centralized in waitBadge.ts
+            const waitColor = getWaitTextColor(attraction.waitMins ?? 0);
 
             return (
               <div
