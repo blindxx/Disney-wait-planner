@@ -169,6 +169,17 @@ export const ALIASES_DLR: Record<string, string> = {
 
   // ---- WEB SLINGERS two-word form ----
   "web slingers":                "web slingers a spider man adventure",
+
+  // ---- Mickey & Minnie's Runaway Railway variants ----
+  // "mickey & minnie" normalizes to "mickey minnie" (& → space, collapse)
+  "mickey and minnie":           "mickey minnies runaway railway",
+  "mickey minnie":               "mickey minnies runaway railway",
+  "mickey minnies":              "mickey minnies runaway railway",
+
+  // ---- Single-token ride names that can't hit stage-2 ----
+  "dumbo":                       "dumbo the flying elephant",
+  "space":                       "space mountain",
+  "buzz":                        "buzz lightyear astro blasters",  // Buzz Lightyear Astro Blasters (DL)
 };
 
 /**
@@ -269,6 +280,32 @@ export const ALIASES_WDW: Record<string, string> = {
   // ---- MK Fantasyland ----
   // "mermaid" alone is a single token → needs alias
   "mermaid":                     "under the sea journey of the little mermaid",
+
+  // ---- Mickey & Minnie's Runaway Railway variants ----
+  // "mickey & minnie" normalizes to "mickey minnie" (& → space, collapse)
+  "mickey and minnie":           "mickey minnies runaway railway",
+  "mickey minnie":               "mickey minnies runaway railway",
+  "mickey minnies":              "mickey minnies runaway railway",
+
+  // ---- Single-token ride names that can't hit stage-2 ----
+  "dumbo":                       "dumbo the flying elephant",         // MK Fantasyland
+  "spaceship":                   "spaceship earth",                   // EPCOT World Celebration
+  "space":                       "space mountain",                    // MK Tomorrowland
+  "buzz":                        "buzz lightyears space ranger spin", // Buzz Lightyear's Space Ranger Spin (MK)
+
+  // ---- The Barnstormer (MK Fantasyland) ----
+  // "the barnstormer" is an exact stage-1 match; "barnstormer" needs this alias.
+  "barnstormer":                 "the barnstormer",
+
+  // ---- Seven Dwarfs Mine Train — additional acronym/shorthand ----
+  // "seven dwarfs" already present above; add acronym + numeric form.
+  sdmt:                          "seven dwarfs mine train",
+  "7 dwarfs":                    "seven dwarfs mine train",
+
+  // ---- Magic Carpets of Aladdin (MK Adventureland) ----
+  "aladdin":                     "magic carpets of aladdin",
+  "magic carpet":                "magic carpets of aladdin",
+  "magic carpets":               "magic carpets of aladdin",
 };
 
 // ---------------------------------------------------------------------------
@@ -299,8 +336,14 @@ export function lookupWait(
   const exact = waitMap.get(planKey);
   if (exact) return exact;
 
-  // Stage 3: manual alias lookup
-  const aliasTarget = aliases[planKey];
+  // Stage 3: manual alias lookup.
+  // Conservative fallback: if planKey starts with "the ", also check aliases
+  // for the key with "the " stripped (e.g. "the barnstormer" → "barnstormer").
+  // Stage 1 always runs first, so canonical keys that begin with "the" (like
+  // "the barnstormer") are already found via exact match without stripping.
+  const aliasTarget =
+    aliases[planKey] ??
+    (planKey.startsWith("the ") ? aliases[planKey.slice(4)] : undefined);
   if (aliasTarget) {
     const aliasResult = waitMap.get(aliasTarget);
     if (aliasResult) return aliasResult;
@@ -399,4 +442,21 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "roger rabbit",          resort: "DLR", expectedKey: "roger rabbits car toon spin" },
   { input: "pooh",                  resort: "DLR", expectedKey: "the many adventures of winnie the pooh" },
   { input: "mermaid",               resort: "DLR", expectedKey: "the little mermaid ariels undersea adventure" },
+  // --- Targeted patch: DLR ---
+  { input: "mickey and minnie",     resort: "DLR", expectedKey: "mickey minnies runaway railway" },
+  { input: "mickey & minnie",       resort: "DLR", expectedKey: "mickey minnies runaway railway" }, // normalizes to "mickey minnie"
+  { input: "dumbo",                 resort: "DLR", expectedKey: "dumbo the flying elephant" },
+  { input: "space",                 resort: "DLR", expectedKey: "space mountain" },
+  { input: "buzz",                  resort: "DLR", expectedKey: "buzz lightyear astro blasters" },
+  // --- Targeted patch: WDW ---
+  { input: "mickey and minnie",     resort: "WDW", expectedKey: "mickey minnies runaway railway" },
+  { input: "dumbo",                 resort: "WDW", expectedKey: "dumbo the flying elephant" },
+  { input: "spaceship",             resort: "WDW", expectedKey: "spaceship earth" },
+  { input: "space",                 resort: "WDW", expectedKey: "space mountain" },
+  { input: "buzz",                  resort: "WDW", expectedKey: "buzz lightyears space ranger spin" },
+  { input: "barnstormer",           resort: "WDW", expectedKey: "the barnstormer" },
+  { input: "sdmt",                  resort: "WDW", expectedKey: "seven dwarfs mine train" },
+  { input: "7 dwarfs",              resort: "WDW", expectedKey: "seven dwarfs mine train" },
+  { input: "aladdin",               resort: "WDW", expectedKey: "magic carpets of aladdin" },
+  { input: "magic carpet",          resort: "WDW", expectedKey: "magic carpets of aladdin" },
 ];
