@@ -144,6 +144,31 @@ export const ALIASES_DLR: Record<string, string> = {
   // normalizeKey strips apostrophe: "soarin'" → "soarin"
   "soarin":                      "soarin around the world",
   "soarin over california":      "soarin around the world", // legacy DCA name
+
+  // ---- Tiana's Bayou Adventure (DL Bayou Country) — cross-resort parity ----
+  // Single token "tiana" cannot reach stage-2 (≥2 tokens required); alias needed.
+  "tiana":                       "tianas bayou adventure",
+  "tianas bayou":                "tianas bayou adventure",
+
+  // ---- Single-token shorthands that can't hit stage-2 ----
+  "indy":                        "indiana jones adventure",   // Indiana Jones™ Adventure
+  "matterhorn":                  "matterhorn bobsleds",
+  "pinocchio":                   "pinocchios daring journey", // Pinocchio's Daring Journey
+  "toad":                        "mr toads wild ride",        // Mr. Toad's Wild Ride
+  "pooh":                        "the many adventures of winnie the pooh",
+  "mermaid":                     "the little mermaid ariels undersea adventure", // DCA
+
+  // ---- Possessive-s shorthands (stage-2 won't match "rabbit" → "rabbits …") ----
+  "peter pan":                   "peter pans flight",         // Peter Pan's Flight
+  "snow white":                  "snow whites enchanted wish", // Snow White's Enchanted Wish
+  "mr toad":                     "mr toads wild ride",
+  "roger rabbit":                "roger rabbits car toon spin",
+
+  // ---- The Little Mermaid (DCA) — explicit for discoverability ----
+  "little mermaid":              "the little mermaid ariels undersea adventure",
+
+  // ---- WEB SLINGERS two-word form ----
+  "web slingers":                "web slingers a spider man adventure",
 };
 
 /**
@@ -195,6 +220,55 @@ export const ALIASES_WDW: Record<string, string> = {
   "rise":                        "star wars rise of the resistance",
   "smugglers run":               "millennium falcon smugglers run",
   "runaway railway":             "mickey minnies runaway railway",
+
+  // ---- Journey Into Imagination With Figment (EPCOT World Celebration) ----
+  // "figment" is a single token — stage-2 can't reach it without an alias.
+  "figment":                     "journey into imagination with figment",
+  "journey into imagination":    "journey into imagination with figment",
+
+  // ---- TRON Lightcycle / Run (MK Tomorrowland) ----
+  // normalizeKey: "/" → space → "tron lightcycle run"
+  "tron":                        "tron lightcycle run",
+  "tron lightcycle":             "tron lightcycle run",
+  "lightcycle":                  "tron lightcycle run",
+
+  // ---- Seven Dwarfs Mine Train (MK Fantasyland) ----
+  "seven dwarfs":                "seven dwarfs mine train",
+  "mine train":                  "seven dwarfs mine train",
+
+  // ---- Cross-resort shorthand parity (same key as ALIASES_DLR, WDW canonical) ----
+  "pirates":                     "pirates of the caribbean",          // MK Adventureland
+  "smuggler":                    "millennium falcon smugglers run",    // HS Galaxy's Edge
+  "smugglers":                   "millennium falcon smugglers run",    // HS Galaxy's Edge
+  "big thunder":                 "big thunder mountain railroad",      // MK Frontierland
+  "thunder mountain":            "big thunder mountain railroad",      // MK Frontierland
+  "soarin":                      "soarin around the world",           // EPCOT World Nature
+
+  // ---- Tiana's Bayou Adventure (MK Frontierland) — cross-resort parity ----
+  "tiana":                       "tianas bayou adventure",
+  "tianas bayou":                "tianas bayou adventure",
+
+  // ---- Possessive-s shorthands ----
+  // stage-2 won't match "peter pan" into "peter pans flight" ("pans" ≠ "pan")
+  "peter pan":                   "peter pans flight",                 // MK Fantasyland
+  "pooh":                        "the many adventures of winnie the pooh", // MK Fantasyland
+
+  // ---- Animal Kingdom ----
+  "kali":                        "kali river rapids",                 // AK Asia
+  "kali river":                  "kali river rapids",
+  "navi river":                  "navi river journey",                // AK Pandora
+
+  // ---- MK Tomorrowland ----
+  // "peoplemover" is a single token → stage-2 fails (only 1 meaningful token).
+  "peoplemover":                 "tomorrowland transit authority peoplemover",
+
+  // ---- EPCOT World Showcase ----
+  "gran fiesta":                 "gran fiesta tour starring the three caballeros",
+  "three caballeros":            "gran fiesta tour starring the three caballeros",
+
+  // ---- MK Fantasyland ----
+  // "mermaid" alone is a single token → needs alias
+  "mermaid":                     "under the sea journey of the little mermaid",
 };
 
 // ---------------------------------------------------------------------------
@@ -302,4 +376,27 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "tower of terror",        resort: "WDW", expectedKey: "the twilight zone tower of terror" },
   { input: "The Twilight Zone Tower of Terror", resort: "WDW", expectedKey: "the twilight zone tower of terror" },
   { input: "the haunted mansion",    resort: "WDW", expectedKey: "the haunted mansion" }, // exact match in waitMap
+  // --- WDW: figment + new additions ---
+  { input: "figment",               resort: "WDW", expectedKey: "journey into imagination with figment" },
+  { input: "journey into imagination", resort: "WDW", expectedKey: "journey into imagination with figment" },
+  { input: "tron",                  resort: "WDW", expectedKey: "tron lightcycle run" },
+  { input: "tron lightcycle",       resort: "WDW", expectedKey: "tron lightcycle run" },
+  { input: "seven dwarfs",          resort: "WDW", expectedKey: "seven dwarfs mine train" },
+  { input: "pirates",               resort: "WDW", expectedKey: "pirates of the caribbean" },
+  { input: "tiana",                 resort: "WDW", expectedKey: "tianas bayou adventure" },
+  { input: "kali",                  resort: "WDW", expectedKey: "kali river rapids" },
+  { input: "peoplemover",           resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
+  { input: "gran fiesta",           resort: "WDW", expectedKey: "gran fiesta tour starring the three caballeros" },
+  { input: "soarin",                resort: "WDW", expectedKey: "soarin around the world" }, // EPCOT
+  // --- DLR: new additions ---
+  { input: "indy",                  resort: "DLR", expectedKey: "indiana jones adventure" },
+  { input: "matterhorn",            resort: "DLR", expectedKey: "matterhorn bobsleds" },
+  { input: "tiana",                 resort: "DLR", expectedKey: "tianas bayou adventure" },
+  { input: "peter pan",             resort: "DLR", expectedKey: "peter pans flight" },
+  { input: "snow white",            resort: "DLR", expectedKey: "snow whites enchanted wish" },
+  { input: "mr toad",               resort: "DLR", expectedKey: "mr toads wild ride" },
+  { input: "pinocchio",             resort: "DLR", expectedKey: "pinocchios daring journey" },
+  { input: "roger rabbit",          resort: "DLR", expectedKey: "roger rabbits car toon spin" },
+  { input: "pooh",                  resort: "DLR", expectedKey: "the many adventures of winnie the pooh" },
+  { input: "mermaid",               resort: "DLR", expectedKey: "the little mermaid ariels undersea adventure" },
 ];
