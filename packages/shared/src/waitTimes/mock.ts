@@ -617,6 +617,12 @@ const EPCOT_RIDES: RideDef[] = [
 
   // ---- World Celebration ----
   {
+    id: "epcot-spaceship-earth",
+    name: "Spaceship Earth",
+    land: "World Celebration",
+    waitMins: 20,
+  },
+  {
     id: "epcot-figment",
     name: "Journey Into Imagination With Figment",
     land: "World Celebration",
@@ -775,7 +781,7 @@ const AK_RIDES: RideDef[] = [
  * DLR — Disneyland Park:               35 rides
  * DLR — Disney California Adventure:   19 rides
  * WDW — Magic Kingdom:                 22 rides
- * WDW — EPCOT:                          9 rides
+ * WDW — EPCOT:                         10 rides
  * WDW — Hollywood Studios:              9 rides
  * WDW — Animal Kingdom:                 6 rides
  */

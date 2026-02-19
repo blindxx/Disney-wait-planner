@@ -337,6 +337,8 @@ const ALIASES_WDW = new Map<string, string>([
   ["star tours the adventures continue",         "star tours - the adventures continue"],
   // Kali River Rapids (Animal Kingdom) — common shortening
   ["kali river",                                 "kali river rapids"],
+  // Magic Carpets of Aladdin (Magic Kingdom) — API includes leading "The"
+  ["the magic carpets of aladdin",               "magic carpets of aladdin"],
 ]);
 
 /**
