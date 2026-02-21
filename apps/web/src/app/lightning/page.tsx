@@ -517,16 +517,10 @@ function ReservationCard({
   const countdown = showCountdown ? formatCountdown(item, now) : "";
 
   // Compute live wait badge — same logic as My Plans (getWaitBadgeProps).
-  // Prefix "Live: " on operating waits so it reads distinctly from the countdown.
+  // Status overrides minutes: Down/Closed show status label, operating shows "X min".
   const liveBadge = (() => {
     if (!waitEntry) return null;
-    const badge = getWaitBadgeProps({ status: waitEntry.status, waitMins: waitEntry.waitMins });
-    if (!badge) return null;
-    const label =
-      badge.label === "Down" || badge.label === "Closed"
-        ? badge.label
-        : `Live: ${badge.label}`;
-    return { label, style: badge.style };
+    return getWaitBadgeProps({ status: waitEntry.status, waitMins: waitEntry.waitMins });
   })();
 
   const borderColor =
@@ -593,6 +587,25 @@ function ReservationCard({
               </span>
             )}
           </div>
+
+          {/* Canonical attraction name — shown when it differs from user input and a match exists */}
+          {waitEntry &&
+            normalizeKey(waitEntry.canonicalName) !== normalizeKey(item.name) &&
+            (waitEntry.status === "DOWN" || waitEntry.status === "CLOSED" || waitEntry.waitMins != null) && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: "#9ca3af",
+                fontStyle: "italic",
+                lineHeight: 1.3,
+                marginTop: "0.1rem",
+                marginBottom: "0.25rem",
+                wordBreak: "break-word",
+              }}
+            >
+              {waitEntry.canonicalName}
+            </div>
+          )}
 
           {/* Time window */}
           <div
