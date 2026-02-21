@@ -1,12 +1,36 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   parseAmPmToken,
   parse24hToken,
   parseMilToken,
   formatSingleTime,
 } from "@/lib/timeUtils";
+import {
+  mockAttractionWaits,
+  type AttractionWait,
+  type ResortId,
+} from "@disney-wait-planner/shared";
+import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import {
+  normalizeKey,
+  ALIASES_DLR,
+  ALIASES_WDW,
+  lookupWait,
+  type WaitEntry,
+} from "@/lib/plansMatching";
+import { getWaitBadgeProps } from "@/lib/waitBadge";
+
+// ===== RESORT CONSTANTS =====
+
+/** Shared with My Plans — both pages read/write the same key for consistency. */
+const STORAGE_RESORT_KEY = "dwp.selectedResort";
+
+const RESORT_LABELS: Record<ResortId, string> = {
+  DLR: "Disneyland Resort",
+  WDW: "Walt Disney World",
+};
 
 // ===== TYPES =====
 
@@ -174,6 +198,12 @@ export default function LightningPage() {
   // Shared "now" state drives all countdowns — one interval for the whole page
   const [now, setNow] = useState(nowInMinutes);
 
+  // Resort selection — shared localStorage key with My Plans for consistency
+  const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
+
+  // Live attraction wait data for the selected resort (all parks merged)
+  const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
+
   // Load persisted reservations on mount
   useEffect(() => {
     setItems(loadFromStorage());
@@ -192,6 +222,47 @@ export default function LightningPage() {
     }, 10_000);
     return () => clearInterval(id);
   }, []);
+
+  // Hydrate selectedResort from localStorage on client mount (runs once)
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(STORAGE_RESORT_KEY);
+      if (v === "DLR" || v === "WDW") setSelectedResort(v);
+    } catch {}
+  }, []);
+
+  // Persist selectedResort whenever it changes
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
+  }, [selectedResort]);
+
+  // Fetch live wait data for all parks in the selected resort.
+  // Shares the same TTL cache as My Plans / Wait Times — no second fetch path.
+  useEffect(() => {
+    if (!LIVE_ENABLED) return;
+    let cancelled = false;
+    getWaitDatasetForResort(selectedResort).then(({ data }) => {
+      if (!cancelled) setLiveAttractions(data);
+    });
+    return () => { cancelled = true; };
+  }, [selectedResort]);
+
+  // Build a deterministic wait lookup map scoped to selectedResort.
+  // Identical pattern to My Plans — resort-scoped, park-aware (no cross-park collisions).
+  const waitMap = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const map = new Map<string, WaitEntry>();
+    for (const a of source) {
+      if (a.resortId !== selectedResort) continue;
+      map.set(normalizeKey(a.name), {
+        status: a.status,
+        waitMins: a.waitMins,
+        canonicalName: a.name,
+      });
+    }
+    return map;
+  }, [selectedResort, liveAttractions]);
 
   // Derived form validity
   const nameValid = rideName.trim().length > 0;
@@ -364,6 +435,35 @@ export default function LightningPage() {
         </button>
       </div>
 
+      {/* ── Resort Toggle — scopes live wait overlay to selected resort ── */}
+      <div style={{ display: "flex", gap: 8, marginBottom: "0.5rem" }}>
+        {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
+          <button
+            key={resortId}
+            onClick={() => setSelectedResort(resortId)}
+            style={{
+              flex: "1 1 0%",
+              padding: "8px 6px",
+              borderRadius: 8,
+              border: `1px solid ${selectedResort === resortId ? "#1e3a5f" : "#d1d5db"}`,
+              cursor: "pointer",
+              fontWeight: 600,
+              fontSize: 13,
+              lineHeight: 1.2,
+              textAlign: "center",
+              backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
+              color: selectedResort === resortId ? "#fff" : "#374151",
+              minHeight: 36,
+            }}
+          >
+            {RESORT_LABELS[resortId]}
+          </button>
+        ))}
+      </div>
+      <p style={{ fontSize: "0.7rem", color: "#9ca3af", marginBottom: "0.75rem" }}>
+        Wait overlay: {selectedResort}
+      </p>
+
       {/* ── Reservation List ── */}
       {!loaded ? null : items.length === 0 ? (
         <p
@@ -380,6 +480,7 @@ export default function LightningPage() {
         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
           {sortedItems(items, now).map((item) => {
             const bucket = getBucket(item, now);
+            const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
             return (
               <ReservationCard
                 key={item.id}
@@ -387,6 +488,7 @@ export default function LightningPage() {
                 bucket={bucket}
                 now={now}
                 onRemove={() => handleRemove(item.id)}
+                waitEntry={lookupWait(item.name, waitMap, aliases)}
               />
             );
           })}
@@ -403,14 +505,23 @@ function ReservationCard({
   bucket,
   now,
   onRemove,
+  waitEntry,
 }: {
   item: LightningItem;
   bucket: Bucket;
   now: number;
   onRemove: () => void;
+  waitEntry: WaitEntry | null;
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
+
+  // Compute live wait badge — same logic as My Plans (getWaitBadgeProps).
+  // Status overrides minutes: Down/Closed show status label, operating shows "X min".
+  const liveBadge = (() => {
+    if (!waitEntry) return null;
+    return getWaitBadgeProps({ status: waitEntry.status, waitMins: waitEntry.waitMins });
+  })();
 
   const borderColor =
     bucket === "now"
@@ -444,18 +555,57 @@ function ReservationCard({
       >
         {/* Left: ride info + status */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Ride name */}
-          <div
-            style={{
-              fontWeight: 600,
-              fontSize: "1.05rem",
-              color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
-              marginBottom: "0.2rem",
-              wordBreak: "break-word",
-            }}
-          >
-            {item.name}
+          {/* Ride name + live wait badge */}
+          <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.2rem" }}>
+            <span
+              style={{
+                fontWeight: 600,
+                fontSize: "1.05rem",
+                color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
+                wordBreak: "break-word",
+              }}
+            >
+              {item.name}
+            </span>
+            {liveBadge && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "0.7rem",
+                  fontWeight: 600,
+                  padding: "0.15rem 0.45rem",
+                  borderRadius: 4,
+                  whiteSpace: "nowrap",
+                  lineHeight: 1.4,
+                  flexShrink: 0,
+                  ...liveBadge.style,
+                }}
+              >
+                {liveBadge.label}
+              </span>
+            )}
           </div>
+
+          {/* Canonical attraction name — shown when it differs from user input and a match exists */}
+          {waitEntry &&
+            normalizeKey(waitEntry.canonicalName) !== normalizeKey(item.name) &&
+            (waitEntry.status === "DOWN" || waitEntry.status === "CLOSED" || waitEntry.waitMins != null) && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: "#9ca3af",
+                fontStyle: "italic",
+                lineHeight: 1.3,
+                marginTop: "0.1rem",
+                marginBottom: "0.25rem",
+                wordBreak: "break-word",
+              }}
+            >
+              {waitEntry.canonicalName}
+            </div>
+          )}
 
           {/* Time window */}
           <div

@@ -140,10 +140,9 @@ export const ALIASES_DLR: Record<string, string> = {
   "webslingers":                 "web slingers a spider man adventure",
   "spider man":                  "web slingers a spider man adventure",
 
-  // ---- Soarin' Around the World (DCA) ----
+  // ---- Soarin' Over California (DCA) ----
   // normalizeKey strips apostrophe: "soarin'" → "soarin"
-  "soarin":                      "soarin around the world",
-  "soarin over california":      "soarin around the world", // legacy DCA name
+  "soarin":                      "soarin over california",
 
   // ---- Tiana's Bayou Adventure (DL Bayou Country) — cross-resort parity ----
   // Single token "tiana" cannot reach stage-2 (≥2 tokens required); alias needed.
@@ -407,9 +406,9 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "rsr",                    resort: "DLR", expectedKey: "radiator springs racers" },
   { input: "web slinger",            resort: "DLR", expectedKey: "web slingers a spider man adventure" },
   { input: "webslingers",            resort: "DLR", expectedKey: "web slingers a spider man adventure" },
-  { input: "soarin",                 resort: "DLR", expectedKey: "soarin around the world" },
-  { input: "soarin'",                resort: "DLR", expectedKey: "soarin around the world" }, // apostrophe stripped
-  { input: "soarin over california", resort: "DLR", expectedKey: "soarin around the world" }, // legacy name
+  { input: "soarin",                 resort: "DLR", expectedKey: "soarin over california" },
+  { input: "soarin'",                resort: "DLR", expectedKey: "soarin over california" }, // apostrophe stripped
+  { input: "soarin over california", resort: "DLR", expectedKey: "soarin over california" }, // stage-1 exact match
   // WDW
   { input: "everest",                resort: "WDW", expectedKey: "expedition everest" },
   { input: "expedition",             resort: "WDW", expectedKey: "expedition everest" },
