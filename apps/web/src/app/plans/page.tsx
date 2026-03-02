@@ -756,8 +756,8 @@ export default function PlansPage() {
           display: flex;
           align-items: center;
           justify-content: center;
-          min-width: 36px;
-          min-height: 36px;
+          min-width: 44px;
+          min-height: 44px;
           font-size: 1rem;
           color: #6b7280;
           padding: 0;

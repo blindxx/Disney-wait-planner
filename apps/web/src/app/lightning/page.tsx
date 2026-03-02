@@ -947,17 +947,17 @@ function ReservationCard({
             >
               ✏
             </button>
-            {/* Remove */}
+            {/* Delete — trash icon, matches Plans danger icon-btn style */}
             <button
               onClick={onRemove}
               aria-label={`Remove ${item.name}`}
               style={{
                 background: "none",
-                border: "1.5px solid #e5e7eb",
-                borderRadius: 8,
+                border: "1px solid #fca5a5",
+                borderRadius: 6,
                 padding: 0,
-                fontSize: "0.85rem",
-                color: "#9ca3af",
+                fontSize: "1rem",
+                color: "#dc2626",
                 cursor: "pointer",
                 minWidth: 44,
                 minHeight: 44,
@@ -966,7 +966,7 @@ function ReservationCard({
                 justifyContent: "center",
               }}
             >
-              ✕
+              🗑
             </button>
           </div>
         )}
