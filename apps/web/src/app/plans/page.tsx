@@ -20,6 +20,7 @@ import {
   ALIASES_WDW,
   lookupWait,
 } from "@/lib/plansMatching";
+import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 
 type PlanItem = {
   id: string;
@@ -274,6 +275,12 @@ export default function PlansPage() {
     }
     return map;
   }, [selectedResort, liveAttractions]);
+
+  // Canonical attraction names for autocomplete in the add/edit modal.
+  const suggestions = useMemo(
+    () => Array.from(waitMap.values()).map((v) => v.canonicalName),
+    [waitMap]
+  );
 
   // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
@@ -1264,16 +1271,16 @@ export default function PlansPage() {
                       Activity name{" "}
                       <span style={{ color: "#dc2626" }}>*</span>
                     </label>
-                    <input
+                    <AttractionSuggestInput
                       id="plan-name"
-                      className={`form-input${formError ? " error" : ""}`}
-                      type="text"
-                      placeholder="e.g. Space Mountain"
                       value={formName}
-                      onChange={(e) => {
-                        setFormName(e.target.value);
+                      onChange={(v) => {
+                        setFormName(v);
                         if (formError) setFormError("");
                       }}
+                      suggestions={suggestions}
+                      placeholder="e.g. Space Mountain"
+                      inputClassName={`form-input${formError ? " error" : ""}`}
                       autoFocus
                     />
                     {formError && <p className="form-error">{formError}</p>}

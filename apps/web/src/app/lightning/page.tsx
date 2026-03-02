@@ -21,6 +21,7 @@ import {
   type WaitEntry,
 } from "@/lib/plansMatching";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
+import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 
 // ===== RESORT CONSTANTS =====
 
@@ -264,6 +265,37 @@ export default function LightningPage() {
     return map;
   }, [selectedResort, liveAttractions]);
 
+  // Inline edit state — tracks which card is being edited
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+
+  // Canonical attraction names for autocomplete, scoped to selectedResort.
+  const suggestions = useMemo(
+    () => Array.from(waitMap.values()).map((v) => v.canonicalName),
+    [waitMap]
+  );
+
+  function handleStartEdit(item: LightningItem) {
+    setEditingId(item.id);
+    setEditingName(item.name);
+  }
+
+  function handleSaveEdit() {
+    if (!editingId || !editingName.trim()) return;
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === editingId ? { ...it, name: editingName.trim() } : it
+      )
+    );
+    setEditingId(null);
+    setEditingName("");
+  }
+
+  function handleCancelEdit() {
+    setEditingId(null);
+    setEditingName("");
+  }
+
   // Derived form validity
   const nameValid = rideName.trim().length > 0;
   const startNorm = normalizeTimeInput(startRaw);
@@ -363,13 +395,13 @@ export default function LightningPage() {
           <label style={labelStyle}>
             Ride name <span style={{ color: "#dc2626" }}>*</span>
           </label>
-          <input
-            type="text"
+          <AttractionSuggestInput
             value={rideName}
-            onChange={(e) => setRideName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && formValid) handleAdd(); }}
+            onChange={setRideName}
+            suggestions={suggestions}
             placeholder="e.g. Space Mountain"
-            style={inputStyle()}
+            inputStyle={inputStyle()}
+            onKeyDown={(e) => { if (e.key === "Enter" && formValid) handleAdd(); }}
           />
         </div>
 
@@ -489,6 +521,13 @@ export default function LightningPage() {
                 now={now}
                 onRemove={() => handleRemove(item.id)}
                 waitEntry={lookupWait(item.name, waitMap, aliases)}
+                isEditing={editingId === item.id}
+                editingName={editingName}
+                onEditNameChange={setEditingName}
+                onEdit={() => handleStartEdit(item)}
+                onEditSave={handleSaveEdit}
+                onEditCancel={handleCancelEdit}
+                suggestions={suggestions}
               />
             );
           })}
@@ -506,12 +545,26 @@ function ReservationCard({
   now,
   onRemove,
   waitEntry,
+  isEditing,
+  editingName,
+  onEditNameChange,
+  onEdit,
+  onEditSave,
+  onEditCancel,
+  suggestions,
 }: {
   item: LightningItem;
   bucket: Bucket;
   now: number;
   onRemove: () => void;
   waitEntry: WaitEntry | null;
+  isEditing: boolean;
+  editingName: string;
+  onEditNameChange: (v: string) => void;
+  onEdit: () => void;
+  onEditSave: () => void;
+  onEditCancel: () => void;
+  suggestions: string[];
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
@@ -555,38 +608,100 @@ function ReservationCard({
       >
         {/* Left: ride info + status */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Ride name + live wait badge */}
-          <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.2rem" }}>
-            <span
-              style={{
-                fontWeight: 600,
-                fontSize: "1.05rem",
-                color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
-                wordBreak: "break-word",
-              }}
-            >
-              {item.name}
-            </span>
-            {liveBadge && (
+          {/* Ride name + live wait badge — or inline edit input */}
+          {isEditing ? (
+            <div style={{ marginBottom: "0.5rem" }}>
+              <AttractionSuggestInput
+                value={editingName}
+                onChange={onEditNameChange}
+                suggestions={suggestions}
+                placeholder="Ride name"
+                inputStyle={{
+                  width: "100%",
+                  padding: "0.5rem 0.65rem",
+                  fontSize: "1rem",
+                  borderRadius: 8,
+                  border: "1.5px solid #2563eb",
+                  outline: "none",
+                  boxSizing: "border-box",
+                  background: "#fff",
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onEditSave();
+                  if (e.key === "Escape") onEditCancel();
+                }}
+                autoFocus
+              />
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <button
+                  onClick={onEditSave}
+                  disabled={!editingName.trim()}
+                  style={{
+                    flex: 1,
+                    padding: "0.4rem 0.75rem",
+                    fontSize: "0.85rem",
+                    fontWeight: 600,
+                    borderRadius: 7,
+                    border: "none",
+                    background: editingName.trim() ? "#1a1a2e" : "#e5e7eb",
+                    color: editingName.trim() ? "#fff" : "#9ca3af",
+                    cursor: editingName.trim() ? "pointer" : "not-allowed",
+                    minHeight: 36,
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  onClick={onEditCancel}
+                  style={{
+                    flex: 1,
+                    padding: "0.4rem 0.75rem",
+                    fontSize: "0.85rem",
+                    borderRadius: 7,
+                    border: "1.5px solid #e5e7eb",
+                    background: "none",
+                    color: "#6b7280",
+                    cursor: "pointer",
+                    minHeight: 36,
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.2rem" }}>
               <span
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: "0.7rem",
                   fontWeight: 600,
-                  padding: "0.15rem 0.45rem",
-                  borderRadius: 4,
-                  whiteSpace: "nowrap",
-                  lineHeight: 1.4,
-                  flexShrink: 0,
-                  ...liveBadge.style,
+                  fontSize: "1.05rem",
+                  color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
+                  wordBreak: "break-word",
                 }}
               >
-                {liveBadge.label}
+                {item.name}
               </span>
-            )}
-          </div>
+              {liveBadge && (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.7rem",
+                    fontWeight: 600,
+                    padding: "0.15rem 0.45rem",
+                    borderRadius: 4,
+                    whiteSpace: "nowrap",
+                    lineHeight: 1.4,
+                    flexShrink: 0,
+                    ...liveBadge.style,
+                  }}
+                >
+                  {liveBadge.label}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Canonical attraction name — shown when it differs from user input and a match exists */}
           {waitEntry &&
@@ -668,28 +783,53 @@ function ReservationCard({
           )}
         </div>
 
-        {/* Remove button */}
-        <button
-          onClick={onRemove}
-          aria-label={`Remove ${item.name}`}
-          style={{
-            flexShrink: 0,
-            background: "none",
-            border: "1.5px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "0.4rem 0.65rem",
-            fontSize: "0.8rem",
-            color: "#9ca3af",
-            cursor: "pointer",
-            minWidth: 44,
-            minHeight: 44,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          ✕
-        </button>
+        {/* Edit + Remove buttons */}
+        {!isEditing && (
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {/* Edit — pencil-in-square style, 44px tap target */}
+            <button
+              onClick={onEdit}
+              aria-label={`Edit ${item.name}`}
+              style={{
+                background: "none",
+                border: "1.5px solid #e5e7eb",
+                borderRadius: 8,
+                padding: 0,
+                fontSize: "1rem",
+                color: "#6b7280",
+                cursor: "pointer",
+                minWidth: 44,
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              ✏
+            </button>
+            {/* Remove */}
+            <button
+              onClick={onRemove}
+              aria-label={`Remove ${item.name}`}
+              style={{
+                background: "none",
+                border: "1.5px solid #e5e7eb",
+                borderRadius: 8,
+                padding: 0,
+                fontSize: "0.85rem",
+                color: "#9ca3af",
+                cursor: "pointer",
+                minWidth: 44,
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
