@@ -10,6 +10,7 @@ import {
 import {
   mockAttractionWaits,
   type AttractionWait,
+  type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
@@ -31,6 +32,16 @@ const STORAGE_RESORT_KEY = "dwp.selectedResort";
 const RESORT_LABELS: Record<ResortId, string> = {
   DLR: "Disneyland Resort",
   WDW: "Walt Disney World",
+};
+
+/** Friendly park name for the park-line on reservation cards. */
+const PARK_LABELS: Record<ParkId, string> = {
+  disneyland: "Disneyland",
+  dca: "Disney California Adventure",
+  mk: "Magic Kingdom",
+  epcot: "EPCOT",
+  hs: "Hollywood Studios",
+  ak: "Animal Kingdom",
 };
 
 // ===== TYPES =====
@@ -265,9 +276,26 @@ export default function LightningPage() {
     return map;
   }, [selectedResort, liveAttractions]);
 
-  // Inline edit state — tracks which card is being edited
+  // Park name lookup: canonical normalized name → friendly park label.
+  // Built from the same source as waitMap — no extra fetch.
+  const parkMap = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const map = new Map<string, string>();
+    for (const a of source) {
+      if (a.resortId !== selectedResort) continue;
+      map.set(normalizeKey(a.name), PARK_LABELS[a.parkId] ?? a.parkId);
+    }
+    return map;
+  }, [selectedResort, liveAttractions]);
+
+  // Inline edit state — tracks which card is being edited (name + start/end times)
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
+  const [editingStart, setEditingStart] = useState("");
+  const [editingEnd, setEditingEnd] = useState("");
+  const [editingStartErr, setEditingStartErr] = useState("");
+  const [editingEndErr, setEditingEndErr] = useState("");
 
   // Canonical attraction names for autocomplete, scoped to selectedResort.
   const suggestions = useMemo(
@@ -278,22 +306,47 @@ export default function LightningPage() {
   function handleStartEdit(item: LightningItem) {
     setEditingId(item.id);
     setEditingName(item.name);
+    // Prefill times in 12h format for friendly editing (stored as 24h, displayed as 12h)
+    setEditingStart(item.startTime ? formatSingleTime(item.startTime) : "");
+    setEditingEnd(item.endTime ? formatSingleTime(item.endTime) : "");
+    setEditingStartErr("");
+    setEditingEndErr("");
   }
 
   function handleSaveEdit() {
     if (!editingId || !editingName.trim()) return;
+    const normStart = normalizeTimeInput(editingStart);
+    if (!normStart) {
+      setEditingStartErr("Invalid time. Try: 3pm, 3:30 PM, 15:30, or 1530");
+      return;
+    }
+    const normEnd = editingEnd.trim() ? normalizeTimeInput(editingEnd) : "";
+    if (normEnd === null) {
+      setEditingEndErr("Invalid time. Try: 4pm, 4:30 PM, 16:30, or 1630");
+      return;
+    }
     setItems((prev) =>
       prev.map((it) =>
-        it.id === editingId ? { ...it, name: editingName.trim() } : it
+        it.id === editingId
+          ? { ...it, name: editingName.trim(), startTime: normStart, endTime: normEnd }
+          : it
       )
     );
     setEditingId(null);
     setEditingName("");
+    setEditingStart("");
+    setEditingEnd("");
+    setEditingStartErr("");
+    setEditingEndErr("");
   }
 
   function handleCancelEdit() {
     setEditingId(null);
     setEditingName("");
+    setEditingStart("");
+    setEditingEnd("");
+    setEditingStartErr("");
+    setEditingEndErr("");
   }
 
   // Derived form validity
@@ -513,6 +566,10 @@ export default function LightningPage() {
           {sortedItems(items, now).map((item) => {
             const bucket = getBucket(item, now);
             const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+            const waitEntry = lookupWait(item.name, waitMap, aliases);
+            const parkLabel = waitEntry
+              ? (parkMap.get(normalizeKey(waitEntry.canonicalName)) ?? null)
+              : null;
             return (
               <ReservationCard
                 key={item.id}
@@ -520,10 +577,17 @@ export default function LightningPage() {
                 bucket={bucket}
                 now={now}
                 onRemove={() => handleRemove(item.id)}
-                waitEntry={lookupWait(item.name, waitMap, aliases)}
+                waitEntry={waitEntry}
+                parkLabel={parkLabel}
                 isEditing={editingId === item.id}
                 editingName={editingName}
+                editingStart={editingStart}
+                editingEnd={editingEnd}
+                editingStartErr={editingStartErr}
+                editingEndErr={editingEndErr}
                 onEditNameChange={setEditingName}
+                onEditStartChange={(v) => { setEditingStart(v); setEditingStartErr(""); }}
+                onEditEndChange={(v) => { setEditingEnd(v); setEditingEndErr(""); }}
                 onEdit={() => handleStartEdit(item)}
                 onEditSave={handleSaveEdit}
                 onEditCancel={handleCancelEdit}
@@ -545,9 +609,16 @@ function ReservationCard({
   now,
   onRemove,
   waitEntry,
+  parkLabel,
   isEditing,
   editingName,
+  editingStart,
+  editingEnd,
+  editingStartErr,
+  editingEndErr,
   onEditNameChange,
+  onEditStartChange,
+  onEditEndChange,
   onEdit,
   onEditSave,
   onEditCancel,
@@ -558,9 +629,16 @@ function ReservationCard({
   now: number;
   onRemove: () => void;
   waitEntry: WaitEntry | null;
+  parkLabel: string | null;
   isEditing: boolean;
   editingName: string;
+  editingStart: string;
+  editingEnd: string;
+  editingStartErr: string;
+  editingEndErr: string;
   onEditNameChange: (v: string) => void;
+  onEditStartChange: (v: string) => void;
+  onEditEndChange: (v: string) => void;
   onEdit: () => void;
   onEditSave: () => void;
   onEditCancel: () => void;
@@ -608,9 +686,10 @@ function ReservationCard({
       >
         {/* Left: ride info + status */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Ride name + live wait badge — or inline edit input */}
+          {/* Ride name + live wait badge — or inline edit panel */}
           {isEditing ? (
             <div style={{ marginBottom: "0.5rem" }}>
+              {/* Attraction name */}
               <AttractionSuggestInput
                 value={editingName}
                 onChange={onEditNameChange}
@@ -626,13 +705,58 @@ function ReservationCard({
                   boxSizing: "border-box",
                   background: "#fff",
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onEditSave();
-                  if (e.key === "Escape") onEditCancel();
-                }}
+                onKeyDown={(e) => { if (e.key === "Escape") onEditCancel(); }}
                 autoFocus
               />
-              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              {/* Start time (prefilled in 12h, accepts any format) */}
+              <div style={{ marginTop: 6 }}>
+                <input
+                  type="text"
+                  value={editingStart}
+                  onChange={(e) => onEditStartChange(e.target.value)}
+                  placeholder="Start time (e.g. 3:00 PM, 15:00)"
+                  style={{
+                    width: "100%",
+                    padding: "0.45rem 0.65rem",
+                    fontSize: "0.9rem",
+                    borderRadius: 8,
+                    border: `1.5px solid ${editingStartErr ? "#dc2626" : "#d1d5db"}`,
+                    outline: "none",
+                    boxSizing: "border-box",
+                    background: "#fff",
+                  }}
+                />
+                {editingStartErr && (
+                  <p style={{ color: "#dc2626", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
+                    {editingStartErr}
+                  </p>
+                )}
+              </div>
+              {/* End time (optional) */}
+              <div style={{ marginTop: 6 }}>
+                <input
+                  type="text"
+                  value={editingEnd}
+                  onChange={(e) => onEditEndChange(e.target.value)}
+                  placeholder="End time (optional)"
+                  style={{
+                    width: "100%",
+                    padding: "0.45rem 0.65rem",
+                    fontSize: "0.9rem",
+                    borderRadius: 8,
+                    border: `1.5px solid ${editingEndErr ? "#dc2626" : "#d1d5db"}`,
+                    outline: "none",
+                    boxSizing: "border-box",
+                    background: "#fff",
+                  }}
+                />
+                {editingEndErr && (
+                  <p style={{ color: "#dc2626", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
+                    {editingEndErr}
+                  </p>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
                 <button
                   onClick={onEditSave}
                   disabled={!editingName.trim()}
@@ -703,23 +827,39 @@ function ReservationCard({
             </div>
           )}
 
-          {/* Canonical attraction name — shown when it differs from user input and a match exists */}
+          {/* Canonical attraction name + park line — only when a match exists */}
           {waitEntry &&
-            normalizeKey(waitEntry.canonicalName) !== normalizeKey(item.name) &&
             (waitEntry.status === "DOWN" || waitEntry.status === "CLOSED" || waitEntry.waitMins != null) && (
-            <div
-              style={{
-                fontSize: "0.7rem",
-                color: "#9ca3af",
-                fontStyle: "italic",
-                lineHeight: 1.3,
-                marginTop: "0.1rem",
-                marginBottom: "0.25rem",
-                wordBreak: "break-word",
-              }}
-            >
-              {waitEntry.canonicalName}
-            </div>
+            <>
+              {normalizeKey(waitEntry.canonicalName) !== normalizeKey(item.name) && (
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "#9ca3af",
+                    fontStyle: "italic",
+                    lineHeight: 1.3,
+                    marginTop: "0.1rem",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {waitEntry.canonicalName}
+                </div>
+              )}
+              {parkLabel && (
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "#9ca3af",
+                    lineHeight: 1.3,
+                    marginTop: "0.1rem",
+                    marginBottom: "0.15rem",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {parkLabel}
+                </div>
+              )}
+            </>
           )}
 
           {/* Time window */}

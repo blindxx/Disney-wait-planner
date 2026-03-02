@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { type AttractionWait, type ParkId } from "@disney-wait-planner/shared";
+import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
 
@@ -24,11 +24,28 @@ import { getWaitTextColor } from "../lib/waitBadge";
 // CONSTANTS
 // ============================================
 
-// Home page is DLR-only; typed narrowly to avoid requiring WDW park entries
-const PARK_NAMES: Record<"disneyland" | "dca", string> = {
-  disneyland: "Disneyland",
-  dca: "California Adventure",
+/** Shared resort key with Lightning + Plans pages for consistent persistence. */
+const STORAGE_RESORT_KEY = "dwp.selectedResort";
+
+const RESORT_LABELS: Record<ResortId, string> = {
+  DLR: "Disneyland Resort",
+  WDW: "Walt Disney World",
 };
+
+/** Parks per resort with friendly display names. */
+const RESORT_PARKS: Record<ResortId, { id: ParkId; label: string }[]> = {
+  DLR: [
+    { id: "disneyland", label: "Disneyland" },
+    { id: "dca", label: "California Adventure" },
+  ],
+  WDW: [
+    { id: "mk", label: "Magic Kingdom" },
+    { id: "epcot", label: "EPCOT" },
+    { id: "hs", label: "Hollywood Studios" },
+    { id: "ak", label: "Animal Kingdom" },
+  ],
+};
+
 
 const BEST_OPTIONS_COUNT = 5;
 
@@ -168,16 +185,41 @@ const RESPONSIVE_CSS = `
 // ============================================
 
 export default function TodayPage() {
+  const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
   const [currentTime, setCurrentTime] = useState("");
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
-  // Ref always holds the latest park value so refreshData stays stable
-  // (avoids re-registering listeners on every park switch).
+  // Refs for the latest resort+park so refreshData stays stable.
+  const selectedResortRef = useRef(selectedResort);
   const selectedParkRef = useRef(selectedPark);
+  useEffect(() => { selectedResortRef.current = selectedResort; }, [selectedResort]);
   useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
+
+  // Hydrate resort from localStorage on mount (shared with Lightning + Plans).
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(STORAGE_RESORT_KEY);
+      if (v === "DLR" || v === "WDW") {
+        setSelectedResort(v);
+        // Set default park for the stored resort
+        setSelectedPark(RESORT_PARKS[v][0].id);
+      }
+    } catch {}
+  }, []);
+
+  // Persist resort whenever it changes.
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
+  }, [selectedResort]);
+
+  // When resort changes, switch park to first park of that resort.
+  function handleResortChange(resort: ResortId) {
+    setSelectedResort(resort);
+    setSelectedPark(RESORT_PARKS[resort][0].id);
+  }
 
   // Update current time every minute
   useEffect(() => {
@@ -196,11 +238,10 @@ export default function TodayPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch wait data for the selected DLR park on mount and park switch.
-  // getWaitDataset returns live data when enabled, or mock on any failure.
+  // Fetch wait data for the selected resort+park on mount and on change.
   useEffect(() => {
     let cancelled = false;
-    getWaitDataset({ resortId: "DLR", parkId: selectedPark }).then(
+    getWaitDataset({ resortId: selectedResort, parkId: selectedPark }).then(
       ({ data, dataSource: ds, lastUpdated: lu }) => {
         if (!cancelled) {
           setAttractions(data);
@@ -210,19 +251,18 @@ export default function TodayPage() {
       },
     );
     return () => { cancelled = true; };
-  }, [selectedPark]);
+  }, [selectedResort, selectedPark]);
 
-  // Silent refresh — reads current park from ref; does not set any loading
-  // state so the UI never clears or flickers during background refreshes.
+  // Silent refresh — reads current resort+park from refs.
   const refreshData = useCallback(() => {
-    getWaitDataset({ resortId: "DLR", parkId: selectedParkRef.current }).then(
+    getWaitDataset({ resortId: selectedResortRef.current, parkId: selectedParkRef.current }).then(
       ({ data, dataSource: ds, lastUpdated: lu }) => {
         setAttractions(data);
         setDataSource(ds);
         setLastUpdated(lu);
       },
     );
-  }, []); // stable — park read from ref
+  }, []); // stable — resort+park read from refs
 
   // Phase 6.3 — Tab focus refresh (primary trigger).
   // Fires once when the user returns to this tab; TTL cache in getWaitDataset
@@ -288,9 +328,33 @@ export default function TodayPage() {
           Now: {currentTime}
         </div>
 
+        {/* Resort Selector */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resort) => (
+            <button
+              key={resort}
+              onClick={() => handleResortChange(resort)}
+              style={{
+                flex: 1,
+                padding: "8px 6px",
+                borderRadius: 8,
+                border: `1px solid ${selectedResort === resort ? "#1e3a5f" : "#d1d5db"}`,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 13,
+                backgroundColor: selectedResort === resort ? "#1e3a5f" : "#f9fafb",
+                color: selectedResort === resort ? "#fff" : "#374151",
+                minHeight: 36,
+              }}
+            >
+              {RESORT_LABELS[resort]}
+            </button>
+          ))}
+        </div>
+
         {/* Park Selector */}
         <div className="park-selector">
-          {(Object.keys(PARK_NAMES) as ("disneyland" | "dca")[]).map((parkId) => (
+          {RESORT_PARKS[selectedResort].map(({ id: parkId, label }) => (
             <button
               key={parkId}
               className="park-btn"
@@ -301,7 +365,7 @@ export default function TodayPage() {
                 color: selectedPark === parkId ? "#fff" : "#374151",
               }}
             >
-              {PARK_NAMES[parkId]}
+              {label}
             </button>
           ))}
         </div>

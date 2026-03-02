@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from "react";
 import {
   mockAttractionWaits,
   type AttractionWait,
+  type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
 import {
@@ -188,6 +189,16 @@ const RESORT_LABELS: Record<ResortId, string> = {
   WDW: "Walt Disney World",
 };
 
+/** Friendly park name for the park-line display on plan cards. */
+const PARK_LABELS: Record<ParkId, string> = {
+  disneyland: "Disneyland",
+  dca: "Disney California Adventure",
+  mk: "Magic Kingdom",
+  epcot: "EPCOT",
+  hs: "Hollywood Studios",
+  ak: "Animal Kingdom",
+};
+
 // ===== RESORT PERSISTENCE =====
 
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
@@ -276,6 +287,19 @@ export default function PlansPage() {
     return map;
   }, [selectedResort, liveAttractions]);
 
+  // Park name lookup: canonical normalized name → friendly park label.
+  // Built from the same source data as waitMap — no extra fetch.
+  const parkMap = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const map = new Map<string, string>();
+    for (const a of source) {
+      if (a.resortId !== selectedResort) continue;
+      map.set(normalizeKey(a.name), PARK_LABELS[a.parkId] ?? a.parkId);
+    }
+    return map;
+  }, [selectedResort, liveAttractions]);
+
   // Canonical attraction names for autocomplete in the add/edit modal.
   const suggestions = useMemo(
     () => Array.from(waitMap.values()).map((v) => v.canonicalName),
@@ -306,7 +330,9 @@ export default function PlansPage() {
 
   function openEdit(item: PlanItem) {
     setFormName(item.name);
-    setFormTime(item.timeLabel);
+    // Display stored 24h time in friendly 12h format for editing (e.g. "15:00-16:00" → "3:00 PM–4:00 PM").
+    // normalizeEditTimeLabel on save still normalizes whatever the user types back to storage format.
+    setFormTime(formatTimeLabel(item.timeLabel));
     setFormError("");
     setFormTimeError("");
     setEditTarget(item);
@@ -700,6 +726,13 @@ export default function PlansPage() {
           font-size: 0.7rem;
           color: #9ca3af;
           font-style: italic;
+          line-height: 1.3;
+          margin-top: 0.1rem;
+          word-break: break-word;
+        }
+        .item-park {
+          font-size: 0.7rem;
+          color: #9ca3af;
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
@@ -1113,12 +1146,20 @@ export default function PlansPage() {
                       </div>
                       {DISPLAY_CANONICAL_RIDE_NAME && (() => {
                         const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
-                        if (!w || w.canonicalName === item.name) return null;
+                        if (!w) return null;
                         const hasLabel =
                           w.status === "DOWN" || w.status === "CLOSED" || w.waitMins != null;
                         if (!hasLabel) return null;
+                        const parkLabel = parkMap.get(normalizeKey(w.canonicalName));
                         return (
-                          <div className="item-canonical">{w.canonicalName}</div>
+                          <>
+                            {w.canonicalName !== item.name && (
+                              <div className="item-canonical">{w.canonicalName}</div>
+                            )}
+                            {parkLabel && (
+                              <div className="item-park">{parkLabel}</div>
+                            )}
+                          </>
                         );
                       })()}
                       {item.timeLabel && (
