@@ -952,7 +952,7 @@ function ReservationCard({
                 (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
               }}
             >
-              ✏
+              ✏️
             </button>
             {/* Delete — matches Plans .icon-btn.danger style exactly */}
             <button

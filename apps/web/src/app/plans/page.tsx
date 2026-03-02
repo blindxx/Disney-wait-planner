@@ -849,7 +849,8 @@ export default function PlansPage() {
           /* Flex column so title, scrollable body, and actions stack cleanly */
           display: flex;
           flex-direction: column;
-          overflow: hidden;
+          /* overflow:hidden removed — it was clipping the AttractionSuggestInput
+             absolute dropdown; modal-body handles its own overflow-y:auto scroll */
         }
         @media (min-width: 480px) {
           .modal {
