@@ -7,12 +7,16 @@
  * is never clipped by ancestor overflow:hidden / overflow-y:auto containers
  * (e.g. the Plans modal-body or Lightning card).
  *
+ * Uses useLayoutEffect (not useEffect) to position the dropdown so it is
+ * placed before the browser paints — eliminating the one-frame flash where
+ * the unstyled portal div would briefly appear in layout flow.
+ *
  * Mobile-safe: items use onPointerDown + preventDefault so the blur event
  * fired when the user taps outside the input doesn't dismiss the list before
  * the selection is registered.
  */
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { normalizeKey } from "@/lib/plansMatching";
 
@@ -59,8 +63,9 @@ export function AttractionSuggestInput({
 
   const showDrop = open && filtered.length > 0;
 
-  // Recompute fixed dropdown position whenever it opens or input value changes.
-  useEffect(() => {
+  // Recompute fixed dropdown position synchronously before paint so the portal
+  // div is never rendered unstyled (which caused a one-frame layout-flow flash).
+  useLayoutEffect(() => {
     if (showDrop && inputRef.current) {
       const r = inputRef.current.getBoundingClientRect();
       setDropStyle({

@@ -926,14 +926,14 @@ function ReservationCard({
         {/* Edit + Remove buttons */}
         {!isEditing && (
           <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            {/* Edit — pencil-in-square style, 44px tap target */}
+            {/* Edit — matches Plans .icon-btn style exactly */}
             <button
               onClick={onEdit}
               aria-label={`Edit ${item.name}`}
               style={{
                 background: "none",
-                border: "1.5px solid #e5e7eb",
-                borderRadius: 8,
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
                 padding: 0,
                 fontSize: "1rem",
                 color: "#6b7280",
@@ -943,11 +943,18 @@ function ReservationCard({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
+                transition: "background-color 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "#f9fafb";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
               }}
             >
               ✏
             </button>
-            {/* Delete — trash icon, matches Plans danger icon-btn style */}
+            {/* Delete — matches Plans .icon-btn.danger style exactly */}
             <button
               onClick={onRemove}
               aria-label={`Remove ${item.name}`}
@@ -964,6 +971,13 @@ function ReservationCard({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
+                transition: "background-color 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "#fef2f2";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
               }}
             >
               🗑
