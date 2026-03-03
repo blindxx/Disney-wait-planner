@@ -10,6 +10,7 @@ import {
 import {
   mockAttractionWaits,
   type AttractionWait,
+  type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
@@ -21,6 +22,7 @@ import {
   type WaitEntry,
 } from "@/lib/plansMatching";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
+import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 
 // ===== RESORT CONSTANTS =====
 
@@ -30,6 +32,16 @@ const STORAGE_RESORT_KEY = "dwp.selectedResort";
 const RESORT_LABELS: Record<ResortId, string> = {
   DLR: "Disneyland Resort",
   WDW: "Walt Disney World",
+};
+
+/** Friendly park name for the park-line on reservation cards. */
+const PARK_LABELS: Record<ParkId, string> = {
+  disneyland: "Disneyland",
+  dca: "Disney California Adventure",
+  mk: "Magic Kingdom",
+  epcot: "EPCOT",
+  hs: "Hollywood Studios",
+  ak: "Animal Kingdom",
 };
 
 // ===== TYPES =====
@@ -264,6 +276,79 @@ export default function LightningPage() {
     return map;
   }, [selectedResort, liveAttractions]);
 
+  // Park name lookup: canonical normalized name → friendly park label.
+  // Built from the same source as waitMap — no extra fetch.
+  const parkMap = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const map = new Map<string, string>();
+    for (const a of source) {
+      if (a.resortId !== selectedResort) continue;
+      map.set(normalizeKey(a.name), PARK_LABELS[a.parkId] ?? a.parkId);
+    }
+    return map;
+  }, [selectedResort, liveAttractions]);
+
+  // Inline edit state — tracks which card is being edited (name + start/end times)
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingStart, setEditingStart] = useState("");
+  const [editingEnd, setEditingEnd] = useState("");
+  const [editingStartErr, setEditingStartErr] = useState("");
+  const [editingEndErr, setEditingEndErr] = useState("");
+
+  // Canonical attraction names for autocomplete, scoped to selectedResort.
+  const suggestions = useMemo(
+    () => Array.from(waitMap.values()).map((v) => v.canonicalName),
+    [waitMap]
+  );
+
+  function handleStartEdit(item: LightningItem) {
+    setEditingId(item.id);
+    setEditingName(item.name);
+    // Prefill times in 12h format for friendly editing (stored as 24h, displayed as 12h)
+    setEditingStart(item.startTime ? formatSingleTime(item.startTime) : "");
+    setEditingEnd(item.endTime ? formatSingleTime(item.endTime) : "");
+    setEditingStartErr("");
+    setEditingEndErr("");
+  }
+
+  function handleSaveEdit() {
+    if (!editingId || !editingName.trim()) return;
+    const normStart = normalizeTimeInput(editingStart);
+    if (!normStart) {
+      setEditingStartErr("Invalid time. Try: 3pm, 3:30 PM, 15:30, or 1530");
+      return;
+    }
+    const normEnd = editingEnd.trim() ? normalizeTimeInput(editingEnd) : "";
+    if (normEnd === null) {
+      setEditingEndErr("Invalid time. Try: 4pm, 4:30 PM, 16:30, or 1630");
+      return;
+    }
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === editingId
+          ? { ...it, name: editingName.trim(), startTime: normStart, endTime: normEnd }
+          : it
+      )
+    );
+    setEditingId(null);
+    setEditingName("");
+    setEditingStart("");
+    setEditingEnd("");
+    setEditingStartErr("");
+    setEditingEndErr("");
+  }
+
+  function handleCancelEdit() {
+    setEditingId(null);
+    setEditingName("");
+    setEditingStart("");
+    setEditingEnd("");
+    setEditingStartErr("");
+    setEditingEndErr("");
+  }
+
   // Derived form validity
   const nameValid = rideName.trim().length > 0;
   const startNorm = normalizeTimeInput(startRaw);
@@ -363,13 +448,13 @@ export default function LightningPage() {
           <label style={labelStyle}>
             Ride name <span style={{ color: "#dc2626" }}>*</span>
           </label>
-          <input
-            type="text"
+          <AttractionSuggestInput
             value={rideName}
-            onChange={(e) => setRideName(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && formValid) handleAdd(); }}
+            onChange={setRideName}
+            suggestions={suggestions}
             placeholder="e.g. Space Mountain"
-            style={inputStyle()}
+            inputStyle={inputStyle()}
+            onKeyDown={(e) => { if (e.key === "Enter" && formValid) handleAdd(); }}
           />
         </div>
 
@@ -481,6 +566,10 @@ export default function LightningPage() {
           {sortedItems(items, now).map((item) => {
             const bucket = getBucket(item, now);
             const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+            const waitEntry = lookupWait(item.name, waitMap, aliases);
+            const parkLabel = waitEntry
+              ? (parkMap.get(normalizeKey(waitEntry.canonicalName)) ?? null)
+              : null;
             return (
               <ReservationCard
                 key={item.id}
@@ -488,7 +577,21 @@ export default function LightningPage() {
                 bucket={bucket}
                 now={now}
                 onRemove={() => handleRemove(item.id)}
-                waitEntry={lookupWait(item.name, waitMap, aliases)}
+                waitEntry={waitEntry}
+                parkLabel={parkLabel}
+                isEditing={editingId === item.id}
+                editingName={editingName}
+                editingStart={editingStart}
+                editingEnd={editingEnd}
+                editingStartErr={editingStartErr}
+                editingEndErr={editingEndErr}
+                onEditNameChange={setEditingName}
+                onEditStartChange={(v) => { setEditingStart(v); setEditingStartErr(""); }}
+                onEditEndChange={(v) => { setEditingEnd(v); setEditingEndErr(""); }}
+                onEdit={() => handleStartEdit(item)}
+                onEditSave={handleSaveEdit}
+                onEditCancel={handleCancelEdit}
+                suggestions={suggestions}
               />
             );
           })}
@@ -506,12 +609,40 @@ function ReservationCard({
   now,
   onRemove,
   waitEntry,
+  parkLabel,
+  isEditing,
+  editingName,
+  editingStart,
+  editingEnd,
+  editingStartErr,
+  editingEndErr,
+  onEditNameChange,
+  onEditStartChange,
+  onEditEndChange,
+  onEdit,
+  onEditSave,
+  onEditCancel,
+  suggestions,
 }: {
   item: LightningItem;
   bucket: Bucket;
   now: number;
   onRemove: () => void;
   waitEntry: WaitEntry | null;
+  parkLabel: string | null;
+  isEditing: boolean;
+  editingName: string;
+  editingStart: string;
+  editingEnd: string;
+  editingStartErr: string;
+  editingEndErr: string;
+  onEditNameChange: (v: string) => void;
+  onEditStartChange: (v: string) => void;
+  onEditEndChange: (v: string) => void;
+  onEdit: () => void;
+  onEditSave: () => void;
+  onEditCancel: () => void;
+  suggestions: string[];
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
@@ -555,56 +686,180 @@ function ReservationCard({
       >
         {/* Left: ride info + status */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Ride name + live wait badge */}
-          <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.2rem" }}>
-            <span
-              style={{
-                fontWeight: 600,
-                fontSize: "1.05rem",
-                color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
-                wordBreak: "break-word",
-              }}
-            >
-              {item.name}
-            </span>
-            {liveBadge && (
+          {/* Ride name + live wait badge — or inline edit panel */}
+          {isEditing ? (
+            <div style={{ marginBottom: "0.5rem" }}>
+              {/* Attraction name */}
+              <AttractionSuggestInput
+                value={editingName}
+                onChange={onEditNameChange}
+                suggestions={suggestions}
+                placeholder="Ride name"
+                inputStyle={{
+                  width: "100%",
+                  padding: "0.5rem 0.65rem",
+                  fontSize: "1rem",
+                  borderRadius: 8,
+                  border: "1.5px solid #2563eb",
+                  outline: "none",
+                  boxSizing: "border-box",
+                  background: "#fff",
+                }}
+                onKeyDown={(e) => { if (e.key === "Escape") onEditCancel(); }}
+                autoFocus
+              />
+              {/* Start time (prefilled in 12h, accepts any format) */}
+              <div style={{ marginTop: 6 }}>
+                <input
+                  type="text"
+                  value={editingStart}
+                  onChange={(e) => onEditStartChange(e.target.value)}
+                  placeholder="Start time (e.g. 3:00 PM, 15:00)"
+                  style={{
+                    width: "100%",
+                    padding: "0.45rem 0.65rem",
+                    fontSize: "0.9rem",
+                    borderRadius: 8,
+                    border: `1.5px solid ${editingStartErr ? "#dc2626" : "#d1d5db"}`,
+                    outline: "none",
+                    boxSizing: "border-box",
+                    background: "#fff",
+                  }}
+                />
+                {editingStartErr && (
+                  <p style={{ color: "#dc2626", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
+                    {editingStartErr}
+                  </p>
+                )}
+              </div>
+              {/* End time (optional) */}
+              <div style={{ marginTop: 6 }}>
+                <input
+                  type="text"
+                  value={editingEnd}
+                  onChange={(e) => onEditEndChange(e.target.value)}
+                  placeholder="End time (optional)"
+                  style={{
+                    width: "100%",
+                    padding: "0.45rem 0.65rem",
+                    fontSize: "0.9rem",
+                    borderRadius: 8,
+                    border: `1.5px solid ${editingEndErr ? "#dc2626" : "#d1d5db"}`,
+                    outline: "none",
+                    boxSizing: "border-box",
+                    background: "#fff",
+                  }}
+                />
+                {editingEndErr && (
+                  <p style={{ color: "#dc2626", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
+                    {editingEndErr}
+                  </p>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <button
+                  onClick={onEditSave}
+                  disabled={!editingName.trim()}
+                  style={{
+                    flex: 1,
+                    padding: "0.4rem 0.75rem",
+                    fontSize: "0.85rem",
+                    fontWeight: 600,
+                    borderRadius: 7,
+                    border: "none",
+                    background: editingName.trim() ? "#1a1a2e" : "#e5e7eb",
+                    color: editingName.trim() ? "#fff" : "#9ca3af",
+                    cursor: editingName.trim() ? "pointer" : "not-allowed",
+                    minHeight: 36,
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  onClick={onEditCancel}
+                  style={{
+                    flex: 1,
+                    padding: "0.4rem 0.75rem",
+                    fontSize: "0.85rem",
+                    borderRadius: 7,
+                    border: "1.5px solid #e5e7eb",
+                    background: "none",
+                    color: "#6b7280",
+                    cursor: "pointer",
+                    minHeight: 36,
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: "0.35rem", marginBottom: "0.2rem" }}>
               <span
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: "0.7rem",
                   fontWeight: 600,
-                  padding: "0.15rem 0.45rem",
-                  borderRadius: 4,
-                  whiteSpace: "nowrap",
-                  lineHeight: 1.4,
-                  flexShrink: 0,
-                  ...liveBadge.style,
+                  fontSize: "1.05rem",
+                  color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
+                  wordBreak: "break-word",
                 }}
               >
-                {liveBadge.label}
+                {item.name}
               </span>
-            )}
-          </div>
-
-          {/* Canonical attraction name — shown when it differs from user input and a match exists */}
-          {waitEntry &&
-            normalizeKey(waitEntry.canonicalName) !== normalizeKey(item.name) &&
-            (waitEntry.status === "DOWN" || waitEntry.status === "CLOSED" || waitEntry.waitMins != null) && (
-            <div
-              style={{
-                fontSize: "0.7rem",
-                color: "#9ca3af",
-                fontStyle: "italic",
-                lineHeight: 1.3,
-                marginTop: "0.1rem",
-                marginBottom: "0.25rem",
-                wordBreak: "break-word",
-              }}
-            >
-              {waitEntry.canonicalName}
+              {liveBadge && (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "0.7rem",
+                    fontWeight: 600,
+                    padding: "0.15rem 0.45rem",
+                    borderRadius: 4,
+                    whiteSpace: "nowrap",
+                    lineHeight: 1.4,
+                    flexShrink: 0,
+                    ...liveBadge.style,
+                  }}
+                >
+                  {liveBadge.label}
+                </span>
+              )}
             </div>
+          )}
+
+          {/* Canonical attraction name + park line — only when a match exists */}
+          {waitEntry &&
+            (waitEntry.status === "DOWN" || waitEntry.status === "CLOSED" || waitEntry.waitMins != null) && (
+            <>
+              {normalizeKey(waitEntry.canonicalName) !== normalizeKey(item.name) && (
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "#9ca3af",
+                    fontStyle: "italic",
+                    lineHeight: 1.3,
+                    marginTop: "0.1rem",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {waitEntry.canonicalName}
+                </div>
+              )}
+              {parkLabel && (
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "#9ca3af",
+                    lineHeight: 1.3,
+                    marginTop: "0.1rem",
+                    marginBottom: "0.15rem",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {parkLabel}
+                </div>
+              )}
+            </>
           )}
 
           {/* Time window */}
@@ -668,28 +923,67 @@ function ReservationCard({
           )}
         </div>
 
-        {/* Remove button */}
-        <button
-          onClick={onRemove}
-          aria-label={`Remove ${item.name}`}
-          style={{
-            flexShrink: 0,
-            background: "none",
-            border: "1.5px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "0.4rem 0.65rem",
-            fontSize: "0.8rem",
-            color: "#9ca3af",
-            cursor: "pointer",
-            minWidth: 44,
-            minHeight: 44,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          ✕
-        </button>
+        {/* Edit + Remove buttons */}
+        {!isEditing && (
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {/* Edit — matches Plans .icon-btn style exactly */}
+            <button
+              onClick={onEdit}
+              aria-label={`Edit ${item.name}`}
+              style={{
+                background: "none",
+                border: "1px solid #e5e7eb",
+                borderRadius: 6,
+                padding: 0,
+                fontSize: "1rem",
+                color: "#6b7280",
+                cursor: "pointer",
+                minWidth: 44,
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "background-color 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "#f9fafb";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
+              }}
+            >
+              ✏️
+            </button>
+            {/* Delete — matches Plans .icon-btn.danger style exactly */}
+            <button
+              onClick={onRemove}
+              aria-label={`Remove ${item.name}`}
+              style={{
+                background: "none",
+                border: "1px solid #fca5a5",
+                borderRadius: 6,
+                padding: 0,
+                fontSize: "1rem",
+                color: "#dc2626",
+                cursor: "pointer",
+                minWidth: 44,
+                minHeight: 44,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                transition: "background-color 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "#fef2f2";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
+              }}
+            >
+              🗑
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
