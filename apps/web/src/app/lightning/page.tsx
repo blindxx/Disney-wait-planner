@@ -306,7 +306,7 @@ export default function LightningPage() {
 
   // Compute time conflict sets from current items, substituting live edit values
   // for the item currently being edited so warnings update on every keystroke.
-  const { invalidIds: llInvalidIds, overlapIds: llOverlapIds } = useMemo(() => {
+  const { invalidIds: llInvalidIds, overlapCountById: llOverlapCountById } = useMemo(() => {
     const conflictInput = items.map((item) => {
       if (item.id === editingId) {
         // Use live editing values when valid; fall back to stored values otherwise.
@@ -319,9 +319,14 @@ export default function LightningPage() {
       return { id: item.id, start: item.startTime, end: item.endTime || undefined };
     });
     const { invalidRanges, overlaps } = detectTimeConflicts(conflictInput);
+    const overlapCountById: Record<string, number> = {};
+    for (const { a, b } of overlaps) {
+      overlapCountById[a] = (overlapCountById[a] ?? 0) + 1;
+      overlapCountById[b] = (overlapCountById[b] ?? 0) + 1;
+    }
     return {
       invalidIds: new Set(invalidRanges),
-      overlapIds: new Set(overlaps.flatMap((p) => [p.a, p.b])),
+      overlapCountById,
     };
   }, [items, editingId, editingStart, editingEnd]);
 
@@ -615,7 +620,7 @@ export default function LightningPage() {
                 onEditCancel={handleCancelEdit}
                 suggestions={suggestions}
                 isInvalid={llInvalidIds.has(item.id)}
-                hasOverlap={llOverlapIds.has(item.id)}
+                overlapCount={llOverlapCountById[item.id] ?? 0}
               />
             );
           })}
@@ -648,7 +653,7 @@ function ReservationCard({
   onEditCancel,
   suggestions,
   isInvalid,
-  hasOverlap,
+  overlapCount,
 }: {
   item: LightningItem;
   bucket: Bucket;
@@ -670,7 +675,7 @@ function ReservationCard({
   onEditCancel: () => void;
   suggestions: string[];
   isInvalid: boolean;
-  hasOverlap: boolean;
+  overlapCount: number;
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
@@ -950,16 +955,15 @@ function ReservationCard({
             </span>
           )}
 
-          {isInvalid && (
-            <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.3rem 0 0" }}>
+          {isInvalid ? (
+            <p style={{ fontSize: "0.8rem", color: "#dc2626", margin: "0.3rem 0 0" }}>
               ⚠️ End time is before start time
             </p>
-          )}
-          {hasOverlap && (
+          ) : overlapCount > 0 ? (
             <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.3rem 0 0" }}>
-              ⚠️ Overlaps with another item
+              ⚠️ Overlaps with {overlapCount === 1 ? "1 other item" : `${overlapCount} other items`}
             </p>
-          )}
+          ) : null}
         </div>
 
         {/* Edit + Remove buttons */}
