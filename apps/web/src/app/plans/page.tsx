@@ -13,6 +13,7 @@ import {
   formatTimeLabel,
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
+import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
@@ -305,6 +306,24 @@ export default function PlansPage() {
     () => Array.from(waitMap.values()).map((v) => v.canonicalName),
     [waitMap]
   );
+
+  // Compute time conflict sets from current items (updates whenever items change).
+  // Parses timeLabel into start/end for each item that has a canonical "H:MM" or
+  // "H:MM-H:MM" label; free-text or empty labels are skipped (non-overlapping).
+  const { invalidIds, overlapIds } = useMemo(() => {
+    const conflictInput = items.flatMap((item) => {
+      if (!item.timeLabel) return [];
+      const rangeMatch = item.timeLabel.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+      if (rangeMatch) return [{ id: item.id, start: rangeMatch[1], end: rangeMatch[2] }];
+      if (/^\d{1,2}:\d{2}$/.test(item.timeLabel)) return [{ id: item.id, start: item.timeLabel }];
+      return [];
+    });
+    const { invalidRanges, overlaps } = detectTimeConflicts(conflictInput);
+    return {
+      invalidIds: new Set(invalidRanges),
+      overlapIds: new Set(overlaps.flatMap((p) => [p.a, p.b])),
+    };
+  }, [items]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only)
   useEffect(() => {
@@ -1193,6 +1212,17 @@ export default function PlansPage() {
                       </button>
                     </div>
                   </div>
+
+                  {invalidIds.has(item.id) && (
+                    <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.25rem 0 0" }}>
+                      ⚠️ End time is before start time
+                    </p>
+                  )}
+                  {overlapIds.has(item.id) && (
+                    <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.25rem 0 0" }}>
+                      ⚠️ Overlaps with another item
+                    </p>
+                  )}
 
                   {deleteConfirmId === item.id && (
                     <div className="confirm-row">
