@@ -20,6 +20,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
+import { getSettingsDefaults } from "../../lib/settingsDefaults";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -164,25 +165,34 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
 const STORAGE_PARK_KEY = "dwp.selectedPark";
 
-/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+/**
+ * Read and validate resort from localStorage.
+ * Falls back to Settings default resort (which itself falls back to "DLR").
+ * Only uses settings default when no page-specific stored value exists.
+ */
 function loadStoredResort(): ResortId {
   try {
     const v = localStorage.getItem(STORAGE_RESORT_KEY);
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
-  return "DLR";
+  return getSettingsDefaults().defaultResort;
 }
 
 /**
  * Read and validate park from localStorage for the given resort.
- * Falls back to first park in the resort if missing or no longer valid.
+ * Falls back to Settings default park (which itself falls back to first park for resort).
+ * Only uses settings default when no page-specific stored value exists.
  */
 function loadStoredPark(resort: ResortId): ParkId {
   try {
     const v = localStorage.getItem(STORAGE_PARK_KEY);
     if (v && (RESORT_PARKS[resort] as string[]).includes(v)) return v as ParkId;
   } catch {}
-  return RESORT_PARKS[resort][0];
+  // Use settings default park only if valid for this resort; otherwise first park.
+  const { defaultPark } = getSettingsDefaults();
+  return (RESORT_PARKS[resort] as string[]).includes(defaultPark)
+    ? (defaultPark as ParkId)
+    : RESORT_PARKS[resort][0];
 }
 
 // ============================================

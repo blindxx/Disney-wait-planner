@@ -19,6 +19,7 @@ import Link from "next/link";
 import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
+import { getSettingsDefaults } from "../lib/settingsDefaults";
 
 // ============================================
 // CONSTANTS
@@ -199,6 +200,7 @@ export default function TodayPage() {
   useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
 
   // Hydrate resort from localStorage on mount (shared with Lightning + Plans).
+  // If no page-specific stored resort exists, fall back to Settings default.
   useEffect(() => {
     try {
       const v = localStorage.getItem(STORAGE_RESORT_KEY);
@@ -206,6 +208,13 @@ export default function TodayPage() {
         setSelectedResort(v);
         // Set default park for the stored resort
         setSelectedPark(RESORT_PARKS[v][0].id);
+      } else {
+        // No stored resort — use Settings default as fallback initializer.
+        const { defaultResort, defaultPark } = getSettingsDefaults();
+        setSelectedResort(defaultResort);
+        // Use settings park if valid for that resort, otherwise first park.
+        const validPark = RESORT_PARKS[defaultResort].find((p) => p.id === defaultPark);
+        setSelectedPark(validPark ? validPark.id : RESORT_PARKS[defaultResort][0].id);
       }
     } catch {}
   }, []);

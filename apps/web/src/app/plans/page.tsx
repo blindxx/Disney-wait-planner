@@ -23,6 +23,7 @@ import {
   lookupWait,
 } from "@/lib/plansMatching";
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
+import { getSettingsDefaults } from "@/lib/settingsDefaults";
 
 type PlanItem = {
   id: string;
@@ -204,13 +205,17 @@ const PARK_LABELS: Record<ParkId, string> = {
 
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
 
-/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+/**
+ * Read and validate resort from localStorage.
+ * Falls back to Settings default resort (which itself falls back to "DLR").
+ * Only uses settings default when no page-specific stored value exists.
+ */
 function loadStoredResort(): ResortId {
   try {
     const v = localStorage.getItem(STORAGE_RESORT_KEY);
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
-  return "DLR";
+  return getSettingsDefaults().defaultResort;
 }
 
 /**

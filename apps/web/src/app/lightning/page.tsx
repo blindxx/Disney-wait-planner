@@ -15,6 +15,7 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -236,11 +237,16 @@ export default function LightningPage() {
     return () => clearInterval(id);
   }, []);
 
-  // Hydrate selectedResort from localStorage on client mount (runs once)
+  // Hydrate selectedResort from localStorage on client mount (runs once).
+  // If no page-specific stored resort exists, fall back to Settings default.
   useEffect(() => {
     try {
       const v = localStorage.getItem(STORAGE_RESORT_KEY);
-      if (v === "DLR" || v === "WDW") setSelectedResort(v);
+      if (v === "DLR" || v === "WDW") {
+        setSelectedResort(v);
+      } else {
+        setSelectedResort(getSettingsDefaults().defaultResort);
+      }
     } catch {}
   }, []);
 
