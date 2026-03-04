@@ -49,12 +49,16 @@ const RESORT_PARKS: Record<ResortId, { id: ParkId; label: string }[]> = {
 export default function SettingsPage() {
   const [defaultResort, setDefaultResort] = useState<ResortId>("DLR");
   const [defaultPark, setDefaultPark] = useState<ParkId>("disneyland");
+  // Prevents a DLR→WDW flip on pages where the stored default differs from
+  // the initial useState value. Resort/park buttons only render once ready=true.
+  const [ready, setReady] = useState(false);
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
+    setReady(true); // Reveal selectors after correct state is set — prevents flicker.
   }, []);
 
   // Handlers — persist immediately on change.
@@ -103,79 +107,101 @@ export default function SettingsPage() {
         made.
       </p>
 
-      {/* ── Default Resort ── */}
-      <section style={{ marginBottom: "28px" }}>
-        <h2
-          style={{
-            fontSize: "15px",
-            fontWeight: 600,
-            color: "#374151",
-            marginBottom: "10px",
-          }}
-        >
-          Default Resort
-        </h2>
-        <div style={{ display: "flex", gap: "8px" }}>
-          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resort) => (
-            <button
-              key={resort}
-              onClick={() => handleResortChange(resort)}
+      {/* ── Default Resort + Park ── */}
+      {/* Only rendered after hydration to prevent DLR→WDW flip on stored WDW defaults */}
+      {ready ? (
+        <>
+          <section style={{ marginBottom: "28px" }}>
+            <h2
               style={{
-                flex: 1,
-                padding: "10px 12px",
-                borderRadius: "8px",
-                border: `1px solid ${defaultResort === resort ? "#1e3a5f" : "#d1d5db"}`,
-                cursor: "pointer",
+                fontSize: "15px",
                 fontWeight: 600,
-                fontSize: "14px",
-                backgroundColor: defaultResort === resort ? "#1e3a5f" : "#f9fafb",
-                color: defaultResort === resort ? "#fff" : "#374151",
-                minHeight: "44px",
-                transition: "background-color 0.15s ease, color 0.15s ease",
+                color: "#374151",
+                marginBottom: "10px",
               }}
             >
-              {RESORT_LABELS[resort]}
-            </button>
-          ))}
-        </div>
-      </section>
+              Default Resort
+            </h2>
+            <div style={{ display: "flex", gap: "8px" }}>
+              {(Object.keys(RESORT_LABELS) as ResortId[]).map((resort) => (
+                <button
+                  key={resort}
+                  onClick={() => handleResortChange(resort)}
+                  style={{
+                    flex: 1,
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    border: `1px solid ${defaultResort === resort ? "#1e3a5f" : "#d1d5db"}`,
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    fontSize: "14px",
+                    backgroundColor: defaultResort === resort ? "#1e3a5f" : "#f9fafb",
+                    color: defaultResort === resort ? "#fff" : "#374151",
+                    minHeight: "44px",
+                    transition: "background-color 0.15s ease, color 0.15s ease",
+                  }}
+                >
+                  {RESORT_LABELS[resort]}
+                </button>
+              ))}
+            </div>
+          </section>
 
-      {/* ── Default Park ── */}
-      <section style={{ marginBottom: "28px" }}>
-        <h2
-          style={{
-            fontSize: "15px",
-            fontWeight: 600,
-            color: "#374151",
-            marginBottom: "10px",
-          }}
-        >
-          Default Park
-        </h2>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-          {parks.map(({ id: parkId, label }) => (
-            <button
-              key={parkId}
-              onClick={() => handleParkChange(parkId)}
+          <section style={{ marginBottom: "28px" }}>
+            <h2
               style={{
-                flex: "1 1 calc(50% - 4px)",
-                padding: "10px 12px",
-                borderRadius: "8px",
-                border: "none",
-                cursor: "pointer",
+                fontSize: "15px",
                 fontWeight: 600,
-                fontSize: "14px",
-                backgroundColor: defaultPark === parkId ? "#2563eb" : "#f3f4f6",
-                color: defaultPark === parkId ? "#fff" : "#374151",
-                minHeight: "44px",
-                transition: "background-color 0.15s ease, color 0.15s ease",
+                color: "#374151",
+                marginBottom: "10px",
               }}
             >
-              {label}
-            </button>
-          ))}
-        </div>
-      </section>
+              Default Park
+            </h2>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+              {parks.map(({ id: parkId, label }) => (
+                <button
+                  key={parkId}
+                  onClick={() => handleParkChange(parkId)}
+                  style={{
+                    flex: "1 1 calc(50% - 4px)",
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    border: "none",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    fontSize: "14px",
+                    backgroundColor: defaultPark === parkId ? "#2563eb" : "#f3f4f6",
+                    color: defaultPark === parkId ? "#fff" : "#374151",
+                    minHeight: "44px",
+                    transition: "background-color 0.15s ease, color 0.15s ease",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </section>
+        </>
+      ) : (
+        /* Skeleton placeholders for resort + park buttons while hydrating */
+        <>
+          <section style={{ marginBottom: "28px" }}>
+            <div style={{ height: "21px", width: "100px", borderRadius: 4, backgroundColor: "#f3f4f6", marginBottom: "10px" }} />
+            <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ flex: 1, height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            </div>
+          </section>
+          <section style={{ marginBottom: "28px" }}>
+            <div style={{ height: "21px", width: "80px", borderRadius: 4, backgroundColor: "#f3f4f6", marginBottom: "10px" }} />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+              <div style={{ flex: "1 1 calc(50% - 4px)", height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: "1 1 calc(50% - 4px)", height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            </div>
+          </section>
+        </>
+      )}
 
       {/* ── Account / Sync (Placeholder) ── */}
       <section
