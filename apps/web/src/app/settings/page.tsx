@@ -64,6 +64,9 @@ export default function SettingsPage() {
   // Handlers — persist immediately on change.
 
   function handleResortChange(resort: ResortId) {
+    // No-op if already selected — prevents defaultPark from being silently reset
+    // to the first park of the resort on an accidental re-click.
+    if (resort === defaultResort) return;
     const firstPark = RESORT_PARKS[resort][0].id;
     setDefaultResort(resort);
     setDefaultPark(firstPark);
