@@ -20,7 +20,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
-import { getSettingsDefaults } from "../../lib/settingsDefaults";
+import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -684,6 +684,29 @@ export default function WaitTimesPage() {
             </button>
           ))}
         </div>
+
+        {/* Set as default shortcut */}
+        <button
+          onClick={() => {
+            try {
+              localStorage.setItem(SETTINGS_RESORT_KEY, selectedResort);
+              localStorage.setItem(SETTINGS_PARK_KEY, selectedPark);
+            } catch {}
+          }}
+          style={{
+            background: "none",
+            border: "none",
+            padding: "4px 0",
+            marginBottom: "8px",
+            fontSize: "12px",
+            color: "#6b7280",
+            cursor: "pointer",
+            textDecoration: "underline",
+            display: "block",
+          }}
+        >
+          Set as default
+        </button>
 
         {/* Controls Row: Filter + Sort — wraps on narrow screens */}
         <div

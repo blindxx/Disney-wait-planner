@@ -19,7 +19,7 @@ import Link from "next/link";
 import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
-import { getSettingsDefaults } from "../lib/settingsDefaults";
+import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
 
 // ============================================
 // CONSTANTS
@@ -27,6 +27,8 @@ import { getSettingsDefaults } from "../lib/settingsDefaults";
 
 /** Shared resort key with Lightning + Plans pages for consistent persistence. */
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
+/** Shared park key with Wait Times for consistent persistence. */
+const STORAGE_PARK_KEY = "dwp.selectedPark";
 
 const RESORT_LABELS: Record<ResortId, string> = {
   DLR: "Disneyland Resort",
@@ -199,33 +201,46 @@ export default function TodayPage() {
   useEffect(() => { selectedResortRef.current = selectedResort; }, [selectedResort]);
   useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
 
-  // Hydrate resort from localStorage on mount (shared with Lightning + Plans).
-  // If no page-specific stored resort exists, fall back to Settings default.
+  // Hydrate resort + park from localStorage on mount (shared context with Wait Times).
+  // If page-specific stored values are absent, fall back to Settings defaults.
+  // Never writes to localStorage during initialization (Phase 7.1.1 rule).
   useEffect(() => {
     try {
-      const v = localStorage.getItem(STORAGE_RESORT_KEY);
-      if (v === "DLR" || v === "WDW") {
-        setSelectedResort(v);
-        // Set default park for the stored resort
-        setSelectedPark(RESORT_PARKS[v][0].id);
+      const storedResort = localStorage.getItem(STORAGE_RESORT_KEY);
+      const resort: ResortId =
+        storedResort === "DLR" || storedResort === "WDW"
+          ? storedResort
+          : getSettingsDefaults().defaultResort;
+      setSelectedResort(resort);
+
+      const validParkIds = RESORT_PARKS[resort].map((p) => p.id) as string[];
+      const storedPark = localStorage.getItem(STORAGE_PARK_KEY);
+      if (storedPark && validParkIds.includes(storedPark)) {
+        // Stored park is valid for this resort — use it.
+        setSelectedPark(storedPark as ParkId);
       } else {
-        // No stored resort — use Settings default as fallback initializer.
-        const { defaultResort, defaultPark } = getSettingsDefaults();
-        setSelectedResort(defaultResort);
-        // Use settings park if valid for that resort, otherwise first park.
-        const validPark = RESORT_PARKS[defaultResort].find((p) => p.id === defaultPark);
-        setSelectedPark(validPark ? validPark.id : RESORT_PARKS[defaultResort][0].id);
+        // No stored park or invalid for resort — fall back to Settings default.
+        const { defaultPark } = getSettingsDefaults();
+        setSelectedPark(
+          validParkIds.includes(defaultPark)
+            ? (defaultPark as ParkId)
+            : RESORT_PARKS[resort][0].id
+        );
       }
     } catch {}
   }, []);
 
-  // When resort changes, switch park to first park of that resort and persist.
+  // When resort changes, switch park to first park of that resort and persist both.
   // Persistence is explicit here (user-initiated) — NOT in a useEffect —
   // so initialization never auto-writes the default to localStorage.
   function handleResortChange(resort: ResortId) {
+    const firstPark = RESORT_PARKS[resort][0].id;
     setSelectedResort(resort);
-    setSelectedPark(RESORT_PARKS[resort][0].id);
-    try { localStorage.setItem(STORAGE_RESORT_KEY, resort); } catch {}
+    setSelectedPark(firstPark);
+    try {
+      localStorage.setItem(STORAGE_RESORT_KEY, resort);
+      localStorage.setItem(STORAGE_PARK_KEY, firstPark);
+    } catch {}
   }
 
   // Update current time every minute
@@ -365,7 +380,13 @@ export default function TodayPage() {
             <button
               key={parkId}
               className="park-btn"
-              onClick={() => setSelectedPark(parkId)}
+              onClick={() => {
+                setSelectedPark(parkId);
+                try {
+                  localStorage.setItem(STORAGE_PARK_KEY, parkId);
+                  localStorage.setItem(STORAGE_RESORT_KEY, selectedResort);
+                } catch {}
+              }}
               style={{
                 backgroundColor:
                   selectedPark === parkId ? "#2563eb" : "#f3f4f6",
@@ -376,6 +397,29 @@ export default function TodayPage() {
             </button>
           ))}
         </div>
+
+        {/* Set as default shortcut */}
+        <button
+          onClick={() => {
+            try {
+              localStorage.setItem(SETTINGS_RESORT_KEY, selectedResort);
+              localStorage.setItem(SETTINGS_PARK_KEY, selectedPark);
+            } catch {}
+          }}
+          style={{
+            background: "none",
+            border: "none",
+            padding: "4px 0",
+            marginBottom: "12px",
+            fontSize: "12px",
+            color: "#6b7280",
+            cursor: "pointer",
+            textDecoration: "underline",
+            display: "block",
+          }}
+        >
+          Set as default
+        </button>
 
         {/* Section Header */}
         <h2
