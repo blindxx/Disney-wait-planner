@@ -669,7 +669,10 @@ export default function WaitTimesPage() {
               onClick={() => {
                 setSelectedPark(parkId);
                 setSelectedLand("");
-                try { localStorage.setItem(STORAGE_PARK_KEY, parkId); } catch {}
+                try {
+                  localStorage.setItem(STORAGE_PARK_KEY, parkId);
+                  localStorage.setItem(STORAGE_RESORT_KEY, selectedResort);
+                } catch {}
               }}
               style={{
                 backgroundColor:
