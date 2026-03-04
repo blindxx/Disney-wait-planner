@@ -15,6 +15,7 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -213,6 +214,8 @@ export default function LightningPage() {
 
   // Resort selection — shared localStorage key with My Plans for consistency
   const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
+  // Prevents resort selector from briefly showing DLR when WDW is stored.
+  const [ready, setReady] = useState(false);
 
   // Live attraction wait data for the selected resort (all parks merged)
   const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
@@ -236,18 +239,20 @@ export default function LightningPage() {
     return () => clearInterval(id);
   }, []);
 
-  // Hydrate selectedResort from localStorage on client mount (runs once)
+  // Hydrate selectedResort from localStorage on client mount (runs once).
+  // If no page-specific stored resort exists, fall back to Settings default.
+  // Sets ready=true last so the selector renders with the correct value — no flicker.
   useEffect(() => {
     try {
       const v = localStorage.getItem(STORAGE_RESORT_KEY);
-      if (v === "DLR" || v === "WDW") setSelectedResort(v);
+      if (v === "DLR" || v === "WDW") {
+        setSelectedResort(v);
+      } else {
+        setSelectedResort(getSettingsDefaults().defaultResort);
+      }
     } catch {}
+    setReady(true);
   }, []);
-
-  // Persist selectedResort whenever it changes
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
 
   // Fetch live wait data for all parks in the selected resort.
   // Shares the same TTL cache as My Plans / Wait Times — no second fetch path.
@@ -547,31 +552,42 @@ export default function LightningPage() {
         </button>
       </div>
 
-      {/* ── Resort Toggle — scopes live wait overlay to selected resort ── */}
-      <div style={{ display: "flex", gap: 8, marginBottom: "0.5rem" }}>
-        {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
-          <button
-            key={resortId}
-            onClick={() => setSelectedResort(resortId)}
-            style={{
-              flex: "1 1 0%",
-              padding: "8px 6px",
-              borderRadius: 8,
-              border: `1px solid ${selectedResort === resortId ? "#1e3a5f" : "#d1d5db"}`,
-              cursor: "pointer",
-              fontWeight: 600,
-              fontSize: 13,
-              lineHeight: 1.2,
-              textAlign: "center",
-              backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-              color: selectedResort === resortId ? "#fff" : "#374151",
-              minHeight: 36,
-            }}
-          >
-            {RESORT_LABELS[resortId]}
-          </button>
-        ))}
-      </div>
+      {/* ── Resort Toggle — scopes live wait overlay to selected resort.
+          Gated by ready to prevent a DLR→WDW flip when WDW is stored. ── */}
+      {ready ? (
+        <div style={{ display: "flex", gap: 8, marginBottom: "0.5rem" }}>
+          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
+            <button
+              key={resortId}
+              onClick={() => {
+                setSelectedResort(resortId);
+                try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
+              }}
+              style={{
+                flex: "1 1 0%",
+                padding: "8px 6px",
+                borderRadius: 8,
+                border: `1px solid ${selectedResort === resortId ? "#1e3a5f" : "#d1d5db"}`,
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: 13,
+                lineHeight: 1.2,
+                textAlign: "center",
+                backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
+                color: selectedResort === resortId ? "#fff" : "#374151",
+                minHeight: 36,
+              }}
+            >
+              {RESORT_LABELS[resortId]}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 8, marginBottom: "0.5rem" }}>
+          <div style={{ flex: "1 1 0%", height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+          <div style={{ flex: "1 1 0%", height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+        </div>
+      )}
       <p style={{ fontSize: "0.7rem", color: "#9ca3af", marginBottom: "0.75rem" }}>
         Wait overlay: {selectedResort}
       </p>

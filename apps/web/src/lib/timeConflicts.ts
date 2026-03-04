@@ -57,15 +57,20 @@ export function detectTimeConflicts(
     parsed.push({ id: item.id, startMin, endMin });
   }
 
-  // Overlap check — only between items that both have a bounded end time
-  for (let i = 0; i < parsed.length; i++) {
-    for (let j = i + 1; j < parsed.length; j++) {
-      const a = parsed[i];
-      const b = parsed[j];
-      if (a.endMin !== null && b.endMin !== null) {
-        if (a.startMin < b.endMin && b.startMin < a.endMin) {
-          overlaps.push({ a: a.id, b: b.id });
-        }
+  // Filter to valid items only — invalid ranges (end <= start) must not pollute
+  // the overlap calculation and cause false positives on unrelated valid items.
+  const validItems = parsed.filter(
+    (p) => p.endMin !== null && p.endMin > p.startMin
+  );
+
+  // Overlap check — only between valid items (both have a bounded, valid end time)
+  for (let i = 0; i < validItems.length; i++) {
+    for (let j = i + 1; j < validItems.length; j++) {
+      const a = validItems[i];
+      const b = validItems[j];
+      // endMin is guaranteed non-null and > startMin by the filter above
+      if (a.startMin < b.endMin! && b.startMin < a.endMin!) {
+        overlaps.push({ a: a.id, b: b.id });
       }
     }
   }

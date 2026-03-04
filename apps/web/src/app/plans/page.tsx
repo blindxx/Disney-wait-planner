@@ -23,6 +23,7 @@ import {
   lookupWait,
 } from "@/lib/plansMatching";
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
+import { getSettingsDefaults } from "@/lib/settingsDefaults";
 
 type PlanItem = {
   id: string;
@@ -204,13 +205,17 @@ const PARK_LABELS: Record<ParkId, string> = {
 
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
 
-/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+/**
+ * Read and validate resort from localStorage.
+ * Falls back to Settings default resort (which itself falls back to "DLR").
+ * Only uses settings default when no page-specific stored value exists.
+ */
 function loadStoredResort(): ResortId {
   try {
     const v = localStorage.getItem(STORAGE_RESORT_KEY);
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
-  return "DLR";
+  return getSettingsDefaults().defaultResort;
 }
 
 /**
@@ -225,6 +230,8 @@ const DISPLAY_CANONICAL_RIDE_NAME = true;
 export default function PlansPage() {
   // Initial value is server-safe default; localStorage hydration runs in useEffect.
   const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
+  // Prevents resort selector from briefly showing DLR when WDW is stored.
+  const [ready, setReady] = useState(false);
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
   const [autoSortEnabled, setAutoSortEnabled] = useState(false);
@@ -244,14 +251,11 @@ export default function PlansPage() {
   const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
 
   // Hydrate selectedResort from localStorage on client mount (runs once).
+  // Sets ready=true last so the selector renders with the correct value — no flicker.
   useEffect(() => {
     setSelectedResort(loadStoredResort());
+    setReady(true);
   }, []);
-
-  // Persist selectedResort whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
 
   // Fetch live wait data for all parks in the selected resort.
   // Uses the same TTL cache as the Wait Times page (results are shared).
@@ -1085,25 +1089,34 @@ export default function PlansPage() {
           </div>
         </div>
 
-        {/* Resort Toggle — scopes the wait overlay to the selected resort */}
-        <div className="plans-resort-row">
-          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
-            <button
-              key={resortId}
-              className="plans-resort-tab"
-              onClick={() => setSelectedResort(resortId)}
-              style={{
-                backgroundColor:
-                  selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-                color: selectedResort === resortId ? "#fff" : "#374151",
-                borderColor:
-                  selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
-              }}
-            >
-              {RESORT_LABELS[resortId]}
-            </button>
-          ))}
-        </div>
+        {/* Resort Toggle — scopes the wait overlay to the selected resort.
+            Gated by ready to prevent a DLR→WDW flip when WDW is stored. */}
+        {ready ? (
+          <div className="plans-resort-row">
+            {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
+              <button
+                key={resortId}
+                className="plans-resort-tab"
+                onClick={() => {
+                  setSelectedResort(resortId);
+                  try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
+                }}
+                style={{
+                  backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
+                  color: selectedResort === resortId ? "#fff" : "#374151",
+                  borderColor: selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+                }}
+              >
+                {RESORT_LABELS[resortId]}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="plans-resort-row">
+            <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+          </div>
+        )}
 
         <div className="sort-toggle-row">
           <label className="sort-toggle-label">

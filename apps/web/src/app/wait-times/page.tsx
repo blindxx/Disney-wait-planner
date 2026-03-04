@@ -20,6 +20,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
+import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -164,25 +165,34 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
 const STORAGE_PARK_KEY = "dwp.selectedPark";
 
-/** Read and validate resort from localStorage. Returns "DLR" on missing/invalid. */
+/**
+ * Read and validate resort from localStorage.
+ * Falls back to Settings default resort (which itself falls back to "DLR").
+ * Only uses settings default when no page-specific stored value exists.
+ */
 function loadStoredResort(): ResortId {
   try {
     const v = localStorage.getItem(STORAGE_RESORT_KEY);
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
-  return "DLR";
+  return getSettingsDefaults().defaultResort;
 }
 
 /**
  * Read and validate park from localStorage for the given resort.
- * Falls back to first park in the resort if missing or no longer valid.
+ * Falls back to Settings default park (which itself falls back to first park for resort).
+ * Only uses settings default when no page-specific stored value exists.
  */
 function loadStoredPark(resort: ResortId): ParkId {
   try {
     const v = localStorage.getItem(STORAGE_PARK_KEY);
     if (v && (RESORT_PARKS[resort] as string[]).includes(v)) return v as ParkId;
   } catch {}
-  return RESORT_PARKS[resort][0];
+  // Use settings default park only if valid for this resort; otherwise first park.
+  const { defaultPark } = getSettingsDefaults();
+  return (RESORT_PARKS[resort] as string[]).includes(defaultPark)
+    ? (defaultPark as ParkId)
+    : RESORT_PARKS[resort][0];
 }
 
 // ============================================
@@ -464,6 +474,12 @@ export default function WaitTimesPage() {
   // Initial values are server-safe defaults; localStorage hydration runs in useEffect.
   const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
+  // Tracks whether localStorage hydration has completed — used to prevent a
+  // visible DLR→WDW flip when a stored selection differs from the initial default.
+  const [ready, setReady] = useState(false);
+  // Mirror of dw:settings:* keys, kept in sync for reactive isAlreadyDefault.
+  const [settingsResort, setSettingsResort] = useState<ResortId>("DLR");
+  const [settingsPark, setSettingsPark] = useState<ParkId>("disneyland");
   const [operatingOnly, setOperatingOnly] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>("wait-desc");
   const [selectedLand, setSelectedLand] = useState("");
@@ -481,28 +497,29 @@ export default function WaitTimesPage() {
   useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
 
   // Hydrate resort + park from localStorage on client mount (runs once).
+  // Sets ready=true at end so selectors render with the correct state (no flicker).
   useEffect(() => {
+    const { defaultResort, defaultPark } = getSettingsDefaults();
+    setSettingsResort(defaultResort);
+    setSettingsPark(defaultPark);
     const resort = loadStoredResort();
     const park = loadStoredPark(resort);
     setSelectedResort(resort);
     setSelectedPark(park);
+    setReady(true);
   }, []);
 
-  // Persist resort whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
-
-  // Persist park whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_PARK_KEY, selectedPark); } catch {}
-  }, [selectedPark]);
-
-  /** Handle resort change — reset park to first in new resort and clear land filter */
+  /** Handle resort change — reset park to first in new resort, clear land filter, and persist.
+   * Persistence is explicit here (user-initiated) — NOT in a useEffect —
+   * so initialization never auto-writes the default to localStorage. */
   function handleResortChange(resort: ResortId) {
     setSelectedResort(resort);
     setSelectedPark(RESORT_PARKS[resort][0]);
     setSelectedLand("");
+    try {
+      localStorage.setItem(STORAGE_RESORT_KEY, resort);
+      localStorage.setItem(STORAGE_PARK_KEY, RESORT_PARKS[resort][0]);
+    } catch {}
   }
 
   // Fetch wait data when resort or park changes.
@@ -622,55 +639,106 @@ export default function WaitTimesPage() {
           Wait Times
         </h1>
 
-        {/* Resort Toggle — DLR | WDW */}
-        <div
-          style={{
-            display: "flex",
-            gap: "8px",
-            marginBottom: "10px",
-          }}
-        >
-          {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
-            <button
-              key={resortId}
-              className="resort-tab"
-              onClick={() => handleResortChange(resortId)}
-              style={{
-                backgroundColor:
-                  selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-                color: selectedResort === resortId ? "#fff" : "#374151",
-                borderColor:
-                  selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
-              }}
-            >
-              {RESORT_LABELS[resortId]}
-            </button>
-          ))}
-        </div>
+        {/* Resort + Park selectors — only rendered after hydration to prevent
+            a visible DLR→WDW flip when the stored selection differs from the
+            server-safe initial state. Placeholders preserve layout height. */}
+        {ready ? (
+          <>
+            {/* Resort Toggle — DLR | WDW */}
+            <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+              {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
+                <button
+                  key={resortId}
+                  className="resort-tab"
+                  onClick={() => handleResortChange(resortId)}
+                  style={{
+                    backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
+                    color: selectedResort === resortId ? "#fff" : "#374151",
+                    borderColor: selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+                  }}
+                >
+                  {RESORT_LABELS[resortId]}
+                </button>
+              ))}
+            </div>
 
-        {/* Park Tabs — scoped to selected resort */}
-        <div
-          style={{
-            display: "flex",
-            gap: "8px",
-            marginBottom: "12px",
-          }}
-        >
-          {resortParks.map((parkId) => (
-            <button
-              key={parkId}
-              className="park-tab"
-              onClick={() => { setSelectedPark(parkId); setSelectedLand(""); }}
-              style={{
-                backgroundColor:
-                  selectedPark === parkId ? "#2563eb" : "#f3f4f6",
-                color: selectedPark === parkId ? "#fff" : "#374151",
-              }}
-            >
-              {PARK_TAB_LABELS[parkId]}
-            </button>
-          ))}
-        </div>
+            {/* Park Tabs — scoped to selected resort */}
+            <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+              {resortParks.map((parkId) => (
+                <button
+                  key={parkId}
+                  className="park-tab"
+                  onClick={() => {
+                    setSelectedPark(parkId);
+                    setSelectedLand("");
+                    try {
+                      localStorage.setItem(STORAGE_PARK_KEY, parkId);
+                      localStorage.setItem(STORAGE_RESORT_KEY, selectedResort);
+                    } catch {}
+                  }}
+                  style={{
+                    backgroundColor: selectedPark === parkId ? "#2563eb" : "#f3f4f6",
+                    color: selectedPark === parkId ? "#fff" : "#374151",
+                  }}
+                >
+                  {PARK_TAB_LABELS[parkId]}
+                </button>
+              ))}
+            </div>
+
+            {/* Set as default shortcut / "Default" label */}
+            {selectedResort === settingsResort && selectedPark === settingsPark ? (
+              <span
+                style={{
+                  display: "block",
+                  padding: "4px 0",
+                  marginBottom: "8px",
+                  fontSize: "12px",
+                  color: "#9ca3af",
+                }}
+              >
+                Default
+              </span>
+            ) : (
+              <button
+                onClick={() => {
+                  try {
+                    localStorage.setItem(SETTINGS_RESORT_KEY, selectedResort);
+                    localStorage.setItem(SETTINGS_PARK_KEY, selectedPark);
+                    setSettingsResort(selectedResort);
+                    setSettingsPark(selectedPark);
+                  } catch {}
+                }}
+                style={{
+                  background: "none",
+                  border: "none",
+                  padding: "4px 0",
+                  marginBottom: "8px",
+                  fontSize: "12px",
+                  color: "#6b7280",
+                  cursor: "pointer",
+                  textDecoration: "underline",
+                  display: "block",
+                }}
+              >
+                Set as default
+              </button>
+            )}
+          </>
+        ) : (
+          /* Skeleton placeholders preserve layout while hydration runs */
+          <>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            </div>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            </div>
+            <div style={{ height: 20, marginBottom: "8px" }} />
+          </>
+        )}
 
         {/* Controls Row: Filter + Sort — wraps on narrow screens */}
         <div
