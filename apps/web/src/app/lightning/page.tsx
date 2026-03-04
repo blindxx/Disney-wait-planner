@@ -7,6 +7,7 @@ import {
   parseMilToken,
   formatSingleTime,
 } from "@/lib/timeUtils";
+import { detectTimeConflicts } from "@/lib/timeConflicts";
 import {
   mockAttractionWaits,
   type AttractionWait,
@@ -303,6 +304,32 @@ export default function LightningPage() {
     [waitMap]
   );
 
+  // Compute time conflict sets from current items, substituting live edit values
+  // for the item currently being edited so warnings update on every keystroke.
+  const { invalidIds: llInvalidIds, overlapCountById: llOverlapCountById } = useMemo(() => {
+    const conflictInput = items.map((item) => {
+      if (item.id === editingId) {
+        // Use live editing values when valid; fall back to stored values otherwise.
+        const liveStart = normalizeTimeInput(editingStart) || item.startTime;
+        const rawEnd = editingEnd.trim()
+          ? (normalizeTimeInput(editingEnd) ?? item.endTime)
+          : item.endTime;
+        return { id: item.id, start: liveStart, end: rawEnd || undefined };
+      }
+      return { id: item.id, start: item.startTime, end: item.endTime || undefined };
+    });
+    const { invalidRanges, overlaps } = detectTimeConflicts(conflictInput);
+    const overlapCountById: Record<string, number> = {};
+    for (const { a, b } of overlaps) {
+      overlapCountById[a] = (overlapCountById[a] ?? 0) + 1;
+      overlapCountById[b] = (overlapCountById[b] ?? 0) + 1;
+    }
+    return {
+      invalidIds: new Set(invalidRanges),
+      overlapCountById,
+    };
+  }, [items, editingId, editingStart, editingEnd]);
+
   function handleStartEdit(item: LightningItem) {
     setEditingId(item.id);
     setEditingName(item.name);
@@ -592,6 +619,8 @@ export default function LightningPage() {
                 onEditSave={handleSaveEdit}
                 onEditCancel={handleCancelEdit}
                 suggestions={suggestions}
+                isInvalid={llInvalidIds.has(item.id)}
+                overlapCount={llOverlapCountById[item.id] ?? 0}
               />
             );
           })}
@@ -623,6 +652,8 @@ function ReservationCard({
   onEditSave,
   onEditCancel,
   suggestions,
+  isInvalid,
+  overlapCount,
 }: {
   item: LightningItem;
   bucket: Bucket;
@@ -643,6 +674,8 @@ function ReservationCard({
   onEditSave: () => void;
   onEditCancel: () => void;
   suggestions: string[];
+  isInvalid: boolean;
+  overlapCount: number;
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
@@ -921,6 +954,16 @@ function ReservationCard({
               Expired
             </span>
           )}
+
+          {isInvalid ? (
+            <p style={{ fontSize: "0.8rem", color: "#dc2626", margin: "0.3rem 0 0" }}>
+              ⚠️ End time is before start time
+            </p>
+          ) : overlapCount > 0 ? (
+            <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.3rem 0 0" }}>
+              ⚠️ Overlaps with {overlapCount === 1 ? "1 other item" : `${overlapCount} other items`}
+            </p>
+          ) : null}
         </div>
 
         {/* Edit + Remove buttons */}
