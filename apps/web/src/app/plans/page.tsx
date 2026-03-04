@@ -253,11 +253,6 @@ export default function PlansPage() {
     setSelectedResort(loadStoredResort());
   }, []);
 
-  // Persist selectedResort whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
-
   // Fetch live wait data for all parks in the selected resort.
   // Uses the same TTL cache as the Wait Times page (results are shared).
   // No-ops when live API is disabled — waitMap falls back to mock.
@@ -1096,7 +1091,10 @@ export default function PlansPage() {
             <button
               key={resortId}
               className="plans-resort-tab"
-              onClick={() => setSelectedResort(resortId)}
+              onClick={() => {
+                setSelectedResort(resortId);
+                try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
+              }}
               style={{
                 backgroundColor:
                   selectedResort === resortId ? "#1e3a5f" : "#f9fafb",

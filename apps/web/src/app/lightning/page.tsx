@@ -250,11 +250,6 @@ export default function LightningPage() {
     } catch {}
   }, []);
 
-  // Persist selectedResort whenever it changes
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
-
   // Fetch live wait data for all parks in the selected resort.
   // Shares the same TTL cache as My Plans / Wait Times — no second fetch path.
   useEffect(() => {
@@ -558,7 +553,10 @@ export default function LightningPage() {
         {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
           <button
             key={resortId}
-            onClick={() => setSelectedResort(resortId)}
+            onClick={() => {
+              setSelectedResort(resortId);
+              try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
+            }}
             style={{
               flex: "1 1 0%",
               padding: "8px 6px",

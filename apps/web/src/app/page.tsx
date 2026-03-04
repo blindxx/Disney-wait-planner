@@ -219,15 +219,13 @@ export default function TodayPage() {
     } catch {}
   }, []);
 
-  // Persist resort whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
-
-  // When resort changes, switch park to first park of that resort.
+  // When resort changes, switch park to first park of that resort and persist.
+  // Persistence is explicit here (user-initiated) — NOT in a useEffect —
+  // so initialization never auto-writes the default to localStorage.
   function handleResortChange(resort: ResortId) {
     setSelectedResort(resort);
     setSelectedPark(RESORT_PARKS[resort][0].id);
+    try { localStorage.setItem(STORAGE_RESORT_KEY, resort); } catch {}
   }
 
   // Update current time every minute

@@ -200,6 +200,46 @@ export default function SettingsPage() {
           Cloud Sync coming in Phase 7.2
         </p>
       </section>
+
+      {/* ── Reset Current Selection ── */}
+      <section style={{ marginTop: "20px" }}>
+        <h2
+          style={{
+            fontSize: "15px",
+            fontWeight: 600,
+            color: "#374151",
+            marginBottom: "6px",
+          }}
+        >
+          Reset Current Selection
+        </h2>
+        <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "12px" }}>
+          Clears your current resort &amp; park selection so Settings defaults
+          apply again on your next visit.
+        </p>
+        <button
+          onClick={() => {
+            try {
+              localStorage.removeItem("dwp.selectedResort");
+              localStorage.removeItem("dwp.selectedPark");
+            } catch {}
+            location.reload();
+          }}
+          style={{
+            padding: "10px 16px",
+            borderRadius: "8px",
+            border: "1px solid #d1d5db",
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: "14px",
+            backgroundColor: "#f9fafb",
+            color: "#374151",
+            minHeight: "44px",
+          }}
+        >
+          Reset resort &amp; park to defaults
+        </button>
+      </section>
     </div>
   );
 }

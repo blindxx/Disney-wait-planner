@@ -498,21 +498,17 @@ export default function WaitTimesPage() {
     setSelectedPark(park);
   }, []);
 
-  // Persist resort whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_RESORT_KEY, selectedResort); } catch {}
-  }, [selectedResort]);
-
-  // Persist park whenever it changes.
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_PARK_KEY, selectedPark); } catch {}
-  }, [selectedPark]);
-
-  /** Handle resort change — reset park to first in new resort and clear land filter */
+  /** Handle resort change — reset park to first in new resort, clear land filter, and persist.
+   * Persistence is explicit here (user-initiated) — NOT in a useEffect —
+   * so initialization never auto-writes the default to localStorage. */
   function handleResortChange(resort: ResortId) {
     setSelectedResort(resort);
     setSelectedPark(RESORT_PARKS[resort][0]);
     setSelectedLand("");
+    try {
+      localStorage.setItem(STORAGE_RESORT_KEY, resort);
+      localStorage.setItem(STORAGE_PARK_KEY, RESORT_PARKS[resort][0]);
+    } catch {}
   }
 
   // Fetch wait data when resort or park changes.
@@ -670,7 +666,11 @@ export default function WaitTimesPage() {
             <button
               key={parkId}
               className="park-tab"
-              onClick={() => { setSelectedPark(parkId); setSelectedLand(""); }}
+              onClick={() => {
+                setSelectedPark(parkId);
+                setSelectedLand("");
+                try { localStorage.setItem(STORAGE_PARK_KEY, parkId); } catch {}
+              }}
               style={{
                 backgroundColor:
                   selectedPark === parkId ? "#2563eb" : "#f3f4f6",
