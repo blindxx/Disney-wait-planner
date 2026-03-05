@@ -245,6 +245,7 @@ export default function TodayPage() {
   // Persistence is explicit here (user-initiated) — NOT in a useEffect —
   // so initialization never auto-writes the default to localStorage.
   function handleResortChange(resort: ResortId) {
+    if (resort === selectedResort) return;
     const firstPark = RESORT_PARKS[resort][0].id;
     setSelectedResort(resort);
     setSelectedPark(firstPark);
