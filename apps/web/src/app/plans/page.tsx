@@ -24,6 +24,12 @@ import {
 } from "@/lib/plansMatching";
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
+import { useSession } from "next-auth/react";
+import {
+  scheduleSync,
+  pullPlans,
+  registerUnloadSync,
+} from "@/lib/syncHelper";
 
 type PlanItem = {
   id: string;
@@ -234,6 +240,9 @@ export default function PlansPage() {
   const [ready, setReady] = useState(false);
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
+
+  // Auth session — used to trigger cloud pull on sign-in
+  const { status: sessionStatus } = useSession();
   const [autoSortEnabled, setAutoSortEnabled] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
@@ -341,11 +350,34 @@ export default function PlansPage() {
     setInitialized(true);
   }, []);
 
-  // Persist plan to localStorage on every mutation (after initial load)
+  // Persist plan to localStorage on every mutation (after initial load),
+  // then schedule a debounced cloud push.
   useEffect(() => {
     if (!initialized) return;
+    const payload = { version: SCHEMA_VERSION, items };
     saveToStorage(items);
+    scheduleSync(payload);
   }, [items, initialized]);
+
+  // On sign-in: pull cloud plans and overwrite local if cloud data exists.
+  // Uses sessionStatus to detect the transition from loading→authenticated.
+  useEffect(() => {
+    if (sessionStatus !== "authenticated" || !initialized) return;
+    void pullPlans().then((cloud) => {
+      if (!cloud) return; // null = 401, 204, or network error — keep local
+      setItems(cloud.items as PlanItem[]);
+    });
+  }, [sessionStatus, initialized]);
+
+  // Register a best-effort sendBeacon push on page unload (no cleanup needed).
+  useEffect(() => {
+    const cleanup = registerUnloadSync(() => ({
+      version: SCHEMA_VERSION,
+      items,
+    }));
+    return cleanup;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
 
   function openAdd() {
     setFormName("");
