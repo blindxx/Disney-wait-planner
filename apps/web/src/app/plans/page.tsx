@@ -366,31 +366,42 @@ export default function PlansPage() {
     if (syncReady) scheduleSync({ version: SCHEMA_VERSION, items });
   }, [items, initialized, syncReady]);
 
-  // On sign-in: pull cloud plans and overwrite local if cloud data exists.
-  // Sets syncReady=true after the pull resolves so subsequent mutations can push.
+  // Manage syncReady gate based on auth state transitions.
+  // loading      → gate resets to false immediately; guards against re-auth races
+  //                where the user was previously unauthenticated (syncReady=true).
+  // authenticated → gate resets to false, pull resolves, then gate opens.
+  // unauthenticated → gate opens immediately (local-only, no cloud pull needed).
   useEffect(() => {
-    if (sessionStatus !== "authenticated" || !initialized) return;
+    if (sessionStatus === "loading") {
+      setSyncReady(false);
+      return;
+    }
+    if (sessionStatus === "unauthenticated") {
+      setSyncReady(true);
+      return;
+    }
+    // authenticated
+    if (!initialized) return;
+    setSyncReady(false);
     void pullPlans().then((cloud) => {
       if (cloud) setItems(cloud.items as PlanItem[]);
-      setSyncReady(true); // allow scheduleSync after pull settles
+      setSyncReady(true); // allow scheduleSync only after pull settles
     });
   }, [sessionStatus, initialized]);
 
-  // Signed-out: no cloud pull needed — enable sync gate immediately so
-  // local-only behavior works as before (scheduleSync will 401-and-ignore).
+  // Register a best-effort sendBeacon push on page unload.
+  // Gated on syncReady: if the initial cloud pull hasn't resolved yet,
+  // we do not register the beacon so stale local plans cannot overwrite
+  // newer cloud data when the user closes the tab during the pull.
   useEffect(() => {
-    if (sessionStatus === "unauthenticated") setSyncReady(true);
-  }, [sessionStatus]);
-
-  // Register a best-effort sendBeacon push on page unload (no cleanup needed).
-  useEffect(() => {
+    if (!syncReady) return;
     const cleanup = registerUnloadSync(() => ({
       version: SCHEMA_VERSION,
       items,
     }));
     return cleanup;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items]);
+  }, [items, syncReady]);
 
   function openAdd() {
     setFormName("");
