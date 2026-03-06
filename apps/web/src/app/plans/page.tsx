@@ -382,11 +382,18 @@ export default function PlansPage() {
     }
     // authenticated
     if (!initialized) return;
+    // Cancellation flag: React sets this to true when the effect re-runs
+    // (i.e. sessionStatus or initialized changed). Any in-flight pullPlans()
+    // that resolves after the flag is set will be ignored, preventing stale
+    // cloud data from overwriting local state mid-auth-transition.
+    let cancelled = false;
     setSyncReady(false);
     void pullPlans().then((cloud) => {
+      if (cancelled) return;
       if (cloud) setItems(cloud.items as PlanItem[]);
-      setSyncReady(true); // allow scheduleSync only after pull settles
+      setSyncReady(true);
     });
+    return () => { cancelled = true; };
   }, [sessionStatus, initialized]);
 
   // Register a best-effort sendBeacon push on page unload.
