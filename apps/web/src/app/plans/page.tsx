@@ -388,12 +388,14 @@ export default function PlansPage() {
   // Schedule a debounced cloud push after every items change, but only once
   // syncReady is true (initial cloud pull has resolved) AND the user is
   // authenticated. Unauthenticated edits are local-only — no network calls.
-  // Cleanup cancels any queued debounce when the component unmounts so a
-  // stale timer cannot fire after auth state changes on a different page.
+  // NOTE: no unmount cleanup here intentionally — cancelling on unmount would
+  // silently drop the pending push on SPA navigation before the debounce fires,
+  // because beforeunload does not fire on in-app route changes. Auth/session
+  // transitions are already protected by the syncReady gate and the separate
+  // loading/unauthenticated branches in the effect below.
   useEffect(() => {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync({ version: SCHEMA_VERSION, items });
-    return () => { cancelScheduledSync(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized, syncReady, sessionStatus]);
 
