@@ -372,12 +372,13 @@ export default function PlansPage() {
   }, [items, initialized]);
 
   // Schedule a debounced cloud push after every items change, but only once
-  // syncReady is true (initial cloud pull has resolved).
+  // syncReady is true (initial cloud pull has resolved) AND the user is
+  // authenticated. Unauthenticated edits are local-only — no network calls.
   useEffect(() => {
-    if (!initialized || !syncReady) return;
+    if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync({ version: SCHEMA_VERSION, items });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, initialized, syncReady]);
+  }, [items, initialized, syncReady, sessionStatus]);
 
   // Manage syncReady gate based on auth state transitions.
   // loading      → gate resets to false immediately; guards against re-auth races

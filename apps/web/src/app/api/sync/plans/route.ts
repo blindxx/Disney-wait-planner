@@ -81,7 +81,9 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
 
-  if (body.length > MAX_BODY_BYTES) {
+  // Use UTF-8 byte length to match actual transmitted size — JS string .length
+  // counts UTF-16 code units, which underestimates multi-byte characters.
+  if (Buffer.byteLength(body, "utf8") > MAX_BODY_BYTES) {
     return NextResponse.json({ error: "Payload too large" }, { status: 413 });
   }
 
