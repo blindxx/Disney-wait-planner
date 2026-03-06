@@ -45,6 +45,15 @@ function makeId() {
   return String(nextId++);
 }
 
+/** Advance nextId past any IDs already present in a hydrated item list. */
+function reseedNextId(items: { id: string }[]): void {
+  const maxId = items.reduce((max, item) => {
+    const n = parseInt(item.id, 10);
+    return isNaN(n) ? max : Math.max(max, n);
+  }, 0);
+  if (maxId >= nextId) nextId = maxId + 1;
+}
+
 // ===== NAME POLISH HELPERS =====
 
 /**
@@ -354,9 +363,14 @@ export default function PlansPage() {
     };
   }, [items]);
 
-  // Load saved plan and preferences from localStorage once on mount (client-side only)
+  // Load saved plan and preferences from localStorage once on mount (client-side only).
+  // After loading, reseed nextId to be greater than any persisted item ID so
+  // that newly created items never collide with hydrated ones (avoids React key
+  // collisions and incorrect edit/delete behaviour after a page reload).
   useEffect(() => {
-    setItems(loadFromStorage());
+    const loaded = loadFromStorage();
+    if (loaded.length > 0) reseedNextId(loaded);
+    setItems(loaded);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
   }, []);
@@ -374,6 +388,11 @@ export default function PlansPage() {
   // Schedule a debounced cloud push after every items change, but only once
   // syncReady is true (initial cloud pull has resolved) AND the user is
   // authenticated. Unauthenticated edits are local-only — no network calls.
+  // NOTE: no unmount cleanup here intentionally — cancelling on unmount would
+  // silently drop the pending push on SPA navigation before the debounce fires,
+  // because beforeunload does not fire on in-app route changes. Auth/session
+  // transitions are already protected by the syncReady gate and the separate
+  // loading/unauthenticated branches in the effect below.
   useEffect(() => {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync({ version: SCHEMA_VERSION, items });
@@ -418,7 +437,10 @@ export default function PlansPage() {
         if (cancelled) return;
         // Only apply cloud data if no local edits occurred while the pull was
         // in flight. Either way, open the sync gate so edits can push.
-        if (!localEditRef.current && cloud) setItems(cloud.items as PlanItem[]);
+        if (!localEditRef.current && cloud) {
+          reseedNextId(cloud.items as PlanItem[]);
+          setItems(cloud.items as PlanItem[]);
+        }
         setSyncReady(true);
       })
       .catch(() => {
