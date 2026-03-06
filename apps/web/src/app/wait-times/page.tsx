@@ -496,6 +496,11 @@ export default function WaitTimesPage() {
   useEffect(() => { selectedResortRef.current = selectedResort; }, [selectedResort]);
   useEffect(() => { selectedParkRef.current = selectedPark; }, [selectedPark]);
 
+  // Monotonic token: incremented every time a new background refresh begins.
+  // Only the response whose token still matches the latest value may commit
+  // state — makes older in-flight responses self-discard automatically.
+  const refreshTokenRef = useRef(0);
+
   // Hydrate resort + park from localStorage on client mount (runs once).
   // Sets ready=true at end so selectors render with the correct state (no flicker).
   useEffect(() => {
@@ -547,16 +552,23 @@ export default function WaitTimesPage() {
 
   // Silent refresh — reads current resort/park from refs; intentionally does
   // NOT call setIsLoading so the existing list stays visible (no flicker).
-  // Request identity guard: captures the initiating resort+park before the
-  // async call and verifies they still match before committing state, so a
-  // response for a previously selected park cannot overwrite current state.
+  // Primary guard: monotonic request token — only the response whose token
+  // still matches the latest issued token may commit state. This prevents
+  // any older in-flight response from winning regardless of ref timing.
+  // Secondary guard: resort/park value check retained as a belt-and-suspenders
+  // sanity check for selection changes that arrive between token increment and
+  // ref synchronization (which runs in an effect micro-task).
   const refreshData = useCallback(() => {
+    const token = ++refreshTokenRef.current;
     const initiatingResort = selectedResortRef.current;
     const initiatingPark = selectedParkRef.current;
     getWaitDataset({
       resortId: initiatingResort,
       parkId: initiatingPark,
     }).then(({ data, dataSource: ds, lastUpdated: lu }) => {
+      if (token !== refreshTokenRef.current) {
+        return; // a newer refresh has already started — discard this response
+      }
       if (
         selectedResortRef.current !== initiatingResort ||
         selectedParkRef.current !== initiatingPark
@@ -567,7 +579,7 @@ export default function WaitTimesPage() {
       setDataSource(ds);
       setLastUpdated(lu);
     });
-  }, []); // stable — resort/park read from refs
+  }, []); // stable — all reads go through refs
 
   // Phase 6.3 — Tab focus refresh (primary trigger).
   // Fires once when the user returns to this tab; TTL cache in getWaitDataset

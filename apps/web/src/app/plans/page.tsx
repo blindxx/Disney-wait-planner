@@ -45,6 +45,15 @@ function makeId() {
   return String(nextId++);
 }
 
+/** Advance nextId past any IDs already present in a hydrated item list. */
+function reseedNextId(items: { id: string }[]): void {
+  const maxId = items.reduce((max, item) => {
+    const n = parseInt(item.id, 10);
+    return isNaN(n) ? max : Math.max(max, n);
+  }, 0);
+  if (maxId >= nextId) nextId = maxId + 1;
+}
+
 // ===== NAME POLISH HELPERS =====
 
 /**
@@ -360,13 +369,7 @@ export default function PlansPage() {
   // collisions and incorrect edit/delete behaviour after a page reload).
   useEffect(() => {
     const loaded = loadFromStorage();
-    if (loaded.length > 0) {
-      const maxId = loaded.reduce((max, item) => {
-        const n = parseInt(item.id, 10);
-        return isNaN(n) ? max : Math.max(max, n);
-      }, 0);
-      if (maxId >= nextId) nextId = maxId + 1;
-    }
+    if (loaded.length > 0) reseedNextId(loaded);
     setItems(loaded);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
@@ -432,7 +435,10 @@ export default function PlansPage() {
         if (cancelled) return;
         // Only apply cloud data if no local edits occurred while the pull was
         // in flight. Either way, open the sync gate so edits can push.
-        if (!localEditRef.current && cloud) setItems(cloud.items as PlanItem[]);
+        if (!localEditRef.current && cloud) {
+          reseedNextId(cloud.items as PlanItem[]);
+          setItems(cloud.items as PlanItem[]);
+        }
         setSyncReady(true);
       })
       .catch(() => {
