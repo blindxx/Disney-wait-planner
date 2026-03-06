@@ -354,9 +354,20 @@ export default function PlansPage() {
     };
   }, [items]);
 
-  // Load saved plan and preferences from localStorage once on mount (client-side only)
+  // Load saved plan and preferences from localStorage once on mount (client-side only).
+  // After loading, reseed nextId to be greater than any persisted item ID so
+  // that newly created items never collide with hydrated ones (avoids React key
+  // collisions and incorrect edit/delete behaviour after a page reload).
   useEffect(() => {
-    setItems(loadFromStorage());
+    const loaded = loadFromStorage();
+    if (loaded.length > 0) {
+      const maxId = loaded.reduce((max, item) => {
+        const n = parseInt(item.id, 10);
+        return isNaN(n) ? max : Math.max(max, n);
+      }, 0);
+      if (maxId >= nextId) nextId = maxId + 1;
+    }
+    setItems(loaded);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
   }, []);
@@ -374,9 +385,12 @@ export default function PlansPage() {
   // Schedule a debounced cloud push after every items change, but only once
   // syncReady is true (initial cloud pull has resolved) AND the user is
   // authenticated. Unauthenticated edits are local-only — no network calls.
+  // Cleanup cancels any queued debounce when the component unmounts so a
+  // stale timer cannot fire after auth state changes on a different page.
   useEffect(() => {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync({ version: SCHEMA_VERSION, items });
+    return () => { cancelScheduledSync(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized, syncReady, sessionStatus]);
 

@@ -547,11 +547,22 @@ export default function WaitTimesPage() {
 
   // Silent refresh — reads current resort/park from refs; intentionally does
   // NOT call setIsLoading so the existing list stays visible (no flicker).
+  // Request identity guard: captures the initiating resort+park before the
+  // async call and verifies they still match before committing state, so a
+  // response for a previously selected park cannot overwrite current state.
   const refreshData = useCallback(() => {
+    const initiatingResort = selectedResortRef.current;
+    const initiatingPark = selectedParkRef.current;
     getWaitDataset({
-      resortId: selectedResortRef.current,
-      parkId: selectedParkRef.current,
+      resortId: initiatingResort,
+      parkId: initiatingPark,
     }).then(({ data, dataSource: ds, lastUpdated: lu }) => {
+      if (
+        selectedResortRef.current !== initiatingResort ||
+        selectedParkRef.current !== initiatingPark
+      ) {
+        return; // selection changed while request was in flight — discard
+      }
       setAttractions(data);
       setDataSource(ds);
       setLastUpdated(lu);
