@@ -243,6 +243,11 @@ export default function PlansPage() {
 
   // Auth session — used to trigger cloud pull on sign-in
   const { status: sessionStatus } = useSession();
+  // Gate: prevents scheduleSync() from running until the initial cloud pull
+  // resolves. Stays false while authenticated session status is loading or
+  // while the GET /api/sync/plans request is in-flight. Set true after pull
+  // completes (authenticated path) or immediately (unauthenticated path).
+  const [syncReady, setSyncReady] = useState(false);
   const [autoSortEnabled, setAutoSortEnabled] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
@@ -351,23 +356,31 @@ export default function PlansPage() {
   }, []);
 
   // Persist plan to localStorage on every mutation (after initial load),
-  // then schedule a debounced cloud push.
+  // then schedule a debounced cloud push — but only after syncReady is true.
+  // syncReady stays false until the initial cloud pull resolves (authenticated)
+  // or until the user is confirmed unauthenticated, preventing stale local
+  // data from overwriting newer cloud data on first load after sign-in.
   useEffect(() => {
     if (!initialized) return;
-    const payload = { version: SCHEMA_VERSION, items };
     saveToStorage(items);
-    scheduleSync(payload);
-  }, [items, initialized]);
+    if (syncReady) scheduleSync({ version: SCHEMA_VERSION, items });
+  }, [items, initialized, syncReady]);
 
   // On sign-in: pull cloud plans and overwrite local if cloud data exists.
-  // Uses sessionStatus to detect the transition from loading→authenticated.
+  // Sets syncReady=true after the pull resolves so subsequent mutations can push.
   useEffect(() => {
     if (sessionStatus !== "authenticated" || !initialized) return;
     void pullPlans().then((cloud) => {
-      if (!cloud) return; // null = 401, 204, or network error — keep local
-      setItems(cloud.items as PlanItem[]);
+      if (cloud) setItems(cloud.items as PlanItem[]);
+      setSyncReady(true); // allow scheduleSync after pull settles
     });
   }, [sessionStatus, initialized]);
+
+  // Signed-out: no cloud pull needed — enable sync gate immediately so
+  // local-only behavior works as before (scheduleSync will 401-and-ignore).
+  useEffect(() => {
+    if (sessionStatus === "unauthenticated") setSyncReady(true);
+  }, [sessionStatus]);
 
   // Register a best-effort sendBeacon push on page unload (no cleanup needed).
   useEffect(() => {

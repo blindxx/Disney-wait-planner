@@ -17,10 +17,9 @@ export function getPool(): Pool {
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL env var is not set");
   }
-  if (process.env.NODE_ENV === "production") {
-    return new Pool({ connectionString: process.env.DATABASE_URL });
-  }
-  // In development, reuse across HMR cycles to avoid exhausting connections.
+  // Single Pool instance reused in BOTH development and production.
+  // globalThis persists across HMR cycles in dev and across warm invocations
+  // in production serverless runtimes, preventing connection accumulation.
   if (!global.__pgPool) {
     global.__pgPool = new Pool({ connectionString: process.env.DATABASE_URL });
   }
