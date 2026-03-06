@@ -432,18 +432,18 @@ export default function PlansPage() {
   }, [sessionStatus, initialized]);
 
   // Register a best-effort sendBeacon push on page unload.
-  // Gated on syncReady: if the initial cloud pull hasn't resolved yet,
-  // we do not register the beacon so stale local plans cannot overwrite
-  // newer cloud data when the user closes the tab during the pull.
+  // Requires both syncReady (initial pull resolved) AND authenticated session.
+  // Signed-out users have syncReady=true (local-only path) but must not send
+  // a beacon that would just receive a 401 and waste the unload budget.
   useEffect(() => {
-    if (!syncReady) return;
+    if (!syncReady || sessionStatus !== "authenticated") return;
     const cleanup = registerUnloadSync(() => ({
       version: SCHEMA_VERSION,
       items,
     }));
     return cleanup;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, syncReady]);
+  }, [items, syncReady, sessionStatus]);
 
   function openAdd() {
     setFormName("");
