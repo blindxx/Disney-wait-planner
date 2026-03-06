@@ -109,7 +109,7 @@ export function registerUnloadSync(getPayload: () => unknown): () => void {
       debounceTimer = null;
     }
     const body = JSON.stringify(getPayload());
-    if (body.length > MAX_SYNC_BYTES) return;
+    if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
     navigator.sendBeacon(
       "/api/sync/plans",
       new Blob([body], { type: "application/json" })
@@ -131,7 +131,7 @@ async function doPush(payload: unknown): Promise<void> {
   }
 
   const body = JSON.stringify(payload);
-  if (body.length > MAX_SYNC_BYTES) return;
+  if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
 
   inFlight = true;
   try {
