@@ -35,36 +35,59 @@ export function scheduleSync(payload: unknown): void {
   }, DEBOUNCE_MS);
 }
 
+// ── cancelScheduledSync ───────────────────────────────────────────────────────
+
+/**
+ * Cancel any pending debounced sync push.
+ * Call this on auth transitions (loading/authenticated) to prevent a
+ * queued stale PUT from firing during the initial cloud pull window.
+ */
+export function cancelScheduledSync(): void {
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+}
+
 // ── pullPlans ─────────────────────────────────────────────────────────────────
 
 /**
  * Pull the latest cloud plans for the currently signed-in user.
- * Returns null when the user is signed out (401), has no cloud data (204),
- * or when a network error occurs.
+ *
+ * Returns:
+ *   { version, items } — cloud data found
+ *   null               — cloud is definitively empty (204 No Content)
+ *
+ * Throws on:
+ *   non-OK HTTP responses (401, 5xx, etc.)
+ *   network/fetch failures
+ *
+ * Callers must catch to distinguish "unknown failure" from "known empty".
+ * A thrown error must NOT reopen the push gate — cloud state is uncertain.
  */
 export async function pullPlans(): Promise<{
   version: number;
   items: unknown[];
 } | null> {
-  try {
-    const res = await fetch("/api/sync/plans", { credentials: "include" });
-    if (res.status === 204 || !res.ok) return null;
-    const data = (await res.json()) as { plansJson?: unknown };
-    // Validate basic shape before returning
-    const pj = data.plansJson;
-    if (
-      pj &&
-      typeof pj === "object" &&
-      !Array.isArray(pj) &&
-      typeof (pj as Record<string, unknown>).version === "number" &&
-      Array.isArray((pj as Record<string, unknown>).items)
-    ) {
-      return pj as { version: number; items: unknown[] };
-    }
-    return null;
-  } catch {
-    return null;
+  const res = await fetch("/api/sync/plans", { credentials: "include" });
+  // Definitively empty — no plans stored for this user yet
+  if (res.status === 204) return null;
+  // Any other non-OK status is a real failure (401, 5xx, etc.); let it throw
+  if (!res.ok) throw new Error(`sync/plans GET ${res.status}`);
+  const data = (await res.json()) as { plansJson?: unknown };
+  // Validate basic shape before returning
+  const pj = data.plansJson;
+  if (
+    pj &&
+    typeof pj === "object" &&
+    !Array.isArray(pj) &&
+    typeof (pj as Record<string, unknown>).version === "number" &&
+    Array.isArray((pj as Record<string, unknown>).items)
+  ) {
+    return pj as { version: number; items: unknown[] };
   }
+  // Unexpected response shape — treat as empty (not as failure)
+  return null;
 }
 
 // ── registerUnloadSync ────────────────────────────────────────────────────────

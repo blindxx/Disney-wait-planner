@@ -29,6 +29,7 @@ import {
   scheduleSync,
   pullPlans,
   registerUnloadSync,
+  cancelScheduledSync,
 } from "@/lib/syncHelper";
 
 type PlanItem = {
@@ -385,6 +386,10 @@ export default function PlansPage() {
   // unauthenticated → gate opens immediately (local-only, no cloud pull needed).
   useEffect(() => {
     if (sessionStatus === "loading") {
+      // Cancel any queued debounced push from a prior signed-out session
+      // before entering the loading state — prevents stale local data from
+      // being sent while we don't yet know the final auth state.
+      cancelScheduledSync();
       setSyncReady(false);
       return;
     }
@@ -394,6 +399,9 @@ export default function PlansPage() {
     }
     // authenticated
     if (!initialized) return;
+    // Cancel any pending debounced push before starting the cloud pull so a
+    // queued stale PUT cannot fire during the initial pull window.
+    cancelScheduledSync();
     // Cancellation flag: React sets this to true when the effect re-runs
     // (i.e. sessionStatus or initialized changed). Any in-flight pullPlans()
     // that resolves after the flag is set will be ignored, preventing stale
@@ -404,13 +412,21 @@ export default function PlansPage() {
     // flips back to true and we skip applying the cloud result.
     localEditRef.current = false;
     setSyncReady(false);
-    void pullPlans().then((cloud) => {
-      if (cancelled) return;
-      // Only apply cloud data if no local edits occurred while the pull was
-      // in flight. Either way, open the sync gate so edits can push.
-      if (!localEditRef.current && cloud) setItems(cloud.items as PlanItem[]);
-      setSyncReady(true);
-    });
+    void pullPlans()
+      .then((cloud) => {
+        if (cancelled) return;
+        // Only apply cloud data if no local edits occurred while the pull was
+        // in flight. Either way, open the sync gate so edits can push.
+        if (!localEditRef.current && cloud) setItems(cloud.items as PlanItem[]);
+        setSyncReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Network or server error — cloud state is unknown (not definitively
+        // empty). Keep the push gate closed to avoid overwriting cloud data
+        // with potentially stale local plans. Gate reopens on the next auth
+        // cycle (sign-out + sign-in, or page reload).
+      });
     return () => { cancelled = true; };
   }, [sessionStatus, initialized]);
 
