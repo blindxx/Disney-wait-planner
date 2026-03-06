@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   mockAttractionWaits,
   type AttractionWait,
@@ -243,6 +243,11 @@ export default function PlansPage() {
 
   // Auth session — used to trigger cloud pull on sign-in
   const { status: sessionStatus } = useSession();
+  // Tracks whether the user made a local edit after the current pull started.
+  // Reset to false each time a new pull begins; set to true on any mutation.
+  // The pull callback checks this before applying cloud state so it never
+  // overwrites edits that happened while the GET was in flight.
+  const localEditRef = useRef(false);
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Stays false while authenticated session status is loading or
   // while the GET /api/sync/plans request is in-flight. Set true after pull
@@ -355,15 +360,22 @@ export default function PlansPage() {
     setInitialized(true);
   }, []);
 
-  // Persist plan to localStorage on every mutation (after initial load),
-  // then schedule a debounced cloud push — but only after syncReady is true.
-  // syncReady stays false until the initial cloud pull resolves (authenticated)
-  // or until the user is confirmed unauthenticated, preventing stale local
-  // data from overwriting newer cloud data on first load after sign-in.
+  // Persist to localStorage on every items mutation (after initial load).
+  // Also marks localEditRef so any in-flight pull sees the edit and skips
+  // overwriting it. Kept separate from the sync effect so that syncReady
+  // state changes don't trigger localEditRef (only real items changes do).
   useEffect(() => {
     if (!initialized) return;
+    localEditRef.current = true;
     saveToStorage(items);
-    if (syncReady) scheduleSync({ version: SCHEMA_VERSION, items });
+  }, [items, initialized]);
+
+  // Schedule a debounced cloud push after every items change, but only once
+  // syncReady is true (initial cloud pull has resolved).
+  useEffect(() => {
+    if (!initialized || !syncReady) return;
+    scheduleSync({ version: SCHEMA_VERSION, items });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized, syncReady]);
 
   // Manage syncReady gate based on auth state transitions.
@@ -387,10 +399,16 @@ export default function PlansPage() {
     // that resolves after the flag is set will be ignored, preventing stale
     // cloud data from overwriting local state mid-auth-transition.
     let cancelled = false;
+    // Reset the local-edit guard so the upcoming pull starts with a clean slate.
+    // If the user edits anything while the pull is in flight, localEditRef
+    // flips back to true and we skip applying the cloud result.
+    localEditRef.current = false;
     setSyncReady(false);
     void pullPlans().then((cloud) => {
       if (cancelled) return;
-      if (cloud) setItems(cloud.items as PlanItem[]);
+      // Only apply cloud data if no local edits occurred while the pull was
+      // in flight. Either way, open the sync gate so edits can push.
+      if (!localEditRef.current && cloud) setItems(cloud.items as PlanItem[]);
       setSyncReady(true);
     });
     return () => { cancelled = true; };

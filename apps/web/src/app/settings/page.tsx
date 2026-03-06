@@ -336,7 +336,7 @@ export default function SettingsPage() {
               {" · "}Auto-sync: On
             </p>
             <button
-              onClick={() => void signOut({ redirect: false })}
+              onClick={() => { setSignInSent(false); void signOut({ redirect: false }); }}
               style={{
                 padding: "10px 16px",
                 borderRadius: "8px",
