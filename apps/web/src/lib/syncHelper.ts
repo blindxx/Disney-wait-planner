@@ -1,3 +1,18 @@
+/*
+Cloud Sync Safety Notes
+This module manages debounced cloud plan synchronization.
+Critical invariants:
+• Debounced sync operations must not cross auth/session boundaries.
+• Only the most recent local state should be pushed to the cloud.
+• Pending sync timers must be safely cancelable during auth transitions.
+• Sync scheduling must not cause duplicate or conflicting writes.
+Reviewers should check any changes affecting:
+- debounce timers
+- session/auth transitions
+- push ordering
+- payload correctness
+*/
+
 /**
  * syncHelper — client-side Plans cloud sync (Phase 7.2)
  *
