@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import SessionProviderWrapper from "@/components/SessionProviderWrapper";
 
 export const metadata: Metadata = {
   title: "Disney Wait Planner",
@@ -34,7 +35,9 @@ export default function RootLayout({
             ))}
           </ul>
         </nav>
-        <main className="main">{children}</main>
+        <main className="main">
+          <SessionProviderWrapper>{children}</SessionProviderWrapper>
+        </main>
       </body>
     </html>
   );

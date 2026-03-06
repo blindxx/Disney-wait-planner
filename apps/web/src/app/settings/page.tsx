@@ -19,6 +19,8 @@ import {
   SETTINGS_RESORT_KEY,
   SETTINGS_PARK_KEY,
 } from "../../lib/settingsDefaults";
+import { useSession, signIn, signOut } from "next-auth/react";
+import { LAST_SYNCED_KEY } from "../../lib/syncHelper";
 
 // ============================================
 // CONSTANTS
@@ -53,12 +55,23 @@ export default function SettingsPage() {
   // the initial useState value. Resort/park buttons only render once ready=true.
   const [ready, setReady] = useState(false);
 
+  // Account & Sync state
+  const { data: session, status: sessionStatus } = useSession();
+  const [emailInput, setEmailInput] = useState("");
+  const [signInSent, setSignInSent] = useState(false);
+  const [signInError, setSignInError] = useState("");
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
+    // Read last sync time
+    try {
+      setLastSyncedAt(localStorage.getItem(LAST_SYNCED_KEY));
+    } catch {}
   }, []);
 
   // Handlers — persist immediately on change.
@@ -81,6 +94,24 @@ export default function SettingsPage() {
     try {
       localStorage.setItem(SETTINGS_PARK_KEY, park);
     } catch {}
+  }
+
+  async function handleSendSignInLink() {
+    setSignInError("");
+    const trimmedEmail = emailInput.trim();
+    if (!trimmedEmail || !trimmedEmail.includes("@")) {
+      setSignInError("Please enter a valid email address.");
+      return;
+    }
+    const result = await signIn("email", {
+      email: trimmedEmail,
+      redirect: false,
+    });
+    if (result?.error) {
+      setSignInError("Something went wrong. Please try again.");
+    } else {
+      setSignInSent(true);
+    }
   }
 
   const parks = RESORT_PARKS[defaultResort];
@@ -206,13 +237,14 @@ export default function SettingsPage() {
         </>
       )}
 
-      {/* ── Account / Sync (Placeholder) ── */}
+      {/* ── Account / Sync ── */}
       <section
         style={{
           padding: "16px",
           borderRadius: "8px",
           border: "1px solid #e5e7eb",
           backgroundColor: "#f9fafb",
+          marginBottom: "4px",
         }}
       >
         <h2
@@ -220,14 +252,107 @@ export default function SettingsPage() {
             fontSize: "15px",
             fontWeight: 600,
             color: "#374151",
-            marginBottom: "6px",
+            marginBottom: "12px",
           }}
         >
           Account &amp; Sync
         </h2>
-        <p style={{ fontSize: "14px", color: "#6b7280", margin: 0 }}>
-          Cloud Sync coming in Phase 7.2
-        </p>
+
+        {/* Loading skeleton while session resolves */}
+        {sessionStatus === "loading" && (
+          <div style={{ height: 44, borderRadius: 8, backgroundColor: "#e5e7eb" }} />
+        )}
+
+        {/* Signed-out state */}
+        {sessionStatus === "unauthenticated" && !signInSent && (
+          <div>
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "10px" }}>
+              We&apos;ll email you a link to sign in. No password.
+            </p>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <input
+                type="email"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") void handleSendSignInLink(); }}
+                placeholder="you@example.com"
+                style={{
+                  flex: "1 1 180px",
+                  padding: "10px 12px",
+                  borderRadius: "8px",
+                  border: "1px solid #d1d5db",
+                  fontSize: "14px",
+                  minHeight: "44px",
+                  backgroundColor: "#fff",
+                  color: "#111827",
+                  outline: "none",
+                }}
+              />
+              <button
+                onClick={() => void handleSendSignInLink()}
+                style={{
+                  flex: "0 0 auto",
+                  padding: "10px 16px",
+                  borderRadius: "8px",
+                  border: "none",
+                  cursor: "pointer",
+                  fontWeight: 600,
+                  fontSize: "14px",
+                  backgroundColor: "#1e3a5f",
+                  color: "#fff",
+                  minHeight: "44px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Send sign-in link
+              </button>
+            </div>
+            {signInError && (
+              <p style={{ fontSize: "13px", color: "#dc2626", marginTop: "8px" }}>
+                {signInError}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Email sent confirmation */}
+        {sessionStatus === "unauthenticated" && signInSent && (
+          <p style={{ fontSize: "14px", color: "#374151" }}>
+            Check your inbox — we sent a sign-in link to{" "}
+            <strong>{emailInput}</strong>.
+          </p>
+        )}
+
+        {/* Signed-in state */}
+        {sessionStatus === "authenticated" && session?.user && (
+          <div>
+            <p style={{ fontSize: "14px", color: "#374151", marginBottom: "4px" }}>
+              Signed in as <strong>{session.user.email}</strong>
+            </p>
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "12px" }}>
+              {lastSyncedAt
+                ? `Last synced: ${new Date(lastSyncedAt).toLocaleString()}`
+                : "Never synced"}
+              {" · "}Auto-sync: On
+            </p>
+            <button
+              onClick={() => { setSignInSent(false); void signOut({ redirect: false }); }}
+              style={{
+                padding: "10px 16px",
+                borderRadius: "8px",
+                border: "1px solid #d1d5db",
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: "14px",
+                backgroundColor: "#f9fafb",
+                color: "#374151",
+                minHeight: "44px",
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        )}
       </section>
 
       {/* ── Reset Current Selection ── */}
