@@ -1,5 +1,19 @@
 "use client";
 
+/*
+Async Fetch Safety Notes
+This page fetches wait-time data based on the selected resort and park.
+Critical invariants:
+• Older async responses must never overwrite newer selections.
+• Request token logic ensures only the newest refresh may commit state.
+• Rapid park/resort switching must not produce stale UI state.
+• Background refresh timers must respect the currently active selection.
+Reviewers should verify that:
+- request tokens remain monotonic
+- stale responses are ignored
+- async refresh behavior does not regress
+*/
+
 /**
  * Wait Times Page
  * Displays current attraction wait times for Disneyland Resort (DLR) and

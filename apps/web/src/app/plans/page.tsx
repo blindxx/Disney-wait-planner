@@ -1,5 +1,24 @@
 "use client";
 
+/*
+Async State Safety Notes
+This component coordinates local plan editing with cloud synchronization.
+Critical invariants:
+• Debounced sync must never write stale state across auth/session transitions.
+• Sync scheduling must respect the `initialized`, `syncReady`, and
+  `sessionStatus === "authenticated"` gates.
+• Pending sync operations must not overwrite newer edits.
+• Plan item IDs must remain globally unique even after localStorage
+  hydration or cloud plan hydration.
+• Hydration ordering (local → cloud) must not cause ID reuse.
+Reviewers should carefully check any changes affecting:
+- debounce timing
+- sync scheduling
+- hydration logic
+- plan item ID generation
+- session/auth state transitions
+*/
+
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   mockAttractionWaits,
