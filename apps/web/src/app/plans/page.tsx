@@ -592,6 +592,13 @@ export default function PlansPage() {
         if (!localEditRef.current && cloud) {
           reseedNextId(cloud.items as PlanItem[]);
           setItems(cloud.items as PlanItem[]);
+          // Phase 7.3.6: if no explicit session context exists, allow the
+          // items-watcher to re-run inference once on the authoritative cloud
+          // dataset. The mount-time inference ran on stale local plans; the
+          // cloud pull is the definitive source for this page load.
+          if (!readSessionContext().exists) {
+            contextInferredRef.current = false;
+          }
         }
         setSyncReady(true);
       })
