@@ -326,6 +326,10 @@ export default function PlansPage() {
   const localEditRef = useRef(false);
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
+  // Tracks how many items existed when the page first mounted. Used to
+  // distinguish ordinary revisits (existing plans) from true import-triggered
+  // inference events (items went from zero to non-zero in this lifecycle).
+  const initialItemCountRef = useRef(0);
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Stays false while authenticated session status is loading or
   // while the GET /api/sync/plans request is in-flight. Set true after pull
@@ -446,6 +450,10 @@ export default function PlansPage() {
   //   Priority 3 → Settings defaults.
   useEffect(() => {
     const loaded = loadFromStorage();
+    // Record how many items existed at mount. The post-import effect uses this
+    // to distinguish ordinary page revisits (pre-existing plans) from true
+    // import-triggered events where inference is allowed.
+    initialItemCountRef.current = loaded.length;
     if (loaded.length > 0) reseedNextId(loaded);
     setItems(loaded);
     setAutoSortEnabled(loadSortPref());
@@ -456,34 +464,23 @@ export default function PlansPage() {
 
     if (session.exists) {
       // Priority 1: session context key(s) exist — respect them, skip inference.
-      // Lock contextInferredRef immediately so the post-import items-watcher
-      // cannot re-open the inference gate on subsequent items changes during
-      // this page lifecycle (ordinary revisits must not re-infer).
-      contextInferredRef.current = true;
-      // Restore stored park if valid for this resort; fall back to resort's first park.
+      // Lock the inference gate only when items existed at mount (ordinary revisit
+      // with existing plans). If mounted with empty plans, leave the gate open so
+      // a subsequent import can still run inference as a true bootstrap event.
+      if (loaded.length > 0) {
+        contextInferredRef.current = true;
+      }
       setSelectedResort(session.resort);
       setSelectedPark(session.park ?? RESORT_PARKS[session.resort][0]);
       setReady(true);
       return;
     }
 
-    // Priority 2: no session context — attempt one-time inference from plans.
-    if (!contextInferredRef.current && loaded.length > 0) {
-      contextInferredRef.current = true;
-      const inferred = inferPlansContext(loaded);
-      if (inferred.resort) {
-        setSelectedResort(inferred.resort);
-        const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
-        setSelectedPark(resolvedPark);
-        // Phase 7.3.4: persist inferred context immediately to session keys
-        try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
-        try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
-        setReady(true);
-        return;
-      }
-    }
+    // Priority 2 (removed): existing plans at mount no longer trigger inference.
+    // Inference is import-triggered only — ordinary page visits with pre-existing
+    // plans must not reassert inferred context over active session or defaults.
 
-    // Priority 3: settings defaults (also handles empty plans or unresolvable names).
+    // Priority 3: settings defaults.
     const defaultResort = getSettingsDefaults().defaultResort;
     setSelectedResort(defaultResort);
     setSelectedPark(RESORT_PARKS[defaultResort][0]);
@@ -508,10 +505,15 @@ export default function PlansPage() {
   useEffect(() => {
     if (!initialized) return;
     if (contextInferredRef.current) return;
-    if (items.length === 0) return;
+    // Only allow inference on a true fresh-import event: items went from zero
+    // to non-zero during this page lifecycle. Items that existed at mount
+    // (initialItemCountRef.current > 0) represent an ordinary page revisit —
+    // existing plans must not reassert inferred context on simple page visits.
+    if (items.length === 0 || initialItemCountRef.current > 0) return;
 
     const session = readSessionContext();
-    // Session context exists — mark as resolved and skip inference.
+    // Explicit session context exists — mark resolved and skip inference.
+    // Explicit user selection (Priority 1) wins over import-triggered inference.
     if (session.exists) {
       contextInferredRef.current = true;
       return;
@@ -845,6 +847,7 @@ export default function PlansPage() {
     //   2. dwp.selectedResort/Park keys still exist → readSessionContext().exists
     //      returns true → watcher treats it as an explicit selection and skips inference
     contextInferredRef.current = false;
+    initialItemCountRef.current = 0; // re-open import-inference eligibility
     try { localStorage.removeItem(STORAGE_RESORT_KEY); } catch {}
     try { localStorage.removeItem(STORAGE_PARK_KEY); } catch {}
   }

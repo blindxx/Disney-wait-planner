@@ -94,7 +94,12 @@ export default function SettingsPage() {
           haspark && RESORT_PARKS[resolvedResort].some((p) => p.id === storedPark);
         const resolvedPark: ParkId = parkBelongsToResort
           ? (storedPark as ParkId)
-          : RESORT_PARKS[resolvedResort][0].id;
+          // Prefer the current/default park if valid for the resolved resort.
+          // This matches the resolution order used elsewhere in the app when
+          // the park key is absent but the resort key exists.
+          : RESORT_PARKS[resolvedResort].some((p) => p.id === park)
+            ? park
+            : RESORT_PARKS[resolvedResort][0].id;
         setSessionResort(resolvedResort);
         setSessionPark(resolvedPark);
       }
