@@ -335,6 +335,10 @@ export default function PlansPage() {
   // Live wait data for the selected resort (all parks merged).
   // Empty when live is disabled; waitMap falls back to mock in that case.
   const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
+  // Inferred park from context inference — displayed in the context label.
+  // Null when no park has been inferred (e.g. session context or no match).
+  // Cleared when the user manually switches resort.
+  const [inferredPark, setInferredPark] = useState<ParkId | null>(null);
 
   // Phase 7.3 — Context priority model (runs once on mount, client-side only).
   // Priority 1: Session context (dwp.selectedResort or dwp.selectedPark exists) → use it.
@@ -452,6 +456,7 @@ export default function PlansPage() {
       const inferred = inferPlansContext(loaded);
       if (inferred.resort) {
         setSelectedResort(inferred.resort);
+        if (inferred.park) setInferredPark(inferred.park as ParkId);
         setReady(true);
         return;
       }
@@ -462,6 +467,42 @@ export default function PlansPage() {
     setReady(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Phase 7.3.1 — Post-import inference trigger.
+  // Runs inference when plans first become available after the page is already
+  // initialized (e.g. the user imports a plan while the Plans page is open).
+  // The initialization effect above only covers plans that existed at mount time;
+  // this effect covers the case where plans arrive later.
+  //
+  // Guards (ALL must be true to proceed):
+  //   1. initialized — page has fully hydrated
+  //   2. contextInferredRef.current === false — inference has not already run
+  //   3. items.length > 0 — plans are now available
+  //   4. no session context — explicit selection always wins
+  //
+  // Marks contextInferredRef=true on first execution regardless of result,
+  // so subsequent items changes (edits, deletions) never re-trigger inference.
+  useEffect(() => {
+    if (!initialized) return;
+    if (contextInferredRef.current) return;
+    if (items.length === 0) return;
+
+    const session = readSessionContext();
+    // Session context exists — mark as resolved and skip inference.
+    if (session.exists) {
+      contextInferredRef.current = true;
+      return;
+    }
+
+    // Run inference (one-time).
+    contextInferredRef.current = true;
+    const inferred = inferPlansContext(items);
+    if (inferred.resort) {
+      setSelectedResort(inferred.resort);
+      if (inferred.park) setInferredPark(inferred.park as ParkId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, initialized]);
 
   // Persist to localStorage on every items mutation (after initial load).
   // Also marks localEditRef so any in-flight pull sees the edit and skips
@@ -1307,6 +1348,7 @@ export default function PlansPage() {
                 className="plans-resort-tab"
                 onClick={() => {
                   setSelectedResort(resortId);
+                  setInferredPark(null); // clear stale park when resort is changed manually
                   try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
                 }}
                 style={{
@@ -1337,7 +1379,9 @@ export default function PlansPage() {
           </label>
         </div>
 
-        <p className="wait-scope-label">Wait overlay: {selectedResort}</p>
+        <p className="wait-scope-label">
+          Wait overlay: {selectedResort}{inferredPark && PARK_LABELS[inferredPark] ? ` / ${PARK_LABELS[inferredPark]}` : ""}
+        </p>
 
         {clearConfirm && (
           <div className="clear-confirm-row">
