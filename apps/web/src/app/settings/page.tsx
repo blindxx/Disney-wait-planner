@@ -56,8 +56,8 @@ export default function SettingsPage() {
   const [ready, setReady] = useState(false);
 
   // Active session context (dwp.selectedResort / dwp.selectedPark).
-  // Both keys must be present for the pair to be coherent; null otherwise.
-  // Display falls back live to defaultResort/defaultPark when null.
+  // Either key alone is sufficient; the resolved pair is always coherent.
+  // Null when no session context exists; display falls back live to defaults.
   const [sessionResort, setSessionResort] = useState<ResortId | null>(null);
   const [sessionPark, setSessionPark] = useState<ParkId | null>(null);
 
@@ -73,14 +73,30 @@ export default function SettingsPage() {
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
-    // Read active session context. Both keys must be present to form a
-    // coherent pair — partial presence is treated as no active context.
+    // Read active session context using the same normalization as the rest of
+    // the app (matches Plans' readSessionContext logic). Either key alone is
+    // sufficient to establish context; the missing side is derived/validated.
     try {
-      const storedResort = localStorage.getItem("dwp.selectedResort") as ResortId | null;
-      const storedPark = localStorage.getItem("dwp.selectedPark") as ParkId | null;
-      if (storedResort && storedPark) {
-        setSessionResort(storedResort);
-        setSessionPark(storedPark);
+      const storedResort = localStorage.getItem("dwp.selectedResort");
+      const storedPark = localStorage.getItem("dwp.selectedPark");
+      const hasResort = storedResort === "DLR" || storedResort === "WDW";
+      // Find which resort owns storedPark, if any.
+      const parkResort = storedPark
+        ? (Object.entries(RESORT_PARKS) as [ResortId, { id: ParkId; label: string }[]][])
+            .find(([, parks]) => parks.some((p) => p.id === storedPark))?.[0] ?? null
+        : null;
+      const haspark = parkResort !== null;
+
+      if (hasResort || haspark) {
+        const resolvedResort: ResortId = hasResort ? (storedResort as ResortId) : parkResort!;
+        // Validate park against the resolved resort to prevent cross-resort mismatch.
+        const parkBelongsToResort =
+          haspark && RESORT_PARKS[resolvedResort].some((p) => p.id === storedPark);
+        const resolvedPark: ParkId = parkBelongsToResort
+          ? (storedPark as ParkId)
+          : RESORT_PARKS[resolvedResort][0].id;
+        setSessionResort(resolvedResort);
+        setSessionPark(resolvedPark);
       }
     } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.

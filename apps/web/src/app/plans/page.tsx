@@ -456,6 +456,10 @@ export default function PlansPage() {
 
     if (session.exists) {
       // Priority 1: session context key(s) exist — respect them, skip inference.
+      // Lock contextInferredRef immediately so the post-import items-watcher
+      // cannot re-open the inference gate on subsequent items changes during
+      // this page lifecycle (ordinary revisits must not re-infer).
+      contextInferredRef.current = true;
       // Restore stored park if valid for this resort; fall back to resort's first park.
       setSelectedResort(session.resort);
       setSelectedPark(session.park ?? RESORT_PARKS[session.resort][0]);
