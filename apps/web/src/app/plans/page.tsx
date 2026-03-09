@@ -237,6 +237,12 @@ const PARK_LABELS: Record<ParkId, string> = {
   ak: "Animal Kingdom",
 };
 
+/** Ordered list of parks per resort — drives the park selector UI. */
+const RESORT_PARKS: Record<ResortId, ParkId[]> = {
+  DLR: ["disneyland", "dca"],
+  WDW: ["mk", "epcot", "hs", "ak"],
+};
+
 // ===== RESORT PERSISTENCE =====
 
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
@@ -335,10 +341,10 @@ export default function PlansPage() {
   // Live wait data for the selected resort (all parks merged).
   // Empty when live is disabled; waitMap falls back to mock in that case.
   const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
-  // Inferred park from context inference — displayed in the context label.
-  // Null when no park has been inferred (e.g. session context or no match).
-  // Cleared when the user manually switches resort.
-  const [inferredPark, setInferredPark] = useState<ParkId | null>(null);
+  // Active park shown in the park selector. Set by inference or manual selection.
+  // Defaults to the first park of the resolved resort after initialization.
+  // Reset to the first park of the new resort when the user switches resort.
+  const [selectedPark, setSelectedPark] = useState<ParkId | null>(null);
 
   // Phase 7.3 — Context priority model (runs once on mount, client-side only).
   // Priority 1: Session context (dwp.selectedResort or dwp.selectedPark exists) → use it.
@@ -446,6 +452,7 @@ export default function PlansPage() {
     if (session.exists) {
       // Priority 1: session context key(s) exist — respect them, skip inference.
       setSelectedResort(session.resort);
+      setSelectedPark(RESORT_PARKS[session.resort][0]);
       setReady(true);
       return;
     }
@@ -456,14 +463,16 @@ export default function PlansPage() {
       const inferred = inferPlansContext(loaded);
       if (inferred.resort) {
         setSelectedResort(inferred.resort);
-        if (inferred.park) setInferredPark(inferred.park as ParkId);
+        setSelectedPark((inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId);
         setReady(true);
         return;
       }
     }
 
     // Priority 3: settings defaults (also handles empty plans or unresolvable names).
-    setSelectedResort(getSettingsDefaults().defaultResort);
+    const defaultResort = getSettingsDefaults().defaultResort;
+    setSelectedResort(defaultResort);
+    setSelectedPark(RESORT_PARKS[defaultResort][0]);
     setReady(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -499,7 +508,7 @@ export default function PlansPage() {
     const inferred = inferPlansContext(items);
     if (inferred.resort) {
       setSelectedResort(inferred.resort);
-      if (inferred.park) setInferredPark(inferred.park as ParkId);
+      setSelectedPark((inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized]);
@@ -1316,6 +1325,27 @@ export default function PlansPage() {
           transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
           min-height: 36px;
         }
+        /* Park selector — same visual style as the resort selector above */
+        .plans-park-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 6px;
+          margin-bottom: 0.75rem;
+        }
+        .plans-park-tab {
+          flex: 1 1 calc(50% - 3px);
+          min-width: 0;
+          padding: 6px 4px;
+          border-radius: 8px;
+          border: 1px solid #d1d5db;
+          cursor: pointer;
+          font-weight: 500;
+          font-size: 12px;
+          line-height: 1.3;
+          text-align: center;
+          transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+          min-height: 32px;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -1348,7 +1378,7 @@ export default function PlansPage() {
                 className="plans-resort-tab"
                 onClick={() => {
                   setSelectedResort(resortId);
-                  setInferredPark(null); // clear stale park when resort is changed manually
+                  setSelectedPark(RESORT_PARKS[resortId][0]); // reset to first park of new resort
                   try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
                 }}
                 style={{
@@ -1368,6 +1398,33 @@ export default function PlansPage() {
           </div>
         )}
 
+        {/* Park selector — shows all parks for the selected resort.
+            Active park is highlighted (same style as resort selector).
+            Gated by ready to prevent flicker before hydration. */}
+        {ready ? (
+          <div className="plans-park-row">
+            {RESORT_PARKS[selectedResort].map((parkId) => (
+              <button
+                key={parkId}
+                className="plans-park-tab"
+                onClick={() => setSelectedPark(parkId)}
+                style={{
+                  backgroundColor: selectedPark === parkId ? "#1e3a5f" : "#f9fafb",
+                  color: selectedPark === parkId ? "#fff" : "#374151",
+                  borderColor: selectedPark === parkId ? "#1e3a5f" : "#d1d5db",
+                }}
+              >
+                {PARK_LABELS[parkId]}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="plans-park-row">
+            <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+          </div>
+        )}
+
         <div className="sort-toggle-row">
           <label className="sort-toggle-label">
             <input
@@ -1380,7 +1437,7 @@ export default function PlansPage() {
         </div>
 
         <p className="wait-scope-label">
-          Wait overlay: {selectedResort}{inferredPark && PARK_LABELS[inferredPark] ? ` / ${PARK_LABELS[inferredPark]}` : ""}
+          Wait overlay: {selectedResort}{selectedPark && PARK_LABELS[selectedPark] ? ` / ${PARK_LABELS[selectedPark]}` : ""}
         </p>
 
         {clearConfirm && (
