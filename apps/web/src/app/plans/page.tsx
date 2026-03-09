@@ -463,7 +463,11 @@ export default function PlansPage() {
       const inferred = inferPlansContext(loaded);
       if (inferred.resort) {
         setSelectedResort(inferred.resort);
-        setSelectedPark((inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId);
+        const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
+        setSelectedPark(resolvedPark);
+        // Phase 7.3.4: persist inferred context immediately to session keys
+        try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
+        try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
         setReady(true);
         return;
       }
@@ -508,7 +512,11 @@ export default function PlansPage() {
     const inferred = inferPlansContext(items);
     if (inferred.resort) {
       setSelectedResort(inferred.resort);
-      setSelectedPark((inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId);
+      const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
+      setSelectedPark(resolvedPark);
+      // Phase 7.3.4: persist inferred context immediately to session keys
+      try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
+      try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized]);

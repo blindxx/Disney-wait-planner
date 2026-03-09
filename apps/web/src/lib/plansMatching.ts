@@ -121,6 +121,7 @@ export const ALIASES_DLR: Record<string, string> = {
   "guardians mission breakout":  "guardians of the galaxy mission breakout",
   "guardians breakout":          "guardians of the galaxy mission breakout",
   "rise":                        "star wars rise of the resistance",
+  "rise of the resistance":      "star wars rise of the resistance",
   "smuggler":                    "millennium falcon smugglers run",
   "smugglers":                   "millennium falcon smugglers run",
   "smugglers run":               "millennium falcon smugglers run",
@@ -228,6 +229,7 @@ export const ALIASES_WDW: Record<string, string> = {
   "aerosmith":                   "rock n roller coaster starring aerosmith",
 
   "rise":                        "star wars rise of the resistance",
+  "rise of the resistance":      "star wars rise of the resistance",
   "smugglers run":               "millennium falcon smugglers run",
   "runaway railway":             "mickey minnies runaway railway",
 
@@ -441,6 +443,9 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "roger rabbit",          resort: "DLR", expectedKey: "roger rabbits car toon spin" },
   { input: "pooh",                  resort: "DLR", expectedKey: "the many adventures of winnie the pooh" },
   { input: "mermaid",               resort: "DLR", expectedKey: "the little mermaid ariels undersea adventure" },
+  // --- Phase 7.3.4: rise of the resistance full alias ---
+  { input: "Rise of the Resistance", resort: "DLR", expectedKey: "star wars rise of the resistance" },
+  { input: "Rise of the Resistance", resort: "WDW", expectedKey: "star wars rise of the resistance" },
   // --- Targeted patch: DLR ---
   { input: "mickey and minnie",     resort: "DLR", expectedKey: "mickey minnies runaway railway" },
   { input: "mickey & minnie",       resort: "DLR", expectedKey: "mickey minnies runaway railway" }, // normalizes to "mickey minnie"
