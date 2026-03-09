@@ -43,6 +43,7 @@ import {
 } from "@/lib/plansMatching";
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
+import { inferPlansContext } from "@/lib/plansContextInference";
 import { useSession } from "next-auth/react";
 import {
   scheduleSync,
@@ -239,9 +240,20 @@ const PARK_LABELS: Record<ParkId, string> = {
 // ===== RESORT PERSISTENCE =====
 
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
+const STORAGE_PARK_KEY = "dwp.selectedPark";
+
+/** Parks that belong to each resort — used to derive resort from a stored park. */
+const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
+  disneyland: "DLR",
+  dca: "DLR",
+  mk: "WDW",
+  epcot: "WDW",
+  hs: "WDW",
+  ak: "WDW",
+};
 
 /**
- * Read and validate resort from localStorage.
+ * Read and validate resort from localStorage (STORAGE_RESORT_KEY).
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
  */
@@ -251,6 +263,30 @@ function loadStoredResort(): ResortId {
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
   return getSettingsDefaults().defaultResort;
+}
+
+/**
+ * Check whether either session context key exists in localStorage.
+ * If true, inference must be skipped.
+ * Also returns the best resort to use when session context is present.
+ */
+function readSessionContext(): { exists: boolean; resort: ResortId } {
+  try {
+    const storedResort = localStorage.getItem(STORAGE_RESORT_KEY);
+    const storedPark = localStorage.getItem(STORAGE_PARK_KEY);
+    const hasResort = storedResort === "DLR" || storedResort === "WDW";
+    const haspark = !!storedPark && storedPark in PARK_TO_RESORT;
+
+    if (hasResort || haspark) {
+      // Derive resort: explicit resort key wins; fall back to deriving from park.
+      const resort: ResortId =
+        hasResort
+          ? (storedResort as ResortId)
+          : (PARK_TO_RESORT[storedPark!] ?? getSettingsDefaults().defaultResort);
+      return { exists: true, resort };
+    }
+  } catch {}
+  return { exists: false, resort: getSettingsDefaults().defaultResort };
 }
 
 /**
@@ -277,6 +313,8 @@ export default function PlansPage() {
   // The pull callback checks this before applying cloud state so it never
   // overwrites edits that happened while the GET was in flight.
   const localEditRef = useRef(false);
+  // Gate: ensures context inference runs at most once per page load.
+  const contextInferredRef = useRef(false);
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Stays false while authenticated session status is loading or
   // while the GET /api/sync/plans request is in-flight. Set true after pull
@@ -298,12 +336,12 @@ export default function PlansPage() {
   // Empty when live is disabled; waitMap falls back to mock in that case.
   const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
 
-  // Hydrate selectedResort from localStorage on client mount (runs once).
-  // Sets ready=true last so the selector renders with the correct value — no flicker.
-  useEffect(() => {
-    setSelectedResort(loadStoredResort());
-    setReady(true);
-  }, []);
+  // Phase 7.3 — Context priority model (runs once on mount, client-side only).
+  // Priority 1: Session context (dwp.selectedResort or dwp.selectedPark exists) → use it.
+  // Priority 2: Infer resort from plans dataset (one-time bootstrap, no re-runs).
+  // Priority 3: Settings defaults fallback.
+  // Sets ready=true after resolution to prevent selector flicker.
+  // NOTE: combined with plans loading below so inference can access loaded plans.
 
   // Fetch live wait data for all parks in the selected resort.
   // Uses the same TTL cache as the Wait Times page (results are shared).
@@ -386,12 +424,43 @@ export default function PlansPage() {
   // After loading, reseed nextId to be greater than any persisted item ID so
   // that newly created items never collide with hydrated ones (avoids React key
   // collisions and incorrect edit/delete behaviour after a page reload).
+  // Also applies the Phase 7.3 context priority model (see comment above):
+  //   Priority 1 → Session context keys exist in localStorage → use stored resort.
+  //   Priority 2 → Infer resort/park from loaded plans (one-time, runs here since
+  //                plans are available; guarded by contextInferredRef).
+  //   Priority 3 → Settings defaults.
   useEffect(() => {
     const loaded = loadFromStorage();
     if (loaded.length > 0) reseedNextId(loaded);
     setItems(loaded);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
+
+    // --- Context priority resolution ---
+    const session = readSessionContext();
+
+    if (session.exists) {
+      // Priority 1: session context key(s) exist — respect them, skip inference.
+      setSelectedResort(session.resort);
+      setReady(true);
+      return;
+    }
+
+    // Priority 2: no session context — attempt one-time inference from plans.
+    if (!contextInferredRef.current && loaded.length > 0) {
+      contextInferredRef.current = true;
+      const inferred = inferPlansContext(loaded);
+      if (inferred.resort) {
+        setSelectedResort(inferred.resort);
+        setReady(true);
+        return;
+      }
+    }
+
+    // Priority 3: settings defaults (also handles empty plans or unresolvable names).
+    setSelectedResort(getSettingsDefaults().defaultResort);
+    setReady(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Persist to localStorage on every items mutation (after initial load).
