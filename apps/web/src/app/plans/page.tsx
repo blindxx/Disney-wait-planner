@@ -274,9 +274,9 @@ function loadStoredResort(): ResortId {
 /**
  * Check whether either session context key exists in localStorage.
  * If true, inference must be skipped.
- * Also returns the best resort to use when session context is present.
+ * Returns the stored resort and park (park is null if absent or invalid for resort).
  */
-function readSessionContext(): { exists: boolean; resort: ResortId } {
+function readSessionContext(): { exists: boolean; resort: ResortId; park: ParkId | null } {
   try {
     const storedResort = localStorage.getItem(STORAGE_RESORT_KEY);
     const storedPark = localStorage.getItem(STORAGE_PARK_KEY);
@@ -289,10 +289,15 @@ function readSessionContext(): { exists: boolean; resort: ResortId } {
         hasResort
           ? (storedResort as ResortId)
           : (PARK_TO_RESORT[storedPark!] ?? getSettingsDefaults().defaultResort);
-      return { exists: true, resort };
+      // Validate stored park against the resolved resort to prevent cross-resort mismatch.
+      const park: ParkId | null =
+        haspark && RESORT_PARKS[resort].includes(storedPark as ParkId)
+          ? (storedPark as ParkId)
+          : null;
+      return { exists: true, resort, park };
     }
   } catch {}
-  return { exists: false, resort: getSettingsDefaults().defaultResort };
+  return { exists: false, resort: getSettingsDefaults().defaultResort, park: null };
 }
 
 /**
@@ -451,8 +456,9 @@ export default function PlansPage() {
 
     if (session.exists) {
       // Priority 1: session context key(s) exist — respect them, skip inference.
+      // Restore stored park if valid for this resort; fall back to resort's first park.
       setSelectedResort(session.resort);
-      setSelectedPark(RESORT_PARKS[session.resort][0]);
+      setSelectedPark(session.park ?? RESORT_PARKS[session.resort][0]);
       setReady(true);
       return;
     }
@@ -1386,8 +1392,10 @@ export default function PlansPage() {
                 className="plans-resort-tab"
                 onClick={() => {
                   setSelectedResort(resortId);
-                  setSelectedPark(RESORT_PARKS[resortId][0]); // reset to first park of new resort
+                  const firstPark = RESORT_PARKS[resortId][0];
+                  setSelectedPark(firstPark); // reset to first park of new resort
                   try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
+                  try { localStorage.setItem(STORAGE_PARK_KEY, firstPark); } catch {}
                 }}
                 style={{
                   backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
@@ -1415,7 +1423,10 @@ export default function PlansPage() {
               <button
                 key={parkId}
                 className="plans-park-tab"
-                onClick={() => setSelectedPark(parkId)}
+                onClick={() => {
+                  setSelectedPark(parkId);
+                  try { localStorage.setItem(STORAGE_PARK_KEY, parkId); } catch {}
+                }}
                 style={{
                   backgroundColor: selectedPark === parkId ? "#1e3a5f" : "#f9fafb",
                   color: selectedPark === parkId ? "#fff" : "#374151",
