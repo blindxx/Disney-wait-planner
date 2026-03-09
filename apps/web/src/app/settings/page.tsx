@@ -55,6 +55,11 @@ export default function SettingsPage() {
   // the initial useState value. Resort/park buttons only render once ready=true.
   const [ready, setReady] = useState(false);
 
+  // Active session context (dwp.selectedResort / dwp.selectedPark).
+  // Falls back to defaults when no active context is stored.
+  const [activeResort, setActiveResort] = useState<ResortId>("DLR");
+  const [activePark, setActivePark] = useState<ParkId>("disneyland");
+
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
   const [emailInput, setEmailInput] = useState("");
@@ -67,6 +72,13 @@ export default function SettingsPage() {
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
+    // Read active session context; fall back to defaults when absent.
+    try {
+      const storedResort = localStorage.getItem("dwp.selectedResort") as ResortId | null;
+      const storedPark = localStorage.getItem("dwp.selectedPark") as ParkId | null;
+      setActiveResort(storedResort ?? resort);
+      setActivePark(storedPark ?? park);
+    } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
     // Read last sync time
     try {
@@ -115,6 +127,8 @@ export default function SettingsPage() {
   }
 
   const parks = RESORT_PARKS[defaultResort];
+  const activeParkLabel =
+    RESORT_PARKS[activeResort]?.find((p) => p.id === activePark)?.label ?? activePark;
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto", padding: "16px" }}>
@@ -140,6 +154,28 @@ export default function SettingsPage() {
         for the first time. They never overwrite a selection you have already
         made.
       </p>
+
+      {/* ── Current Park Context (informational, read-only) ── */}
+      {ready && (
+        <section style={{ marginBottom: "28px" }}>
+          <h2
+            style={{
+              fontSize: "15px",
+              fontWeight: 600,
+              color: "#374151",
+              marginBottom: "6px",
+            }}
+          >
+            Current Park Context
+          </h2>
+          <p style={{ fontSize: "14px", color: "#6b7280", margin: "0 0 2px" }}>
+            Resort: {RESORT_LABELS[activeResort]}
+          </p>
+          <p style={{ fontSize: "14px", color: "#6b7280", margin: 0 }}>
+            Park: {activeParkLabel}
+          </p>
+        </section>
+      )}
 
       {/* ── Default Resort + Park ── */}
       {/* Only rendered after hydration to prevent DLR→WDW flip on stored WDW defaults */}
