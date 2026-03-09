@@ -834,6 +834,15 @@ export default function PlansPage() {
     setItems([]);
     setDeleteConfirmId(null);
     setClearConfirm(false);
+    // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
+    // fresh, so both the inference gate and the stored session context must be
+    // cleared. Without this, a subsequent import is blocked on two levels:
+    //   1. contextInferredRef stays true → items-watcher guard exits immediately
+    //   2. dwp.selectedResort/Park keys still exist → readSessionContext().exists
+    //      returns true → watcher treats it as an explicit selection and skips inference
+    contextInferredRef.current = false;
+    try { localStorage.removeItem(STORAGE_RESORT_KEY); } catch {}
+    try { localStorage.removeItem(STORAGE_PARK_KEY); } catch {}
   }
 
   function handleToggleSort(checked: boolean) {
