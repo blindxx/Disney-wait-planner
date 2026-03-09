@@ -56,9 +56,10 @@ export default function SettingsPage() {
   const [ready, setReady] = useState(false);
 
   // Active session context (dwp.selectedResort / dwp.selectedPark).
-  // Falls back to defaults when no active context is stored.
-  const [activeResort, setActiveResort] = useState<ResortId>("DLR");
-  const [activePark, setActivePark] = useState<ParkId>("disneyland");
+  // Both keys must be present for the pair to be coherent; null otherwise.
+  // Display falls back live to defaultResort/defaultPark when null.
+  const [sessionResort, setSessionResort] = useState<ResortId | null>(null);
+  const [sessionPark, setSessionPark] = useState<ParkId | null>(null);
 
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
@@ -72,12 +73,15 @@ export default function SettingsPage() {
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
-    // Read active session context; fall back to defaults when absent.
+    // Read active session context. Both keys must be present to form a
+    // coherent pair — partial presence is treated as no active context.
     try {
       const storedResort = localStorage.getItem("dwp.selectedResort") as ResortId | null;
       const storedPark = localStorage.getItem("dwp.selectedPark") as ParkId | null;
-      setActiveResort(storedResort ?? resort);
-      setActivePark(storedPark ?? park);
+      if (storedResort && storedPark) {
+        setSessionResort(storedResort);
+        setSessionPark(storedPark);
+      }
     } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
     // Read last sync time
@@ -127,8 +131,14 @@ export default function SettingsPage() {
   }
 
   const parks = RESORT_PARKS[defaultResort];
-  const activeParkLabel =
-    RESORT_PARKS[activeResort]?.find((p) => p.id === activePark)?.label ?? activePark;
+
+  // Derive current context display values. Falls back live to the selected
+  // defaults when no coherent session context is stored — stays reactive
+  // when the user changes defaults without a page reload.
+  const contextResort: ResortId = sessionResort ?? defaultResort;
+  const contextPark: ParkId = sessionPark ?? defaultPark;
+  const contextParkLabel =
+    RESORT_PARKS[contextResort]?.find((p) => p.id === contextPark)?.label ?? contextPark;
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto", padding: "16px" }}>
@@ -157,22 +167,22 @@ export default function SettingsPage() {
 
       {/* ── Current Park Context (informational, read-only) ── */}
       {ready && (
-        <section style={{ marginBottom: "28px" }}>
+        <section style={{ marginBottom: "20px" }}>
           <h2
             style={{
               fontSize: "15px",
               fontWeight: 600,
               color: "#374151",
-              marginBottom: "6px",
+              marginBottom: "4px",
             }}
           >
             Current Park Context
           </h2>
-          <p style={{ fontSize: "14px", color: "#6b7280", margin: "0 0 2px" }}>
-            Resort: {RESORT_LABELS[activeResort]}
+          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 1px" }}>
+            Resort: {RESORT_LABELS[contextResort]}
           </p>
-          <p style={{ fontSize: "14px", color: "#6b7280", margin: 0 }}>
-            Park: {activeParkLabel}
+          <p style={{ fontSize: "13px", color: "#6b7280", margin: 0 }}>
+            Park: {contextParkLabel}
           </p>
         </section>
       )}
