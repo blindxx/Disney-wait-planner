@@ -76,12 +76,18 @@ export function validatePlansImportPayload(input: unknown): PlanItem[] {
   }
 
   const raw = plansObj.items as unknown[];
+  const seenIds = new Set<string>();
   for (let i = 0; i < raw.length; i++) {
     if (!isPlanItem(raw[i])) {
       throw new Error(
         `Invalid file: item at index ${i} has unexpected shape (expected {id, name, timeLabel} strings).`
       );
     }
+    const id = (raw[i] as PlanItem).id;
+    if (seenIds.has(id)) {
+      throw new Error(`Invalid file: duplicate plan id "${id}" detected.`);
+    }
+    seenIds.add(id);
   }
   return raw as PlanItem[];
 }
