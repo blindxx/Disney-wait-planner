@@ -350,9 +350,6 @@ export default function PlansPage() {
   const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
-  // Phase 7.4 — JSON export/import transfer state
-  const [transferError, setTransferError] = useState("");
-  const jsonImportRef = useRef<HTMLInputElement>(null);
 
   // Live wait data for the selected resort (all parks merged).
   // Empty when live is disabled; waitMap falls back to mock in that case.
@@ -764,6 +761,7 @@ export default function PlansPage() {
       const next = [...prev, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
+    applyImportContextInference(newItems);
     setImportText("");
     setMode("view");
   }
@@ -897,8 +895,28 @@ export default function PlansPage() {
     URL.revokeObjectURL(url);
   }
 
-  // Phase 7.4 — Import Plans: validate and replace current plans from a .json file.
-  function handleJsonImportFile(e: React.ChangeEvent<HTMLInputElement>) {
+  // Phase 7.4 follow-up — Import-driven context restore.
+  // Runs inference on the provided items and immediately updates resort/park
+  // state if a confident result is found. Treats the import as a deliberate
+  // restore action — overrides any prior manual park selection in this session.
+  // Also marks contextInferredRef=true so the reactive items-watcher does not
+  // re-run inference and potentially undo the result with a stale full-list pass.
+  function applyImportContextInference(inferenceBasis: PlanItem[]) {
+    // Prevent the items-watcher from re-running inference after this import.
+    contextInferredRef.current = true;
+    if (inferenceBasis.length === 0) return;
+    const inferred = inferPlansContext(inferenceBasis);
+    if (inferred.resort) {
+      const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
+      setSelectedResort(inferred.resort);
+      setSelectedPark(resolvedPark);
+      try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
+      try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
+    }
+  }
+
+  // Phase 7.4 — JSON restore via the import modal: validate, replace items, restore context.
+  function handleJsonImportModal(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
@@ -908,9 +926,11 @@ export default function PlansPage() {
         const importedItems = parseImportedPlansFile(text);
         reseedNextId(importedItems);
         setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
-        setTransferError("");
+        applyImportContextInference(importedItems);
+        setImportText("");
+        setMode("view");
       } catch (err) {
-        setTransferError(err instanceof Error ? err.message : "Import failed.");
+        setImportError(err instanceof Error ? err.message : "Import failed.");
       }
     };
     reader.readAsText(file);
@@ -972,6 +992,10 @@ export default function PlansPage() {
         }
         .btn-import:active {
           background-color: #eff6ff;
+        }
+        .btn-import:disabled {
+          opacity: 0.3;
+          cursor: not-allowed;
         }
         .btn-clear {
           background-color: #fff;
@@ -1436,37 +1460,6 @@ export default function PlansPage() {
           transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
           min-height: 32px;
         }
-        /* Phase 7.4 — Export / Import Plans transfer row */
-        .transfer-actions-row {
-          display: flex;
-          gap: 0.5rem;
-          margin-bottom: 1rem;
-          flex-wrap: wrap;
-        }
-        .btn-transfer {
-          background-color: #fff;
-          color: #374151;
-          border: 1px solid #d1d5db;
-          border-radius: 8px;
-          font-size: 0.875rem;
-          font-weight: 500;
-          padding: 0.5rem 1rem;
-          cursor: pointer;
-          min-height: 40px;
-          white-space: nowrap;
-        }
-        .btn-transfer:active {
-          background-color: #f3f4f6;
-        }
-        .transfer-error {
-          font-size: 0.8rem;
-          color: #dc2626;
-          margin-bottom: 0.75rem;
-          padding: 0.5rem 0.75rem;
-          background-color: #fef2f2;
-          border: 1px solid #fca5a5;
-          border-radius: 6px;
-        }
       `}</style>
 
       <div className="plans-container">
@@ -1482,6 +1475,13 @@ export default function PlansPage() {
             </button>
             <button className="btn-import" onClick={openImport}>
               Import
+            </button>
+            <button
+              className="btn-import"
+              onClick={handleExportPlans}
+              disabled={items.length === 0}
+            >
+              Export
             </button>
             <button className="btn-add" onClick={openAdd}>
               + Add
@@ -1561,39 +1561,6 @@ export default function PlansPage() {
             Auto-sort by time
           </label>
         </div>
-
-        {/* Phase 7.4 — Export / Import Plans (portable JSON backup/restore) */}
-        <div className="transfer-actions-row">
-          <button
-            className="btn-transfer"
-            onClick={handleExportPlans}
-            disabled={items.length === 0}
-            title={items.length === 0 ? "No plans to export" : "Download plans as JSON"}
-          >
-            Export Plans
-          </button>
-          <button
-            className="btn-transfer"
-            onClick={() => {
-              setTransferError("");
-              jsonImportRef.current?.click();
-            }}
-            title="Restore plans from a previously exported JSON file"
-          >
-            Import Plans
-          </button>
-          <input
-            ref={jsonImportRef}
-            type="file"
-            accept=".json,application/json"
-            className="file-input-hidden"
-            onChange={handleJsonImportFile}
-            aria-hidden="true"
-          />
-        </div>
-        {transferError && (
-          <p className="transfer-error">{transferError}</p>
-        )}
 
         <p className="wait-scope-label">
           Wait overlay: {selectedResort}{selectedPark && PARK_LABELS[selectedPark] ? ` / ${PARK_LABELS[selectedPark]}` : ""}
@@ -1817,6 +1784,16 @@ export default function PlansPage() {
                         accept=".csv,text/csv"
                         className="file-input-hidden"
                         onChange={handleCSVFile}
+                      />
+                    </label>
+                    <label className="btn-file-label" htmlFor="json-import">
+                      📋 .json backup
+                      <input
+                        id="json-import"
+                        type="file"
+                        accept=".json,application/json"
+                        className="file-input-hidden"
+                        onChange={handleJsonImportModal}
                       />
                     </label>
                   </div>
