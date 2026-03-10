@@ -89,19 +89,14 @@ export default function SettingsPage() {
 
       if (hasResort || haspark) {
         const resolvedResort: ResortId = hasResort ? (storedResort as ResortId) : parkResort!;
-        // Validate park against the resolved resort to prevent cross-resort mismatch.
+        // Only store the actual stored park key in state — never a derived
+        // fallback. The fallback (default park → first park) is computed
+        // reactively in render from the live defaultPark so it stays current
+        // when the user changes defaults without reloading the page.
         const parkBelongsToResort =
           haspark && RESORT_PARKS[resolvedResort].some((p) => p.id === storedPark);
-        const resolvedPark: ParkId = parkBelongsToResort
-          ? (storedPark as ParkId)
-          // Prefer the current/default park if valid for the resolved resort.
-          // This matches the resolution order used elsewhere in the app when
-          // the park key is absent but the resort key exists.
-          : RESORT_PARKS[resolvedResort].some((p) => p.id === park)
-            ? park
-            : RESORT_PARKS[resolvedResort][0].id;
         setSessionResort(resolvedResort);
-        setSessionPark(resolvedPark);
+        setSessionPark(parkBelongsToResort ? (storedPark as ParkId) : null);
       }
     } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
@@ -157,7 +152,15 @@ export default function SettingsPage() {
   // defaults when no coherent session context is stored — stays reactive
   // when the user changes defaults without a page reload.
   const contextResort: ResortId = sessionResort ?? defaultResort;
-  const contextPark: ParkId = sessionPark ?? defaultPark;
+  // sessionPark is only set when an actual stored park key is valid for
+  // contextResort. When sessionPark is null (resort-only session or no
+  // session), fall back reactively: prefer the default park if it belongs
+  // to contextResort, otherwise use the first park in the resort list.
+  const contextPark: ParkId = sessionPark ?? (
+    RESORT_PARKS[contextResort].some((p) => p.id === defaultPark)
+      ? defaultPark
+      : RESORT_PARKS[contextResort][0].id
+  );
   const contextParkLabel =
     RESORT_PARKS[contextResort]?.find((p) => p.id === contextPark)?.label ?? contextPark;
 

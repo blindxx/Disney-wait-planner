@@ -481,9 +481,14 @@ export default function PlansPage() {
     // plans must not reassert inferred context over active session or defaults.
 
     // Priority 3: settings defaults.
-    const defaultResort = getSettingsDefaults().defaultResort;
+    const { defaultResort, defaultPark } = getSettingsDefaults();
     setSelectedResort(defaultResort);
-    setSelectedPark(RESORT_PARKS[defaultResort][0]);
+    // Prefer the stored default park if it belongs to the resolved resort,
+    // then fall back to the first park in the resort list.
+    const p3Park = RESORT_PARKS[defaultResort].find((p) => p === defaultPark)
+      ? defaultPark
+      : RESORT_PARKS[defaultResort][0];
+    setSelectedPark(p3Park as ParkId);
     setReady(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -604,6 +609,12 @@ export default function PlansPage() {
           // cloud pull is the definitive source for this page load.
           if (!readSessionContext().exists) {
             contextInferredRef.current = false;
+            // If the cloud pull cleared all items, this page is effectively in
+            // a fresh-import-ready state. Reset the mount-count guard so that
+            // a subsequent import correctly triggers inference.
+            if ((cloud.items as PlanItem[]).length === 0) {
+              initialItemCountRef.current = 0;
+            }
           }
         }
         setSyncReady(true);
