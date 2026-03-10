@@ -202,11 +202,16 @@ export default function SettingsPage() {
           >
             Current Park Context
           </h2>
-          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 1px" }}>
-            Resort: {RESORT_LABELS[contextResort]}
+          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 3px" }}>
+            <span>Resort: </span>
+            <span style={{ color: "#111827", fontWeight: 500 }}>{RESORT_LABELS[contextResort]}</span>
           </p>
-          <p style={{ fontSize: "13px", color: "#6b7280", margin: 0 }}>
-            Park: {contextParkLabel}
+          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 8px" }}>
+            <span>Park: </span>
+            <span style={{ color: "#111827", fontWeight: 500 }}>{contextParkLabel}</span>
+          </p>
+          <p style={{ fontSize: "12px", color: "#9ca3af", margin: 0, lineHeight: "1.4" }}>
+            Current context reflects your active park selection. Defaults apply when no current selection exists or after using Reset.
           </p>
         </section>
       )}
