@@ -21,6 +21,10 @@ Reviewers should carefully check any changes affecting:
 
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
+  buildPlansExportPayload,
+  parseImportedPlansFile,
+} from "@/lib/plansTransfer";
+import {
   mockAttractionWaits,
   type AttractionWait,
   type ParkId,
@@ -326,6 +330,10 @@ export default function PlansPage() {
   const localEditRef = useRef(false);
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
+  // Monotonic counter for JSON import requests. Only the latest request's
+  // FileReader callback is allowed to commit state, preventing stale results
+  // from a previous (slower) import from overwriting a more recent import.
+  const jsonImportRequestRef = useRef(0);
   // Tracks how many items existed when the page first mounted. Used to
   // distinguish ordinary revisits (existing plans) from true import-triggered
   // inference events (items went from zero to non-zero in this lifecycle).
@@ -876,6 +884,68 @@ export default function PlansPage() {
     }
   }
 
+  // Phase 7.4 — Export Plans: build payload, stringify, trigger browser download.
+  function handleExportPlans() {
+    const payload = buildPlansExportPayload(items);
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `disney-wait-planner-plans-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Phase 7.4 follow-up — Import-driven context restore.
+  // Runs inference on the provided items and immediately updates resort/park
+  // state if a confident result is found. Treats the import as a deliberate
+  // restore action — overrides any prior manual park selection in this session.
+  // Also marks contextInferredRef=true so the reactive items-watcher does not
+  // re-run inference and potentially undo the result with a stale full-list pass.
+  function applyImportContextInference(inferenceBasis: PlanItem[]) {
+    // Prevent the items-watcher from re-running inference after this import.
+    contextInferredRef.current = true;
+    if (inferenceBasis.length === 0) return;
+    const inferred = inferPlansContext(inferenceBasis);
+    if (inferred.resort) {
+      const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
+      setSelectedResort(inferred.resort);
+      setSelectedPark(resolvedPark);
+      try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
+      try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
+    }
+  }
+
+  // Phase 7.4 — JSON restore via the import modal: validate, replace items, restore context.
+  function handleJsonImportModal(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Capture a snapshot of the current request counter before the async read.
+    // If another import starts before this one resolves, the counter advances
+    // and the stale callback exits early without touching state.
+    const requestId = ++jsonImportRequestRef.current;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (requestId !== jsonImportRequestRef.current) return; // stale import result
+      const text = (ev.target?.result as string) ?? "";
+      try {
+        const importedItems = parseImportedPlansFile(text);
+        reseedNextId(importedItems);
+        setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
+        applyImportContextInference(importedItems);
+        setImportText("");
+        setMode("view");
+      } catch (err) {
+        setImportError(err instanceof Error ? err.message : "Import failed.");
+      }
+    };
+    reader.readAsText(file);
+    // Reset so selecting the same file again triggers onChange
+    e.target.value = "";
+  }
+
   return (
     <>
       <style>{`
@@ -930,6 +1000,10 @@ export default function PlansPage() {
         }
         .btn-import:active {
           background-color: #eff6ff;
+        }
+        .btn-import:disabled {
+          opacity: 0.3;
+          cursor: not-allowed;
         }
         .btn-clear {
           background-color: #fff;
@@ -1410,6 +1484,13 @@ export default function PlansPage() {
             <button className="btn-import" onClick={openImport}>
               Import
             </button>
+            <button
+              className="btn-import"
+              onClick={handleExportPlans}
+              disabled={items.length === 0}
+            >
+              Export
+            </button>
             <button className="btn-add" onClick={openAdd}>
               + Add
             </button>
@@ -1711,6 +1792,16 @@ export default function PlansPage() {
                         accept=".csv,text/csv"
                         className="file-input-hidden"
                         onChange={handleCSVFile}
+                      />
+                    </label>
+                    <label className="btn-file-label" htmlFor="json-import">
+                      📋 .json backup
+                      <input
+                        id="json-import"
+                        type="file"
+                        accept=".json,application/json"
+                        className="file-input-hidden"
+                        onChange={handleJsonImportModal}
                       />
                     </label>
                   </div>
