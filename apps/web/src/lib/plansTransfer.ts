@@ -98,7 +98,8 @@ export function validatePlansImportPayload(input: unknown): PlanItem[] {
  * Returns validated PlanItem[] on success or throws a descriptive Error.
  */
 export function parseImportedPlansFile(text: string): PlanItem[] {
-  if (text.length > MAX_IMPORT_BYTES) {
+  const byteLength = new TextEncoder().encode(text).length;
+  if (byteLength > MAX_IMPORT_BYTES) {
     throw new Error("File is too large to import (maximum: 1 MB).");
   }
   let parsed: unknown;

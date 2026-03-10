@@ -330,6 +330,10 @@ export default function PlansPage() {
   const localEditRef = useRef(false);
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
+  // Monotonic counter for JSON import requests. Only the latest request's
+  // FileReader callback is allowed to commit state, preventing stale results
+  // from a previous (slower) import from overwriting a more recent import.
+  const jsonImportRequestRef = useRef(0);
   // Tracks how many items existed when the page first mounted. Used to
   // distinguish ordinary revisits (existing plans) from true import-triggered
   // inference events (items went from zero to non-zero in this lifecycle).
@@ -919,8 +923,13 @@ export default function PlansPage() {
   function handleJsonImportModal(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Capture a snapshot of the current request counter before the async read.
+    // If another import starts before this one resolves, the counter advances
+    // and the stale callback exits early without touching state.
+    const requestId = ++jsonImportRequestRef.current;
     const reader = new FileReader();
     reader.onload = (ev) => {
+      if (requestId !== jsonImportRequestRef.current) return; // stale import result
       const text = (ev.target?.result as string) ?? "";
       try {
         const importedItems = parseImportedPlansFile(text);
