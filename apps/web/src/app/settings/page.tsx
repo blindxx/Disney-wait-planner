@@ -55,6 +55,12 @@ export default function SettingsPage() {
   // the initial useState value. Resort/park buttons only render once ready=true.
   const [ready, setReady] = useState(false);
 
+  // Active session context (dwp.selectedResort / dwp.selectedPark).
+  // Either key alone is sufficient; the resolved pair is always coherent.
+  // Null when no session context exists; display falls back live to defaults.
+  const [sessionResort, setSessionResort] = useState<ResortId | null>(null);
+  const [sessionPark, setSessionPark] = useState<ParkId | null>(null);
+
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
   const [emailInput, setEmailInput] = useState("");
@@ -67,6 +73,32 @@ export default function SettingsPage() {
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
+    // Read active session context using the same normalization as the rest of
+    // the app (matches Plans' readSessionContext logic). Either key alone is
+    // sufficient to establish context; the missing side is derived/validated.
+    try {
+      const storedResort = localStorage.getItem("dwp.selectedResort");
+      const storedPark = localStorage.getItem("dwp.selectedPark");
+      const hasResort = storedResort === "DLR" || storedResort === "WDW";
+      // Find which resort owns storedPark, if any.
+      const parkResort = storedPark
+        ? (Object.entries(RESORT_PARKS) as [ResortId, { id: ParkId; label: string }[]][])
+            .find(([, parks]) => parks.some((p) => p.id === storedPark))?.[0] ?? null
+        : null;
+      const haspark = parkResort !== null;
+
+      if (hasResort || haspark) {
+        const resolvedResort: ResortId = hasResort ? (storedResort as ResortId) : parkResort!;
+        // Only store the actual stored park key in state — never a derived
+        // fallback. The fallback (default park → first park) is computed
+        // reactively in render from the live defaultPark so it stays current
+        // when the user changes defaults without reloading the page.
+        const parkBelongsToResort =
+          haspark && RESORT_PARKS[resolvedResort].some((p) => p.id === storedPark);
+        setSessionResort(resolvedResort);
+        setSessionPark(parkBelongsToResort ? (storedPark as ParkId) : null);
+      }
+    } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
     // Read last sync time
     try {
@@ -116,6 +148,22 @@ export default function SettingsPage() {
 
   const parks = RESORT_PARKS[defaultResort];
 
+  // Derive current context display values. Falls back live to the selected
+  // defaults when no coherent session context is stored — stays reactive
+  // when the user changes defaults without a page reload.
+  const contextResort: ResortId = sessionResort ?? defaultResort;
+  // sessionPark is only set when an actual stored park key is valid for
+  // contextResort. When sessionPark is null (resort-only session or no
+  // session), fall back reactively: prefer the default park if it belongs
+  // to contextResort, otherwise use the first park in the resort list.
+  const contextPark: ParkId = sessionPark ?? (
+    RESORT_PARKS[contextResort].some((p) => p.id === defaultPark)
+      ? defaultPark
+      : RESORT_PARKS[contextResort][0].id
+  );
+  const contextParkLabel =
+    RESORT_PARKS[contextResort]?.find((p) => p.id === contextPark)?.label ?? contextPark;
+
   return (
     <div style={{ maxWidth: 560, margin: "0 auto", padding: "16px" }}>
       <h1
@@ -140,6 +188,33 @@ export default function SettingsPage() {
         for the first time. They never overwrite a selection you have already
         made.
       </p>
+
+      {/* ── Current Park Context (informational, read-only) ── */}
+      {ready && (
+        <section style={{ marginBottom: "20px" }}>
+          <h2
+            style={{
+              fontSize: "15px",
+              fontWeight: 600,
+              color: "#374151",
+              marginBottom: "4px",
+            }}
+          >
+            Current Park Context
+          </h2>
+          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 3px" }}>
+            <span>Resort: </span>
+            <span style={{ color: "#111827", fontWeight: 500 }}>{RESORT_LABELS[contextResort]}</span>
+          </p>
+          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 8px" }}>
+            <span>Park: </span>
+            <span style={{ color: "#111827", fontWeight: 500 }}>{contextParkLabel}</span>
+          </p>
+          <p style={{ fontSize: "12px", color: "#9ca3af", margin: 0, lineHeight: "1.4" }}>
+            Current context reflects your active park selection. Defaults apply when no current selection exists or after using Reset.
+          </p>
+        </section>
+      )}
 
       {/* ── Default Resort + Park ── */}
       {/* Only rendered after hydration to prevent DLR→WDW flip on stored WDW defaults */}
