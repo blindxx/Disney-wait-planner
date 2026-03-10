@@ -765,7 +765,6 @@ export default function PlansPage() {
       const next = [...prev, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
-    applyImportContextInference(newItems);
     setImportText("");
     setMode("view");
   }
