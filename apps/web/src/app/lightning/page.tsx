@@ -205,7 +205,7 @@ export default function LightningPage() {
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
   const lightningKeyRef = useRef(STORAGE_KEY);
-  const resortKeyRef = useRef("dwp.selectedResort");
+  const resortKeyRef = useRef(STORAGE_RESORT_KEY);
 
   // Form state
   const [rideName, setRideName] = useState("");
