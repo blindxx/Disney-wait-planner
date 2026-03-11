@@ -172,6 +172,7 @@ export default function SettingsPage() {
   }
 
   function handleRenameProfile() {
+    if (activeProfileId === "default") return;
     const current = profiles.find((p) => p.id === activeProfileId);
     if (!current) return;
     const name = window.prompt("Rename profile:", current.name);
@@ -440,16 +441,17 @@ export default function SettingsPage() {
             </button>
             <button
               onClick={handleRenameProfile}
+              disabled={activeProfileId === "default"}
               style={{
                 flex: "1 1 auto",
                 padding: "10px 12px",
                 borderRadius: "8px",
-                border: "1px solid #d1d5db",
-                cursor: "pointer",
+                border: `1px solid ${activeProfileId === "default" ? "#e5e7eb" : "#d1d5db"}`,
+                cursor: activeProfileId === "default" ? "not-allowed" : "pointer",
                 fontWeight: 600,
                 fontSize: "13px",
                 backgroundColor: "#f9fafb",
-                color: "#374151",
+                color: activeProfileId === "default" ? "#9ca3af" : "#374151",
                 minHeight: "44px",
               }}
             >

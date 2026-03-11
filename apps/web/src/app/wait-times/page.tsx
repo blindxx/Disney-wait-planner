@@ -505,8 +505,9 @@ export default function WaitTimesPage() {
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
-  const resortKeyRef = useRef(SETTINGS_RESORT_KEY);
-  const parkKeyRef = useRef(SETTINGS_PARK_KEY);
+  // Initialized to STORAGE_* (runtime context keys), not SETTINGS_* (defaults).
+  const resortKeyRef = useRef(STORAGE_RESORT_KEY);
+  const parkKeyRef = useRef(STORAGE_PARK_KEY);
 
   const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
 
