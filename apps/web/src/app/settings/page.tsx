@@ -385,10 +385,14 @@ export default function SettingsPage() {
           >
             Profiles
           </h2>
-          <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}>
+          <label
+            htmlFor="activeProfileSelect"
+            style={{ fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}
+          >
             Active Profile:
-          </p>
+          </label>
           <select
+            id="activeProfileSelect"
             value={activeProfileId}
             onChange={(e) => handleProfileSwitch(e.target.value)}
             style={{
