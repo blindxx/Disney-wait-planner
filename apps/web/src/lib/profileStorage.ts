@@ -248,6 +248,17 @@ export function bootstrapProfiles(): void {
 // ===== CONVENIENCE: ACTIVE PROFILE KEYS =====
 
 /**
+ * Returns the currently active Profile object (id + name).
+ * Falls back to the Default profile if the active id is not found.
+ * Call after bootstrapProfiles() to ensure the profile is initialized.
+ */
+export function getActiveProfile(): Profile {
+  const id = getActiveProfileId();
+  const profiles = getProfiles();
+  return profiles.find((p) => p.id === id) ?? DEFAULT_PROFILE;
+}
+
+/**
  * Returns the namespaced keys for the currently active profile.
  * Call after bootstrapProfiles() to ensure the profile is initialized.
  */

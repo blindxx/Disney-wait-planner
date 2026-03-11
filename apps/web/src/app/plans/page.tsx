@@ -48,7 +48,7 @@ import {
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
-import { bootstrapProfiles, getActiveProfileKeys } from "@/lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
   scheduleSync,
@@ -332,6 +332,8 @@ export default function PlansPage() {
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   const parkKeyRef = useRef(STORAGE_PARK_KEY);
 
+  const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
+
   // Auth session — used to trigger cloud pull on sign-in
   const { status: sessionStatus } = useSession();
   // Tracks whether the user made a local edit after the current pull started.
@@ -474,6 +476,7 @@ export default function PlansPage() {
     planKeyRef.current = profileKeys.plans;
     resortKeyRef.current = profileKeys.selectedResort;
     parkKeyRef.current = profileKeys.selectedPark;
+    setActiveProfileName(getActiveProfile().name);
 
     const loaded = loadFromStorage(planKeyRef.current);
     // Record how many items existed at mount. The post-import effect uses this
@@ -1489,6 +1492,11 @@ export default function PlansPage() {
       `}</style>
 
       <div className="plans-container">
+        {activeProfileName && (
+          <div style={{ textAlign: "right", marginBottom: "4px" }}>
+            <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
+          </div>
+        )}
         <div className="plans-header">
           <h1 className="plans-title">My Plans</h1>
           <div className="plans-header-actions">

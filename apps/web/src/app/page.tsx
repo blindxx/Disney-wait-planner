@@ -20,7 +20,7 @@ import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-pl
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys } from "../lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "../lib/profileStorage";
 
 // ============================================
 // CONSTANTS
@@ -202,6 +202,7 @@ export default function TodayPage() {
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
+  const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
@@ -222,6 +223,7 @@ export default function TodayPage() {
     const profileKeys = getActiveProfileKeys();
     resortKeyRef.current = profileKeys.selectedResort;
     parkKeyRef.current = profileKeys.selectedPark;
+    setActiveProfileName(getActiveProfile().name);
 
     try {
       const { defaultResort, defaultPark } = getSettingsDefaults();
@@ -350,16 +352,16 @@ export default function TodayPage() {
 
       <div className="today-page">
         {/* Page Title */}
-        <h1
-          style={{
-            fontSize: "28px",
-            fontWeight: 700,
-            color: "#111827",
-            marginBottom: "8px",
-          }}
-        >
-          Today
-        </h1>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "8px" }}>
+          <h1 style={{ fontSize: "28px", fontWeight: 700, color: "#111827", margin: 0 }}>
+            Today
+          </h1>
+          {activeProfileName && (
+            <span style={{ fontSize: "12px", color: "#9ca3af" }}>
+              Profile: {activeProfileName}
+            </span>
+          )}
+        </div>
 
         {/* Current Time */}
         <div

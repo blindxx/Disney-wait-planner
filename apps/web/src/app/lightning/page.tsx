@@ -16,7 +16,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys } from "@/lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "@/lib/profileStorage";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -225,12 +225,15 @@ export default function LightningPage() {
   // Live attraction wait data for the selected resort (all parks merged)
   const [liveAttractions, setLiveAttractions] = useState<AttractionWait[]>([]);
 
+  const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
+
   // Load persisted reservations on mount
   useEffect(() => {
     bootstrapProfiles();
     const profileKeys = getActiveProfileKeys();
     lightningKeyRef.current = profileKeys.lightning;
     resortKeyRef.current = profileKeys.selectedResort;
+    setActiveProfileName(getActiveProfile().name);
     setItems(loadFromStorage(lightningKeyRef.current));
     setLoaded(true);
   }, []);
@@ -462,7 +465,12 @@ export default function LightningPage() {
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto" }}>
-      <h1 className="title">Lightning Lane</h1>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "0" }}>
+        <h1 className="title" style={{ margin: 0 }}>Lightning Lane</h1>
+        {activeProfileName && (
+          <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
+        )}
+      </div>
 
       {/* ── Add Form ── */}
       <div

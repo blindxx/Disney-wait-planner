@@ -35,7 +35,7 @@ import {
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys } from "../../lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "../../lib/profileStorage";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -508,6 +508,8 @@ export default function WaitTimesPage() {
   const resortKeyRef = useRef(SETTINGS_RESORT_KEY);
   const parkKeyRef = useRef(SETTINGS_PARK_KEY);
 
+  const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
+
   // Refs always hold the latest resort/park so refreshData stays stable
   // (avoids re-registering listeners on every selection change).
   const selectedResortRef = useRef(selectedResort);
@@ -527,6 +529,7 @@ export default function WaitTimesPage() {
     const profileKeys = getActiveProfileKeys();
     resortKeyRef.current = profileKeys.selectedResort;
     parkKeyRef.current = profileKeys.selectedPark;
+    setActiveProfileName(getActiveProfile().name);
 
     const { defaultResort, defaultPark } = getSettingsDefaults();
     setSettingsResort(defaultResort);
@@ -675,16 +678,14 @@ export default function WaitTimesPage() {
 
       <div className="wait-page">
         {/* Page Header */}
-        <h1
-          style={{
-            fontSize: "22px",
-            fontWeight: 700,
-            color: "#111827",
-            marginBottom: "16px",
-          }}
-        >
-          Wait Times
-        </h1>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "16px" }}>
+          <h1 style={{ fontSize: "22px", fontWeight: 700, color: "#111827", margin: 0 }}>
+            Wait Times
+          </h1>
+          {activeProfileName && (
+            <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
+          )}
+        </div>
 
         {/* Resort + Park selectors — only rendered after hydration to prevent
             a visible DLR→WDW flip when the stored selection differs from the

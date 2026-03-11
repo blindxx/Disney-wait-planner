@@ -12,7 +12,7 @@
  *   dw:settings:defaultPark    — park id string
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import {
   getSettingsDefaults,
@@ -30,6 +30,7 @@ import {
   createProfile,
   renameProfile,
   deleteProfile,
+  getActiveProfileKeys,
 } from "../../lib/profileStorage";
 
 // ============================================
@@ -75,6 +76,9 @@ export default function SettingsPage() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [activeProfileId, setActiveProfileIdState] = useState<string>("default");
 
+  // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
+  const profileKeysRef = useRef({ selectedResort: "dwp.selectedResort", selectedPark: "dwp.selectedPark" });
+
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
   const [emailInput, setEmailInput] = useState("");
@@ -86,18 +90,20 @@ export default function SettingsPage() {
   useEffect(() => {
     // Bootstrap profiles system and load profile state
     bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
+    profileKeysRef.current = profileKeys;
     setProfiles(getProfiles());
     setActiveProfileIdState(getActiveProfileId());
 
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
-    // Read active session context using the same normalization as the rest of
-    // the app (matches Plans' readSessionContext logic). Either key alone is
-    // sufficient to establish context; the missing side is derived/validated.
+    // Read active session context from the active profile's namespaced keys.
+    // Either key alone is sufficient to establish context; the missing side
+    // is derived/validated.
     try {
-      const storedResort = localStorage.getItem("dwp.selectedResort");
-      const storedPark = localStorage.getItem("dwp.selectedPark");
+      const storedResort = localStorage.getItem(profileKeys.selectedResort);
+      const storedPark = localStorage.getItem(profileKeys.selectedPark);
       const hasResort = storedResort === "DLR" || storedResort === "WDW";
       // Find which resort owns storedPark, if any.
       const parkResort = storedPark
@@ -175,7 +181,7 @@ export default function SettingsPage() {
   }
 
   function handleDeleteProfile() {
-    if (profiles.length <= 1) return;
+    if (profiles.length <= 1 || activeProfileId === "default") return;
     const current = profiles.find((p) => p.id === activeProfileId);
     const confirmed = window.confirm(
       `Delete profile "${current?.name ?? activeProfileId}"? All its stored data will be removed.`
@@ -387,7 +393,7 @@ export default function SettingsPage() {
           </h2>
           <label
             htmlFor="activeProfileSelect"
-            style={{ fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}
+            style={{ display: "block", fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}
           >
             Active Profile:
           </label>
@@ -451,17 +457,17 @@ export default function SettingsPage() {
             </button>
             <button
               onClick={handleDeleteProfile}
-              disabled={profiles.length <= 1}
+              disabled={profiles.length <= 1 || activeProfileId === "default"}
               style={{
                 flex: "1 1 auto",
                 padding: "10px 12px",
                 borderRadius: "8px",
-                border: `1px solid ${profiles.length <= 1 ? "#e5e7eb" : "#fca5a5"}`,
-                cursor: profiles.length <= 1 ? "not-allowed" : "pointer",
+                border: `1px solid ${(profiles.length <= 1 || activeProfileId === "default") ? "#e5e7eb" : "#fca5a5"}`,
+                cursor: (profiles.length <= 1 || activeProfileId === "default") ? "not-allowed" : "pointer",
                 fontWeight: 600,
                 fontSize: "13px",
                 backgroundColor: "#f9fafb",
-                color: profiles.length <= 1 ? "#9ca3af" : "#dc2626",
+                color: (profiles.length <= 1 || activeProfileId === "default") ? "#9ca3af" : "#dc2626",
                 minHeight: "44px",
               }}
             >
@@ -611,8 +617,8 @@ export default function SettingsPage() {
         <button
           onClick={() => {
             try {
-              localStorage.removeItem("dwp.selectedResort");
-              localStorage.removeItem("dwp.selectedPark");
+              localStorage.removeItem(profileKeysRef.current.selectedResort);
+              localStorage.removeItem(profileKeysRef.current.selectedPark);
             } catch {}
             location.reload();
           }}
