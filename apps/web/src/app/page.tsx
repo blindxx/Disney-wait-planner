@@ -216,11 +216,11 @@ export default function TodayPage() {
 
   // Hydrate resort + park from localStorage on mount (shared context with Wait Times).
   // If page-specific stored values are absent, fall back to Settings defaults.
-  // Never writes to localStorage during initialization (Phase 7.1.1 rule).
+  // This effect only reads resort/park from localStorage; any writes during init are
+  // limited to bootstrapProfiles() (e.g., initializing/migrating profile keys).
   // Sets ready=true at the end so selectors render with the correct state (no flicker).
   useEffect(() => {
     bootstrapProfiles();
-    const profileKeys = getActiveProfileKeys();
     resortKeyRef.current = profileKeys.selectedResort;
     parkKeyRef.current = profileKeys.selectedPark;
     setActiveProfileName(getActiveProfile().name);
