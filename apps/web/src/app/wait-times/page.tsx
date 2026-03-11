@@ -35,6 +35,7 @@ import {
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
+import { bootstrapProfiles, getActiveProfileKeys } from "../../lib/profileStorage";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -184,9 +185,9 @@ const STORAGE_PARK_KEY = "dwp.selectedPark";
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
  */
-function loadStoredResort(): ResortId {
+function loadStoredResort(key: string = STORAGE_RESORT_KEY): ResortId {
   try {
-    const v = localStorage.getItem(STORAGE_RESORT_KEY);
+    const v = localStorage.getItem(key);
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
   return getSettingsDefaults().defaultResort;
@@ -197,9 +198,9 @@ function loadStoredResort(): ResortId {
  * Falls back to Settings default park (which itself falls back to first park for resort).
  * Only uses settings default when no page-specific stored value exists.
  */
-function loadStoredPark(resort: ResortId): ParkId {
+function loadStoredPark(resort: ResortId, key: string = STORAGE_PARK_KEY): ParkId {
   try {
-    const v = localStorage.getItem(STORAGE_PARK_KEY);
+    const v = localStorage.getItem(key);
     if (v && (RESORT_PARKS[resort] as string[]).includes(v)) return v as ParkId;
   } catch {}
   // Use settings default park only if valid for this resort; otherwise first park.
@@ -503,6 +504,10 @@ export default function WaitTimesPage() {
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
+  // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
+  const resortKeyRef = useRef("dwp.selectedResort");
+  const parkKeyRef = useRef("dwp.selectedPark");
+
   // Refs always hold the latest resort/park so refreshData stays stable
   // (avoids re-registering listeners on every selection change).
   const selectedResortRef = useRef(selectedResort);
@@ -518,11 +523,16 @@ export default function WaitTimesPage() {
   // Hydrate resort + park from localStorage on client mount (runs once).
   // Sets ready=true at end so selectors render with the correct state (no flicker).
   useEffect(() => {
+    bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
+    resortKeyRef.current = profileKeys.selectedResort;
+    parkKeyRef.current = profileKeys.selectedPark;
+
     const { defaultResort, defaultPark } = getSettingsDefaults();
     setSettingsResort(defaultResort);
     setSettingsPark(defaultPark);
-    const resort = loadStoredResort();
-    const park = loadStoredPark(resort);
+    const resort = loadStoredResort(resortKeyRef.current);
+    const park = loadStoredPark(resort, parkKeyRef.current);
     setSelectedResort(resort);
     setSelectedPark(park);
     setReady(true);
@@ -536,8 +546,8 @@ export default function WaitTimesPage() {
     setSelectedPark(RESORT_PARKS[resort][0]);
     setSelectedLand("");
     try {
-      localStorage.setItem(STORAGE_RESORT_KEY, resort);
-      localStorage.setItem(STORAGE_PARK_KEY, RESORT_PARKS[resort][0]);
+      localStorage.setItem(resortKeyRef.current, resort);
+      localStorage.setItem(parkKeyRef.current, RESORT_PARKS[resort][0]);
     } catch {}
   }
 
@@ -709,8 +719,8 @@ export default function WaitTimesPage() {
                     setSelectedPark(parkId);
                     setSelectedLand("");
                     try {
-                      localStorage.setItem(STORAGE_PARK_KEY, parkId);
-                      localStorage.setItem(STORAGE_RESORT_KEY, selectedResort);
+                      localStorage.setItem(parkKeyRef.current, parkId);
+                      localStorage.setItem(resortKeyRef.current, selectedResort);
                     } catch {}
                   }}
                   style={{

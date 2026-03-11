@@ -48,6 +48,7 @@ import {
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
+import { bootstrapProfiles, getActiveProfileKeys } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
   scheduleSync,
@@ -143,9 +144,9 @@ function parseCSVRow(line: string): string[] {
 const STORAGE_KEY = "dwp.myPlans";
 const SCHEMA_VERSION = 1;
 
-function loadFromStorage(): PlanItem[] {
+function loadFromStorage(key: string = STORAGE_KEY): PlanItem[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     // v1 shape: { version: 1, items: [...] }
@@ -166,7 +167,7 @@ function loadFromStorage(): PlanItem[] {
     if (Array.isArray(parsed)) {
       const migrated = { version: SCHEMA_VERSION, items: parsed };
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+        localStorage.setItem(key, JSON.stringify(migrated));
       } catch {
         // best-effort migration write — ignore quota errors
       }
@@ -179,10 +180,10 @@ function loadFromStorage(): PlanItem[] {
   }
 }
 
-function saveToStorage(items: PlanItem[]): void {
+function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
   try {
     localStorage.setItem(
-      STORAGE_KEY,
+      key,
       JSON.stringify({ version: SCHEMA_VERSION, items })
     );
   } catch {
@@ -263,13 +264,13 @@ const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
 };
 
 /**
- * Read and validate resort from localStorage (STORAGE_RESORT_KEY).
+ * Read and validate resort from localStorage.
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
  */
-function loadStoredResort(): ResortId {
+function loadStoredResort(key: string = STORAGE_RESORT_KEY): ResortId {
   try {
-    const v = localStorage.getItem(STORAGE_RESORT_KEY);
+    const v = localStorage.getItem(key);
     if (v === "DLR" || v === "WDW") return v;
   } catch {}
   return getSettingsDefaults().defaultResort;
@@ -280,10 +281,13 @@ function loadStoredResort(): ResortId {
  * If true, inference must be skipped.
  * Returns the stored resort and park (park is null if absent or invalid for resort).
  */
-function readSessionContext(): { exists: boolean; resort: ResortId; park: ParkId | null } {
+function readSessionContext(
+  resortKey: string = STORAGE_RESORT_KEY,
+  parkKey: string = STORAGE_PARK_KEY,
+): { exists: boolean; resort: ResortId; park: ParkId | null } {
   try {
-    const storedResort = localStorage.getItem(STORAGE_RESORT_KEY);
-    const storedPark = localStorage.getItem(STORAGE_PARK_KEY);
+    const storedResort = localStorage.getItem(resortKey);
+    const storedPark = localStorage.getItem(parkKey);
     const hasResort = storedResort === "DLR" || storedResort === "WDW";
     const haspark = !!storedPark && storedPark in PARK_TO_RESORT;
 
@@ -320,6 +324,13 @@ export default function PlansPage() {
   const [ready, setReady] = useState(false);
   const [items, setItems] = useState<PlanItem[]>([]);
   const [initialized, setInitialized] = useState(false);
+
+  // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
+  // Using refs ensures the values are stable across re-renders and available
+  // in all effects without adding them as dependencies.
+  const planKeyRef = useRef(STORAGE_KEY);
+  const resortKeyRef = useRef(STORAGE_RESORT_KEY);
+  const parkKeyRef = useRef(STORAGE_PARK_KEY);
 
   // Auth session — used to trigger cloud pull on sign-in
   const { status: sessionStatus } = useSession();
@@ -457,7 +468,14 @@ export default function PlansPage() {
   //                plans are available; guarded by contextInferredRef).
   //   Priority 3 → Settings defaults.
   useEffect(() => {
-    const loaded = loadFromStorage();
+    // Bootstrap profiles system and resolve namespaced keys for this page load.
+    bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
+    planKeyRef.current = profileKeys.plans;
+    resortKeyRef.current = profileKeys.selectedResort;
+    parkKeyRef.current = profileKeys.selectedPark;
+
+    const loaded = loadFromStorage(planKeyRef.current);
     // Record how many items existed at mount. The post-import effect uses this
     // to distinguish ordinary page revisits (pre-existing plans) from true
     // import-triggered events where inference is allowed.
@@ -468,7 +486,7 @@ export default function PlansPage() {
     setInitialized(true);
 
     // --- Context priority resolution ---
-    const session = readSessionContext();
+    const session = readSessionContext(resortKeyRef.current, parkKeyRef.current);
 
     if (session.exists) {
       // Priority 1: session context key(s) exist — respect them, skip inference.
@@ -524,7 +542,7 @@ export default function PlansPage() {
     // existing plans must not reassert inferred context on simple page visits.
     if (items.length === 0 || initialItemCountRef.current > 0) return;
 
-    const session = readSessionContext();
+    const session = readSessionContext(resortKeyRef.current, parkKeyRef.current);
     // Explicit session context exists — mark resolved and skip inference.
     // Explicit user selection (Priority 1) wins over import-triggered inference.
     if (session.exists) {
@@ -540,8 +558,8 @@ export default function PlansPage() {
       const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
       setSelectedPark(resolvedPark);
       // Phase 7.3.4: persist inferred context immediately to session keys
-      try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
-      try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
+      try { localStorage.setItem(resortKeyRef.current, inferred.resort); } catch {}
+      try { localStorage.setItem(parkKeyRef.current, resolvedPark); } catch {}
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized]);
@@ -553,7 +571,7 @@ export default function PlansPage() {
   useEffect(() => {
     if (!initialized) return;
     localEditRef.current = true;
-    saveToStorage(items);
+    saveToStorage(items, planKeyRef.current);
   }, [items, initialized]);
 
   // Schedule a debounced cloud push after every items change, but only once
@@ -615,7 +633,7 @@ export default function PlansPage() {
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
           // cloud pull is the definitive source for this page load.
-          if (!readSessionContext().exists) {
+          if (!readSessionContext(resortKeyRef.current, parkKeyRef.current).exists) {
             contextInferredRef.current = false;
             // If the cloud pull cleared all items, this page is effectively in
             // a fresh-import-ready state. Reset the mount-count guard so that
@@ -867,8 +885,8 @@ export default function PlansPage() {
     //      returns true → watcher treats it as an explicit selection and skips inference
     contextInferredRef.current = false;
     initialItemCountRef.current = 0; // re-open import-inference eligibility
-    try { localStorage.removeItem(STORAGE_RESORT_KEY); } catch {}
-    try { localStorage.removeItem(STORAGE_PARK_KEY); } catch {}
+    try { localStorage.removeItem(resortKeyRef.current); } catch {}
+    try { localStorage.removeItem(parkKeyRef.current); } catch {}
   }
 
   function handleToggleSort(checked: boolean) {
@@ -913,8 +931,8 @@ export default function PlansPage() {
       const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
       setSelectedResort(inferred.resort);
       setSelectedPark(resolvedPark);
-      try { localStorage.setItem(STORAGE_RESORT_KEY, inferred.resort); } catch {}
-      try { localStorage.setItem(STORAGE_PARK_KEY, resolvedPark); } catch {}
+      try { localStorage.setItem(resortKeyRef.current, inferred.resort); } catch {}
+      try { localStorage.setItem(parkKeyRef.current, resolvedPark); } catch {}
     }
   }
 
@@ -1509,8 +1527,8 @@ export default function PlansPage() {
                   setSelectedResort(resortId);
                   const firstPark = RESORT_PARKS[resortId][0];
                   setSelectedPark(firstPark); // reset to first park of new resort
-                  try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
-                  try { localStorage.setItem(STORAGE_PARK_KEY, firstPark); } catch {}
+                  try { localStorage.setItem(resortKeyRef.current, resortId); } catch {}
+                  try { localStorage.setItem(parkKeyRef.current, firstPark); } catch {}
                 }}
                 style={{
                   backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
@@ -1540,7 +1558,7 @@ export default function PlansPage() {
                 className="plans-park-tab"
                 onClick={() => {
                   setSelectedPark(parkId);
-                  try { localStorage.setItem(STORAGE_PARK_KEY, parkId); } catch {}
+                  try { localStorage.setItem(parkKeyRef.current, parkId); } catch {}
                 }}
                 style={{
                   backgroundColor: selectedPark === parkId ? "#1e3a5f" : "#f9fafb",

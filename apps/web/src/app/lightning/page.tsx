@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
   parseAmPmToken,
   parse24hToken,
@@ -16,6 +16,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
+import { bootstrapProfiles, getActiveProfileKeys } from "@/lib/profileStorage";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -64,10 +65,10 @@ type StoredSchema = {
 
 const STORAGE_KEY = "dwp.lightning.v1";
 
-function loadFromStorage(): LightningItem[] {
+function loadFromStorage(key: string = STORAGE_KEY): LightningItem[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (
@@ -79,21 +80,21 @@ function loadFromStorage(): LightningItem[] {
       return (parsed as StoredSchema).items;
     }
     // Wrong version or corrupt structure — clear and start fresh
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(key);
     return [];
   } catch {
     // JSON parse failed — clear bad data
     try {
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(key);
     } catch {}
     return [];
   }
 }
 
-function saveToStorage(items: LightningItem[]): void {
+function saveToStorage(items: LightningItem[], key: string = STORAGE_KEY): void {
   try {
     const schema: StoredSchema = { version: 1, items };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(schema));
+    localStorage.setItem(key, JSON.stringify(schema));
   } catch {}
 }
 
@@ -202,6 +203,10 @@ export default function LightningPage() {
   const [items, setItems] = useState<LightningItem[]>([]);
   const [loaded, setLoaded] = useState(false);
 
+  // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
+  const lightningKeyRef = useRef(STORAGE_KEY);
+  const resortKeyRef = useRef("dwp.selectedResort");
+
   // Form state
   const [rideName, setRideName] = useState("");
   const [startRaw, setStartRaw] = useState("");
@@ -222,13 +227,17 @@ export default function LightningPage() {
 
   // Load persisted reservations on mount
   useEffect(() => {
-    setItems(loadFromStorage());
+    bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
+    lightningKeyRef.current = profileKeys.lightning;
+    resortKeyRef.current = profileKeys.selectedResort;
+    setItems(loadFromStorage(lightningKeyRef.current));
     setLoaded(true);
   }, []);
 
   // Persist whenever items change (after initial load)
   useEffect(() => {
-    if (loaded) saveToStorage(items);
+    if (loaded) saveToStorage(items, lightningKeyRef.current);
   }, [items, loaded]);
 
   // Single interval updates "now" every 10 seconds
@@ -242,9 +251,10 @@ export default function LightningPage() {
   // Hydrate selectedResort from localStorage on client mount (runs once).
   // If no page-specific stored resort exists, fall back to Settings default.
   // Sets ready=true last so the selector renders with the correct value — no flicker.
+  // Note: bootstrapProfiles() has already run in the load effect above, setting resortKeyRef.
   useEffect(() => {
     try {
-      const v = localStorage.getItem(STORAGE_RESORT_KEY);
+      const v = localStorage.getItem(resortKeyRef.current);
       if (v === "DLR" || v === "WDW") {
         setSelectedResort(v);
       } else {
@@ -561,7 +571,7 @@ export default function LightningPage() {
               key={resortId}
               onClick={() => {
                 setSelectedResort(resortId);
-                try { localStorage.setItem(STORAGE_RESORT_KEY, resortId); } catch {}
+                try { localStorage.setItem(resortKeyRef.current, resortId); } catch {}
               }}
               style={{
                 flex: "1 1 0%",
