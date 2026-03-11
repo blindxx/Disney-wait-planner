@@ -98,7 +98,11 @@ export function getProfiles(): Profile[] {
 export function getActiveProfileId(): string {
   if (typeof window === "undefined") return "default";
   try {
-    return localStorage.getItem(ACTIVE_PROFILE_KEY) ?? "default";
+    const stored = localStorage.getItem(ACTIVE_PROFILE_KEY);
+    const fallback = "default";
+    if (!stored) return fallback;
+    const profiles = getProfiles();
+    return profiles.some((p) => p.id === stored) ? stored : fallback;
   } catch {
     return "default";
   }
