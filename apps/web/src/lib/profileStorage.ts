@@ -196,10 +196,16 @@ export function deleteProfile(id: string): void {
     }
   } catch {}
 
-  // If the deleted profile was active, fall back to default
-  if (getActiveProfileId() === id) {
-    setActiveProfileId("default");
-  }
+  // If the deleted profile was active, explicitly persist fallback to default.
+  // Compare raw localStorage directly — getActiveProfileId() already applies
+  // validation fallback, so by the time we call it the profile list no longer
+  // contains `id` and the helper returns "default" regardless, making the
+  // comparison always false and the setActiveProfileId() call unreachable.
+  try {
+    if (localStorage.getItem(ACTIVE_PROFILE_KEY) === id) {
+      setActiveProfileId("default");
+    }
+  } catch {}
 }
 
 // ===== BOOTSTRAP & MIGRATION =====
@@ -222,10 +228,16 @@ export function bootstrapProfiles(): void {
     writeProfiles([DEFAULT_PROFILE, ...profiles]);
   }
 
-  // 2. Ensure activeProfile is set and valid
+  // 2. Ensure activeProfile is set and valid in raw storage.
+  // Read raw localStorage directly — getActiveProfileId() already validates/
+  // falls back, so comparing its result would never trigger the write.
   const validProfiles = hasDefault ? profiles : [DEFAULT_PROFILE, ...profiles];
-  const activeId = getActiveProfileId();
-  if (!validProfiles.some((p) => p.id === activeId)) {
+  try {
+    const rawActiveId = localStorage.getItem(ACTIVE_PROFILE_KEY);
+    if (!rawActiveId || !validProfiles.some((p) => p.id === rawActiveId)) {
+      setActiveProfileId("default");
+    }
+  } catch {
     setActiveProfileId("default");
   }
 

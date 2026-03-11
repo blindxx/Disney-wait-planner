@@ -465,7 +465,7 @@ export default function LightningPage() {
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "0" }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "1rem" }}>
         <h1 className="title" style={{ margin: 0 }}>Lightning Lane</h1>
         {activeProfileName && (
           <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>

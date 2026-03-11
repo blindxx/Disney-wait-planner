@@ -343,6 +343,11 @@ export default function PlansPage() {
   const localEditRef = useRef(false);
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
+  // Gate: set by handleClearAll() to signal that the next import should
+  // run inference even if a manual resort/park change already wrote session
+  // keys to storage. After Clear All the user is starting fresh, so a
+  // subsequent manual selection should not permanently block import inference.
+  const postClearRef = useRef(false);
   // Monotonic counter for JSON import requests. Only the latest request's
   // FileReader callback is allowed to commit state, preventing stale results
   // from a previous (slower) import from overwriting a more recent import.
@@ -547,13 +552,16 @@ export default function PlansPage() {
 
     const session = readSessionContext(resortKeyRef.current, parkKeyRef.current);
     // Explicit session context exists — mark resolved and skip inference.
-    // Explicit user selection (Priority 1) wins over import-triggered inference.
-    if (session.exists) {
+    // Exception: if this is a post-clear import (postClearRef=true), allow
+    // inference to proceed even when a manual selection wrote session keys,
+    // because Clear All explicitly signals a fresh-start intent.
+    if (session.exists && !postClearRef.current) {
       contextInferredRef.current = true;
       return;
     }
 
-    // Run inference (one-time).
+    // Run inference (one-time). Reset post-clear flag before running.
+    postClearRef.current = false;
     contextInferredRef.current = true;
     const inferred = inferPlansContext(items);
     if (inferred.resort) {
@@ -887,6 +895,7 @@ export default function PlansPage() {
     //   2. dwp.selectedResort/Park keys still exist → readSessionContext().exists
     //      returns true → watcher treats it as an explicit selection and skips inference
     contextInferredRef.current = false;
+    postClearRef.current = true; // allow inference on next import even after manual park change
     initialItemCountRef.current = 0; // re-open import-inference eligibility
     try { localStorage.removeItem(resortKeyRef.current); } catch {}
     try { localStorage.removeItem(parkKeyRef.current); } catch {}
@@ -1492,13 +1501,15 @@ export default function PlansPage() {
       `}</style>
 
       <div className="plans-container">
-        {activeProfileName && (
-          <div style={{ textAlign: "right", marginBottom: "4px" }}>
-            <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
-          </div>
-        )}
         <div className="plans-header">
-          <h1 className="plans-title">My Plans</h1>
+          <div>
+            <h1 className="plans-title">My Plans</h1>
+            {activeProfileName && (
+              <span style={{ fontSize: "12px", color: "#9ca3af", display: "block", marginTop: "2px" }}>
+                Profile: {activeProfileName}
+              </span>
+            )}
+          </div>
           <div className="plans-header-actions">
             <button
               className="btn-clear"
