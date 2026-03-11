@@ -505,8 +505,8 @@ export default function WaitTimesPage() {
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
-  const resortKeyRef = useRef("dwp.selectedResort");
-  const parkKeyRef = useRef("dwp.selectedPark");
+  const resortKeyRef = useRef(SETTINGS_RESORT_KEY);
+  const parkKeyRef = useRef(SETTINGS_PARK_KEY);
 
   // Refs always hold the latest resort/park so refreshData stays stable
   // (avoids re-registering listeners on every selection change).
