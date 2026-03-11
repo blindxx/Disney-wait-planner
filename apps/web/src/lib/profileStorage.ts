@@ -49,7 +49,11 @@ export function buildNamespacedKey(profileId: string, baseKey: string): string {
 
 // ===== PROFILE LIST HELPERS =====
 
-/** Read the profiles list from localStorage. Returns [] on error. */
+/**
+ * Read the profiles list.
+ * - On the server (typeof window === "undefined"), returns [DEFAULT_PROFILE].
+ * - In the browser, reads from localStorage and returns [] on error or invalid data.
+ */
 function readProfiles(): Profile[] {
   if (typeof window === "undefined") return [DEFAULT_PROFILE];
   try {
