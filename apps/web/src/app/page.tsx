@@ -204,8 +204,8 @@ export default function TodayPage() {
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
-  const resortKeyRef = useRef("dwp.selectedResort");
-  const parkKeyRef = useRef("dwp.selectedPark");
+  const resortKeyRef = useRef(STORAGE_RESORT_KEY);
+  const parkKeyRef = useRef(STORAGE_PARK_KEY);
 
   // Refs for the latest resort+park so refreshData stays stable.
   const selectedResortRef = useRef(selectedResort);
