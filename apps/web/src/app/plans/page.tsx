@@ -544,6 +544,13 @@ export default function PlansPage() {
   useEffect(() => {
     if (!initialized) return;
     if (contextInferredRef.current) return;
+    // Consume the import flag unconditionally so it is always reset even when
+    // an early-return guard fires (e.g. initialItemCountRef.current > 0 when
+    // the user imports while they already had items). Leaving it true would
+    // let a later non-import items change (e.g. after Clear All resets
+    // initialItemCountRef to 0) incorrectly bypass session-context precedence.
+    const isImport = importJustRanRef.current;
+    importJustRanRef.current = false;
     // Only allow inference on a true fresh-import event: items went from zero
     // to non-zero during this page lifecycle. Items that existed at mount
     // (initialItemCountRef.current > 0) represent an ordinary page revisit —
@@ -551,10 +558,6 @@ export default function PlansPage() {
     if (items.length === 0 || initialItemCountRef.current > 0) return;
 
     const session = readSessionContext(resortKeyRef.current, parkKeyRef.current);
-    // Consume the import flag immediately — must happen before any early return
-    // so it is always reset regardless of which branch exits.
-    const isImport = importJustRanRef.current;
-    importJustRanRef.current = false;
     // Explicit session context exists — mark resolved and skip inference.
     // Exception: if this is a real import flow (importJustRanRef was true),
     // allow inference to proceed even when a manual selection wrote session
