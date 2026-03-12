@@ -26,7 +26,7 @@ import {
   bootstrapProfiles,
   getProfiles,
   getActiveProfileId,
-  setActiveProfileId,
+  setActiveProfileId as setActiveProfileIdInStorage,
   createProfile,
   renameProfile,
   deleteProfile,
@@ -154,7 +154,7 @@ export default function SettingsPage() {
   }
 
   function handleProfileSwitch(id: string) {
-    setActiveProfileId(id);
+    setActiveProfileIdInStorage(id);
     setActiveProfileIdState(id);
     // Reload so all pages pick up the new profile's data cleanly
     location.reload();
@@ -166,7 +166,7 @@ export default function SettingsPage() {
     const profile = createProfile(name);
     setProfiles(getProfiles());
     // Switch to the newly created profile immediately
-    setActiveProfileId(profile.id);
+    setActiveProfileIdInStorage(profile.id);
     setActiveProfileIdState(profile.id);
     location.reload();
   }
