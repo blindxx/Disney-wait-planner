@@ -619,13 +619,8 @@ export default function SettingsPage() {
         <button
           onClick={() => {
             try {
-              // Ensure profiles are bootstrapped and use the active profile's keys
-              bootstrapProfiles();
-              const activeProfileKeys = getActiveProfileKeys();
-              if (activeProfileKeys) {
-                localStorage.removeItem(activeProfileKeys.selectedResort);
-                localStorage.removeItem(activeProfileKeys.selectedPark);
-              }
+              localStorage.removeItem(profileKeysRef.current.selectedResort);
+              localStorage.removeItem(profileKeysRef.current.selectedPark);
             } catch {}
             location.reload();
           }}
