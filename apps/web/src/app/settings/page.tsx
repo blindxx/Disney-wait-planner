@@ -12,7 +12,7 @@
  *   dw:settings:defaultPark    — park id string
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import {
   getSettingsDefaults,
@@ -21,6 +21,17 @@ import {
 } from "../../lib/settingsDefaults";
 import { useSession, signIn, signOut } from "next-auth/react";
 import { LAST_SYNCED_KEY } from "../../lib/syncHelper";
+import {
+  type Profile,
+  bootstrapProfiles,
+  getProfiles,
+  getActiveProfileId,
+  setActiveProfileId as setActiveProfileIdInStorage,
+  createProfile,
+  renameProfile,
+  deleteProfile,
+  getActiveProfileKeys,
+} from "../../lib/profileStorage";
 
 // ============================================
 // CONSTANTS
@@ -61,6 +72,13 @@ export default function SettingsPage() {
   const [sessionResort, setSessionResort] = useState<ResortId | null>(null);
   const [sessionPark, setSessionPark] = useState<ParkId | null>(null);
 
+  // Profiles state
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [activeProfileId, setActiveProfileIdState] = useState<string>("default");
+
+  // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
+  const profileKeysRef = useRef({ selectedResort: "dwp.selectedResort", selectedPark: "dwp.selectedPark" });
+
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
   const [emailInput, setEmailInput] = useState("");
@@ -70,15 +88,22 @@ export default function SettingsPage() {
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
+    // Bootstrap profiles system and load profile state
+    bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
+    profileKeysRef.current = profileKeys;
+    setProfiles(getProfiles());
+    setActiveProfileIdState(getActiveProfileId());
+
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
     setDefaultPark(park);
-    // Read active session context using the same normalization as the rest of
-    // the app (matches Plans' readSessionContext logic). Either key alone is
-    // sufficient to establish context; the missing side is derived/validated.
+    // Read active session context from the active profile's namespaced keys.
+    // Either key alone is sufficient to establish context; the missing side
+    // is derived/validated.
     try {
-      const storedResort = localStorage.getItem("dwp.selectedResort");
-      const storedPark = localStorage.getItem("dwp.selectedPark");
+      const storedResort = localStorage.getItem(profileKeys.selectedResort);
+      const storedPark = localStorage.getItem(profileKeys.selectedPark);
       const hasResort = storedResort === "DLR" || storedResort === "WDW";
       // Find which resort owns storedPark, if any.
       const parkResort = storedPark
@@ -126,6 +151,48 @@ export default function SettingsPage() {
     try {
       localStorage.setItem(SETTINGS_PARK_KEY, park);
     } catch {}
+  }
+
+  function handleProfileSwitch(id: string) {
+    setActiveProfileIdInStorage(id);
+    setActiveProfileIdState(id);
+    // Reload so all pages pick up the new profile's data cleanly
+    location.reload();
+  }
+
+  function handleAddProfile() {
+    const name = window.prompt("New profile name:");
+    if (!name || !name.trim()) return;
+    const profile = createProfile(name);
+    setProfiles(getProfiles());
+    // Switch to the newly created profile immediately
+    setActiveProfileIdInStorage(profile.id);
+    setActiveProfileIdState(profile.id);
+    location.reload();
+  }
+
+  function handleRenameProfile() {
+    if (activeProfileId === "default") return;
+    const current = profiles.find((p) => p.id === activeProfileId);
+    if (!current) return;
+    const name = window.prompt("Rename profile:", current.name);
+    if (!name || !name.trim()) return;
+    renameProfile(activeProfileId, name);
+    setProfiles(getProfiles());
+  }
+
+  function handleDeleteProfile() {
+    if (profiles.length <= 1 || activeProfileId === "default") return;
+    const current = profiles.find((p) => p.id === activeProfileId);
+    const confirmed = window.confirm(
+      `Delete profile "${current?.name ?? activeProfileId}"? All its stored data will be removed.`
+    );
+    if (!confirmed) return;
+    deleteProfile(activeProfileId);
+    const remaining = getProfiles();
+    setProfiles(remaining);
+    setActiveProfileIdState("default");
+    location.reload();
   }
 
   async function handleSendSignInLink() {
@@ -312,6 +379,109 @@ export default function SettingsPage() {
         </>
       )}
 
+      {/* ── Profiles ── */}
+      {ready && profiles.length > 0 && (
+        <section style={{ marginBottom: "28px" }}>
+          <h2
+            style={{
+              fontSize: "15px",
+              fontWeight: 600,
+              color: "#374151",
+              marginBottom: "10px",
+            }}
+          >
+            Profiles
+          </h2>
+          <label
+            htmlFor="activeProfileSelect"
+            style={{ display: "block", fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}
+          >
+            Active Profile:
+          </label>
+          <select
+            id="activeProfileSelect"
+            value={activeProfileId}
+            onChange={(e) => handleProfileSwitch(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "10px 12px",
+              borderRadius: "8px",
+              border: "1px solid #d1d5db",
+              fontSize: "14px",
+              minHeight: "44px",
+              backgroundColor: "#fff",
+              color: "#111827",
+              marginBottom: "10px",
+              cursor: "pointer",
+            }}
+          >
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              onClick={handleAddProfile}
+              style={{
+                flex: "1 1 auto",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: "1px solid #d1d5db",
+                cursor: "pointer",
+                fontWeight: 600,
+                fontSize: "13px",
+                backgroundColor: "#f9fafb",
+                color: "#374151",
+                minHeight: "44px",
+              }}
+            >
+              Add Profile
+            </button>
+            <button
+              onClick={handleRenameProfile}
+              disabled={activeProfileId === "default"}
+              style={{
+                flex: "1 1 auto",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: `1px solid ${activeProfileId === "default" ? "#e5e7eb" : "#d1d5db"}`,
+                cursor: activeProfileId === "default" ? "not-allowed" : "pointer",
+                fontWeight: 600,
+                fontSize: "13px",
+                backgroundColor: "#f9fafb",
+                color: activeProfileId === "default" ? "#9ca3af" : "#374151",
+                minHeight: "44px",
+              }}
+            >
+              Rename
+            </button>
+            <button
+              onClick={handleDeleteProfile}
+              disabled={profiles.length <= 1 || activeProfileId === "default"}
+              style={{
+                flex: "1 1 auto",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                border: `1px solid ${(profiles.length <= 1 || activeProfileId === "default") ? "#e5e7eb" : "#fca5a5"}`,
+                cursor: (profiles.length <= 1 || activeProfileId === "default") ? "not-allowed" : "pointer",
+                fontWeight: 600,
+                fontSize: "13px",
+                backgroundColor: "#f9fafb",
+                color: (profiles.length <= 1 || activeProfileId === "default") ? "#9ca3af" : "#dc2626",
+                minHeight: "44px",
+              }}
+            >
+              Delete
+            </button>
+          </div>
+          <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: "8px" }}>
+            Each profile stores separate Plans, Lightning, and park context. Profiles are local to this device.
+          </p>
+        </section>
+      )}
+
       {/* ── Account / Sync ── */}
       <section
         style={{
@@ -449,8 +619,8 @@ export default function SettingsPage() {
         <button
           onClick={() => {
             try {
-              localStorage.removeItem("dwp.selectedResort");
-              localStorage.removeItem("dwp.selectedPark");
+              localStorage.removeItem(profileKeysRef.current.selectedResort);
+              localStorage.removeItem(profileKeysRef.current.selectedPark);
             } catch {}
             location.reload();
           }}

@@ -20,6 +20,7 @@ import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-pl
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "../lib/profileStorage";
 
 // ============================================
 // CONSTANTS
@@ -201,6 +202,11 @@ export default function TodayPage() {
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
+  const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
+
+  // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
+  const resortKeyRef = useRef(STORAGE_RESORT_KEY);
+  const parkKeyRef = useRef(STORAGE_PARK_KEY);
 
   // Refs for the latest resort+park so refreshData stays stable.
   const selectedResortRef = useRef(selectedResort);
@@ -210,16 +216,23 @@ export default function TodayPage() {
 
   // Hydrate resort + park from localStorage on mount (shared context with Wait Times).
   // If page-specific stored values are absent, fall back to Settings defaults.
-  // Never writes to localStorage during initialization (Phase 7.1.1 rule).
+  // This effect only reads resort/park from localStorage; any writes during init are
+  // limited to bootstrapProfiles() (e.g., initializing/migrating profile keys).
   // Sets ready=true at the end so selectors render with the correct state (no flicker).
   useEffect(() => {
+    bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
+    resortKeyRef.current = profileKeys.selectedResort;
+    parkKeyRef.current = profileKeys.selectedPark;
+    setActiveProfileName(getActiveProfile().name);
+
     try {
       const { defaultResort, defaultPark } = getSettingsDefaults();
       // Mirror settings defaults into state for reactive isAlreadyDefault checks.
       setSettingsResort(defaultResort);
       setSettingsPark(defaultPark);
 
-      const storedResort = localStorage.getItem(STORAGE_RESORT_KEY);
+      const storedResort = localStorage.getItem(resortKeyRef.current);
       const resort: ResortId =
         storedResort === "DLR" || storedResort === "WDW"
           ? storedResort
@@ -227,7 +240,7 @@ export default function TodayPage() {
       setSelectedResort(resort);
 
       const validParkIds = RESORT_PARKS[resort].map((p) => p.id) as string[];
-      const storedPark = localStorage.getItem(STORAGE_PARK_KEY);
+      const storedPark = localStorage.getItem(parkKeyRef.current);
       if (storedPark && validParkIds.includes(storedPark)) {
         setSelectedPark(storedPark as ParkId);
       } else {
@@ -250,8 +263,8 @@ export default function TodayPage() {
     setSelectedResort(resort);
     setSelectedPark(firstPark);
     try {
-      localStorage.setItem(STORAGE_RESORT_KEY, resort);
-      localStorage.setItem(STORAGE_PARK_KEY, firstPark);
+      localStorage.setItem(resortKeyRef.current, resort);
+      localStorage.setItem(parkKeyRef.current, firstPark);
     } catch {}
   }
 
@@ -340,16 +353,16 @@ export default function TodayPage() {
 
       <div className="today-page">
         {/* Page Title */}
-        <h1
-          style={{
-            fontSize: "28px",
-            fontWeight: 700,
-            color: "#111827",
-            marginBottom: "8px",
-          }}
-        >
-          Today
-        </h1>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "8px" }}>
+          <h1 style={{ fontSize: "28px", fontWeight: 700, color: "#111827", margin: 0 }}>
+            Today
+          </h1>
+          {activeProfileName && (
+            <span style={{ fontSize: "12px", color: "#9ca3af" }}>
+              Profile: {activeProfileName}
+            </span>
+          )}
+        </div>
 
         {/* Current Time */}
         <div
@@ -400,8 +413,8 @@ export default function TodayPage() {
                   onClick={() => {
                     setSelectedPark(parkId);
                     try {
-                      localStorage.setItem(STORAGE_PARK_KEY, parkId);
-                      localStorage.setItem(STORAGE_RESORT_KEY, selectedResort);
+                      localStorage.setItem(parkKeyRef.current, parkId);
+                      localStorage.setItem(resortKeyRef.current, selectedResort);
                     } catch {}
                   }}
                   style={{
