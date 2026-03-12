@@ -221,6 +221,7 @@ export default function TodayPage() {
   // Sets ready=true at the end so selectors render with the correct state (no flicker).
   useEffect(() => {
     bootstrapProfiles();
+    const profileKeys = getActiveProfileKeys();
     resortKeyRef.current = profileKeys.selectedResort;
     parkKeyRef.current = profileKeys.selectedPark;
     setActiveProfileName(getActiveProfile().name);
