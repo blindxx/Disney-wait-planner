@@ -14,6 +14,11 @@
  *
  * Phase 7.6: stores a combined Plans + Lightning payload per (user_id, profile_id).
  * The profile_id is user-supplied from the client's active local profile.
+ *
+ * Phase 7.6.1 legacy fallback: if no user_planner row exists, falls back to the
+ * legacy user_plans table (Phase 7.2 plans-only data). The legacy payload is
+ * normalized to the combined planner shape (lightning defaults to empty) and
+ * written through into user_planner so subsequent reads hit the new table.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -56,27 +61,85 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Missing or invalid profileId" }, { status: 400 });
   }
 
-  const { rows } = await getPool().query<{ planner_json: string; updated_at: Date }>(
+  const pool = getPool();
+
+  // ── 1. Try new user_planner table first ──────────────────────────────────
+  const { rows } = await pool.query<{ planner_json: string; updated_at: Date }>(
     "SELECT planner_json, updated_at FROM user_planner WHERE user_id = $1 AND profile_id = $2",
     [userId, profileId]
   );
 
-  if (rows.length === 0) {
-    return new NextResponse(null, { status: 204 });
+  if (rows.length > 0) {
+    let plannerJson: unknown;
+    try {
+      plannerJson = JSON.parse(rows[0].planner_json);
+    } catch {
+      // Stored data is corrupted — treat as missing and fall through to legacy
+    }
+    if (plannerJson !== undefined) {
+      return NextResponse.json({
+        plannerJson,
+        updatedAt: rows[0].updated_at.toISOString(),
+      });
+    }
   }
 
-  let plannerJson: unknown;
-  try {
-    plannerJson = JSON.parse(rows[0].planner_json);
-  } catch {
-    // Stored data is corrupted — treat as missing
-    return new NextResponse(null, { status: 204 });
+  // ── 2. Legacy fallback: try user_plans (Phase 7.2 plans-only table) ──────
+  // Only attempt for profileId "default" — legacy data was never profile-scoped,
+  // so it belongs to the default profile.
+  if (profileId === "default") {
+    const { rows: legacyRows } = await pool.query<{ plans_json: string; updated_at: Date }>(
+      "SELECT plans_json, updated_at FROM user_plans WHERE user_id = $1",
+      [userId]
+    );
+
+    if (legacyRows.length > 0) {
+      let legacyPlans: unknown;
+      try {
+        legacyPlans = JSON.parse(legacyRows[0].plans_json);
+      } catch {
+        // Legacy data corrupted — treat as missing
+      }
+
+      if (
+        legacyPlans &&
+        typeof legacyPlans === "object" &&
+        !Array.isArray(legacyPlans) &&
+        typeof (legacyPlans as Record<string, unknown>).version === "number" &&
+        Array.isArray((legacyPlans as Record<string, unknown>).items)
+      ) {
+        // Normalize into the combined planner shape (lightning defaults to empty)
+        const normalizedPlanner = {
+          version: 1,
+          plans: legacyPlans,
+          lightning: { version: 1, items: [] },
+        };
+        const normalizedJson = JSON.stringify(normalizedPlanner);
+        const legacyUpdatedAt = legacyRows[0].updated_at;
+
+        // Write-through migrate into user_planner so future reads skip this path.
+        // Ignore errors — migration is best-effort; the read still succeeds.
+        try {
+          await pool.query(
+            `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (user_id, profile_id) DO NOTHING`,
+            [userId, profileId, normalizedJson, legacyUpdatedAt]
+          );
+        } catch {
+          // Best-effort — do not fail the read if migration write fails
+        }
+
+        return NextResponse.json({
+          plannerJson: normalizedPlanner,
+          updatedAt: legacyUpdatedAt.toISOString(),
+        });
+      }
+    }
   }
 
-  return NextResponse.json({
-    plannerJson,
-    updatedAt: rows[0].updated_at.toISOString(),
-  });
+  // ── 3. Neither table has data — definitively empty ────────────────────────
+  return new NextResponse(null, { status: 204 });
 }
 
 // ── PUT / POST (shared handler) ───────────────────────────────────────────────

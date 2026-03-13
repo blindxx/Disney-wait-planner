@@ -53,13 +53,6 @@ export function lastSyncedKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:lastSyncedAt`;
 }
 
-/**
- * Backward-compat export: returns the last-synced key for the current module-level
- * profileId. Settings page uses this to display the last sync time.
- * @deprecated Prefer lastSyncedKeyForProfile(profileId) for explicit targeting.
- */
-export const LAST_SYNCED_KEY = "dwp:sync:lastSyncedAt";
-
 // ── Module-level state ────────────────────────────────────────────────────────
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
