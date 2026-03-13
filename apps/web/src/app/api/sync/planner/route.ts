@@ -4,6 +4,8 @@
  *   204: no usable planner payload available; this includes:
  *          • no row in user_planner and no legacy row in user_plans
  *          • user_planner row exists but planner_json is corrupt/unparseable
+ *            (for profileId "default" with valid legacy data this is self-healed
+ *            by the write-through and returns 200 instead)
  *          • legacy user_plans row exists but plans_json is corrupt/unparseable
  *   400: missing or invalid profileId
  *   401: not signed in
@@ -124,12 +126,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         const legacyUpdatedAt = legacyRows[0].updated_at;
 
         // Write-through migrate into user_planner so future reads skip this path.
+        // Uses DO UPDATE (not DO NOTHING) so that a pre-existing corrupted row
+        // is repaired in place — this is the self-heal path for corrupted rows.
         // Ignore errors — migration is best-effort; the read still succeeds.
         try {
           await pool.query(
             `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at)
              VALUES ($1, $2, $3, $4)
-             ON CONFLICT (user_id, profile_id) DO NOTHING`,
+             ON CONFLICT (user_id, profile_id) DO UPDATE
+               SET planner_json = EXCLUDED.planner_json,
+                   updated_at   = EXCLUDED.updated_at`,
             [userId, profileId, normalizedJson, legacyUpdatedAt]
           );
         } catch {

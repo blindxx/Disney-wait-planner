@@ -192,38 +192,64 @@ export function registerUnloadSync(): () => void {
 // ── internal helpers ──────────────────────────────────────────────────────────
 
 /**
+ * Parse a single raw localStorage value (plans or lightning) into a
+ * normalized dataset entry. Returns null when the stored data is in an
+ * unsafe or unrecognisable state so the caller can abort the push.
+ *
+ *   null raw (missing key)         → { version: 1, items: [] }  (empty — safe)
+ *   JSON array (legacy shape)      → { version: 1, items: array } (normalised)
+ *   { version: number, items[] }   → use as-is
+ *   malformed JSON / unknown shape → null  (do NOT coerce to empty)
+ */
+function parseLocalDatasetEntry(
+  raw: string | null
+): { version: number; items: unknown[] } | null {
+  if (raw === null) return { version: 1, items: [] };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null; // malformed JSON — unsafe
+  }
+  if (Array.isArray(parsed)) {
+    return { version: 1, items: parsed }; // legacy array-only shape
+  }
+  if (
+    parsed !== null &&
+    typeof parsed === "object" &&
+    typeof (parsed as Record<string, unknown>).version === "number" &&
+    Array.isArray((parsed as Record<string, unknown>).items)
+  ) {
+    const p = parsed as { version: number; items: unknown[] };
+    return { version: p.version, items: p.items };
+  }
+  return null; // unexpected shape — unsafe
+}
+
+/**
  * Read the current plans + lightning for a profile from localStorage and
- * construct a SyncedPlannerPayload. Returns null if localStorage is unavailable.
- * Tolerates missing/corrupt keys gracefully (treats as empty arrays).
+ * construct a SyncedPlannerPayload.
+ *
+ * Returns null when:
+ *   • localStorage is unavailable (SSR guard)
+ *   • either dataset contains malformed JSON or an unrecognised shape
+ *     (prevents pushing stale/empty data over valid cloud state)
+ *
+ * Missing localStorage keys are treated as empty datasets (safe).
+ * Legacy array-only shapes are normalised automatically.
  */
 function buildPayloadFromStorage(profileId: string): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
   try {
-    const plansKey = buildNamespacedKey(profileId, "plans");
-    const lightningKey = buildNamespacedKey(profileId, "lightning");
-    const plansRaw = localStorage.getItem(plansKey);
-    const lightningRaw = localStorage.getItem(lightningKey);
+    const plansRaw = localStorage.getItem(buildNamespacedKey(profileId, "plans"));
+    const lightningRaw = localStorage.getItem(buildNamespacedKey(profileId, "lightning"));
 
-    let plans: { version: number; items: unknown[] } = { version: 1, items: [] };
-    let lightning: { version: number; items: unknown[] } = { version: 1, items: [] };
+    const plans = parseLocalDatasetEntry(plansRaw);
+    const lightning = parseLocalDatasetEntry(lightningRaw);
 
-    if (plansRaw) {
-      try {
-        const p = JSON.parse(plansRaw) as { version?: number; items?: unknown[] };
-        if (typeof p.version === "number" && Array.isArray(p.items)) {
-          plans = { version: p.version, items: p.items };
-        }
-      } catch {}
-    }
-
-    if (lightningRaw) {
-      try {
-        const l = JSON.parse(lightningRaw) as { version?: number; items?: unknown[] };
-        if (typeof l.version === "number" && Array.isArray(l.items)) {
-          lightning = { version: l.version, items: l.items };
-        }
-      } catch {}
-    }
+    // If either dataset is in an unsafe/unrecognised state, abort — do not
+    // push potentially empty data over valid cloud state.
+    if (plans === null || lightning === null) return null;
 
     return buildSyncedPlannerPayload(plans, lightning);
   } catch {
