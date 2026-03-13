@@ -16,7 +16,15 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "@/lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId } from "@/lib/profileStorage";
+import { useSession } from "next-auth/react";
+import {
+  setSyncProfileId,
+  scheduleSync,
+  pullPlanner,
+  registerUnloadSync,
+  cancelScheduledSync,
+} from "@/lib/syncHelper";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -206,6 +214,16 @@ export default function LightningPage() {
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
   const lightningKeyRef = useRef(STORAGE_KEY);
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
+  // Stable ref to the active profile id — used by sync effects.
+  const activeProfileIdRef = useRef("default");
+  // Tracks whether the user made a local edit after the current pull started.
+  const localEditRef = useRef(false);
+
+  // Auth session — used to trigger cloud pull on sign-in.
+  const { status: sessionStatus } = useSession();
+  // Gate: prevents scheduleSync() from running until the initial cloud pull
+  // resolves. Same semantics as plans/page.tsx syncReady.
+  const [syncReady, setSyncReady] = useState(false);
 
   // Form state
   const [rideName, setRideName] = useState("");
@@ -234,14 +252,73 @@ export default function LightningPage() {
     lightningKeyRef.current = profileKeys.lightning;
     resortKeyRef.current = profileKeys.selectedResort;
     setActiveProfileName(getActiveProfile().name);
+    const currentProfileId = getActiveProfileId();
+    activeProfileIdRef.current = currentProfileId;
+    // Retarget the module-level sync to this profile.
+    setSyncProfileId(currentProfileId);
     setItems(loadFromStorage(lightningKeyRef.current));
     setLoaded(true);
   }, []);
 
-  // Persist whenever items change (after initial load)
+  // Persist whenever items change (after initial load).
+  // Also marks localEditRef so any in-flight pull sees the edit and skips
+  // overwriting it. Kept separate from the sync effect so syncReady state
+  // changes don't spuriously flip localEditRef.
   useEffect(() => {
-    if (loaded) saveToStorage(items, lightningKeyRef.current);
+    if (!loaded) return;
+    localEditRef.current = true;
+    saveToStorage(items, lightningKeyRef.current);
   }, [items, loaded]);
+
+  // Schedule a debounced cloud push after every items change, but only once
+  // syncReady is true (initial cloud pull resolved) AND user is authenticated.
+  useEffect(() => {
+    if (!loaded || !syncReady || sessionStatus !== "authenticated") return;
+    scheduleSync();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, loaded, syncReady, sessionStatus]);
+
+  // Manage syncReady gate based on auth state transitions — mirrors plans/page.tsx.
+  useEffect(() => {
+    if (sessionStatus === "loading") {
+      cancelScheduledSync();
+      setSyncReady(false);
+      return;
+    }
+    if (sessionStatus === "unauthenticated") {
+      setSyncReady(true);
+      return;
+    }
+    // authenticated
+    if (!loaded) return;
+    cancelScheduledSync();
+    let cancelled = false;
+    localEditRef.current = false;
+    setSyncReady(false);
+    void pullPlanner(activeProfileIdRef.current)
+      .then((planner) => {
+        if (cancelled) return;
+        const cloud = planner?.lightning ?? null;
+        // Only apply cloud lightning data if no local edits occurred while
+        // the pull was in flight. Either way, open the sync gate.
+        if (!localEditRef.current && cloud) {
+          setItems(cloud.items as LightningItem[]);
+        }
+        setSyncReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Cloud state is uncertain — keep push gate closed.
+      });
+    return () => { cancelled = true; };
+  }, [sessionStatus, loaded]);
+
+  // Register a best-effort sendBeacon push on page unload.
+  useEffect(() => {
+    if (!syncReady || sessionStatus !== "authenticated") return;
+    const cleanup = registerUnloadSync();
+    return cleanup;
+  }, [syncReady, sessionStatus]);
 
   // Single interval updates "now" every 10 seconds
   useEffect(() => {

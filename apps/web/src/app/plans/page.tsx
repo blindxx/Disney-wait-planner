@@ -48,11 +48,12 @@ import {
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "@/lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
+  setSyncProfileId,
   scheduleSync,
-  pullPlans,
+  pullPlanner,
   registerUnloadSync,
   cancelScheduledSync,
 } from "@/lib/syncHelper";
@@ -331,6 +332,9 @@ export default function PlansPage() {
   const planKeyRef = useRef(STORAGE_KEY);
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   const parkKeyRef = useRef(STORAGE_PARK_KEY);
+  // Stable ref to the active profile id — used by sync effects to target the
+  // correct cloud record and to initialise the module-level sync target.
+  const activeProfileIdRef = useRef("default");
 
   const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
 
@@ -482,6 +486,11 @@ export default function PlansPage() {
     resortKeyRef.current = profileKeys.selectedResort;
     parkKeyRef.current = profileKeys.selectedPark;
     setActiveProfileName(getActiveProfile().name);
+    const currentProfileId = getActiveProfileId();
+    activeProfileIdRef.current = currentProfileId;
+    // Retarget the module-level sync to this profile; cancels any pending work
+    // from a prior profile (safe no-op on first mount).
+    setSyncProfileId(currentProfileId);
 
     const loaded = loadFromStorage(planKeyRef.current);
     // Record how many items existed at mount. The post-import effect uses this
@@ -603,7 +612,7 @@ export default function PlansPage() {
   // loading/unauthenticated branches in the effect below.
   useEffect(() => {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
-    scheduleSync({ version: SCHEMA_VERSION, items });
+    scheduleSync();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, initialized, syncReady, sessionStatus]);
 
@@ -640,9 +649,11 @@ export default function PlansPage() {
     // flips back to true and we skip applying the cloud result.
     localEditRef.current = false;
     setSyncReady(false);
-    void pullPlans()
-      .then((cloud) => {
+    void pullPlanner(activeProfileIdRef.current)
+      .then((planner) => {
         if (cancelled) return;
+        // Extract the plans portion from the combined planner payload.
+        const cloud = planner?.plans ?? null;
         // Only apply cloud data if no local edits occurred while the pull was
         // in flight. Either way, open the sync gate so edits can push.
         if (!localEditRef.current && cloud) {
@@ -680,13 +691,9 @@ export default function PlansPage() {
   // a beacon that would just receive a 401 and waste the unload budget.
   useEffect(() => {
     if (!syncReady || sessionStatus !== "authenticated") return;
-    const cleanup = registerUnloadSync(() => ({
-      version: SCHEMA_VERSION,
-      items,
-    }));
+    const cleanup = registerUnloadSync();
     return cleanup;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, syncReady, sessionStatus]);
+  }, [syncReady, sessionStatus]);
 
   function openAdd() {
     setFormName("");
