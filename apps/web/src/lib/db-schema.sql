@@ -47,3 +47,14 @@ CREATE TABLE IF NOT EXISTS user_plans (
   plans_json TEXT        NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Custom table: per-user, per-profile planner sync blob (Phase 7.6)
+-- Stores the combined Plans + Lightning payload for each (user, profile) pair.
+-- Run: ALTER TABLE user_planner ... if migrating an existing deployment.
+CREATE TABLE IF NOT EXISTS user_planner (
+  user_id     TEXT        NOT NULL,
+  profile_id  TEXT        NOT NULL,
+  planner_json TEXT       NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, profile_id)
+);

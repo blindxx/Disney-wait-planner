@@ -20,7 +20,7 @@ import {
   SETTINGS_PARK_KEY,
 } from "../../lib/settingsDefaults";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { LAST_SYNCED_KEY } from "../../lib/syncHelper";
+import { lastSyncedKeyForProfile } from "../../lib/syncHelper";
 import {
   type Profile,
   bootstrapProfiles,
@@ -125,9 +125,10 @@ export default function SettingsPage() {
       }
     } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
-    // Read last sync time
+    // Read last sync time for the active profile
     try {
-      setLastSyncedAt(localStorage.getItem(LAST_SYNCED_KEY));
+      const profileId = getActiveProfileId();
+      setLastSyncedAt(localStorage.getItem(lastSyncedKeyForProfile(profileId)));
     } catch {}
   }, []);
 
@@ -573,6 +574,12 @@ export default function SettingsPage() {
           <div>
             <p style={{ fontSize: "14px", color: "#374151", marginBottom: "4px" }}>
               Signed in as <strong>{session.user.email}</strong>
+            </p>
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "2px" }}>
+              Syncing profile:{" "}
+              <strong style={{ color: "#111827" }}>
+                {profiles.find((p) => p.id === activeProfileId)?.name ?? activeProfileId}
+              </strong>
             </p>
             <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "12px" }}>
               {lastSyncedAt
