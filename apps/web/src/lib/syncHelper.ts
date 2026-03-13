@@ -117,9 +117,13 @@ export function cancelScheduledSync(): void {
  * Pull the latest combined planner blob for the signed-in user + profile.
  *
  * Returns:
- *   SyncedPlannerPayload — cloud data found (plans + lightning)
- *   null                 — cloud is definitively empty (204 No Content) or
- *                          cloud payload is present but legacy plans-only shape
+ *   SyncedPlannerPayload — a valid combined planner payload was parsed
+ *   null                 — no usable planner payload could be parsed; this
+ *                          includes: 204 No Content (nothing stored yet),
+ *                          a payload that failed JSON parsing or shape
+ *                          validation in parseSyncedPlannerPayload(), or
+ *                          a legacy plans-only response that could not be
+ *                          normalized into the combined shape
  *
  * Throws on:
  *   non-OK HTTP responses (401, 5xx, etc.)

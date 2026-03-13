@@ -1,7 +1,10 @@
 /**
  * GET  /api/sync/planner?profileId=… — fetch the signed-in user's latest planner blob
  *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string }
- *   204: authenticated but no planner stored yet for this profile
+ *   204: no usable planner payload available; this includes:
+ *          • no row in user_planner and no legacy row in user_plans
+ *          • user_planner row exists but planner_json is corrupt/unparseable
+ *          • legacy user_plans row exists but plans_json is corrupt/unparseable
  *   400: missing or invalid profileId
  *   401: not signed in
  *
@@ -19,6 +22,9 @@
  * legacy user_plans table (Phase 7.2 plans-only data). The legacy payload is
  * normalized to the combined planner shape (lightning defaults to empty) and
  * written through into user_planner so subsequent reads hit the new table.
+ * Important: the legacy fallback only activates when profileId === "default".
+ * Legacy data was never profile-scoped, so it belongs to the default profile
+ * only. Non-default profiles skip the fallback and proceed directly to 204.
  */
 
 import { NextRequest, NextResponse } from "next/server";

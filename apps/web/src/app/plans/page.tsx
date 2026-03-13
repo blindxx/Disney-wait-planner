@@ -693,8 +693,7 @@ export default function PlansPage() {
     if (!syncReady || sessionStatus !== "authenticated") return;
     const cleanup = registerUnloadSync();
     return cleanup;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, syncReady, sessionStatus]);
+  }, [syncReady, sessionStatus]);
 
   function openAdd() {
     setFormName("");
