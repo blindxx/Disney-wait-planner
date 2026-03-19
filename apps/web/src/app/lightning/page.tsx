@@ -295,6 +295,7 @@ export default function LightningPage() {
     let cancelled = false;
     localEditRef.current = false;
     setSyncReady(false);
+    const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
       .then((planner) => {
         if (cancelled) return;
@@ -303,6 +304,20 @@ export default function LightningPage() {
         // the pull was in flight. Either way, open the sync gate.
         if (!localEditRef.current && cloud) {
           setItems(cloud.items as LightningItem[]);
+        }
+        // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
+        // so sync pushes always include a complete dataset regardless of which page loads first.
+        if (typeof window !== "undefined") {
+          try {
+            if (planner?.plans) {
+              localStorage.setItem(
+                profileKeysForPull.plans,
+                JSON.stringify(planner.plans)
+              );
+            }
+          } catch {
+            // ignore storage errors
+          }
         }
         setSyncReady(true);
       })

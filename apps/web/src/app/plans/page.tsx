@@ -649,6 +649,7 @@ export default function PlansPage() {
     // flips back to true and we skip applying the cloud result.
     localEditRef.current = false;
     setSyncReady(false);
+    const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
       .then((planner) => {
         if (cancelled) return;
@@ -671,6 +672,20 @@ export default function PlansPage() {
             if ((cloud.items as PlanItem[]).length === 0) {
               initialItemCountRef.current = 0;
             }
+          }
+        }
+        // Phase 7.6.3 — Sync Hydration Safety: hydrate lightning into localStorage
+        // so sync pushes always include a complete dataset regardless of which page loads first.
+        if (typeof window !== "undefined") {
+          try {
+            if (planner?.lightning) {
+              localStorage.setItem(
+                profileKeysForPull.lightning,
+                JSON.stringify(planner.lightning)
+              );
+            }
+          } catch {
+            // ignore storage errors
           }
         }
         setSyncReady(true);
