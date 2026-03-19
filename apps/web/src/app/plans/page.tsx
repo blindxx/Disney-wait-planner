@@ -678,8 +678,9 @@ export default function PlansPage() {
         if (typeof window !== "undefined") {
           try {
             if (planner?.lightning) {
+              const keys = getActiveProfileKeys();
               localStorage.setItem(
-                `dwp:${activeProfileIdRef.current}:lightning`,
+                keys.lightning,
                 JSON.stringify(planner.lightning)
               );
             }
