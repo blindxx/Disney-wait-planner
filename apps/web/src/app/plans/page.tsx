@@ -673,6 +673,20 @@ export default function PlansPage() {
             }
           }
         }
+        // Phase 7.6.3 — Sync Hydration Safety: hydrate lightning into localStorage
+        // so sync pushes always include a complete dataset regardless of which page loads first.
+        if (typeof window !== "undefined") {
+          try {
+            if (planner?.lightning) {
+              localStorage.setItem(
+                `dwp:${activeProfileIdRef.current}:lightning`,
+                JSON.stringify(planner.lightning)
+              );
+            }
+          } catch {
+            // ignore storage errors
+          }
+        }
         setSyncReady(true);
       })
       .catch(() => {
