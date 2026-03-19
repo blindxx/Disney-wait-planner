@@ -649,6 +649,7 @@ export default function PlansPage() {
     // flips back to true and we skip applying the cloud result.
     localEditRef.current = false;
     setSyncReady(false);
+    const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
       .then((planner) => {
         if (cancelled) return;
@@ -678,9 +679,8 @@ export default function PlansPage() {
         if (typeof window !== "undefined") {
           try {
             if (planner?.lightning) {
-              const keys = getActiveProfileKeys();
               localStorage.setItem(
-                keys.lightning,
+                profileKeysForPull.lightning,
                 JSON.stringify(planner.lightning)
               );
             }

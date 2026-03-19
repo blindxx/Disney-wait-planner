@@ -295,6 +295,7 @@ export default function LightningPage() {
     let cancelled = false;
     localEditRef.current = false;
     setSyncReady(false);
+    const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
       .then((planner) => {
         if (cancelled) return;
@@ -309,9 +310,8 @@ export default function LightningPage() {
         if (typeof window !== "undefined") {
           try {
             if (planner?.plans) {
-              const keys = getActiveProfileKeys();
               localStorage.setItem(
-                keys.plans,
+                profileKeysForPull.plans,
                 JSON.stringify(planner.plans)
               );
             }
