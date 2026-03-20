@@ -142,7 +142,7 @@ export function formatClosureDateRangeForDisplay(
 
 /**
  * All known planned closures (refurbishments).
- * Manually updated Feb 2026.
+ * Manually updated Mar 2026.
  *
  * Key: `${parkId}:${normalizedAttractionName}` — must match
  *      normalizeAttractionName() output in liveWaitApi.ts.
@@ -159,47 +159,30 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
     },
   ],
   [
-    "disneyland:space mountain",
+    "dl:roger rabbit's car toon spin",
     {
-      name: "Space Mountain",
+      name: "Roger Rabbit\u2019s Car Toon Spin",
+      parkId: "disneyland",
+      land: "Mickey's Toontown",
+      dateRange: "2026-03-30 - TBD",
+    },
+  ],
+  [
+    "dl:disneyland monorail",
+    {
+      name: "Disneyland Monorail",
       parkId: "disneyland",
       land: "Tomorrowland",
-      dateRange: "2026-02-23 - 2026-02-26",
+      dateRange: "2026-03-30 - TBD",
     },
   ],
   [
-    "disneyland:great moments with mr. lincoln",
+    "dl:buzz lightyear astro blasters",
     {
-      name: "Great Moments with Mr. Lincoln",
+      name: "Buzz Lightyear Astro Blasters",
       parkId: "disneyland",
-      land: "Main Street, U.S.A.",
-    },
-  ],
-  // ---- DLR: Disney California Adventure ----
-  [
-    "dca:grizzly river run",
-    {
-      name: "Grizzly River Run",
-      parkId: "dca",
-      land: "Grizzly Peak",
-    },
-  ],
-  [
-    "dca:jumpin' jellyfish",
-    {
-      name: "Jumpin\u2019 Jellyfish",
-      parkId: "dca",
-      land: "Paradise Gardens Park",
-      dateRange: "2026-02-23 - 2026-03-05",
-    },
-  ],
-  [
-    "dca:golden zephyr",
-    {
-      name: "Golden Zephyr",
-      parkId: "dca",
-      land: "Paradise Gardens Park",
-      dateRange: "2026-03-09 - 2026-03-17",
+      land: "Tomorrowland",
+      dateRange: "2026-04-13 - TBD",
     },
   ],
   // ---- WDW: Magic Kingdom ----
