@@ -90,6 +90,9 @@ const SYNC_STATUS_LABEL: Record<"idle" | "syncing" | "error", string> = {
   error: "Error",
 };
 
+/** Minimum ms "Syncing…" remains visible — prevents sub-100ms flicker. */
+const MIN_SYNC_DISPLAY_MS = 400;
+
 // ============================================
 // PAGE COMPONENT
 // ============================================
@@ -124,6 +127,14 @@ export default function SettingsPage() {
     lastSyncedAt: null,
     lastError: null,
   });
+  // displayedSyncState is what the UI renders — mirrors syncState but holds
+  // "syncing" visible for at least MIN_SYNC_DISPLAY_MS before transitioning.
+  const [displayedSyncState, setDisplayedSyncState] = useState<SyncState>({
+    status: "idle",
+    lastSyncedAt: null,
+    lastError: null,
+  });
+  const syncingStartedAtRef = useRef<number | null>(null);
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
@@ -177,6 +188,36 @@ export default function SettingsPage() {
       window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
     };
   }, []);
+
+  // Mediate syncState → displayedSyncState with a minimum "syncing" display time.
+  useEffect(() => {
+    if (syncState.status === "syncing") {
+      // Entering syncing: show immediately and record the start time.
+      syncingStartedAtRef.current = Date.now();
+      setDisplayedSyncState(syncState);
+    } else if (displayedSyncState.status === "syncing") {
+      // Leaving syncing: hold the display until MIN_SYNC_DISPLAY_MS has elapsed.
+      const elapsed = syncingStartedAtRef.current !== null
+        ? Date.now() - syncingStartedAtRef.current
+        : MIN_SYNC_DISPLAY_MS;
+      const remaining = MIN_SYNC_DISPLAY_MS - elapsed;
+      if (remaining <= 0) {
+        syncingStartedAtRef.current = null;
+        setDisplayedSyncState(syncState);
+      } else {
+        const next = syncState; // capture for closure
+        const t = setTimeout(() => {
+          syncingStartedAtRef.current = null;
+          setDisplayedSyncState(next);
+        }, remaining);
+        return () => clearTimeout(t);
+      }
+    } else {
+      // Not a syncing transition — apply immediately (covers error, idle at rest).
+      setDisplayedSyncState(syncState);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncState]);
 
   // Handlers — persist immediately on change.
 
@@ -636,28 +677,28 @@ export default function SettingsPage() {
               </strong>
             </p>
 
-            {/* Sync status row */}
+            {/* Sync status row — rendered from displayedSyncState for min-duration stability */}
             <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "2px" }}>
               Status:{" "}
               <span
-                className={syncState.status === "syncing" ? "dwp-syncing" : undefined}
-                style={{ color: SYNC_STATUS_COLOR[syncState.status], fontWeight: 500 }}
+                className={displayedSyncState.status === "syncing" ? "dwp-syncing" : undefined}
+                style={{ color: SYNC_STATUS_COLOR[displayedSyncState.status], fontWeight: 500 }}
               >
-                {SYNC_STATUS_LABEL[syncState.status]}
+                {SYNC_STATUS_LABEL[displayedSyncState.status]}
               </span>
             </p>
-            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: syncState.status === "error" ? "4px" : "12px" }}>
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: displayedSyncState.status === "error" ? "4px" : "12px" }}>
               Last synced:{" "}
-              {syncState.lastSyncedAt
-                ? formatRelativeTime(syncState.lastSyncedAt)
+              {displayedSyncState.lastSyncedAt
+                ? formatRelativeTime(displayedSyncState.lastSyncedAt)
                 : "--"}
             </p>
 
             {/* Error message — persists until next successful sync */}
-            {syncState.status === "error" && (
+            {displayedSyncState.status === "error" && (
               <p style={{ fontSize: "13px", color: "#dc2626", marginBottom: "12px" }}>
                 Last sync failed
-                {syncState.lastError ? ` (${syncState.lastError})` : ""}.
+                {displayedSyncState.lastError ? ` (${displayedSyncState.lastError})` : ""}.
                 {" "}Changes are stored locally.
               </p>
             )}
