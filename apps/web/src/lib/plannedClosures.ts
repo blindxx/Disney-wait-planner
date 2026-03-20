@@ -218,7 +218,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       name: "Buzz Lightyear\u2019s Space Ranger Spin",
       parkId: "mk",
       land: "Tomorrowland",
-      dateRange: "2025-08-04 - 2026-05-01",
+      dateRange: "2025-08-04 - 2026-04-08",
     },
   ],
   // ---- WDW: Hollywood Studios ----

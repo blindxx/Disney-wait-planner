@@ -64,7 +64,10 @@ const RESORT_PARKS: Record<ResortId, { id: ParkId; label: string }[]> = {
 // ============================================
 
 function formatRelativeTime(isoString: string): string {
-  const diffMs = Date.now() - new Date(isoString).getTime();
+  const ts = new Date(isoString).getTime();
+  if (isNaN(ts)) return "--"; // guard against malformed stored value
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return "just now"; // clock skew guard
   const diffSec = Math.floor(diffMs / 1000);
   if (diffSec < 60) return "just now";
   const diffMin = Math.floor(diffSec / 60);
@@ -642,7 +645,9 @@ export default function SettingsPage() {
             {/* Error message — persists until next successful sync */}
             {syncState.status === "error" && (
               <p style={{ fontSize: "13px", color: "#dc2626", marginBottom: "12px" }}>
-                Last sync failed. Changes are stored locally.
+                Last sync failed
+                {syncState.lastError ? ` (${syncState.lastError})` : ""}.
+                {" "}Changes are stored locally.
               </p>
             )}
 
