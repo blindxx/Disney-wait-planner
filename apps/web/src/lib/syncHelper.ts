@@ -343,15 +343,17 @@ async function doPush(): Promise<void> {
       // the user has switched to a different profile mid-flight.
       // lastSyncedAt is also written unconditionally: the originating profile
       // completed a real successful sync and should always record its own timestamp.
+      // Timestamp write is best-effort — quota or private-mode errors must not
+      // prevent the status transition and event dispatch below.
       try {
-        const now = new Date().toISOString();
-        localStorage.setItem(lastSyncedKeyForProfile(profileId), now);
+        localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
+      } catch {}
+      // Status + event MUST always execute so the UI never stays stuck in "syncing".
+      try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
         localStorage.removeItem(syncErrorKeyForProfile(profileId));
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
-      } catch {
-        // quota errors must not crash the app
-      }
+      } catch {}
     } else if (res.status !== 401) {
       // Non-401 failure — record error state for the originating profile.
       try {
