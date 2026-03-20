@@ -320,7 +320,9 @@ async function doPush(): Promise<void> {
   if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
 
   inFlight = true;
-  // Mark syncing state before the request — stale guard: only write if profile matches
+  // Mark syncing for the originating profile. This write is intentionally
+  // unconditional — storage is namespaced by profileId so writing "syncing"
+  // here is always correct for the profile that started this request.
   try {
     localStorage.setItem(syncStatusKeyForProfile(profileId), "syncing");
     window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
@@ -336,16 +338,14 @@ async function doPush(): Promise<void> {
       }
     );
     if (res.ok) {
-      // Always write completion status to the originating profileId so the
-      // profile can never get stuck "syncing" after a mid-flight profile switch.
-      // lastSyncedAt is only written when the profile is still active (stale guard
-      // remains there — we don't want a stale timestamp on a profile the user
-      // already switched away from).
+      // Write completion state to the originating profileId unconditionally —
+      // storage is per-profile so this is always safe regardless of whether
+      // the user has switched to a different profile mid-flight.
+      // lastSyncedAt is also written unconditionally: the originating profile
+      // completed a real successful sync and should always record its own timestamp.
       try {
         const now = new Date().toISOString();
-        if (currentSyncProfileId === profileId) {
-          localStorage.setItem(lastSyncedKeyForProfile(profileId), now);
-        }
+        localStorage.setItem(lastSyncedKeyForProfile(profileId), now);
         localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
         localStorage.removeItem(syncErrorKeyForProfile(profileId));
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
@@ -354,17 +354,17 @@ async function doPush(): Promise<void> {
       }
     } else if (res.status !== 401) {
       // Non-401 failure — record error state for the originating profile.
-      // Do NOT gate on currentSyncProfileId — the profile may have switched
-      // but we still need to clear the "syncing" marker on the origin profile.
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
         localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
     } else {
-      // 401 — user not signed in; reset originating profile to idle (not an error)
+      // 401 — user not signed in; return originating profile to a clean idle state.
+      // Also clear lastError so the profile doesn't show a stale error after sign-out.
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
+        localStorage.removeItem(syncErrorKeyForProfile(profileId));
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
     }
