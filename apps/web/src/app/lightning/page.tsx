@@ -307,19 +307,23 @@ export default function LightningPage() {
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
         // so sync pushes always include a complete dataset regardless of which page loads first.
+        // Phase 7.6.4 — Hydration Guard: only open syncReady when the opposite-dataset
+        // write succeeds. A failed write leaves the key missing, which syncHelper would
+        // treat as empty data on the next push — potentially overwriting valid cloud state.
+        let hydrationSucceeded = true;
         if (typeof window !== "undefined") {
-          try {
-            if (planner?.plans) {
+          if (planner?.plans) {
+            try {
               localStorage.setItem(
                 profileKeysForPull.plans,
                 JSON.stringify(planner.plans)
               );
+            } catch {
+              hydrationSucceeded = false;
             }
-          } catch {
-            // ignore storage errors
           }
         }
-        setSyncReady(true);
+        if (hydrationSucceeded) setSyncReady(true);
       })
       .catch(() => {
         if (cancelled) return;
