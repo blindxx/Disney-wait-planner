@@ -53,6 +53,48 @@ export function lastSyncedKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:lastSyncedAt`;
 }
 
+function syncStatusKeyForProfile(profileId: string): string {
+  return `dwp:sync:${profileId}:status`;
+}
+
+function syncErrorKeyForProfile(profileId: string): string {
+  return `dwp:sync:${profileId}:lastError`;
+}
+
+// ── Sync state observer ───────────────────────────────────────────────────────
+
+/**
+ * Custom event name dispatched on window whenever sync status changes.
+ * Listen to this for same-tab reactive updates (e.g. on the Settings page).
+ */
+export const SYNC_STATE_CHANGED_EVENT = "dwp:syncStateChanged";
+
+export interface SyncState {
+  status: "idle" | "syncing" | "error";
+  lastSyncedAt: string | null;
+  lastError: string | null;
+}
+
+/**
+ * Read the current sync state for a profile from localStorage.
+ * Safe to call in SSR (returns defaults).
+ */
+export function getSyncStateForProfile(profileId: string): SyncState {
+  if (typeof window === "undefined") {
+    return { status: "idle", lastSyncedAt: null, lastError: null };
+  }
+  try {
+    const rawStatus = localStorage.getItem(syncStatusKeyForProfile(profileId));
+    const status: SyncState["status"] =
+      rawStatus === "syncing" || rawStatus === "error" ? rawStatus : "idle";
+    const lastSyncedAt = localStorage.getItem(lastSyncedKeyForProfile(profileId));
+    const lastError = localStorage.getItem(syncErrorKeyForProfile(profileId));
+    return { status, lastSyncedAt, lastError };
+  } catch {
+    return { status: "idle", lastSyncedAt: null, lastError: null };
+  }
+}
+
 // ── Module-level state ────────────────────────────────────────────────────────
 
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -278,6 +320,11 @@ async function doPush(): Promise<void> {
   if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
 
   inFlight = true;
+  // Mark syncing state before the request — stale guard: only write if profile matches
+  try {
+    localStorage.setItem(syncStatusKeyForProfile(profileId), "syncing");
+    window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+  } catch {}
   try {
     const res = await fetch(
       `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`,
@@ -294,16 +341,42 @@ async function doPush(): Promise<void> {
       // to the new profile's key.
       if (currentSyncProfileId === profileId) {
         try {
-          localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
+          const now = new Date().toISOString();
+          localStorage.setItem(lastSyncedKeyForProfile(profileId), now);
+          localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
+          localStorage.removeItem(syncErrorKeyForProfile(profileId));
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
         } catch {
           // quota errors must not crash the app
         }
       }
+    } else if (res.status !== 401) {
+      // Non-401 failure — record error state (401 = not signed in, not a sync failure)
+      if (currentSyncProfileId === profileId) {
+        try {
+          localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
+          localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+        } catch {}
+      }
+    } else {
+      // 401 — user not signed in; reset to idle (not an error)
+      if (currentSyncProfileId === profileId) {
+        try {
+          localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+        } catch {}
+      }
     }
-    // 401 = not signed in, silently ignore
-    // Other errors are also silently ignored; local data stays intact
   } catch {
-    // Network errors are silently ignored — local data is always the fallback
+    // Network error — record error state
+    if (currentSyncProfileId === profileId) {
+      try {
+        localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
+        localStorage.setItem(syncErrorKeyForProfile(profileId), "Network error");
+        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
+    }
   } finally {
     inFlight = false;
   }

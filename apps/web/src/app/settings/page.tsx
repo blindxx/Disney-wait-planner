@@ -20,7 +20,11 @@ import {
   SETTINGS_PARK_KEY,
 } from "../../lib/settingsDefaults";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { lastSyncedKeyForProfile } from "../../lib/syncHelper";
+import {
+  getSyncStateForProfile,
+  SYNC_STATE_CHANGED_EVENT,
+  type SyncState,
+} from "../../lib/syncHelper";
 import {
   type Profile,
   bootstrapProfiles,
@@ -56,6 +60,34 @@ const RESORT_PARKS: Record<ResortId, { id: ParkId; label: string }[]> = {
 };
 
 // ============================================
+// HELPERS
+// ============================================
+
+function formatRelativeTime(isoString: string): string {
+  const diffMs = Date.now() - new Date(isoString).getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return "just now";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} minute${diffMin === 1 ? "" : "s"} ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr} hour${diffHr === 1 ? "" : "s"} ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay} day${diffDay === 1 ? "" : "s"} ago`;
+}
+
+const SYNC_STATUS_COLOR: Record<"idle" | "syncing" | "error", string> = {
+  idle: "#6b7280",
+  syncing: "#2563eb",
+  error: "#dc2626",
+};
+
+const SYNC_STATUS_LABEL: Record<"idle" | "syncing" | "error", string> = {
+  idle: "Idle",
+  syncing: "Syncing\u2026",
+  error: "Error",
+};
+
+// ============================================
 // PAGE COMPONENT
 // ============================================
 
@@ -84,7 +116,11 @@ export default function SettingsPage() {
   const [emailInput, setEmailInput] = useState("");
   const [signInSent, setSignInSent] = useState(false);
   const [signInError, setSignInError] = useState("");
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [syncState, setSyncState] = useState<SyncState>({
+    status: "idle",
+    lastSyncedAt: null,
+    lastError: null,
+  });
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
@@ -125,11 +161,18 @@ export default function SettingsPage() {
       }
     } catch {}
     setReady(true); // Reveal selectors after correct state is set — prevents flicker.
-    // Read last sync time for the active profile
-    try {
-      const profileId = getActiveProfileId();
-      setLastSyncedAt(localStorage.getItem(lastSyncedKeyForProfile(profileId)));
-    } catch {}
+    // Read sync state for the active profile
+    const profileId = getActiveProfileId();
+    setSyncState(getSyncStateForProfile(profileId));
+
+    // Listen for same-tab sync state changes (e.g. sync fires while on Settings)
+    const handleSyncStateChanged = () => {
+      setSyncState(getSyncStateForProfile(profileId));
+    };
+    window.addEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
+    return () => {
+      window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
+    };
   }, []);
 
   // Handlers — persist immediately on change.
@@ -581,12 +624,28 @@ export default function SettingsPage() {
                 {profiles.find((p) => p.id === activeProfileId)?.name ?? activeProfileId}
               </strong>
             </p>
-            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "12px" }}>
-              {lastSyncedAt
-                ? `Last synced: ${new Date(lastSyncedAt).toLocaleString()}`
-                : "Never synced"}
-              {" · "}Auto-sync: On
+
+            {/* Sync status row */}
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "2px" }}>
+              Status:{" "}
+              <span style={{ color: SYNC_STATUS_COLOR[syncState.status], fontWeight: 500 }}>
+                {SYNC_STATUS_LABEL[syncState.status]}
+              </span>
             </p>
+            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: syncState.status === "error" ? "4px" : "12px" }}>
+              Last synced:{" "}
+              {syncState.lastSyncedAt
+                ? formatRelativeTime(syncState.lastSyncedAt)
+                : "--"}
+            </p>
+
+            {/* Error message — persists until next successful sync */}
+            {syncState.status === "error" && (
+              <p style={{ fontSize: "13px", color: "#dc2626", marginBottom: "12px" }}>
+                Last sync failed. Changes are stored locally.
+              </p>
+            )}
+
             <button
               onClick={() => { setSignInSent(false); void signOut({ redirect: false }); }}
               style={{
@@ -604,6 +663,13 @@ export default function SettingsPage() {
               Sign out
             </button>
           </div>
+        )}
+
+        {/* Signed-out sync status note */}
+        {sessionStatus === "unauthenticated" && (
+          <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: "8px", marginBottom: "0" }}>
+            Not signed in — local-only mode. Sign in above to enable cloud sync.
+          </p>
         )}
       </section>
 
