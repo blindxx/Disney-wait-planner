@@ -280,6 +280,14 @@ export default function SettingsPage() {
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto", padding: "16px" }}>
+      {/* Keyframe animation for syncing pulse — scoped, no external CSS needed */}
+      <style>{`
+        @keyframes dwp-sync-pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.45; }
+        }
+        .dwp-syncing { animation: dwp-sync-pulse 1.4s ease-in-out infinite; }
+      `}</style>
       <h1
         style={{
           fontSize: "24px",
@@ -631,7 +639,10 @@ export default function SettingsPage() {
             {/* Sync status row */}
             <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "2px" }}>
               Status:{" "}
-              <span style={{ color: SYNC_STATUS_COLOR[syncState.status], fontWeight: 500 }}>
+              <span
+                className={syncState.status === "syncing" ? "dwp-syncing" : undefined}
+                style={{ color: SYNC_STATUS_COLOR[syncState.status], fontWeight: 500 }}
+              >
                 {SYNC_STATUS_LABEL[syncState.status]}
               </span>
             </p>
