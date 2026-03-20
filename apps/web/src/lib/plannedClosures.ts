@@ -159,7 +159,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
     },
   ],
   [
-    "dl:roger rabbit's car toon spin",
+    "disneyland:roger rabbit's car toon spin",
     {
       name: "Roger Rabbit\u2019s Car Toon Spin",
       parkId: "disneyland",
@@ -168,7 +168,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
     },
   ],
   [
-    "dl:disneyland monorail",
+    "disneyland:disneyland monorail",
     {
       name: "Disneyland Monorail",
       parkId: "disneyland",
@@ -177,7 +177,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
     },
   ],
   [
-    "dl:buzz lightyear astro blasters",
+    "disneyland:buzz lightyear astro blasters",
     {
       name: "Buzz Lightyear Astro Blasters",
       parkId: "disneyland",
