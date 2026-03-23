@@ -309,8 +309,8 @@ async function doPush(): Promise<void> {
     return;
   }
 
-  // Capture the profile at push-start; if it changes mid-flight the result
-  // will be dropped (stale guard below).
+  // Capture the profile at push-start so all writes target the originating
+  // profile unconditionally, even if the user switches profiles mid-flight.
   const profileId = currentSyncProfileId;
 
   const payload = buildPayloadFromStorage(profileId);
