@@ -328,6 +328,7 @@ export default function SettingsPage() {
           50% { opacity: 0.45; }
         }
         .dwp-syncing { animation: dwp-sync-pulse 1.4s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .dwp-syncing { animation: none; } }
       `}</style>
       <h1
         style={{

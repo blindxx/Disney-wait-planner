@@ -326,7 +326,9 @@ async function doPush(): Promise<void> {
   try {
     localStorage.setItem(syncStatusKeyForProfile(profileId), "syncing");
   } catch {}
-  window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+  try {
+    window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+  } catch {}
   try {
     const res = await fetch(
       `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`,
@@ -355,7 +357,9 @@ async function doPush(): Promise<void> {
       try {
         localStorage.removeItem(syncErrorKeyForProfile(profileId));
       } catch {}
-      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      try {
+        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
     } else if (res.status !== 401) {
       // Non-401 failure — record error state for the originating profile.
       try {
@@ -364,7 +368,9 @@ async function doPush(): Promise<void> {
       try {
         localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
       } catch {}
-      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      try {
+        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
     } else {
       // 401 — user not signed in; return originating profile to a clean idle state.
       // Also clear lastError so the profile doesn't show a stale error after sign-out.
@@ -374,7 +380,9 @@ async function doPush(): Promise<void> {
       try {
         localStorage.removeItem(syncErrorKeyForProfile(profileId));
       } catch {}
-      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      try {
+        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
     }
   } catch {
     // Network error — record error state on the originating profile
@@ -384,7 +392,9 @@ async function doPush(): Promise<void> {
     try {
       localStorage.setItem(syncErrorKeyForProfile(profileId), "Network error");
     } catch {}
-    window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+    try {
+      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+    } catch {}
   } finally {
     inFlight = false;
   }
