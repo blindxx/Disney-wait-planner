@@ -325,8 +325,8 @@ async function doPush(): Promise<void> {
   // here is always correct for the profile that started this request.
   try {
     localStorage.setItem(syncStatusKeyForProfile(profileId), "syncing");
-    window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
   } catch {}
+  window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
   try {
     const res = await fetch(
       `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`,
@@ -348,35 +348,43 @@ async function doPush(): Promise<void> {
       try {
         localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
       } catch {}
-      // Status + event MUST always execute so the UI never stays stuck in "syncing".
+      // Status writes are best-effort; event dispatch MUST always execute.
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
-        localStorage.removeItem(syncErrorKeyForProfile(profileId));
-        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
+      try {
+        localStorage.removeItem(syncErrorKeyForProfile(profileId));
+      } catch {}
+      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
     } else if (res.status !== 401) {
       // Non-401 failure — record error state for the originating profile.
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
-        localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
-        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
+      try {
+        localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
+      } catch {}
+      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
     } else {
       // 401 — user not signed in; return originating profile to a clean idle state.
       // Also clear lastError so the profile doesn't show a stale error after sign-out.
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
-        localStorage.removeItem(syncErrorKeyForProfile(profileId));
-        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
+      try {
+        localStorage.removeItem(syncErrorKeyForProfile(profileId));
+      } catch {}
+      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
     }
   } catch {
     // Network error — record error state on the originating profile
     try {
       localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
-      localStorage.setItem(syncErrorKeyForProfile(profileId), "Network error");
-      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
     } catch {}
+    try {
+      localStorage.setItem(syncErrorKeyForProfile(profileId), "Network error");
+    } catch {}
+    window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
   } finally {
     inFlight = false;
   }
