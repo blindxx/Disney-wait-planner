@@ -257,12 +257,17 @@ function loadDays(key: string): string[] {
     const raw = localStorage.getItem(key);
     if (!raw) return ["day-1"];
     const parsed = JSON.parse(raw) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.length > 0 &&
-      (parsed as unknown[]).every((d) => typeof d === "string")
-    ) {
-      return parsed as string[];
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      // Phase 8.0.3 — normalize each entry through strict canonical check,
+      // dedupe, sort, then guarantee "day-1" baseline.
+      const sanitized = [
+        ...new Set(
+          (parsed as unknown[])
+            .map((d) => normalizeDayId(d))
+            .filter((d) => d !== "day-1") // collect non-baseline first
+        ),
+      ];
+      return ["day-1", ...sanitized].sort(daySort);
     }
     return ["day-1"];
   } catch {
@@ -551,11 +556,20 @@ export default function PlansPage() {
     [waitMap]
   );
 
-  // Compute time conflict sets from current items (updates whenever items change).
+  // Phase 8.0 — Items visible in the current day (display-only; storage unchanged).
+  const displayedItems = useMemo(
+    () => items.filter((it) => it.dayId === activeDayId),
+    [items, activeDayId]
+  );
+
+  // Compute time conflict sets scoped to the active day only (Phase 8.0.3).
+  // Previously used `items` (all days), which produced false overlap warnings
+  // between plans on different days. Now uses displayedItems so conflicts are
+  // day-local. Switches days recompute correctly via displayedItems dependency.
   // Parses timeLabel into start/end for each item that has a canonical "H:MM" or
   // "H:MM-H:MM" label; free-text or empty labels are skipped (non-overlapping).
   const { invalidIds, overlapCountById } = useMemo(() => {
-    const conflictInput = items.flatMap((item) => {
+    const conflictInput = displayedItems.flatMap((item) => {
       if (!item.timeLabel) return [];
       const rangeMatch = item.timeLabel.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
       if (rangeMatch) return [{ id: item.id, start: rangeMatch[1], end: rangeMatch[2] }];
@@ -572,13 +586,7 @@ export default function PlansPage() {
       invalidIds: new Set(invalidRanges),
       overlapCountById,
     };
-  }, [items]);
-
-  // Phase 8.0 — Items visible in the current day (display-only; storage unchanged).
-  const displayedItems = useMemo(
-    () => items.filter((it) => it.dayId === activeDayId),
-    [items, activeDayId]
-  );
+  }, [displayedItems]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
