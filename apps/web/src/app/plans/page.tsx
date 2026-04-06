@@ -224,13 +224,14 @@ function parseDayNum(id: string): number {
 
 /**
  * Sort comparator: canonical day IDs order by numeric suffix.
- * Malformed values (Infinity) always sort after valid day IDs.
- * Secondary string comparison provides a stable tiebreaker.
+ * Uses direct comparison (not subtraction) so Infinity - Infinity = NaN
+ * can never occur. Malformed values sort after all valid day IDs.
  */
 function daySort(a: string, b: string): number {
-  const diff = parseDayNum(a) - parseDayNum(b);
-  if (diff !== 0) return diff;
-  return a < b ? -1 : a > b ? 1 : 0;
+  const aNum = parseDayNum(a);
+  const bNum = parseDayNum(b);
+  if (aNum === bNum) return a < b ? -1 : a > b ? 1 : 0;
+  return aNum < bNum ? -1 : 1;
 }
 
 /**
@@ -817,13 +818,16 @@ export default function PlansPage() {
           const cloudItems = migrateDayIds(cloud.items as PlanItem[]);
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Merge cloud item day IDs into the days list deterministically.
+          // Merge cloud item day IDs into the days list.
+          // Uses functional setDays(prev) — this is an async .then() callback
+          // so `days` from the outer closure may be stale; `prev` is always fresh.
           const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
-          const nextCloudDays = [...new Set([...days, ...cloudDayIds])].sort(daySort);
-          if (nextCloudDays.join(",") !== days.join(",")) {
-            setDays(nextCloudDays);
-            saveDays(nextCloudDays, daysKeyRef.current);
-          }
+          setDays((prev) => {
+            const next = [...new Set([...prev, ...cloudDayIds])].sort(daySort);
+            if (next.join(",") === prev.join(",")) return prev;
+            saveDays(next, daysKeyRef.current);
+            return next;
+          });
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
@@ -1204,13 +1208,16 @@ export default function PlansPage() {
           timeLabel: it.timeLabel,
           dayId: normalizeDayId(it.dayId), // Phase 8.0.2 — strict canonical check
         }));
-        // Merge imported day IDs into the days list deterministically.
+        // Merge imported day IDs into the days list.
+        // Uses functional setDays(prev) — this runs inside FileReader.onload
+        // (async) so `days` from the outer closure may be stale; `prev` is fresh.
         const importedDayIds = [...new Set(importedItems.map((it) => it.dayId))];
-        const nextImportDays = [...new Set([...days, ...importedDayIds])].sort(daySort);
-        if (nextImportDays.join(",") !== days.join(",")) {
-          setDays(nextImportDays);
-          saveDays(nextImportDays, daysKeyRef.current);
-        }
+        setDays((prev) => {
+          const next = [...new Set([...prev, ...importedDayIds])].sort(daySort);
+          if (next.join(",") === prev.join(",")) return prev;
+          saveDays(next, daysKeyRef.current);
+          return next;
+        });
         reseedNextId(importedItems);
         setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
         applyImportContextInference(importedItems);
