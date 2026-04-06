@@ -886,6 +886,14 @@ export default function PlansPage() {
   // Computes directly from current rendered days state; no functional updater
   // captures, no side effects inside updater callbacks.
   function handleAddDay() {
+    // Phase 8.0.10 — resolve profile keys at write time so a profile switch
+    // between mount and this click always targets the correct namespace.
+    const _profileId = getActiveProfileId();
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    daysKeyRef.current = _daysKey;
+    activeDayKeyRef.current = _activeDayKey;
+
     const nums = days
       .map((d) => parseInt(d.split("-")[1], 10))
       .filter((n) => !isNaN(n));
@@ -894,9 +902,9 @@ export default function PlansPage() {
     if (days.includes(candidate)) return; // already exists — no-op
     const nextDays = [...days, candidate].sort(daySort);
     setDays(nextDays);
-    saveDays(nextDays, daysKeyRef.current);
+    saveDays(nextDays, _daysKey);
     setActiveDayId(candidate);
-    saveActiveDayId(candidate, activeDayKeyRef.current);
+    saveActiveDayId(candidate, _activeDayKey);
   }
 
   function openAdd() {
@@ -1890,8 +1898,11 @@ export default function PlansPage() {
               className={`btn-day${activeDayId === dayId ? " btn-day-active" : ""}`}
               aria-pressed={activeDayId === dayId}
               onClick={() => {
+                // Phase 8.0.10 — resolve active-day key at click time.
+                const _activeDayKey = buildNamespacedKey(getActiveProfileId(), "activeDayId");
+                activeDayKeyRef.current = _activeDayKey;
                 setActiveDayId(dayId);
-                saveActiveDayId(dayId, activeDayKeyRef.current);
+                saveActiveDayId(dayId, _activeDayKey);
               }}
             >
               {dayLabelFromId(dayId)}
