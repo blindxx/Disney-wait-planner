@@ -1090,17 +1090,20 @@ export default function PlansPage() {
     setDeleteConfirmId(null);
   }
 
-  // Phase 8.0 — moveUp/moveDown operate within the active day's items only.
-  // displayIndex is the index within displayedItems (filtered by activeDayId).
-  function moveUp(displayIndex: number) {
+  // Phase 8.0 / 8.0.8 — reorder within the active day.
+  // itemId is the stable identity of the clicked item; displayIndex is kept
+  // only for the top-boundary guard (index === 0 ⇒ already at top).
+  // Inside the updater, the current position is re-resolved from itemId so
+  // a stale render-time displayIndex can never target the wrong item.
+  function moveUp(displayIndex: number, itemId: string) {
     if (displayIndex === 0) return;
     setItems((prev) => {
       const dayItems = prev.filter((it) => it.dayId === activeDayId);
-      const idA = dayItems[displayIndex]?.id;
-      const idB = dayItems[displayIndex - 1]?.id;
-      if (!idA || !idB) return prev;
-      const gA = prev.findIndex((it) => it.id === idA);
-      const gB = prev.findIndex((it) => it.id === idB);
+      const liveIdx = dayItems.findIndex((it) => it.id === itemId);
+      if (liveIdx <= 0) return prev; // not found or already at top
+      const idAbove = dayItems[liveIdx - 1].id;
+      const gA = prev.findIndex((it) => it.id === itemId);
+      const gB = prev.findIndex((it) => it.id === idAbove);
       if (gA === -1 || gB === -1) return prev;
       const next = [...prev];
       [next[gA], next[gB]] = [next[gB], next[gA]];
@@ -1108,15 +1111,14 @@ export default function PlansPage() {
     });
   }
 
-  function moveDown(displayIndex: number) {
+  function moveDown(displayIndex: number, itemId: string) {
     setItems((prev) => {
       const dayItems = prev.filter((it) => it.dayId === activeDayId);
-      if (displayIndex >= dayItems.length - 1) return prev;
-      const idA = dayItems[displayIndex]?.id;
-      const idB = dayItems[displayIndex + 1]?.id;
-      if (!idA || !idB) return prev;
-      const gA = prev.findIndex((it) => it.id === idA);
-      const gB = prev.findIndex((it) => it.id === idB);
+      const liveIdx = dayItems.findIndex((it) => it.id === itemId);
+      if (liveIdx === -1 || liveIdx >= dayItems.length - 1) return prev;
+      const idBelow = dayItems[liveIdx + 1].id;
+      const gA = prev.findIndex((it) => it.id === itemId);
+      const gB = prev.findIndex((it) => it.id === idBelow);
       if (gA === -1 || gB === -1) return prev;
       const next = [...prev];
       [next[gA], next[gB]] = [next[gB], next[gA]];
@@ -2048,7 +2050,7 @@ export default function PlansPage() {
                       className="icon-btn"
                       aria-label="Move up"
                       disabled={index === 0}
-                      onClick={() => moveUp(index)}
+                      onClick={() => moveUp(index, item.id)}
                     >
                       ↑
                     </button>
@@ -2056,7 +2058,7 @@ export default function PlansPage() {
                       className="icon-btn"
                       aria-label="Move down"
                       disabled={index === displayedItems.length - 1}
-                      onClick={() => moveDown(index)}
+                      onClick={() => moveDown(index, item.id)}
                     >
                       ↓
                     </button>
