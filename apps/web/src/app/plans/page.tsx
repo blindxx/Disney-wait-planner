@@ -282,17 +282,19 @@ function saveDays(days: string[], key: string): void {
 }
 
 function loadActiveDayId(key: string): string {
+  // Phase 8.0.4 — route through strict normalizeDayId so invalid stored
+  // values (arbitrary strings, whitespace, non-string) become "day-1".
   try {
-    const raw = localStorage.getItem(key);
-    return typeof raw === "string" && raw.length > 0 ? raw : "day-1";
+    return normalizeDayId(localStorage.getItem(key));
   } catch {
     return "day-1";
   }
 }
 
 function saveActiveDayId(dayId: string, key: string): void {
+  // Phase 8.0.4 — normalize before write so storage stays canonical.
   try {
-    localStorage.setItem(key, dayId);
+    localStorage.setItem(key, normalizeDayId(dayId));
   } catch {}
 }
 
@@ -641,6 +643,12 @@ export default function PlansPage() {
     const validActiveDayId = mergedDays.includes(storedActiveDayId)
       ? storedActiveDayId
       : mergedDays[0];
+    // Phase 8.0.4 — self-heal: if the stored active day was unusable and we
+    // fell back to a different value, persist the corrected value immediately
+    // so subsequent reloads resolve without re-fallbacking.
+    if (validActiveDayId !== storedActiveDayId) {
+      saveActiveDayId(validActiveDayId, activeDayKeyRef.current);
+    }
     setDays(mergedDays);
     setActiveDayId(validActiveDayId);
     setAutoSortEnabled(loadSortPref());
@@ -879,7 +887,7 @@ export default function PlansPage() {
       const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
       const newDayId = `day-${nextNum}`;
       if (prev.includes(newDayId)) return prev; // guard against duplicate
-      const updated = [...prev, newDayId];
+      const updated = [...prev, newDayId].sort(daySort); // keep canonical order
       saveDays(updated, daysKeyRef.current);
       // Activate the new day. Safe to call a setter inside another setter's
       // updater — React batches these in the same flush.
