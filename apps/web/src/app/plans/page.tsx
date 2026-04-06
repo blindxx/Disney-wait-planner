@@ -1111,7 +1111,7 @@ export default function PlansPage() {
     });
   }
 
-  function moveDown(displayIndex: number, itemId: string) {
+  function moveDown(itemId: string) {
     setItems((prev) => {
       const dayItems = prev.filter((it) => it.dayId === activeDayId);
       const liveIdx = dayItems.findIndex((it) => it.id === itemId);
@@ -2058,7 +2058,7 @@ export default function PlansPage() {
                       className="icon-btn"
                       aria-label="Move down"
                       disabled={index === displayedItems.length - 1}
-                      onClick={() => moveDown(index, item.id)}
+                      onClick={() => moveDown(item.id)}
                     >
                       ↓
                     </button>
