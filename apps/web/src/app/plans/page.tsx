@@ -214,10 +214,11 @@ function normalizeDayId(raw: unknown): string {
 
 /**
  * Parse numeric suffix from a canonical day ID.
- * Invalid / non-canonical values return Infinity so they sort after all valid days.
+ * Uses VALID_DAY_ID_RE (^day-([1-9]\d*)$) so non-canonical values like
+ * day-0 / day-01 return Infinity and sort after all valid day IDs.
  */
 function parseDayNum(id: string): number {
-  const m = /^day-(\d+)$/.exec(id);
+  const m = VALID_DAY_ID_RE.exec(id);
   return m ? parseInt(m[1], 10) : Infinity;
 }
 
@@ -816,17 +817,13 @@ export default function PlansPage() {
           const cloudItems = migrateDayIds(cloud.items as PlanItem[]);
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Merge cloud item day IDs into the days list (stale-safe, pure updater).
-          // Phase 8.0.5: saveDays side effect captured outside updater.
+          // Merge cloud item day IDs into the days list deterministically.
           const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
-          let mergedCloudDays: string[] | null = null;
-          setDays((prev) => {
-            const merged = [...new Set([...prev, ...cloudDayIds])].sort(daySort);
-            if (merged.join(",") === prev.join(",")) return prev;
-            mergedCloudDays = merged;
-            return merged;
-          });
-          if (mergedCloudDays) saveDays(mergedCloudDays, daysKeyRef.current);
+          const nextCloudDays = [...new Set([...days, ...cloudDayIds])].sort(daySort);
+          if (nextCloudDays.join(",") !== days.join(",")) {
+            setDays(nextCloudDays);
+            saveDays(nextCloudDays, daysKeyRef.current);
+          }
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
@@ -881,33 +878,21 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
-  // Phase 8.0 / 8.0.1 / 8.0.5 — create the next sequential day and switch to it.
-  // Uses functional setDays (stale-safe) with a pure updater: captured-result
-  // pattern moves all side effects outside the updater so it is safe to replay
-  // in React Strict Mode without duplicating writes.
+  // Phase 8.0 — create the next sequential day and switch to it.
+  // Computes directly from current rendered days state; no functional updater
+  // captures, no side effects inside updater callbacks.
   function handleAddDay() {
-    let newDayId: string | null = null;
-    let nextDays: string[] | null = null;
-    setDays((prev) => {
-      const nums = prev
-        .map((d) => parseInt(d.split("-")[1], 10))
-        .filter((n) => !isNaN(n));
-      const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
-      const candidate = `day-${nextNum}`;
-      if (prev.includes(candidate)) return prev; // duplicate guard
-      const updated = [...prev, candidate].sort(daySort);
-      // Capture for side effects below — updater must remain pure.
-      newDayId = candidate;
-      nextDays = updated;
-      return updated;
-    });
-    // Side effects run after the pure updater. The updater is called
-    // synchronously inside event handlers, so these values are set here.
-    if (nextDays) saveDays(nextDays, daysKeyRef.current);
-    if (newDayId) {
-      setActiveDayId(newDayId);
-      saveActiveDayId(newDayId, activeDayKeyRef.current);
-    }
+    const nums = days
+      .map((d) => parseInt(d.split("-")[1], 10))
+      .filter((n) => !isNaN(n));
+    const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
+    const candidate = `day-${nextNum}`;
+    if (days.includes(candidate)) return; // already exists — no-op
+    const nextDays = [...days, candidate].sort(daySort);
+    setDays(nextDays);
+    saveDays(nextDays, daysKeyRef.current);
+    setActiveDayId(candidate);
+    saveActiveDayId(candidate, activeDayKeyRef.current);
   }
 
   function openAdd() {
@@ -1219,17 +1204,13 @@ export default function PlansPage() {
           timeLabel: it.timeLabel,
           dayId: normalizeDayId(it.dayId), // Phase 8.0.2 — strict canonical check
         }));
-        // Merge imported day IDs into the days list (stale-safe, pure updater).
-        // Phase 8.0.5: saveDays side effect captured outside updater.
+        // Merge imported day IDs into the days list deterministically.
         const importedDayIds = [...new Set(importedItems.map((it) => it.dayId))];
-        let mergedDaysResult: string[] | null = null;
-        setDays((prev) => {
-          const merged = [...new Set([...prev, ...importedDayIds])].sort(daySort);
-          if (merged.join(",") === prev.join(",")) return prev;
-          mergedDaysResult = merged;
-          return merged;
-        });
-        if (mergedDaysResult) saveDays(mergedDaysResult, daysKeyRef.current);
+        const nextImportDays = [...new Set([...days, ...importedDayIds])].sort(daySort);
+        if (nextImportDays.join(",") !== days.join(",")) {
+          setDays(nextImportDays);
+          saveDays(nextImportDays, daysKeyRef.current);
+        }
         reseedNextId(importedItems);
         setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
         applyImportContextInference(importedItems);
