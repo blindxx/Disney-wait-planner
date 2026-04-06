@@ -195,7 +195,9 @@ function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
 
 // ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1 / 8.0.2) =====
 
-const VALID_DAY_ID_RE = /^day-\d+$/;
+// Phase 8.0.5 — 1-based, no leading zeros: day-1, day-2, day-10 are valid;
+// day-0, day-01, day-00 are not.
+const VALID_DAY_ID_RE = /^day-([1-9]\d*)$/;
 
 /**
  * Normalize any raw value to a canonical day ID (Phase 8.0.2).
@@ -814,14 +816,17 @@ export default function PlansPage() {
           const cloudItems = migrateDayIds(cloud.items as PlanItem[]);
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Merge cloud item day IDs into the days list (stale-safe).
+          // Merge cloud item day IDs into the days list (stale-safe, pure updater).
+          // Phase 8.0.5: saveDays side effect captured outside updater.
+          const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
+          let mergedCloudDays: string[] | null = null;
           setDays((prev) => {
-            const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
             const merged = [...new Set([...prev, ...cloudDayIds])].sort(daySort);
             if (merged.join(",") === prev.join(",")) return prev;
-            saveDays(merged, daysKeyRef.current);
+            mergedCloudDays = merged;
             return merged;
           });
+          if (mergedCloudDays) saveDays(mergedCloudDays, daysKeyRef.current);
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
@@ -876,25 +881,33 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
-  // Phase 8.0 / 8.0.1 — create the next sequential day and switch to it.
-  // Uses functional setDays so rapid clicks always compute from the latest state
-  // and cannot generate duplicate IDs from stale closure values.
+  // Phase 8.0 / 8.0.1 / 8.0.5 — create the next sequential day and switch to it.
+  // Uses functional setDays (stale-safe) with a pure updater: captured-result
+  // pattern moves all side effects outside the updater so it is safe to replay
+  // in React Strict Mode without duplicating writes.
   function handleAddDay() {
+    let newDayId: string | null = null;
+    let nextDays: string[] | null = null;
     setDays((prev) => {
       const nums = prev
         .map((d) => parseInt(d.split("-")[1], 10))
         .filter((n) => !isNaN(n));
       const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
-      const newDayId = `day-${nextNum}`;
-      if (prev.includes(newDayId)) return prev; // guard against duplicate
-      const updated = [...prev, newDayId].sort(daySort); // keep canonical order
-      saveDays(updated, daysKeyRef.current);
-      // Activate the new day. Safe to call a setter inside another setter's
-      // updater — React batches these in the same flush.
-      setActiveDayId(newDayId);
-      saveActiveDayId(newDayId, activeDayKeyRef.current);
+      const candidate = `day-${nextNum}`;
+      if (prev.includes(candidate)) return prev; // duplicate guard
+      const updated = [...prev, candidate].sort(daySort);
+      // Capture for side effects below — updater must remain pure.
+      newDayId = candidate;
+      nextDays = updated;
       return updated;
     });
+    // Side effects run after the pure updater. The updater is called
+    // synchronously inside event handlers, so these values are set here.
+    if (nextDays) saveDays(nextDays, daysKeyRef.current);
+    if (newDayId) {
+      setActiveDayId(newDayId);
+      saveActiveDayId(newDayId, activeDayKeyRef.current);
+    }
   }
 
   function openAdd() {
@@ -1206,16 +1219,17 @@ export default function PlansPage() {
           timeLabel: it.timeLabel,
           dayId: normalizeDayId(it.dayId), // Phase 8.0.2 — strict canonical check
         }));
-        // Merge any day IDs from the imported file into the days list.
-        // Uses functional setDays so async file-read cannot clobber day additions
-        // made locally while the read was in flight (Phase 8.0.1).
+        // Merge imported day IDs into the days list (stale-safe, pure updater).
+        // Phase 8.0.5: saveDays side effect captured outside updater.
         const importedDayIds = [...new Set(importedItems.map((it) => it.dayId))];
+        let mergedDaysResult: string[] | null = null;
         setDays((prev) => {
           const merged = [...new Set([...prev, ...importedDayIds])].sort(daySort);
           if (merged.join(",") === prev.join(",")) return prev;
-          saveDays(merged, daysKeyRef.current);
+          mergedDaysResult = merged;
           return merged;
         });
+        if (mergedDaysResult) saveDays(mergedDaysResult, daysKeyRef.current);
         reseedNextId(importedItems);
         setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
         applyImportContextInference(importedItems);
