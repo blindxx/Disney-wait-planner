@@ -193,22 +193,41 @@ function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
   }
 }
 
-// ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1) =====
+// ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1 / 8.0.2) =====
+
+const VALID_DAY_ID_RE = /^day-\d+$/;
 
 /**
- * Normalize any raw dayId value to a safe string.
- * - Non-string, null, undefined, or empty → "day-1"
- * - Valid non-empty string → returned as-is
+ * Normalize any raw value to a canonical day ID (Phase 8.0.2).
+ * - Non-string or empty/whitespace-only → "day-1"
+ * - Trimmed value must match ^day-\d+$ or → "day-1"
+ * - " day-3 " → "day-3" (trimmed before check)
+ * - "banana" / "day-two" / "" → "day-1"
  */
 function normalizeDayId(raw: unknown): string {
-  return typeof raw === "string" && raw.length > 0 ? raw : "day-1";
+  if (typeof raw !== "string") return "day-1";
+  const trimmed = raw.trim();
+  return VALID_DAY_ID_RE.test(trimmed) ? trimmed : "day-1";
 }
 
-/** Stable sort comparator: "day-1" < "day-2" < "day-10" by numeric suffix. */
+/**
+ * Parse numeric suffix from a canonical day ID.
+ * Invalid / non-canonical values return Infinity so they sort after all valid days.
+ */
+function parseDayNum(id: string): number {
+  const m = /^day-(\d+)$/.exec(id);
+  return m ? parseInt(m[1], 10) : Infinity;
+}
+
+/**
+ * Sort comparator: canonical day IDs order by numeric suffix.
+ * Malformed values (Infinity) always sort after valid day IDs.
+ * Secondary string comparison provides a stable tiebreaker.
+ */
 function daySort(a: string, b: string): number {
-  const na = parseInt(a.split("-")[1], 10) || 0;
-  const nb = parseInt(b.split("-")[1], 10) || 0;
-  return na - nb;
+  const diff = parseDayNum(a) - parseDayNum(b);
+  if (diff !== 0) return diff;
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
@@ -1169,7 +1188,7 @@ export default function PlansPage() {
           id: it.id,
           name: it.name,
           timeLabel: it.timeLabel,
-          dayId: it.dayId ?? "day-1",
+          dayId: normalizeDayId(it.dayId), // Phase 8.0.2 — strict canonical check
         }));
         // Merge any day IDs from the imported file into the days list.
         // Uses functional setDays so async file-read cannot clobber day additions
@@ -1849,6 +1868,7 @@ export default function PlansPage() {
             <button
               key={dayId}
               className={`btn-day${activeDayId === dayId ? " btn-day-active" : ""}`}
+              aria-pressed={activeDayId === dayId}
               onClick={() => {
                 setActiveDayId(dayId);
                 saveActiveDayId(dayId, activeDayKeyRef.current);
