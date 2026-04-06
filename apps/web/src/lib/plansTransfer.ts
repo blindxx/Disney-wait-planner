@@ -6,6 +6,7 @@ export type PlanItem = {
   id: string;
   name: string;
   timeLabel: string;
+  dayId?: string; // Phase 8.0 — optional for backward compat with stored/imported data
 };
 
 export type PlansExportPayload = {

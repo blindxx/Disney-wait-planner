@@ -48,7 +48,7 @@ import {
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId } from "@/lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
@@ -62,6 +62,7 @@ type PlanItem = {
   id: string;
   name: string;
   timeLabel: string;
+  dayId: string; // Phase 8.0
 };
 
 type Mode = "view" | "add" | "edit" | "import";
@@ -190,6 +191,69 @@ function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
   } catch {
     // Quota or security errors must not crash the app
   }
+}
+
+// ===== DAY MANAGEMENT (Phase 8.0) =====
+
+/**
+ * Assign dayId "day-1" to any item that lacks one.
+ * Idempotent — items that already have a dayId are returned unchanged.
+ * Returns the same array reference when no migration is needed.
+ */
+function migrateDayIds(items: PlanItem[]): PlanItem[] {
+  const needsMigration = items.some(
+    (it) => (it.dayId as string | undefined) === undefined
+  );
+  if (!needsMigration) return items;
+  return items.map((it) => ({
+    ...it,
+    dayId: (it.dayId as string | undefined) ?? "day-1",
+  }));
+}
+
+/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
+function dayLabelFromId(dayId: string): string {
+  const n = parseInt(dayId.split("-")[1], 10);
+  return isNaN(n) ? dayId : `Day ${n}`;
+}
+
+function loadDays(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return ["day-1"];
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.length > 0 &&
+      (parsed as unknown[]).every((d) => typeof d === "string")
+    ) {
+      return parsed as string[];
+    }
+    return ["day-1"];
+  } catch {
+    return ["day-1"];
+  }
+}
+
+function saveDays(days: string[], key: string): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(days));
+  } catch {}
+}
+
+function loadActiveDayId(key: string): string {
+  try {
+    const raw = localStorage.getItem(key);
+    return typeof raw === "string" && raw.length > 0 ? raw : "day-1";
+  } catch {
+    return "day-1";
+  }
+}
+
+function saveActiveDayId(dayId: string, key: string): void {
+  try {
+    localStorage.setItem(key, dayId);
+  } catch {}
 }
 
 // ===== AUTO-SORT =====
@@ -335,6 +399,9 @@ export default function PlansPage() {
   // Stable ref to the active profile id — used by sync effects to target the
   // correct cloud record and to initialise the module-level sync target.
   const activeProfileIdRef = useRef("default");
+  // Phase 8.0 — per-profile day storage key refs
+  const activeDayKeyRef = useRef("dwp:default:activeDayId");
+  const daysKeyRef = useRef("dwp:default:days");
 
   const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
 
@@ -365,6 +432,9 @@ export default function PlansPage() {
   // while the GET /api/sync/plans request is in-flight. Set true after pull
   // completes (authenticated path) or immediately (unauthenticated path).
   const [syncReady, setSyncReady] = useState(false);
+  // Phase 8.0 — multi-day state (default to day-1; hydrated from storage on mount)
+  const [activeDayId, setActiveDayId] = useState<string>("day-1");
+  const [days, setDays] = useState<string[]>(["day-1"]);
   const [autoSortEnabled, setAutoSortEnabled] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
@@ -469,6 +539,12 @@ export default function PlansPage() {
     };
   }, [items]);
 
+  // Phase 8.0 — Items visible in the current day (display-only; storage unchanged).
+  const displayedItems = useMemo(
+    () => items.filter((it) => it.dayId === activeDayId),
+    [items, activeDayId]
+  );
+
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
   // that newly created items never collide with hydrated ones (avoids React key
@@ -488,17 +564,35 @@ export default function PlansPage() {
     setActiveProfileName(getActiveProfile().name);
     const currentProfileId = getActiveProfileId();
     activeProfileIdRef.current = currentProfileId;
+    // Phase 8.0 — set per-profile day storage keys
+    activeDayKeyRef.current = buildNamespacedKey(currentProfileId, "activeDayId");
+    daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
     // Retarget the module-level sync to this profile; cancels any pending work
     // from a prior profile (safe no-op on first mount).
     setSyncProfileId(currentProfileId);
 
-    const loaded = loadFromStorage(planKeyRef.current);
+    // Load plans, run Phase 8.0 dayId migration (idempotent), persist if needed.
+    const rawLoaded = loadFromStorage(planKeyRef.current);
+    const loaded = migrateDayIds(rawLoaded);
+    if (loaded !== rawLoaded) {
+      // Migration ran — persist migrated items so next load is clean.
+      saveToStorage(loaded, planKeyRef.current);
+    }
     // Record how many items existed at mount. The post-import effect uses this
     // to distinguish ordinary page revisits (pre-existing plans) from true
     // import-triggered events where inference is allowed.
     initialItemCountRef.current = loaded.length;
     if (loaded.length > 0) reseedNextId(loaded);
     setItems(loaded);
+
+    // Phase 8.0 — Load days list and active day for this profile.
+    const storedDays = loadDays(daysKeyRef.current);
+    const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
+    const validActiveDayId = storedDays.includes(storedActiveDayId)
+      ? storedActiveDayId
+      : storedDays[0];
+    setDays(storedDays);
+    setActiveDayId(validActiveDayId);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
 
@@ -714,6 +808,20 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
+  // Phase 8.0 — create the next sequential day and switch to it.
+  function handleAddDay() {
+    const nums = days
+      .map((d) => parseInt(d.split("-")[1], 10))
+      .filter((n) => !isNaN(n));
+    const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
+    const newDayId = `day-${nextNum}`;
+    const updatedDays = [...days, newDayId];
+    setDays(updatedDays);
+    saveDays(updatedDays, daysKeyRef.current);
+    setActiveDayId(newDayId);
+    saveActiveDayId(newDayId, activeDayKeyRef.current);
+  }
+
   function openAdd() {
     setFormName("");
     setFormTime("");
@@ -788,7 +896,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -817,6 +925,7 @@ export default function PlansPage() {
           id: makeId(),
           name: stripEnDashSuffix(parsed.name),
           timeLabel: parsed.timeLabel,
+          dayId: activeDayId,
         });
       }
     }
@@ -904,20 +1013,36 @@ export default function PlansPage() {
     setDeleteConfirmId(null);
   }
 
-  function moveUp(index: number) {
-    if (index === 0) return;
+  // Phase 8.0 — moveUp/moveDown operate within the active day's items only.
+  // displayIndex is the index within displayedItems (filtered by activeDayId).
+  function moveUp(displayIndex: number) {
+    if (displayIndex === 0) return;
     setItems((prev) => {
+      const dayItems = prev.filter((it) => it.dayId === activeDayId);
+      const idA = dayItems[displayIndex]?.id;
+      const idB = dayItems[displayIndex - 1]?.id;
+      if (!idA || !idB) return prev;
+      const gA = prev.findIndex((it) => it.id === idA);
+      const gB = prev.findIndex((it) => it.id === idB);
+      if (gA === -1 || gB === -1) return prev;
       const next = [...prev];
-      [next[index - 1], next[index]] = [next[index], next[index - 1]];
+      [next[gA], next[gB]] = [next[gB], next[gA]];
       return next;
     });
   }
 
-  function moveDown(index: number) {
-    if (index === items.length - 1) return;
+  function moveDown(displayIndex: number) {
     setItems((prev) => {
+      const dayItems = prev.filter((it) => it.dayId === activeDayId);
+      if (displayIndex >= dayItems.length - 1) return prev;
+      const idA = dayItems[displayIndex]?.id;
+      const idB = dayItems[displayIndex + 1]?.id;
+      if (!idA || !idB) return prev;
+      const gA = prev.findIndex((it) => it.id === idA);
+      const gB = prev.findIndex((it) => it.id === idB);
+      if (gA === -1 || gB === -1) return prev;
       const next = [...prev];
-      [next[index], next[index + 1]] = [next[index + 1], next[index]];
+      [next[gA], next[gB]] = [next[gB], next[gA]];
       return next;
     });
   }
@@ -998,7 +1123,27 @@ export default function PlansPage() {
       if (requestId !== jsonImportRequestRef.current) return; // stale import result
       const text = (ev.target?.result as string) ?? "";
       try {
-        const importedItems = parseImportedPlansFile(text);
+        const rawImported = parseImportedPlansFile(text);
+        // Phase 8.0 — preserve existing dayId from backup; assign "day-1" if absent.
+        const importedItems: PlanItem[] = rawImported.map((it) => ({
+          id: it.id,
+          name: it.name,
+          timeLabel: it.timeLabel,
+          dayId: it.dayId ?? "day-1",
+        }));
+        // Merge any day IDs from the imported file into the days list.
+        const importedDayIds = [...new Set(importedItems.map((it) => it.dayId))];
+        const mergedDays = [
+          ...new Set([...days, ...importedDayIds]),
+        ].sort((a, b) => {
+          const na = parseInt(a.split("-")[1], 10) || 0;
+          const nb = parseInt(b.split("-")[1], 10) || 0;
+          return na - nb;
+        });
+        if (mergedDays.join(",") !== days.join(",")) {
+          setDays(mergedDays);
+          saveDays(mergedDays, daysKeyRef.current);
+        }
         reseedNextId(importedItems);
         setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
         applyImportContextInference(importedItems);
@@ -1535,6 +1680,34 @@ export default function PlansPage() {
           transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
           min-height: 32px;
         }
+        /* Phase 8.0 — Day Selector */
+        .day-selector-row {
+          display: flex;
+          gap: 0.5rem;
+          margin-bottom: 1rem;
+          flex-wrap: wrap;
+        }
+        .btn-day {
+          background-color: #f9fafb;
+          color: #374151;
+          border: 1px solid #d1d5db;
+          border-radius: 8px;
+          font-size: 0.875rem;
+          font-weight: 600;
+          padding: 0.5rem 0.875rem;
+          cursor: pointer;
+          min-height: 36px;
+          white-space: nowrap;
+          transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        }
+        .btn-day-active {
+          background-color: #2563eb;
+          color: #fff;
+          border-color: #2563eb;
+        }
+        .btn-day:active {
+          opacity: 0.85;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -1633,6 +1806,25 @@ export default function PlansPage() {
           </div>
         )}
 
+        {/* Phase 8.0 — Day Selector */}
+        <div className="day-selector-row">
+          {days.map((dayId) => (
+            <button
+              key={dayId}
+              className={`btn-day${activeDayId === dayId ? " btn-day-active" : ""}`}
+              onClick={() => {
+                setActiveDayId(dayId);
+                saveActiveDayId(dayId, activeDayKeyRef.current);
+              }}
+            >
+              {dayLabelFromId(dayId)}
+            </button>
+          ))}
+          <button className="btn-day" onClick={handleAddDay}>
+            + Add Day
+          </button>
+        </div>
+
         <div className="sort-toggle-row">
           <label className="sort-toggle-label">
             <input
@@ -1668,7 +1860,7 @@ export default function PlansPage() {
           </div>
         )}
 
-        {items.length === 0 ? (
+        {displayedItems.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">🗓</div>
             <p className="empty-text">No activities planned yet.</p>
@@ -1676,7 +1868,7 @@ export default function PlansPage() {
           </div>
         ) : (
           <ul className="timeline">
-            {items.map((item, index) => (
+            {displayedItems.map((item, index) => (
               <li key={item.id} className="timeline-item">
                 <div className="step-circle">{index + 1}</div>
                 <div className="item-card">
@@ -1788,7 +1980,7 @@ export default function PlansPage() {
                     <button
                       className="icon-btn"
                       aria-label="Move down"
-                      disabled={index === items.length - 1}
+                      disabled={index === displayedItems.length - 1}
                       onClick={() => moveDown(index)}
                     >
                       ↓
