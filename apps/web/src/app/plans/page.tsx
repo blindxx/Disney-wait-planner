@@ -193,21 +193,37 @@ function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
   }
 }
 
-// ===== DAY MANAGEMENT (Phase 8.0) =====
+// ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1) =====
 
 /**
- * Assign dayId "day-1" to any item that lacks one.
- * Idempotent — items that already have a dayId are returned unchanged.
- * Returns the same array reference when no migration is needed.
+ * Normalize any raw dayId value to a safe string.
+ * - Non-string, null, undefined, or empty → "day-1"
+ * - Valid non-empty string → returned as-is
+ */
+function normalizeDayId(raw: unknown): string {
+  return typeof raw === "string" && raw.length > 0 ? raw : "day-1";
+}
+
+/** Stable sort comparator: "day-1" < "day-2" < "day-10" by numeric suffix. */
+function daySort(a: string, b: string): number {
+  const na = parseInt(a.split("-")[1], 10) || 0;
+  const nb = parseInt(b.split("-")[1], 10) || 0;
+  return na - nb;
+}
+
+/**
+ * Normalize dayId on every item.
+ * Handles missing, empty, or non-string dayId values (Phase 8.0.1).
+ * Returns the same array reference when no normalization is needed (idempotent).
  */
 function migrateDayIds(items: PlanItem[]): PlanItem[] {
   const needsMigration = items.some(
-    (it) => (it.dayId as string | undefined) === undefined
+    (it) => normalizeDayId(it.dayId as unknown) !== (it.dayId as unknown)
   );
   if (!needsMigration) return items;
   return items.map((it) => ({
     ...it,
-    dayId: (it.dayId as string | undefined) ?? "day-1",
+    dayId: normalizeDayId(it.dayId as unknown),
   }));
 }
 
@@ -586,12 +602,19 @@ export default function PlansPage() {
     setItems(loaded);
 
     // Phase 8.0 — Load days list and active day for this profile.
+    // Phase 8.0.1 — Merge dayIds actually present in items into stored list
+    // so synced/imported items with day-2/day-3 always appear in the selector.
     const storedDays = loadDays(daysKeyRef.current);
     const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
-    const validActiveDayId = storedDays.includes(storedActiveDayId)
+    const itemDayIds = [...new Set(loaded.map((it) => it.dayId))];
+    const mergedDays = [...new Set(["day-1", ...storedDays, ...itemDayIds])].sort(daySort);
+    if (mergedDays.join(",") !== storedDays.join(",")) {
+      saveDays(mergedDays, daysKeyRef.current);
+    }
+    const validActiveDayId = mergedDays.includes(storedActiveDayId)
       ? storedActiveDayId
-      : storedDays[0];
-    setDays(storedDays);
+      : mergedDays[0];
+    setDays(mergedDays);
     setActiveDayId(validActiveDayId);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
@@ -752,8 +775,18 @@ export default function PlansPage() {
         // Only apply cloud data if no local edits occurred while the pull was
         // in flight. Either way, open the sync gate so edits can push.
         if (!localEditRef.current && cloud) {
-          reseedNextId(cloud.items as PlanItem[]);
-          setItems(cloud.items as PlanItem[]);
+          // Phase 8.0.1 — normalize dayIds from cloud before applying to state.
+          const cloudItems = migrateDayIds(cloud.items as PlanItem[]);
+          reseedNextId(cloudItems);
+          setItems(cloudItems);
+          // Merge cloud item day IDs into the days list (stale-safe).
+          setDays((prev) => {
+            const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
+            const merged = [...new Set([...prev, ...cloudDayIds])].sort(daySort);
+            if (merged.join(",") === prev.join(",")) return prev;
+            saveDays(merged, daysKeyRef.current);
+            return merged;
+          });
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
@@ -763,7 +796,7 @@ export default function PlansPage() {
             // If the cloud pull cleared all items, this page is effectively in
             // a fresh-import-ready state. Reset the mount-count guard so that
             // a subsequent import correctly triggers inference.
-            if ((cloud.items as PlanItem[]).length === 0) {
+            if (cloudItems.length === 0) {
               initialItemCountRef.current = 0;
             }
           }
@@ -808,18 +841,25 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
-  // Phase 8.0 — create the next sequential day and switch to it.
+  // Phase 8.0 / 8.0.1 — create the next sequential day and switch to it.
+  // Uses functional setDays so rapid clicks always compute from the latest state
+  // and cannot generate duplicate IDs from stale closure values.
   function handleAddDay() {
-    const nums = days
-      .map((d) => parseInt(d.split("-")[1], 10))
-      .filter((n) => !isNaN(n));
-    const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
-    const newDayId = `day-${nextNum}`;
-    const updatedDays = [...days, newDayId];
-    setDays(updatedDays);
-    saveDays(updatedDays, daysKeyRef.current);
-    setActiveDayId(newDayId);
-    saveActiveDayId(newDayId, activeDayKeyRef.current);
+    setDays((prev) => {
+      const nums = prev
+        .map((d) => parseInt(d.split("-")[1], 10))
+        .filter((n) => !isNaN(n));
+      const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
+      const newDayId = `day-${nextNum}`;
+      if (prev.includes(newDayId)) return prev; // guard against duplicate
+      const updated = [...prev, newDayId];
+      saveDays(updated, daysKeyRef.current);
+      // Activate the new day. Safe to call a setter inside another setter's
+      // updater — React batches these in the same flush.
+      setActiveDayId(newDayId);
+      saveActiveDayId(newDayId, activeDayKeyRef.current);
+      return updated;
+    });
   }
 
   function openAdd() {
@@ -1132,18 +1172,15 @@ export default function PlansPage() {
           dayId: it.dayId ?? "day-1",
         }));
         // Merge any day IDs from the imported file into the days list.
+        // Uses functional setDays so async file-read cannot clobber day additions
+        // made locally while the read was in flight (Phase 8.0.1).
         const importedDayIds = [...new Set(importedItems.map((it) => it.dayId))];
-        const mergedDays = [
-          ...new Set([...days, ...importedDayIds]),
-        ].sort((a, b) => {
-          const na = parseInt(a.split("-")[1], 10) || 0;
-          const nb = parseInt(b.split("-")[1], 10) || 0;
-          return na - nb;
+        setDays((prev) => {
+          const merged = [...new Set([...prev, ...importedDayIds])].sort(daySort);
+          if (merged.join(",") === prev.join(",")) return prev;
+          saveDays(merged, daysKeyRef.current);
+          return merged;
         });
-        if (mergedDays.join(",") !== days.join(",")) {
-          setDays(mergedDays);
-          saveDays(mergedDays, daysKeyRef.current);
-        }
         reseedNextId(importedItems);
         setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
         applyImportContextInference(importedItems);
