@@ -65,7 +65,7 @@ type PlanItem = {
   dayId: string; // Phase 8.0
 };
 
-type Mode = "view" | "add" | "edit" | "import";
+type Mode = "view" | "add" | "edit" | "import" | "edit-day";
 
 let nextId = 1;
 function makeId() {
@@ -248,6 +248,112 @@ function migrateDayIds(items: PlanItem[]): PlanItem[] {
     ...it,
     dayId: normalizeDayId(it.dayId as unknown),
   }));
+}
+
+// ===== DAY METADATA (Phase 8.1 — labels + dates) =====
+
+type DayMeta = {
+  label?: string; // Optional user-set label, e.g. "Magic Kingdom Day"
+  date?: string;  // Optional ISO date (YYYY-MM-DD), informational only
+};
+
+/**
+ * Strict calendar-date validator for YYYY-MM-DD strings (Phase 8.1.1).
+ * Rejects impossible month/day combinations and JS Date rollover cases.
+ * "2025-02-30", "2025-13-01", "9000-00-00" all return false.
+ * Uses local Date constructor to avoid timezone shift.
+ */
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parts = value.split("-");
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  // Quick range guard before Date construction (year floor: 2000+)
+  if (y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return false;
+  // Cross-check: JS Date normalises overflow (Feb 30 → Mar 2). If the
+  // resulting date's fields don't match the inputs, the date was invalid.
+  const date = new Date(y, m - 1, d);
+  return (
+    date.getFullYear() === y &&
+    date.getMonth() === m - 1 &&
+    date.getDate() === d
+  );
+}
+
+/**
+ * Format an ISO date string (YYYY-MM-DD) as a short friendly date.
+ * Returns "" when the value fails strict calendar validation.
+ * Uses local Date construction to avoid timezone shift.
+ * "2025-05-12" → "Mon, May 12"
+ */
+function formatDayDate(iso: string): string {
+  if (!isValidIsoCalendarDate(iso)) return "";
+  try {
+    const parts = iso.split("-");
+    const y = parseInt(parts[0], 10);
+    const m = parseInt(parts[1], 10);
+    const d = parseInt(parts[2], 10);
+    const date = new Date(y, m - 1, d);
+    return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Derive the display string for a day pill (Phase 8.1.1 — date-only fix).
+ * - label + date → "Magic Kingdom Day — Mon, May 12"
+ * - label only   → "Magic Kingdom Day"
+ * - date only    → "Day 1 — Mon, May 12"
+ * - neither      → "Day 1"
+ */
+function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>): string {
+  const m = meta[dayId];
+  const label = m?.label?.trim();
+  const date = m?.date;
+  // Use custom label if set, otherwise fall back to "Day N"
+  const baseLabel = label || dayLabelFromId(dayId);
+  if (date) {
+    const formatted = formatDayDate(date);
+    if (formatted) return `${baseLabel} — ${formatted}`;
+  }
+  return baseLabel;
+}
+
+function loadDayMeta(key: string): Record<string, DayMeta> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, DayMeta> = {};
+    for (const [dayId, rawMeta] of Object.entries(parsed as Record<string, unknown>)) {
+      // Ignore any key that isn't a valid canonical day ID
+      if (!VALID_DAY_ID_RE.test(dayId)) continue;
+      if (typeof rawMeta !== "object" || rawMeta === null) continue;
+      const entry = rawMeta as Record<string, unknown>;
+      const label = typeof entry.label === "string" ? entry.label.trim() : "";
+      const rawDate = typeof entry.date === "string" ? entry.date.trim() : "";
+      // Only accept strict calendar-valid dates; silently discard anything else
+      const date = isValidIsoCalendarDate(rawDate) ? rawDate : "";
+      if (label || date) {
+        result[dayId] = {
+          ...(label ? { label } : {}),
+          ...(date ? { date } : {}),
+        };
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(meta));
+  } catch {}
 }
 
 /** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
@@ -481,6 +587,20 @@ export default function PlansPage() {
   // Phase 8.0 — multi-day state (default to day-1; hydrated from storage on mount)
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
   const [days, setDays] = useState<string[]>(["day-1"]);
+  // Phase 8.1 — day metadata (labels + dates) and per-profile storage key
+  const dayMetaKeyRef = useRef("dwp:default:dayMeta");
+  const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
+  // Phase 8.1 — day control UI state
+  // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
+  const [removeConfirmDayId, setRemoveConfirmDayId] = useState<string | null>(null);
+  // clearDayTargetId: the specific day ID to clear (null = no pending clear-day action).
+  // Carries the intended target explicitly so modal and header actions cannot cross-target.
+  const [clearDayTargetId, setClearDayTargetId] = useState<string | null>(null);
+  // Phase 8.1 — edit-day modal state
+  const [editingDayId, setEditingDayId] = useState<string | null>(null);
+  const [editDayLabel, setEditDayLabel] = useState("");
+  const [editDayDate, setEditDayDate] = useState("");
+  const [editDayDateError, setEditDayDateError] = useState("");
   const [autoSortEnabled, setAutoSortEnabled] = useState(false);
   const [clearConfirm, setClearConfirm] = useState(false);
   const [mode, setMode] = useState<Mode>("view");
@@ -568,6 +688,15 @@ export default function PlansPage() {
     [items, activeDayId]
   );
 
+  // Phase 8.1 — item counts per day for the day selector display.
+  const itemCountByDay = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const it of items) {
+      counts[it.dayId] = (counts[it.dayId] ?? 0) + 1;
+    }
+    return counts;
+  }, [items]);
+
   // Compute time conflict sets scoped to the active day only (Phase 8.0.3).
   // Previously used `items` (all days), which produced false overlap warnings
   // between plans on different days. Now uses displayedItems so conflicts are
@@ -616,6 +745,8 @@ export default function PlansPage() {
     // Phase 8.0 — set per-profile day storage keys
     activeDayKeyRef.current = buildNamespacedKey(currentProfileId, "activeDayId");
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
+    // Phase 8.1 — set per-profile day metadata key
+    dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
     // Retarget the module-level sync to this profile; cancels any pending work
     // from a prior profile (safe no-op on first mount).
     setSyncProfileId(currentProfileId);
@@ -655,6 +786,8 @@ export default function PlansPage() {
     }
     setDays(mergedDays);
     setActiveDayId(validActiveDayId);
+    // Phase 8.1 — load day metadata (labels + dates)
+    setDayMeta(loadDayMeta(dayMetaKeyRef.current));
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
 
@@ -907,6 +1040,99 @@ export default function PlansPage() {
     saveActiveDayId(candidate, _activeDayKey);
   }
 
+  // Phase 8.1 — open the edit-day label/date modal for a specific day.
+  function openEditDay(dayId: string) {
+    // Clear any pending destructive confirms so they cannot remain active
+    // behind the modal or reappear immediately after closing.
+    setRemoveConfirmDayId(null);
+    setClearDayTargetId(null);
+    setClearConfirm(false);
+    const m = dayMeta[dayId];
+    setEditingDayId(dayId);
+    setEditDayLabel(m?.label ?? "");
+    setEditDayDate(m?.date ?? "");
+    setEditDayDateError("");
+    setMode("edit-day");
+  }
+
+  // Phase 8.1 — save label and/or date for the currently edited day.
+  function handleSaveDayMeta() {
+    const dayId = editingDayId;
+    if (!dayId) return;
+    const trimmedLabel = editDayLabel.trim();
+    const trimmedDate = editDayDate.trim();
+    // Validate: must be a strict calendar-valid date, not just a matching regex
+    if (trimmedDate && !isValidIsoCalendarDate(trimmedDate)) {
+      setEditDayDateError("Enter a valid date as YYYY-MM-DD (e.g. 2025-05-12).");
+      return;
+    }
+    const _profileId = getActiveProfileId();
+    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    dayMetaKeyRef.current = _dayMetaKey;
+    const nextMeta = { ...dayMeta };
+    if (!trimmedLabel && !trimmedDate) {
+      delete nextMeta[dayId];
+    } else {
+      nextMeta[dayId] = {
+        ...(trimmedLabel ? { label: trimmedLabel } : {}),
+        ...(trimmedDate ? { date: trimmedDate } : {}),
+      };
+    }
+    setDayMeta(nextMeta);
+    saveDayMeta(nextMeta, _dayMetaKey);
+    closeModal();
+  }
+
+  // Phase 8.1 — remove a day entirely. Must not be the last day or day-1.
+  // Preserves canonical IDs of remaining days; does NOT reindex.
+  function handleRemoveDay(dayId: string) {
+    if (dayId === "day-1") return;   // Day 1 is a permanent base day
+    if (days.length <= 1) return;   // Cannot remove the last day
+    const _profileId = getActiveProfileId();
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    daysKeyRef.current = _daysKey;
+    activeDayKeyRef.current = _activeDayKey;
+    dayMetaKeyRef.current = _dayMetaKey;
+    // Remove all items that belonged to this day
+    setItems((prev) => prev.filter((it) => it.dayId !== dayId));
+    // Remove from days list (no reindexing)
+    const nextDays = days.filter((d) => d !== dayId);
+    setDays(nextDays);
+    saveDays(nextDays, _daysKey);
+    // Remove day metadata entry
+    const nextMeta = { ...dayMeta };
+    delete nextMeta[dayId];
+    setDayMeta(nextMeta);
+    saveDayMeta(nextMeta, _dayMetaKey);
+    // Active day reset guard — result must always be a valid existing day ID.
+    if (activeDayId === dayId) {
+      // Removed day was active: prefer the previous day; else first remaining.
+      const removedIdx = days.indexOf(dayId);
+      const nextActive = removedIdx > 0 ? days[removedIdx - 1] : nextDays[0];
+      setActiveDayId(nextActive);
+      saveActiveDayId(nextActive, _activeDayKey);
+    } else if (!nextDays.includes(activeDayId)) {
+      // Guard against unexpected invalid active day (should not normally occur).
+      setActiveDayId(nextDays[0]);
+      saveActiveDayId(nextDays[0], _activeDayKey);
+    }
+    // else: active day is still valid — no change needed.
+    setRemoveConfirmDayId(null);
+  }
+
+  // Phase 8.1 — clear all items from the target day.
+  // Uses clearDayTargetId (set when the confirm row was opened) to avoid
+  // targeting activeDayId when the confirm was triggered from the edit modal.
+  // Preserves day structure, labels, dates, and all other days.
+  function handleClearDay() {
+    const target = clearDayTargetId;
+    if (!target) return;
+    setItems((prev) => prev.filter((it) => it.dayId !== target));
+    setClearDayTargetId(null);
+  }
+
   function openAdd() {
     setFormName("");
     setFormTime("");
@@ -936,9 +1162,11 @@ export default function PlansPage() {
   function closeModal() {
     setMode("view");
     setEditTarget(null);
+    setEditingDayId(null);
     setFormError("");
     setFormTimeError("");
     setImportError("");
+    setEditDayDateError("");
   }
 
   function handleSave() {
@@ -1026,6 +1254,13 @@ export default function PlansPage() {
       const next = [...prev, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
+    // Fix 6 (Phase 8.1.1) — Apply context inference directly from the newly
+    // imported items. The reactive items-watcher only fires when items go from
+    // 0 → N in this page lifecycle; when items already existed at mount the
+    // watcher guard blocks inference. Calling applyImportContextInference here
+    // ensures context is reliably updated after every text/CSV import, matching
+    // the behaviour already in place for JSON restore.
+    applyImportContextInference(newItems);
     setImportText("");
     setMode("view");
   }
@@ -1138,6 +1373,24 @@ export default function PlansPage() {
     setItems([]);
     setDeleteConfirmId(null);
     setClearConfirm(false);
+    // Fix 5: reset all day-level transient UI state on full reset
+    setClearDayTargetId(null);
+    setRemoveConfirmDayId(null);
+    // Phase 8.1 — full reset: revert to one empty Day 1, clear all day metadata.
+    const _profileId = getActiveProfileId();
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    daysKeyRef.current = _daysKey;
+    activeDayKeyRef.current = _activeDayKey;
+    dayMetaKeyRef.current = _dayMetaKey;
+    const resetDays = ["day-1"];
+    setDays(resetDays);
+    saveDays(resetDays, _daysKey);
+    setActiveDayId("day-1");
+    saveActiveDayId("day-1", _activeDayKey);
+    setDayMeta({});
+    saveDayMeta({}, _dayMetaKey);
     // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
     // fresh, so both the inference gate and the stored session context must be
     // cleared. Without this, a subsequent import is blocked on two levels:
@@ -1254,6 +1507,7 @@ export default function PlansPage() {
           display: flex;
           align-items: center;
           justify-content: space-between;
+          gap: 1rem;
           margin-bottom: 1.5rem;
         }
         .plans-title {
@@ -1264,6 +1518,7 @@ export default function PlansPage() {
         .plans-header-actions {
           display: flex;
           gap: 0.5rem;
+          flex-shrink: 0;
         }
         .btn-add {
           background-color: #2563eb;
@@ -1770,7 +2025,9 @@ export default function PlansPage() {
           gap: 0.5rem;
           margin-bottom: 1rem;
           flex-wrap: wrap;
+          align-items: center;
         }
+        /* Phase 8.0 — standalone "btn-day" used for + Add Day button only */
         .btn-day {
           background-color: #f9fafb;
           color: #374151;
@@ -1784,13 +2041,123 @@ export default function PlansPage() {
           white-space: nowrap;
           transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
         }
-        .btn-day-active {
-          background-color: #2563eb;
-          color: #fff;
-          border-color: #2563eb;
-        }
         .btn-day:active {
           opacity: 0.85;
+        }
+        /* Phase 8.1 — compound day pill (wrapper replaces per-day .btn-day) */
+        .day-pill {
+          display: inline-flex;
+          align-items: stretch;
+          border-radius: 8px;
+          overflow: hidden;
+          border: 1px solid #d1d5db;
+          white-space: nowrap;
+        }
+        .day-pill-active {
+          border-color: #2563eb;
+        }
+        .btn-day-select {
+          background-color: #f9fafb;
+          color: #374151;
+          border: none;
+          font-size: 0.875rem;
+          font-weight: 600;
+          padding: 0.5rem 0.5rem 0.5rem 0.875rem;
+          cursor: pointer;
+          min-height: 36px;
+          transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .day-pill-active .btn-day-select {
+          background-color: #2563eb;
+          color: #fff;
+        }
+        .btn-day-select:active {
+          opacity: 0.85;
+        }
+        .day-count {
+          font-weight: 400;
+          font-size: 0.8rem;
+          margin-left: 0.25rem;
+          opacity: 0.75;
+        }
+        .day-pill-divider {
+          width: 1px;
+          background-color: #d1d5db;
+          flex-shrink: 0;
+        }
+        .day-pill-active .day-pill-divider {
+          background-color: rgba(255, 255, 255, 0.3);
+        }
+        .btn-day-icon {
+          background-color: #f9fafb;
+          color: #9ca3af;
+          border: none;
+          font-size: 0.75rem;
+          padding: 0 0.45rem;
+          cursor: pointer;
+          min-height: 36px;
+          min-width: 30px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background-color 0.15s ease, color 0.15s ease;
+          line-height: 1;
+        }
+        .day-pill-active .btn-day-icon {
+          background-color: #2563eb;
+          color: rgba(255, 255, 255, 0.7);
+        }
+        .btn-day-icon:hover {
+          background-color: #e5e7eb;
+          color: #374151;
+        }
+        .day-pill-active .btn-day-icon:hover {
+          background-color: #1d4ed8;
+          color: #fff;
+        }
+        .btn-day-remove {
+          background-color: #f9fafb;
+          color: #9ca3af;
+          border: none;
+          font-size: 1rem;
+          padding: 0 0.45rem;
+          cursor: pointer;
+          min-height: 36px;
+          min-width: 30px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background-color 0.15s ease, color 0.15s ease;
+          line-height: 1;
+        }
+        .day-pill-active .btn-day-remove {
+          background-color: #2563eb;
+          color: rgba(255, 255, 255, 0.65);
+        }
+        .btn-day-remove:hover {
+          background-color: #fef2f2;
+          color: #dc2626;
+        }
+        .day-pill-active .btn-day-remove:hover {
+          background-color: #1d4ed8;
+          color: #fca5a5;
+        }
+        /* Phase 8.1.2 — keyboard focus inside clipped pill boundary.
+           overflow:hidden clips the default browser outline, so we use
+           outline-offset:-2px to draw the indicator inside the element.
+           :focus-visible only fires for keyboard navigation, never mouse. */
+        .day-pill button:focus-visible {
+          outline: 2px solid #2563eb;
+          outline-offset: -2px;
+        }
+        .day-pill-active button:focus-visible {
+          outline-color: #fff;
+        }
+        .day-remove-confirm-row {
+          margin-bottom: 1rem;
+        }
+        .day-clear-confirm-row {
+          margin-bottom: 1rem;
         }
       `}</style>
 
@@ -1807,8 +2174,26 @@ export default function PlansPage() {
           <div className="plans-header-actions">
             <button
               className="btn-clear"
+              disabled={displayedItems.length === 0}
+              onClick={() => {
+                // Fix 4: reset sibling confirms before opening this one
+                setRemoveConfirmDayId(null);
+                setClearConfirm(false);
+                setClearDayTargetId(activeDayId);
+              }}
+              title="Clear items from this day only"
+            >
+              Clear day
+            </button>
+            <button
+              className="btn-clear"
               disabled={items.length === 0}
-              onClick={() => setClearConfirm(true)}
+              onClick={() => {
+                // Fix 4: reset sibling confirms before opening this one
+                setRemoveConfirmDayId(null);
+                setClearDayTargetId(null);
+                setClearConfirm(true);
+              }}
             >
               Clear all
             </button>
@@ -1890,28 +2275,139 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.0 — Day Selector */}
+        {/* Phase 8.0 / 8.1 — Day Selector with labels, counts, edit, remove.
+            Gated by initialized to prevent a Day 1 flash before localStorage
+            hydration resolves (same pattern as resort/park tab ready gate). */}
+        {initialized ? (
         <div className="day-selector-row">
-          {days.map((dayId) => (
-            <button
-              key={dayId}
-              className={`btn-day${activeDayId === dayId ? " btn-day-active" : ""}`}
-              aria-pressed={activeDayId === dayId}
-              onClick={() => {
-                // Phase 8.0.10 — resolve active-day key at click time.
-                const _activeDayKey = buildNamespacedKey(getActiveProfileId(), "activeDayId");
-                activeDayKeyRef.current = _activeDayKey;
-                setActiveDayId(dayId);
-                saveActiveDayId(dayId, _activeDayKey);
-              }}
-            >
-              {dayLabelFromId(dayId)}
-            </button>
-          ))}
+          {days.map((dayId) => {
+            const isActive = activeDayId === dayId;
+            const count = itemCountByDay[dayId] ?? 0;
+            const label = dayDisplayLabel(dayId, dayMeta);
+            return (
+              <div
+                key={dayId}
+                className={`day-pill${isActive ? " day-pill-active" : ""}`}
+              >
+                {/* Select-day button — the main clickable label area */}
+                <button
+                  className="btn-day-select"
+                  aria-pressed={isActive}
+                  onClick={() => {
+                    // Phase 8.0.10 — resolve active-day key at click time.
+                    const _activeDayKey = buildNamespacedKey(getActiveProfileId(), "activeDayId");
+                    activeDayKeyRef.current = _activeDayKey;
+                    setActiveDayId(dayId);
+                    saveActiveDayId(dayId, _activeDayKey);
+                    setRemoveConfirmDayId(null);
+                    setClearDayTargetId(null);
+                  }}
+                >
+                  {label}
+                  {count > 0 && (
+                    <span className="day-count">({count})</span>
+                  )}
+                </button>
+                <div className="day-pill-divider" aria-hidden="true" />
+                {/* Edit label/date */}
+                <button
+                  className="btn-day-icon"
+                  aria-label={`Edit label for ${label}`}
+                  title="Edit label / date"
+                  onClick={() => openEditDay(dayId)}
+                >
+                  ✏
+                </button>
+                {/* Remove day — only shown for non-Day-1 days when more than one day exists */}
+                {days.length > 1 && dayId !== "day-1" && (
+                  <>
+                    <div className="day-pill-divider" aria-hidden="true" />
+                    <button
+                      className="btn-day-remove"
+                      aria-label={`Remove ${label}`}
+                      title="Remove this day"
+                      onClick={() => {
+                        const itemCount = itemCountByDay[dayId] ?? 0;
+                        if (itemCount > 0) {
+                          // Reset sibling confirms before opening this one
+                          setClearDayTargetId(null);
+                          setClearConfirm(false);
+                          setRemoveConfirmDayId(dayId);
+                        } else {
+                          // Empty day — remove immediately, but still clear
+                          // sibling confirms so no stale UI remains behind.
+                          setClearDayTargetId(null);
+                          setClearConfirm(false);
+                          handleRemoveDay(dayId);
+                        }
+                      }}
+                    >
+                      ×
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })}
           <button className="btn-day" onClick={handleAddDay}>
             + Add Day
           </button>
         </div>
+        ) : (
+          /* Skeleton shown before localStorage hydration to prevent Day 1 flash */
+          <div className="day-selector-row" aria-hidden="true">
+            <div style={{ height: 36, width: 56, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+          </div>
+        )}
+
+        {/* Phase 8.1 — Remove day confirmation (shown when day has items) */}
+        {removeConfirmDayId !== null && (
+          <div className="day-remove-confirm-row">
+            <div className="confirm-row">
+              <span className="confirm-text">
+                Remove {dayDisplayLabel(removeConfirmDayId, dayMeta)}?
+                {(itemCountByDay[removeConfirmDayId] ?? 0) > 0 && (
+                  <>{" "}({itemCountByDay[removeConfirmDayId]} {itemCountByDay[removeConfirmDayId] === 1 ? "item" : "items"} will be deleted)</>
+                )}
+              </span>
+              <button
+                className="btn-cancel-delete"
+                onClick={() => setRemoveConfirmDayId(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-confirm-delete"
+                onClick={() => handleRemoveDay(removeConfirmDayId)}
+              >
+                Yes, remove
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 8.1 — Clear day confirmation (targets clearDayTargetId, not activeDayId) */}
+        {clearDayTargetId !== null && (
+          <div className="day-clear-confirm-row">
+            <div className="confirm-row">
+              <span className="confirm-text">
+                Clear all items from {dayDisplayLabel(clearDayTargetId, dayMeta)}?
+              </span>
+              <button
+                className="btn-cancel-delete"
+                onClick={() => setClearDayTargetId(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-confirm-delete"
+                onClick={handleClearDay}
+              >
+                Yes, clear
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="sort-toggle-row">
           <label className="sort-toggle-label">
@@ -1948,7 +2444,7 @@ export default function PlansPage() {
           </div>
         )}
 
-        {displayedItems.length === 0 ? (
+        {!initialized ? null : displayedItems.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">🗓</div>
             <p className="empty-text">No activities planned yet.</p>
@@ -2089,11 +2585,84 @@ export default function PlansPage() {
                 ? "Add activity"
                 : mode === "edit"
                 ? "Edit activity"
+                : mode === "edit-day"
+                ? `Edit day — ${editingDayId ? dayLabelFromId(editingDayId) : ""}`
                 : "Import activities"}
             </h2>
 
             <div className="modal-body">
-              {mode === "import" ? (
+              {mode === "edit-day" ? (
+                <>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="day-label">
+                      Label{" "}
+                      <span style={{ color: "#9ca3af", fontWeight: 400 }}>(optional)</span>
+                    </label>
+                    <input
+                      id="day-label"
+                      className="form-input"
+                      type="text"
+                      placeholder="e.g. Magic Kingdom Day"
+                      value={editDayLabel}
+                      onChange={(e) => setEditDayLabel(e.target.value)}
+                      autoFocus
+                    />
+                    <p className="form-hint">
+                      Leave blank to show the default day number.
+                    </p>
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="day-date">
+                      Date{" "}
+                      <span style={{ color: "#9ca3af", fontWeight: 400 }}>(optional)</span>
+                    </label>
+                    <input
+                      id="day-date"
+                      className={`form-input${editDayDateError ? " error" : ""}`}
+                      type="text"
+                      placeholder="YYYY-MM-DD (e.g. 2025-05-12)"
+                      value={editDayDate}
+                      onChange={(e) => {
+                        setEditDayDate(e.target.value);
+                        if (editDayDateError) setEditDayDateError("");
+                      }}
+                    />
+                    {editDayDateError ? (
+                      <p className="form-error">{editDayDateError}</p>
+                    ) : (
+                      <p className="form-hint">
+                        Informational only — shown alongside the label in the day selector.
+                      </p>
+                    )}
+                  </div>
+                  <div className="form-field" style={{ borderTop: "1px solid #f3f4f6", paddingTop: "1rem" }}>
+                    <p style={{ fontSize: "0.875rem", color: "#6b7280", marginBottom: "0.5rem" }}>
+                      Clear this day
+                    </p>
+                    {editingDayId && (itemCountByDay[editingDayId] ?? 0) > 0 ? (
+                      <button
+                        className="btn-clear"
+                        style={{ fontSize: "0.875rem", padding: "0.5rem 1rem", minHeight: 40 }}
+                        onClick={() => {
+                          // Fix 3: target the edited day, not activeDayId
+                          // Fix 4: close modal and reset sibling confirms first
+                          const target = editingDayId;
+                          closeModal();
+                          setRemoveConfirmDayId(null);
+                          setClearConfirm(false);
+                          if (target) setClearDayTargetId(target);
+                        }}
+                      >
+                        Remove {itemCountByDay[editingDayId]} {itemCountByDay[editingDayId] === 1 ? "item" : "items"} from this day
+                      </button>
+                    ) : (
+                      <p style={{ fontSize: "0.8rem", color: "#9ca3af" }}>
+                        No items on this day.
+                      </p>
+                    )}
+                  </div>
+                </>
+              ) : mode === "import" ? (
                 <div className="form-field">
                   <label className="form-label" htmlFor="import-text">
                     Paste your schedule
@@ -2218,7 +2787,13 @@ export default function PlansPage() {
               </button>
               <button
                 className="btn-save"
-                onClick={mode === "import" ? handleImport : handleSave}
+                onClick={
+                  mode === "import"
+                    ? handleImport
+                    : mode === "edit-day"
+                    ? handleSaveDayMeta
+                    : handleSave
+                }
               >
                 {mode === "import" ? "Parse & Add" : "Save"}
               </button>
