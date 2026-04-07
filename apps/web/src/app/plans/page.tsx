@@ -269,8 +269,8 @@ function isValidIsoCalendarDate(value: string): boolean {
   const y = parseInt(parts[0], 10);
   const m = parseInt(parts[1], 10);
   const d = parseInt(parts[2], 10);
-  // Quick range guard before Date construction
-  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  // Quick range guard before Date construction (year floor: 2000+)
+  if (y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return false;
   // Cross-check: JS Date normalises overflow (Feb 30 → Mar 2). If the
   // resulting date's fields don't match the inputs, the date was invalid.
   const date = new Date(y, m - 1, d);
@@ -2274,7 +2274,10 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.0 / 8.1 — Day Selector with labels, counts, edit, remove */}
+        {/* Phase 8.0 / 8.1 — Day Selector with labels, counts, edit, remove.
+            Gated by initialized to prevent a Day 1 flash before localStorage
+            hydration resolves (same pattern as resort/park tab ready gate). */}
+        {initialized ? (
         <div className="day-selector-row">
           {days.map((dayId) => {
             const isActive = activeDayId === dayId;
@@ -2349,6 +2352,12 @@ export default function PlansPage() {
             + Add Day
           </button>
         </div>
+        ) : (
+          /* Skeleton shown before localStorage hydration to prevent Day 1 flash */
+          <div className="day-selector-row" aria-hidden="true">
+            <div style={{ height: 36, width: 56, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+          </div>
+        )}
 
         {/* Phase 8.1 — Remove day confirmation (shown when day has items) */}
         {removeConfirmDayId !== null && (
