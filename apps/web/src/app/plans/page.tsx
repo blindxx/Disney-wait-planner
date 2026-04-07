@@ -1083,10 +1083,11 @@ export default function PlansPage() {
     closeModal();
   }
 
-  // Phase 8.1 — remove a day entirely. Must not be the last day.
+  // Phase 8.1 — remove a day entirely. Must not be the last day or day-1.
   // Preserves canonical IDs of remaining days; does NOT reindex.
   function handleRemoveDay(dayId: string) {
-    if (days.length <= 1) return; // Cannot remove the last day
+    if (dayId === "day-1") return;   // Day 1 is a permanent base day
+    if (days.length <= 1) return;   // Cannot remove the last day
     const _profileId = getActiveProfileId();
     const _daysKey = buildNamespacedKey(_profileId, "days");
     const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
@@ -2317,8 +2318,8 @@ export default function PlansPage() {
                 >
                   ✏
                 </button>
-                {/* Remove day — only shown when more than one day exists */}
-                {days.length > 1 && (
+                {/* Remove day — only shown for non-Day-1 days when more than one day exists */}
+                {days.length > 1 && dayId !== "day-1" && (
                   <>
                     <div className="day-pill-divider" aria-hidden="true" />
                     <button
@@ -2443,7 +2444,7 @@ export default function PlansPage() {
           </div>
         )}
 
-        {displayedItems.length === 0 ? (
+        {!initialized ? null : displayedItems.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">🗓</div>
             <p className="empty-text">No activities planned yet.</p>
