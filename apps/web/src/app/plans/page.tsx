@@ -334,7 +334,7 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
       if (typeof rawMeta !== "object" || rawMeta === null) continue;
       const entry = rawMeta as Record<string, unknown>;
       const label = typeof entry.label === "string" ? entry.label.trim() : "";
-      const rawDate = typeof entry.date === "string" ? entry.date : "";
+      const rawDate = typeof entry.date === "string" ? entry.date.trim() : "";
       // Only accept strict calendar-valid dates; silently discard anything else
       const date = isValidIsoCalendarDate(rawDate) ? rawDate : "";
       if (label || date) {
@@ -2133,6 +2133,17 @@ export default function PlansPage() {
         .day-pill-active .btn-day-remove:hover {
           background-color: #1d4ed8;
           color: #fca5a5;
+        }
+        /* Phase 8.1.2 — keyboard focus inside clipped pill boundary.
+           overflow:hidden clips the default browser outline, so we use
+           outline-offset:-2px to draw the indicator inside the element.
+           :focus-visible only fires for keyboard navigation, never mouse. */
+        .day-pill button:focus-visible {
+          outline: 2px solid #2563eb;
+          outline-offset: -2px;
+        }
+        .day-pill-active button:focus-visible {
+          outline-color: #fff;
         }
         .day-remove-confirm-row {
           margin-bottom: 1rem;
