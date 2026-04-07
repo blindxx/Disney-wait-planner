@@ -1042,6 +1042,11 @@ export default function PlansPage() {
 
   // Phase 8.1 — open the edit-day label/date modal for a specific day.
   function openEditDay(dayId: string) {
+    // Clear any pending destructive confirms so they cannot remain active
+    // behind the modal or reappear immediately after closing.
+    setRemoveConfirmDayId(null);
+    setClearDayTargetId(null);
+    setClearConfirm(false);
     const m = dayMeta[dayId];
     setEditingDayId(dayId);
     setEditDayLabel(m?.label ?? "");
@@ -1501,6 +1506,7 @@ export default function PlansPage() {
           display: flex;
           align-items: center;
           justify-content: space-between;
+          gap: 1rem;
           margin-bottom: 1.5rem;
         }
         .plans-title {
@@ -1511,6 +1517,7 @@ export default function PlansPage() {
         .plans-header-actions {
           display: flex;
           gap: 0.5rem;
+          flex-shrink: 0;
         }
         .btn-add {
           background-color: #2563eb;
@@ -2318,11 +2325,15 @@ export default function PlansPage() {
                       onClick={() => {
                         const itemCount = itemCountByDay[dayId] ?? 0;
                         if (itemCount > 0) {
-                          // Fix 4: reset sibling confirms before opening this one
+                          // Reset sibling confirms before opening this one
                           setClearDayTargetId(null);
                           setClearConfirm(false);
                           setRemoveConfirmDayId(dayId);
                         } else {
+                          // Empty day — remove immediately, but still clear
+                          // sibling confirms so no stale UI remains behind.
+                          setClearDayTargetId(null);
+                          setClearConfirm(false);
                           handleRemoveDay(dayId);
                         }
                       }}
