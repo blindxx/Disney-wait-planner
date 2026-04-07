@@ -258,18 +258,42 @@ type DayMeta = {
 };
 
 /**
+ * Strict calendar-date validator for YYYY-MM-DD strings (Phase 8.1.1).
+ * Rejects impossible month/day combinations and JS Date rollover cases.
+ * "2025-02-30", "2025-13-01", "9000-00-00" all return false.
+ * Uses local Date constructor to avoid timezone shift.
+ */
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parts = value.split("-");
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  // Quick range guard before Date construction
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  // Cross-check: JS Date normalises overflow (Feb 30 → Mar 2). If the
+  // resulting date's fields don't match the inputs, the date was invalid.
+  const date = new Date(y, m - 1, d);
+  return (
+    date.getFullYear() === y &&
+    date.getMonth() === m - 1 &&
+    date.getDate() === d
+  );
+}
+
+/**
  * Format an ISO date string (YYYY-MM-DD) as a short friendly date.
- * Uses local date construction to avoid timezone shift.
- * "2025-05-12" → "Mon, May 12". Returns "" on invalid input.
+ * Returns "" when the value fails strict calendar validation.
+ * Uses local Date construction to avoid timezone shift.
+ * "2025-05-12" → "Mon, May 12"
  */
 function formatDayDate(iso: string): string {
+  if (!isValidIsoCalendarDate(iso)) return "";
   try {
     const parts = iso.split("-");
-    if (parts.length !== 3) return "";
     const y = parseInt(parts[0], 10);
     const m = parseInt(parts[1], 10);
     const d = parseInt(parts[2], 10);
-    if (isNaN(y) || isNaN(m) || isNaN(d)) return "";
     const date = new Date(y, m - 1, d);
     return date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
   } catch {
@@ -278,21 +302,23 @@ function formatDayDate(iso: string): string {
 }
 
 /**
- * Derive the display string for a day pill.
+ * Derive the display string for a day pill (Phase 8.1.1 — date-only fix).
  * - label + date → "Magic Kingdom Day — Mon, May 12"
  * - label only   → "Magic Kingdom Day"
- * - no label     → "Day 1" (fallback via dayLabelFromId)
+ * - date only    → "Day 1 — Mon, May 12"
+ * - neither      → "Day 1"
  */
 function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>): string {
   const m = meta[dayId];
   const label = m?.label?.trim();
-  if (!label) return dayLabelFromId(dayId);
   const date = m?.date;
+  // Use custom label if set, otherwise fall back to "Day N"
+  const baseLabel = label || dayLabelFromId(dayId);
   if (date) {
     const formatted = formatDayDate(date);
-    if (formatted) return `${label} — ${formatted}`;
+    if (formatted) return `${baseLabel} — ${formatted}`;
   }
-  return label;
+  return baseLabel;
 }
 
 function loadDayMeta(key: string): Record<string, DayMeta> {
@@ -309,8 +335,8 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
       const entry = rawMeta as Record<string, unknown>;
       const label = typeof entry.label === "string" ? entry.label.trim() : "";
       const rawDate = typeof entry.date === "string" ? entry.date : "";
-      // Only accept YYYY-MM-DD; silently discard anything else
-      const date = /^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? rawDate : "";
+      // Only accept strict calendar-valid dates; silently discard anything else
+      const date = isValidIsoCalendarDate(rawDate) ? rawDate : "";
       if (label || date) {
         result[dayId] = {
           ...(label ? { label } : {}),
@@ -565,8 +591,11 @@ export default function PlansPage() {
   const dayMetaKeyRef = useRef("dwp:default:dayMeta");
   const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
   // Phase 8.1 — day control UI state
+  // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
   const [removeConfirmDayId, setRemoveConfirmDayId] = useState<string | null>(null);
-  const [clearDayConfirm, setClearDayConfirm] = useState(false);
+  // clearDayTargetId: the specific day ID to clear (null = no pending clear-day action).
+  // Carries the intended target explicitly so modal and header actions cannot cross-target.
+  const [clearDayTargetId, setClearDayTargetId] = useState<string | null>(null);
   // Phase 8.1 — edit-day modal state
   const [editingDayId, setEditingDayId] = useState<string | null>(null);
   const [editDayLabel, setEditDayLabel] = useState("");
@@ -1027,9 +1056,9 @@ export default function PlansPage() {
     if (!dayId) return;
     const trimmedLabel = editDayLabel.trim();
     const trimmedDate = editDayDate.trim();
-    // Validate date format if provided
-    if (trimmedDate && !/^\d{4}-\d{2}-\d{2}$/.test(trimmedDate)) {
-      setEditDayDateError("Enter a date as YYYY-MM-DD (e.g. 2025-05-12).");
+    // Validate: must be a strict calendar-valid date, not just a matching regex
+    if (trimmedDate && !isValidIsoCalendarDate(trimmedDate)) {
+      setEditDayDateError("Enter a valid date as YYYY-MM-DD (e.g. 2025-05-12).");
       return;
     }
     const _profileId = getActiveProfileId();
@@ -1087,11 +1116,15 @@ export default function PlansPage() {
     setRemoveConfirmDayId(null);
   }
 
-  // Phase 8.1 — clear all items from the active day only.
+  // Phase 8.1 — clear all items from the target day.
+  // Uses clearDayTargetId (set when the confirm row was opened) to avoid
+  // targeting activeDayId when the confirm was triggered from the edit modal.
   // Preserves day structure, labels, dates, and all other days.
   function handleClearDay() {
-    setItems((prev) => prev.filter((it) => it.dayId !== activeDayId));
-    setClearDayConfirm(false);
+    const target = clearDayTargetId;
+    if (!target) return;
+    setItems((prev) => prev.filter((it) => it.dayId !== target));
+    setClearDayTargetId(null);
   }
 
   function openAdd() {
@@ -1215,6 +1248,13 @@ export default function PlansPage() {
       const next = [...prev, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
+    // Fix 6 (Phase 8.1.1) — Apply context inference directly from the newly
+    // imported items. The reactive items-watcher only fires when items go from
+    // 0 → N in this page lifecycle; when items already existed at mount the
+    // watcher guard blocks inference. Calling applyImportContextInference here
+    // ensures context is reliably updated after every text/CSV import, matching
+    // the behaviour already in place for JSON restore.
+    applyImportContextInference(newItems);
     setImportText("");
     setMode("view");
   }
@@ -1327,6 +1367,9 @@ export default function PlansPage() {
     setItems([]);
     setDeleteConfirmId(null);
     setClearConfirm(false);
+    // Fix 5: reset all day-level transient UI state on full reset
+    setClearDayTargetId(null);
+    setRemoveConfirmDayId(null);
     // Phase 8.1 — full reset: revert to one empty Day 1, clear all day metadata.
     const _profileId = getActiveProfileId();
     const _daysKey = buildNamespacedKey(_profileId, "days");
@@ -2113,7 +2156,12 @@ export default function PlansPage() {
             <button
               className="btn-clear"
               disabled={displayedItems.length === 0}
-              onClick={() => setClearDayConfirm(true)}
+              onClick={() => {
+                // Fix 4: reset sibling confirms before opening this one
+                setRemoveConfirmDayId(null);
+                setClearConfirm(false);
+                setClearDayTargetId(activeDayId);
+              }}
               title="Clear items from this day only"
             >
               Clear day
@@ -2121,7 +2169,12 @@ export default function PlansPage() {
             <button
               className="btn-clear"
               disabled={items.length === 0}
-              onClick={() => setClearConfirm(true)}
+              onClick={() => {
+                // Fix 4: reset sibling confirms before opening this one
+                setRemoveConfirmDayId(null);
+                setClearDayTargetId(null);
+                setClearConfirm(true);
+              }}
             >
               Clear all
             </button>
@@ -2225,7 +2278,7 @@ export default function PlansPage() {
                     setActiveDayId(dayId);
                     saveActiveDayId(dayId, _activeDayKey);
                     setRemoveConfirmDayId(null);
-                    setClearDayConfirm(false);
+                    setClearDayTargetId(null);
                   }}
                 >
                   {label}
@@ -2254,6 +2307,9 @@ export default function PlansPage() {
                       onClick={() => {
                         const itemCount = itemCountByDay[dayId] ?? 0;
                         if (itemCount > 0) {
+                          // Fix 4: reset sibling confirms before opening this one
+                          setClearDayTargetId(null);
+                          setClearConfirm(false);
                           setRemoveConfirmDayId(dayId);
                         } else {
                           handleRemoveDay(dayId);
@@ -2298,16 +2354,16 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.1 — Clear active day confirmation */}
-        {clearDayConfirm && (
+        {/* Phase 8.1 — Clear day confirmation (targets clearDayTargetId, not activeDayId) */}
+        {clearDayTargetId !== null && (
           <div className="day-clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Clear all items from {dayDisplayLabel(activeDayId, dayMeta)}?
+                Clear all items from {dayDisplayLabel(clearDayTargetId, dayMeta)}?
               </span>
               <button
                 className="btn-cancel-delete"
-                onClick={() => setClearDayConfirm(false)}
+                onClick={() => setClearDayTargetId(null)}
               >
                 Cancel
               </button>
@@ -2556,8 +2612,13 @@ export default function PlansPage() {
                         className="btn-clear"
                         style={{ fontSize: "0.875rem", padding: "0.5rem 1rem", minHeight: 40 }}
                         onClick={() => {
+                          // Fix 3: target the edited day, not activeDayId
+                          // Fix 4: close modal and reset sibling confirms first
+                          const target = editingDayId;
                           closeModal();
-                          setClearDayConfirm(true);
+                          setRemoveConfirmDayId(null);
+                          setClearConfirm(false);
+                          if (target) setClearDayTargetId(target);
                         }}
                       >
                         Remove {itemCountByDay[editingDayId]} {itemCountByDay[editingDayId] === 1 ? "item" : "items"} from this day
