@@ -617,11 +617,19 @@ export default function PlansPage() {
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
-  // Phase 8.2 — Day import confirmation state (shown when active day has items)
-  const [pendingDayImportItems, setPendingDayImportItems] = useState<DayExportItem[] | null>(null);
+  // Phase 8.2 — Day import confirmation state (shown when active day has items).
+  // targetDayId is captured at file-selection time to prevent drift if the user
+  // switches active day between file pick and confirmation (fix D).
+  const [pendingDayImportItems, setPendingDayImportItems] = useState<{
+    items: DayExportItem[];
+    targetDayId: string;
+    existingCount: number;
+  } | null>(null);
   const [dayImportError, setDayImportError] = useState("");
   // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
   const dayImportRequestRef = useRef(0);
+  // Ref for the hidden day-import file input — used for programmatic trigger (fix F)
+  const dayImportInputRef = useRef<HTMLInputElement>(null);
 
   // Phase 8.2 — Backup / Restore modal state
   const [showBackupRestore, setShowBackupRestore] = useState(false);
@@ -1483,19 +1491,25 @@ export default function PlansPage() {
     }
   }
 
-  // Phase 8.2 — Apply pending day import items to the active day.
+  // Phase 8.2 — Apply pending day import items to the target day.
+  // targetDayId is the day selected at file-pick time (fix D — never drifts).
+  // Imported items receive fresh local IDs to prevent collisions (fix E).
   // Called after user confirmation (non-empty day) or immediately (empty day).
-  function applyDayImport(importedItems: DayExportItem[], wasEmpty: boolean) {
+  function applyDayImport(
+    importedItems: DayExportItem[],
+    wasEmpty: boolean,
+    targetDayId: string
+  ) {
+    // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     const newItems: PlanItem[] = importedItems.map((it) => ({
-      id: it.id,
+      id: makeId(),
       name: it.name,
       timeLabel: it.timeLabel,
-      dayId: activeDayId,
+      dayId: targetDayId,
     }));
-    reseedNextId(newItems);
     setItems((prev) => {
-      const withoutActiveDay = prev.filter((it) => it.dayId !== activeDayId);
-      const next = [...withoutActiveDay, ...newItems];
+      const withoutTargetDay = prev.filter((it) => it.dayId !== targetDayId);
+      const next = [...withoutTargetDay, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
     // Inference runs ONLY when importing into an empty day (bootstrap behavior).
@@ -1507,10 +1521,15 @@ export default function PlansPage() {
   }
 
   // Phase 8.2 — Day plan JSON import via file picker.
-  // Replaces ONLY active day items; no new day created; day label/date unchanged.
+  // Replaces ONLY target day items; no new day created; day label/date unchanged.
+  // targetDayId is captured synchronously from the render that fired onChange,
+  // so it always reflects the day active at file-selection time (fix D).
   function handleDayImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Capture targetDayId synchronously — this is the day selected at pick time (fix D).
+    const targetDayId = activeDayId;
+    const existingDayItems = items.filter((it) => it.dayId === targetDayId);
     const requestId = ++dayImportRequestRef.current;
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -1524,14 +1543,17 @@ export default function PlansPage() {
         return;
       }
       setDayImportError("");
-      const activeDayItems = items.filter((it) => it.dayId === activeDayId);
-      const wasEmpty = activeDayItems.length === 0;
+      const wasEmpty = existingDayItems.length === 0;
       if (wasEmpty) {
         // Empty day — apply immediately, no confirmation needed.
-        applyDayImport(parsed, true);
+        applyDayImport(parsed, true, targetDayId);
       } else {
-        // Non-empty day — store pending items; show confirmation.
-        setPendingDayImportItems(parsed);
+        // Non-empty day — store pending state; show confirmation.
+        setPendingDayImportItems({
+          items: parsed,
+          targetDayId,
+          existingCount: existingDayItems.length,
+        });
       }
     };
     reader.readAsText(file);
@@ -2302,15 +2324,21 @@ export default function PlansPage() {
             >
               Clear day
             </button>
-            <label className="btn-import" title="Import day plan (.json)">
+            {/* Phase 8.2.1 fix F — real button + programmatic trigger for mobile/keyboard reliability */}
+            <button
+              className="btn-import"
+              title="Import day plan (.json)"
+              onClick={() => dayImportInputRef.current?.click()}
+            >
               Import
-              <input
-                type="file"
-                accept=".json,application/json"
-                className="file-input-hidden"
-                onChange={handleDayImportFile}
-              />
-            </label>
+            </button>
+            <input
+              ref={dayImportInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="file-input-hidden"
+              onChange={handleDayImportFile}
+            />
             <button
               className="btn-import"
               onClick={handleExportDay}
@@ -2582,12 +2610,13 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.2 — Day import confirmation (non-empty day) */}
+        {/* Phase 8.2 — Day import confirmation (non-empty day).
+            Uses targetDayId captured at file-selection time — not activeDayId (fix D). */}
         {pendingDayImportItems !== null && (
           <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Replace {displayedItems.length} {displayedItems.length === 1 ? "item" : "items"} in {dayDisplayLabel(activeDayId, dayMeta)} with {pendingDayImportItems.length} imported {pendingDayImportItems.length === 1 ? "item" : "items"}?
+                Replace {pendingDayImportItems.existingCount} {pendingDayImportItems.existingCount === 1 ? "item" : "items"} in {dayDisplayLabel(pendingDayImportItems.targetDayId, dayMeta)} with {pendingDayImportItems.items.length} imported {pendingDayImportItems.items.length === 1 ? "item" : "items"}?
               </span>
               <button
                 className="btn-cancel-delete"
@@ -2597,7 +2626,13 @@ export default function PlansPage() {
               </button>
               <button
                 className="btn-confirm-delete"
-                onClick={() => applyDayImport(pendingDayImportItems, false)}
+                onClick={() =>
+                  applyDayImport(
+                    pendingDayImportItems.items,
+                    false,
+                    pendingDayImportItems.targetDayId
+                  )
+                }
               >
                 Yes, replace
               </button>

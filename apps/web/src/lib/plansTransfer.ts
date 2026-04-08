@@ -117,32 +117,64 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
   }
   const d = data as Record<string, unknown>;
 
+  // Validate days array — must be non-empty with canonical IDs.
   if (!Array.isArray(d.days) || d.days.length === 0) {
     throw new Error("Invalid backup: data.days must be a non-empty array.");
   }
+  const daysSet = new Set<string>();
   for (const dayId of d.days as unknown[]) {
     if (typeof dayId !== "string" || !VALID_DAY_ID_RE.test(dayId)) {
       throw new Error(`Invalid backup: invalid day ID "${String(dayId)}".`);
     }
+    daysSet.add(dayId);
   }
 
+  // Validate plans array — shape, canonical dayId, dayId in days, no duplicate IDs.
   if (!Array.isArray(d.plans)) {
     throw new Error("Invalid backup: data.plans must be an array.");
   }
+  const seenPlanIds = new Set<string>();
   for (let i = 0; i < (d.plans as unknown[]).length; i++) {
-    if (!isPlanItem((d.plans as unknown[])[i])) {
+    const item = (d.plans as unknown[])[i];
+    if (!isPlanItem(item)) {
       throw new Error(
         `Invalid backup: plan item at index ${i} has unexpected shape (expected {id, name, timeLabel} strings).`
       );
     }
+    const planItem = item as PlanItem;
+    if (
+      typeof planItem.dayId !== "string" ||
+      !VALID_DAY_ID_RE.test(planItem.dayId)
+    ) {
+      throw new Error(
+        `Invalid backup: plan item at index ${i} has missing or invalid dayId "${String(planItem.dayId)}".`
+      );
+    }
+    if (!daysSet.has(planItem.dayId)) {
+      throw new Error(
+        `Invalid backup: plan item at index ${i} has dayId "${planItem.dayId}" not found in data.days.`
+      );
+    }
+    if (seenPlanIds.has(planItem.id)) {
+      throw new Error(
+        `Invalid backup: duplicate plan id "${planItem.id}" detected.`
+      );
+    }
+    seenPlanIds.add(planItem.id);
   }
 
+  // Validate activeDayId — must be canonical and present in days.
   if (
     typeof d.activeDayId !== "string" ||
     !VALID_DAY_ID_RE.test(d.activeDayId)
   ) {
     throw new Error(
       `Invalid backup: invalid activeDayId "${String(d.activeDayId)}".`
+    );
+  }
+  if (!daysSet.has(d.activeDayId as string)) {
+    throw new Error(
+      `Invalid backup: activeDayId "${String(d.activeDayId)}" not found in data.days.`
     );
   }
 
@@ -220,6 +252,11 @@ export function validateDayPlanImportPayload(raw: unknown): DayExportItem[] {
   }
   const obj = raw as Record<string, unknown>;
 
+  if (obj.version !== 1) {
+    throw new Error(
+      `Invalid day plan: unsupported version ${String(obj.version)}. Expected 1.`
+    );
+  }
   if (obj.type !== "day-plan-export") {
     throw new Error(
       `Invalid day plan: wrong type "${String(obj.type)}". Expected "day-plan-export".`
