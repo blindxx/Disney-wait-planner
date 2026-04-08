@@ -24,7 +24,9 @@ import {
   buildDayPlanExportPayload,
   buildPlannerBackupPayload,
   parseDayPlanImportFile,
+  parseDayPlanImportPayload,
   parsePlannerBackupFile,
+  parsePlannerBackupPayload,
   type DayExportItem,
   type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
@@ -1520,37 +1522,138 @@ export default function PlansPage() {
     setDayImportError("");
   }
 
-  // Phase 8.2 — Day plan JSON import via file picker.
+  // Phase 8.2.2 — Parse TXT lines into DayExportItem[].
+  // Uses the same parseLine / stripEnDashSuffix logic as processImportText but
+  // does NOT assign IDs or dayId — those are assigned in applyDayImport.
+  function parseTxtToDayItems(text: string): DayExportItem[] {
+    const lines = text.split("\n");
+    const result: DayExportItem[] = [];
+    for (const line of lines) {
+      const normalized = line.replace(/[\u2013\u2014]/g, "-");
+      const parsed = parseLine(normalized);
+      if (parsed) {
+        result.push({
+          id: "", // placeholder — applyDayImport assigns fresh ID
+          name: stripEnDashSuffix(parsed.name),
+          timeLabel: parsed.timeLabel,
+        });
+      }
+    }
+    return result;
+  }
+
+  // Phase 8.2.2 — Parse CSV text into DayExportItem[] via the TXT pipeline.
+  // Mirrors processCSVText but returns items without mutating state.
+  function parseCsvToDayItems(text: string): DayExportItem[] {
+    const rows = text.split("\n");
+    const txtLines: string[] = [];
+    for (const row of rows) {
+      const trimmedRow = row.trim();
+      if (!trimmedRow) continue;
+      try {
+        const cells = parseCSVRow(trimmedRow);
+        if (cells.length === 0) continue;
+        const c0 = cells[0].toLowerCase();
+        const c1 = cells.length >= 2 ? cells[1].toLowerCase() : "";
+        if (cells.length >= 2 && c0 === "timelabel" && c1 === "name") continue;
+        if (cells.length === 1 && c0 === "line") continue;
+        if (cells.length >= 2 && cells[1]) {
+          const timeCell = cells[0];
+          const nameCell = cells[1];
+          txtLines.push(timeCell ? `${timeCell} ${nameCell}` : nameCell);
+        } else if (cells[0]) {
+          txtLines.push(cells[0]);
+        }
+      } catch {
+        // Skip malformed rows without crashing
+      }
+    }
+    return parseTxtToDayItems(txtLines.join("\n"));
+  }
+
+  // Phase 8.2 — Day plan import via file picker.
   // Replaces ONLY target day items; no new day created; day label/date unchanged.
   // targetDayId is captured synchronously from the render that fired onChange,
   // so it always reflects the day active at file-selection time (fix D).
   function handleDayImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Capture targetDayId synchronously — this is the day selected at pick time (fix D).
+    // Size guard before reading (1 MB)
+    if (file.size > 1_048_576) {
+      setDayImportError("File is too large to import (maximum: 1 MB).");
+      e.target.value = "";
+      return;
+    }
+    // Capture targetDayId and existing count synchronously at file-selection time (fix D).
     const targetDayId = activeDayId;
     const existingDayItems = items.filter((it) => it.dayId === targetDayId);
     const requestId = ++dayImportRequestRef.current;
+    const fileName = file.name.toLowerCase();
     const reader = new FileReader();
     reader.onload = (ev) => {
       if (requestId !== dayImportRequestRef.current) return; // stale
       const text = (ev.target?.result as string) ?? "";
-      const parsed = parseDayPlanImportFile(text);
-      if (!parsed) {
-        setDayImportError(
-          "Invalid file: expected a day plan export (disney-wait-planner-day-*.json)."
-        );
+      let parsedItems: DayExportItem[] | null = null;
+      let errorMsg = "";
+
+      if (fileName.endsWith(".json")) {
+        // Inspect payload type before validating (B/C)
+        let rawJson: unknown = null;
+        try { rawJson = JSON.parse(text); } catch { /* fall through to error */ }
+        if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
+          const t = (rawJson as Record<string, unknown>).type;
+          if (t === "planner-backup") {
+            // User loaded a full backup into the day import — redirect them (C)
+            errorMsg =
+              "This file is a full planner backup. Use Backup / Restore to load it.";
+          } else if (t === "day-plan-export") {
+            const dayItems = parseDayPlanImportPayload(rawJson);
+            if (dayItems === null) {
+              errorMsg = "Invalid day plan file: the file could not be parsed.";
+            } else {
+              parsedItems = dayItems;
+            }
+          } else {
+            errorMsg =
+              "Invalid file: expected a day plan export (disney-wait-planner-day-*.json).";
+          }
+        } else {
+          errorMsg = "Invalid file: could not parse as JSON.";
+        }
+      } else if (fileName.endsWith(".csv")) {
+        // CSV path — parse and apply as day import (A/E)
+        const csvItems = parseCsvToDayItems(text);
+        if (csvItems.length === 0) {
+          errorMsg =
+            "No valid activities found. Check your CSV file and try again.";
+        } else {
+          parsedItems = csvItems;
+        }
+      } else {
+        // .txt and unrecognised extensions (A/E)
+        const txtItems = parseTxtToDayItems(text);
+        if (txtItems.length === 0) {
+          errorMsg =
+            "No valid activities found. Check your text file and try again.";
+        } else {
+          parsedItems = txtItems;
+        }
+      }
+
+      if (errorMsg || parsedItems === null) {
+        setDayImportError(errorMsg || "Import failed.");
         return;
       }
+
       setDayImportError("");
       const wasEmpty = existingDayItems.length === 0;
       if (wasEmpty) {
         // Empty day — apply immediately, no confirmation needed.
-        applyDayImport(parsed, true, targetDayId);
+        applyDayImport(parsedItems, true, targetDayId);
       } else {
         // Non-empty day — store pending state; show confirmation.
         setPendingDayImportItems({
-          items: parsed,
+          items: parsedItems,
           targetDayId,
           existingCount: existingDayItems.length,
         });
@@ -1560,7 +1663,8 @@ export default function PlansPage() {
     e.target.value = "";
   }
 
-  // Phase 8.2 — Restore file handler: parse backup and prompt confirmation.
+  // Phase 8.2 / 8.2.2 — Restore file handler: inspect payload type, then validate.
+  // Gives specific guidance when a day-plan export is loaded here by mistake (D).
   function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1569,7 +1673,20 @@ export default function PlansPage() {
     reader.onload = (ev) => {
       if (requestId !== restoreRequestRef.current) return; // stale
       const text = (ev.target?.result as string) ?? "";
-      const payload = parsePlannerBackupFile(text);
+      // Peek at the type field to give a specific user-facing message (D)
+      let rawJson: unknown = null;
+      try { rawJson = JSON.parse(text); } catch { /* fall through */ }
+      if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
+        const t = (rawJson as Record<string, unknown>).type;
+        if (t === "day-plan-export") {
+          setBackupRestoreError(
+            "This file is a day plan export. Use Import to load it into the active day."
+          );
+          setRestoreConfirmPayload(null);
+          return;
+        }
+      }
+      const payload = parsePlannerBackupPayload(rawJson);
       if (!payload) {
         setBackupRestoreError(
           "Invalid file: expected a planner backup (disney-wait-planner-backup-*.json)."
@@ -1596,10 +1713,12 @@ export default function PlansPage() {
     }));
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
     const restoredActiveDayId = normalizeDayId(data.activeDayId as string);
+    // Only persist dayMeta keys that belong to actual restored days (H)
+    const restoredDaysSet = new Set(restoredDays);
     const restoredDayMeta: Record<string, DayMeta> =
       data.dayMeta
         ? (Object.fromEntries(
-            Object.entries(data.dayMeta).filter(([k]) => VALID_DAY_ID_RE.test(k))
+            Object.entries(data.dayMeta).filter(([k]) => restoredDaysSet.has(k))
           ) as Record<string, DayMeta>)
         : {};
 
@@ -1612,9 +1731,16 @@ export default function PlansPage() {
     setDayMeta(restoredDayMeta);
     saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
 
+    // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);
     setBackupRestoreError("");
     setShowBackupRestore(false);
+    setClearConfirm(false);
+    setClearDayTargetId(null);
+    setRemoveConfirmDayId(null);
+    setDeleteConfirmId(null);
+    setPendingDayImportItems(null);
+    setDayImportError("");
   }
 
   return (
@@ -2325,9 +2451,10 @@ export default function PlansPage() {
               Clear day
             </button>
             {/* Phase 8.2.1 fix F — real button + programmatic trigger for mobile/keyboard reliability */}
+            {/* Phase 8.2.2 fix A — accept .txt / .csv / .json (regression fix) */}
             <button
               className="btn-import"
-              title="Import day plan (.json)"
+              title="Import day plan (.json / .txt / .csv)"
               onClick={() => dayImportInputRef.current?.click()}
             >
               Import
@@ -2335,7 +2462,7 @@ export default function PlansPage() {
             <input
               ref={dayImportInputRef}
               type="file"
-              accept=".json,application/json"
+              accept=".json,.txt,.csv,application/json,text/plain,text/csv"
               className="file-input-hidden"
               onChange={handleDayImportFile}
             />

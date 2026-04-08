@@ -110,6 +110,10 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       `Invalid backup: wrong type "${String(obj.type)}". Expected "planner-backup".`
     );
   }
+  // exportedAt must be a string when present (H)
+  if ("exportedAt" in obj && typeof obj.exportedAt !== "string") {
+    throw new Error("Invalid backup: exportedAt must be a string.");
+  }
 
   const data = obj.data;
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
@@ -176,6 +180,17 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
     throw new Error(
       `Invalid backup: activeDayId "${String(d.activeDayId)}" not found in data.days.`
     );
+  }
+
+  // dayMeta must be a plain object when present (H)
+  if ("dayMeta" in d && d.dayMeta !== undefined) {
+    if (
+      typeof d.dayMeta !== "object" ||
+      d.dayMeta === null ||
+      Array.isArray(d.dayMeta)
+    ) {
+      throw new Error("Invalid backup: dayMeta must be a plain object when present.");
+    }
   }
 
   return raw as PlannerBackupPayload;
@@ -266,9 +281,19 @@ export function validateDayPlanImportPayload(raw: unknown): DayExportItem[] {
     throw new Error("Invalid day plan: items must be an array.");
   }
   for (let i = 0; i < (obj.items as unknown[]).length; i++) {
-    if (!isDayExportItem((obj.items as unknown[])[i])) {
+    const item = (obj.items as unknown[])[i];
+    if (!isDayExportItem(item)) {
       throw new Error(
         `Invalid day plan: item at index ${i} has unexpected shape (expected {id, name, timeLabel} strings).`
+      );
+    }
+    // Reject planner-only fields — dayId must not appear in day-plan export items (G)
+    if (
+      "dayId" in (item as Record<string, unknown>) &&
+      (item as Record<string, unknown>).dayId !== undefined
+    ) {
+      throw new Error(
+        `Invalid day plan: item at index ${i} contains dayId which is not allowed in day-plan exports.`
       );
     }
   }
