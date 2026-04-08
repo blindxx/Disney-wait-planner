@@ -21,8 +21,12 @@ Reviewers should carefully check any changes affecting:
 
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
-  buildPlansExportPayload,
-  parseImportedPlansFile,
+  buildDayPlanExportPayload,
+  buildPlannerBackupPayload,
+  parseDayPlanImportFile,
+  parsePlannerBackupFile,
+  type DayExportItem,
+  type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
 import {
   mockAttractionWaits,
@@ -612,6 +616,19 @@ export default function PlansPage() {
   const [formTimeError, setFormTimeError] = useState("");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
+
+  // Phase 8.2 — Day import confirmation state (shown when active day has items)
+  const [pendingDayImportItems, setPendingDayImportItems] = useState<DayExportItem[] | null>(null);
+  const [dayImportError, setDayImportError] = useState("");
+  // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
+  const dayImportRequestRef = useRef(0);
+
+  // Phase 8.2 — Backup / Restore modal state
+  const [showBackupRestore, setShowBackupRestore] = useState(false);
+  const [backupRestoreError, setBackupRestoreError] = useState("");
+  const [restoreConfirmPayload, setRestoreConfirmPayload] = useState<PlannerBackupPayload | null>(null);
+  // Stale-request guard for restore file reads
+  const restoreRequestRef = useRef(0);
 
   // Live wait data for the selected resort (all parks merged).
   // Empty when live is disabled; waitMap falls back to mock in that case.
@@ -1416,28 +1433,44 @@ export default function PlansPage() {
     }
   }
 
-  // Phase 7.4 — Export Plans: build payload, stringify, trigger browser download.
-  function handleExportPlans() {
-    const payload = buildPlansExportPayload(items);
+  // Phase 8.2 — Export active day plans only (day-plan-export format).
+  function handleExportDay() {
+    const activeDayPlans = items.filter((it) => it.dayId === activeDayId);
+    const payload = buildDayPlanExportPayload(activeDayPlans);
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     const a = document.createElement("a");
     a.href = url;
-    a.download = `disney-wait-planner-plans-${today}.json`;
+    a.download = `disney-wait-planner-day-${today}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
 
-  // Phase 7.4 follow-up — Import-driven context restore.
-  // Runs inference on the provided items and immediately updates resort/park
-  // state if a confident result is found. Treats the import as a deliberate
-  // restore action — overrides any prior manual park selection in this session.
-  // Also marks contextInferredRef=true so the reactive items-watcher does not
-  // re-run inference and potentially undo the result with a stale full-list pass.
+  // Phase 8.2 — Export full planner backup (planner-backup format).
+  function handleExportBackup() {
+    const payload = buildPlannerBackupPayload({
+      days,
+      plans: items,
+      activeDayId,
+      dayMeta,
+    });
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `disney-wait-planner-backup-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Phase 8.2 — Day plan context inference helper.
+  // Runs inference only when importing into an empty day (bootstrap behavior).
+  // Marks contextInferredRef=true so the reactive items-watcher does not re-run.
   function applyImportContextInference(inferenceBasis: PlanItem[]) {
-    // Prevent the items-watcher from re-running inference after this import.
     contextInferredRef.current = true;
     if (inferenceBasis.length === 0) return;
     const inferred = inferPlansContext(inferenceBasis);
@@ -1450,49 +1483,116 @@ export default function PlansPage() {
     }
   }
 
-  // Phase 7.4 — JSON restore via the import modal: validate, replace items, restore context.
-  function handleJsonImportModal(e: React.ChangeEvent<HTMLInputElement>) {
+  // Phase 8.2 — Apply pending day import items to the active day.
+  // Called after user confirmation (non-empty day) or immediately (empty day).
+  function applyDayImport(importedItems: DayExportItem[], wasEmpty: boolean) {
+    const newItems: PlanItem[] = importedItems.map((it) => ({
+      id: it.id,
+      name: it.name,
+      timeLabel: it.timeLabel,
+      dayId: activeDayId,
+    }));
+    reseedNextId(newItems);
+    setItems((prev) => {
+      const withoutActiveDay = prev.filter((it) => it.dayId !== activeDayId);
+      const next = [...withoutActiveDay, ...newItems];
+      return autoSortEnabled ? sortPlanItems(next) : next;
+    });
+    // Inference runs ONLY when importing into an empty day (bootstrap behavior).
+    if (wasEmpty) {
+      applyImportContextInference(newItems);
+    }
+    setPendingDayImportItems(null);
+    setDayImportError("");
+  }
+
+  // Phase 8.2 — Day plan JSON import via file picker.
+  // Replaces ONLY active day items; no new day created; day label/date unchanged.
+  function handleDayImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Capture a snapshot of the current request counter before the async read.
-    // If another import starts before this one resolves, the counter advances
-    // and the stale callback exits early without touching state.
-    const requestId = ++jsonImportRequestRef.current;
+    const requestId = ++dayImportRequestRef.current;
     const reader = new FileReader();
     reader.onload = (ev) => {
-      if (requestId !== jsonImportRequestRef.current) return; // stale import result
+      if (requestId !== dayImportRequestRef.current) return; // stale
       const text = (ev.target?.result as string) ?? "";
-      try {
-        const rawImported = parseImportedPlansFile(text);
-        // Phase 8.0 — preserve existing dayId from backup; assign "day-1" if absent.
-        const importedItems: PlanItem[] = rawImported.map((it) => ({
-          id: it.id,
-          name: it.name,
-          timeLabel: it.timeLabel,
-          dayId: normalizeDayId(it.dayId), // Phase 8.0.2 — strict canonical check
-        }));
-        // Merge imported day IDs into the days list.
-        // Uses functional setDays(prev) — this runs inside FileReader.onload
-        // (async) so `days` from the outer closure may be stale; `prev` is fresh.
-        const importedDayIds = [...new Set(importedItems.map((it) => it.dayId))];
-        setDays((prev) => {
-          const next = [...new Set([...prev, ...importedDayIds])].sort(daySort);
-          if (next.join(",") === prev.join(",")) return prev;
-          saveDays(next, daysKeyRef.current);
-          return next;
-        });
-        reseedNextId(importedItems);
-        setItems(autoSortEnabled ? sortPlanItems(importedItems) : importedItems);
-        applyImportContextInference(importedItems);
-        setImportText("");
-        setMode("view");
-      } catch (err) {
-        setImportError(err instanceof Error ? err.message : "Import failed.");
+      const parsed = parseDayPlanImportFile(text);
+      if (!parsed) {
+        setDayImportError(
+          "Invalid file: expected a day plan export (disney-wait-planner-day-*.json)."
+        );
+        return;
+      }
+      setDayImportError("");
+      const activeDayItems = items.filter((it) => it.dayId === activeDayId);
+      const wasEmpty = activeDayItems.length === 0;
+      if (wasEmpty) {
+        // Empty day — apply immediately, no confirmation needed.
+        applyDayImport(parsed, true);
+      } else {
+        // Non-empty day — store pending items; show confirmation.
+        setPendingDayImportItems(parsed);
       }
     };
     reader.readAsText(file);
-    // Reset so selecting the same file again triggers onChange
     e.target.value = "";
+  }
+
+  // Phase 8.2 — Restore file handler: parse backup and prompt confirmation.
+  function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const requestId = ++restoreRequestRef.current;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (requestId !== restoreRequestRef.current) return; // stale
+      const text = (ev.target?.result as string) ?? "";
+      const payload = parsePlannerBackupFile(text);
+      if (!payload) {
+        setBackupRestoreError(
+          "Invalid file: expected a planner backup (disney-wait-planner-backup-*.json)."
+        );
+        setRestoreConfirmPayload(null);
+        return;
+      }
+      setBackupRestoreError("");
+      setRestoreConfirmPayload(payload);
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  // Phase 8.2 — Apply confirmed restore: replace entire planner state.
+  function handleRestoreConfirm() {
+    if (!restoreConfirmPayload) return;
+    const { data } = restoreConfirmPayload;
+    const restoredPlans: PlanItem[] = (data.plans as PlanItem[]).map((it) => ({
+      id: it.id,
+      name: it.name,
+      timeLabel: it.timeLabel,
+      dayId: normalizeDayId((it as PlanItem).dayId),
+    }));
+    const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
+    const restoredActiveDayId = normalizeDayId(data.activeDayId as string);
+    const restoredDayMeta: Record<string, DayMeta> =
+      data.dayMeta
+        ? (Object.fromEntries(
+            Object.entries(data.dayMeta).filter(([k]) => VALID_DAY_ID_RE.test(k))
+          ) as Record<string, DayMeta>)
+        : {};
+
+    reseedNextId(restoredPlans);
+    setItems(autoSortEnabled ? sortPlanItems(restoredPlans) : restoredPlans);
+    setDays(restoredDays);
+    saveDays(restoredDays, daysKeyRef.current);
+    setActiveDayId(restoredActiveDayId);
+    saveActiveDayId(restoredActiveDayId, activeDayKeyRef.current);
+    setDayMeta(restoredDayMeta);
+    saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
+
+    setRestoreConfirmPayload(null);
+    setBackupRestoreError("");
+    setShowBackupRestore(false);
   }
 
   return (
@@ -1537,6 +1637,9 @@ export default function PlansPage() {
           background-color: #1d4ed8;
         }
         .btn-import {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
           background-color: #fff;
           color: #2563eb;
           border: 1px solid #2563eb;
@@ -1548,6 +1651,8 @@ export default function PlansPage() {
           min-height: 44px;
           min-width: 44px;
           white-space: nowrap;
+          text-decoration: none;
+          box-sizing: border-box;
         }
         .btn-import:active {
           background-color: #eff6ff;
@@ -2174,6 +2279,18 @@ export default function PlansPage() {
           <div className="plans-header-actions">
             <button
               className="btn-clear"
+              disabled={items.length === 0}
+              onClick={() => {
+                // Fix 4: reset sibling confirms before opening this one
+                setRemoveConfirmDayId(null);
+                setClearDayTargetId(null);
+                setClearConfirm(true);
+              }}
+            >
+              Clear all
+            </button>
+            <button
+              className="btn-clear"
               disabled={displayedItems.length === 0}
               onClick={() => {
                 // Fix 4: reset sibling confirms before opening this one
@@ -2185,27 +2302,33 @@ export default function PlansPage() {
             >
               Clear day
             </button>
-            <button
-              className="btn-clear"
-              disabled={items.length === 0}
-              onClick={() => {
-                // Fix 4: reset sibling confirms before opening this one
-                setRemoveConfirmDayId(null);
-                setClearDayTargetId(null);
-                setClearConfirm(true);
-              }}
-            >
-              Clear all
-            </button>
-            <button className="btn-import" onClick={openImport}>
+            <label className="btn-import" title="Import day plan (.json)">
               Import
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="file-input-hidden"
+                onChange={handleDayImportFile}
+              />
+            </label>
+            <button
+              className="btn-import"
+              onClick={handleExportDay}
+              disabled={displayedItems.length === 0}
+              title="Export active day plan"
+            >
+              Export
             </button>
             <button
               className="btn-import"
-              onClick={handleExportPlans}
-              disabled={items.length === 0}
+              onClick={() => {
+                setBackupRestoreError("");
+                setRestoreConfirmPayload(null);
+                setShowBackupRestore(true);
+              }}
+              title="Backup or restore full planner"
             >
-              Export
+              Backup
             </button>
             <button className="btn-add" onClick={openAdd}>
               + Add
@@ -2444,6 +2567,44 @@ export default function PlansPage() {
           </div>
         )}
 
+        {/* Phase 8.2 — Day import error display */}
+        {dayImportError && (
+          <div className="clear-confirm-row">
+            <div className="confirm-row" style={{ borderColor: "#fca5a5", backgroundColor: "#fef2f2" }}>
+              <span className="confirm-text" style={{ color: "#dc2626" }}>{dayImportError}</span>
+              <button
+                className="btn-cancel-delete"
+                onClick={() => setDayImportError("")}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Phase 8.2 — Day import confirmation (non-empty day) */}
+        {pendingDayImportItems !== null && (
+          <div className="clear-confirm-row">
+            <div className="confirm-row">
+              <span className="confirm-text">
+                Replace {displayedItems.length} {displayedItems.length === 1 ? "item" : "items"} in {dayDisplayLabel(activeDayId, dayMeta)} with {pendingDayImportItems.length} imported {pendingDayImportItems.length === 1 ? "item" : "items"}?
+              </span>
+              <button
+                className="btn-cancel-delete"
+                onClick={() => setPendingDayImportItems(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-confirm-delete"
+                onClick={() => applyDayImport(pendingDayImportItems, false)}
+              >
+                Yes, replace
+              </button>
+            </div>
+          </div>
+        )}
+
         {!initialized ? null : displayedItems.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">🗓</div>
@@ -2576,6 +2737,96 @@ export default function PlansPage() {
           </ul>
         )}
       </div>
+
+      {/* Phase 8.2 — Backup / Restore modal */}
+      {showBackupRestore && (
+        <div
+          className="backdrop"
+          onClick={() => {
+            setShowBackupRestore(false);
+            setRestoreConfirmPayload(null);
+            setBackupRestoreError("");
+          }}
+        >
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2 className="modal-title">Backup / Restore</h2>
+            <div className="modal-body">
+
+              {/* Backup section */}
+              <div className="form-field">
+                <p className="form-label">Backup planner</p>
+                <p className="form-hint" style={{ marginBottom: "0.75rem" }}>
+                  Downloads a full backup of all days, items, and labels. File name: <code>disney-wait-planner-backup-YYYY-MM-DD.json</code>
+                </p>
+                <button
+                  className="btn-import"
+                  style={{ width: "100%", textAlign: "center" }}
+                  onClick={handleExportBackup}
+                >
+                  Download backup
+                </button>
+              </div>
+
+              {/* Divider */}
+              <div style={{ borderTop: "1px solid #e5e7eb", margin: "1rem 0" }} />
+
+              {/* Restore section */}
+              <div className="form-field">
+                <p className="form-label">Restore from backup</p>
+                <p className="form-hint" style={{ marginBottom: "0.75rem" }}>
+                  Replaces <strong>all</strong> days, items, and labels with the backup contents. This cannot be undone.
+                </p>
+
+                {restoreConfirmPayload ? (
+                  <div className="confirm-row">
+                    <span className="confirm-text">
+                      Replace entire planner with backup ({restoreConfirmPayload.data.days.length} {restoreConfirmPayload.data.days.length === 1 ? "day" : "days"}, {restoreConfirmPayload.data.plans.length} {restoreConfirmPayload.data.plans.length === 1 ? "item" : "items"})?
+                    </span>
+                    <button
+                      className="btn-cancel-delete"
+                      onClick={() => setRestoreConfirmPayload(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="btn-confirm-delete"
+                      onClick={handleRestoreConfirm}
+                    >
+                      Yes, restore
+                    </button>
+                  </div>
+                ) : (
+                  <label className="btn-file-label" style={{ width: "100%", justifyContent: "center", boxSizing: "border-box" }}>
+                    📂 Choose backup file
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      className="file-input-hidden"
+                      onChange={handleRestoreFile}
+                    />
+                  </label>
+                )}
+
+                {backupRestoreError && (
+                  <p className="form-error" style={{ marginTop: "0.5rem" }}>{backupRestoreError}</p>
+                )}
+              </div>
+            </div>
+            <div className="modal-actions">
+              <button
+                className="btn-cancel"
+                onClick={() => {
+                  setShowBackupRestore(false);
+                  setRestoreConfirmPayload(null);
+                  setBackupRestoreError("");
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {mode !== "view" && (
         <div className="backdrop" onClick={closeModal}>
@@ -2718,13 +2969,16 @@ export default function PlansPage() {
                       />
                     </label>
                     <label className="btn-file-label" htmlFor="json-import">
-                      📋 .json backup
+                      📋 .json day plan
                       <input
                         id="json-import"
                         type="file"
                         accept=".json,application/json"
                         className="file-input-hidden"
-                        onChange={handleJsonImportModal}
+                        onChange={(e) => {
+                          handleDayImportFile(e);
+                          setMode("view");
+                        }}
                       />
                     </label>
                   </div>
