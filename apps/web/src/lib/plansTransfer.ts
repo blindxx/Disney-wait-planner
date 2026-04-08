@@ -110,9 +110,9 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       `Invalid backup: wrong type "${String(obj.type)}". Expected "planner-backup".`
     );
   }
-  // exportedAt must be a string when present
-  if ("exportedAt" in obj && typeof obj.exportedAt !== "string") {
-    throw new Error("Invalid backup: exportedAt must be a string.");
+  // exportedAt is required and must be a string
+  if (typeof obj.exportedAt !== "string") {
+    throw new Error("Invalid backup: exportedAt is required and must be a string.");
   }
 
   const data = obj.data;
@@ -182,7 +182,7 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
     );
   }
 
-  // dayMeta must be a plain object when present
+  // dayMeta must be a plain object when present; each entry must have valid shape
   if ("dayMeta" in d && d.dayMeta !== undefined) {
     if (
       typeof d.dayMeta !== "object" ||
@@ -190,6 +190,19 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       Array.isArray(d.dayMeta)
     ) {
       throw new Error("Invalid backup: dayMeta must be a plain object when present.");
+    }
+    for (const [key, entry] of Object.entries(d.dayMeta as Record<string, unknown>)) {
+      if (!VALID_DAY_ID_RE.test(key)) continue;
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        throw new Error(`Invalid backup: dayMeta["${key}"] must be a plain object.`);
+      }
+      const e = entry as Record<string, unknown>;
+      if ("label" in e && typeof e.label !== "string") {
+        throw new Error(`Invalid backup: dayMeta["${key}"].label must be a string when present.`);
+      }
+      if ("date" in e && typeof e.date !== "string") {
+        throw new Error(`Invalid backup: dayMeta["${key}"].date must be a string when present.`);
+      }
     }
   }
 
@@ -277,9 +290,9 @@ export function validateDayPlanImportPayload(raw: unknown): DayExportItem[] {
       `Invalid day plan: wrong type "${String(obj.type)}". Expected "day-plan-export".`
     );
   }
-  // exportedAt must be a string when present (G — consistent with backup contract)
-  if ("exportedAt" in obj && typeof obj.exportedAt !== "string") {
-    throw new Error("Invalid day plan: exportedAt must be a string.");
+  // exportedAt is required and must be a string
+  if (typeof obj.exportedAt !== "string") {
+    throw new Error("Invalid day plan: exportedAt is required and must be a string.");
   }
   if (!Array.isArray(obj.items)) {
     throw new Error("Invalid day plan: items must be an array.");

@@ -544,6 +544,10 @@ export default function PlansPage() {
   // Prevents resort selector from briefly showing DLR when WDW is stored.
   const [ready, setReady] = useState(false);
   const [items, setItems] = useState<PlanItem[]>([]);
+  // Ref that always holds the latest items — used inside async callbacks to avoid
+  // stale closure snapshots (e.g. deciding empty/non-empty in handleDayImportFile).
+  const itemsRef = useRef<PlanItem[]>([]);
+  itemsRef.current = items;
   const [initialized, setInitialized] = useState(false);
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
@@ -628,8 +632,6 @@ export default function PlansPage() {
   const [dayImportError, setDayImportError] = useState("");
   // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
   const dayImportRequestRef = useRef(0);
-  // Ref for the hidden day-import file input — used for programmatic trigger
-  const dayImportInputRef = useRef<HTMLInputElement>(null);
   // Refs for the three modal import file inputs (separate accept filters per type)
   const modalTxtInputRef = useRef<HTMLInputElement>(null);
   const modalCsvInputRef = useRef<HTMLInputElement>(null);
@@ -1588,9 +1590,9 @@ export default function PlansPage() {
       e.target.value = "";
       return;
     }
-    // Capture targetDayId and existing count synchronously at file-selection time.
+    // Capture targetDayId synchronously at file-selection time to prevent day-switch drift.
+    // Emptiness is re-checked at apply time via itemsRef to avoid stale closure snapshots.
     const targetDayId = activeDayId;
-    const existingDayItems = items.filter((it) => it.dayId === targetDayId);
     const requestId = ++dayImportRequestRef.current;
     const fileName = file.name.toLowerCase();
     const reader = new FileReader();
@@ -1612,7 +1614,7 @@ export default function PlansPage() {
           } else if (t === "day-plan-export") {
             const dayItems = parseDayPlanImportPayload(rawJson);
             if (dayItems === null) {
-              errorMsg = "Invalid day plan file: the file could not be parsed.";
+              errorMsg = "Invalid day plan export: the file structure or fields are not valid.";
             } else {
               parsedItems = dayItems;
             }
@@ -1648,7 +1650,10 @@ export default function PlansPage() {
       }
 
       setDayImportError("");
-      const wasEmpty = existingDayItems.length === 0;
+      // Re-check emptiness using current items state (itemsRef) to avoid stale closure.
+      // targetDayId was captured at selection time and is not re-read here.
+      const currentTargetDayItems = itemsRef.current.filter((it) => it.dayId === targetDayId);
+      const wasEmpty = currentTargetDayItems.length === 0;
       if (wasEmpty) {
         // Empty day — apply immediately, no confirmation needed.
         applyDayImport(parsedItems, true, targetDayId);
@@ -1657,7 +1662,7 @@ export default function PlansPage() {
         setPendingDayImportItems({
           items: parsedItems,
           targetDayId,
-          existingCount: existingDayItems.length,
+          existingCount: currentTargetDayItems.length,
         });
       }
     };
@@ -2460,22 +2465,14 @@ export default function PlansPage() {
             >
               Clear day
             </button>
-            {/* Phase 8.2.1 fix F — real button + programmatic trigger for mobile/keyboard reliability */}
-            {/* Phase 8.2.2 fix A — accept .txt / .csv / .json (regression fix) */}
+            {/* Phase 8.2.4 fix A — Import button opens the modal (not OS file picker directly) */}
             <button
               className="btn-import"
               title="Import day plan (.json / .txt / .csv)"
-              onClick={() => dayImportInputRef.current?.click()}
+              onClick={() => openImport()}
             >
               Import
             </button>
-            <input
-              ref={dayImportInputRef}
-              type="file"
-              accept=".json,.txt,.csv,application/json,text/plain,text/csv"
-              className="file-input-hidden"
-              onChange={handleDayImportFile}
-            />
             <button
               className="btn-import"
               onClick={handleExportDay}
