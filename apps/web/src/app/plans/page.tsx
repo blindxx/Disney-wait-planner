@@ -23,10 +23,8 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import {
   buildDayPlanExportPayload,
   buildPlannerBackupPayload,
-  parseDayPlanImportFile,
   parseDayPlanImportPayload,
   parsePlannerBackupFile,
-  parsePlannerBackupPayload,
   type DayExportItem,
   type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
@@ -630,8 +628,12 @@ export default function PlansPage() {
   const [dayImportError, setDayImportError] = useState("");
   // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
   const dayImportRequestRef = useRef(0);
-  // Ref for the hidden day-import file input — used for programmatic trigger (fix F)
+  // Ref for the hidden day-import file input — used for programmatic trigger
   const dayImportInputRef = useRef<HTMLInputElement>(null);
+  // Refs for the three modal import file inputs (separate accept filters per type)
+  const modalTxtInputRef = useRef<HTMLInputElement>(null);
+  const modalCsvInputRef = useRef<HTMLInputElement>(null);
+  const modalJsonInputRef = useRef<HTMLInputElement>(null);
 
   // Phase 8.2 — Backup / Restore modal state
   const [showBackupRestore, setShowBackupRestore] = useState(false);
@@ -1522,9 +1524,8 @@ export default function PlansPage() {
     setDayImportError("");
   }
 
-  // Phase 8.2.2 — Parse TXT lines into DayExportItem[].
-  // Uses the same parseLine / stripEnDashSuffix logic as processImportText but
-  // does NOT assign IDs or dayId — those are assigned in applyDayImport.
+  // Parse TXT lines into DayExportItem[] without assigning IDs or dayId.
+  // IDs are assigned fresh in applyDayImport; dayId is set to the target day.
   function parseTxtToDayItems(text: string): DayExportItem[] {
     const lines = text.split("\n");
     const result: DayExportItem[] = [];
@@ -1542,7 +1543,7 @@ export default function PlansPage() {
     return result;
   }
 
-  // Phase 8.2.2 — Parse CSV text into DayExportItem[] via the TXT pipeline.
+  // Parse CSV text into DayExportItem[] via the shared TXT pipeline.
   // Mirrors processCSVText but returns items without mutating state.
   function parseCsvToDayItems(text: string): DayExportItem[] {
     const rows = text.split("\n");
@@ -1578,13 +1579,16 @@ export default function PlansPage() {
   function handleDayImportFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Clear stale pending/error state at the start of every new import attempt.
+    setPendingDayImportItems(null);
+    setDayImportError("");
     // Size guard before reading (1 MB)
     if (file.size > 1_048_576) {
       setDayImportError("File is too large to import (maximum: 1 MB).");
       e.target.value = "";
       return;
     }
-    // Capture targetDayId and existing count synchronously at file-selection time (fix D).
+    // Capture targetDayId and existing count synchronously at file-selection time.
     const targetDayId = activeDayId;
     const existingDayItems = items.filter((it) => it.dayId === targetDayId);
     const requestId = ++dayImportRequestRef.current;
@@ -1597,13 +1601,12 @@ export default function PlansPage() {
       let errorMsg = "";
 
       if (fileName.endsWith(".json")) {
-        // Inspect payload type before validating (B/C)
+        // Inspect payload type before validating — reject full backups with guidance.
         let rawJson: unknown = null;
         try { rawJson = JSON.parse(text); } catch { /* fall through to error */ }
         if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
           const t = (rawJson as Record<string, unknown>).type;
           if (t === "planner-backup") {
-            // User loaded a full backup into the day import — redirect them (C)
             errorMsg =
               "This file is a full planner backup. Use Backup / Restore to load it.";
           } else if (t === "day-plan-export") {
@@ -1621,7 +1624,6 @@ export default function PlansPage() {
           errorMsg = "Invalid file: could not parse as JSON.";
         }
       } else if (fileName.endsWith(".csv")) {
-        // CSV path — parse and apply as day import (A/E)
         const csvItems = parseCsvToDayItems(text);
         if (csvItems.length === 0) {
           errorMsg =
@@ -1630,7 +1632,7 @@ export default function PlansPage() {
           parsedItems = csvItems;
         }
       } else {
-        // .txt and unrecognised extensions (A/E)
+        // .txt and other text extensions
         const txtItems = parseTxtToDayItems(text);
         if (txtItems.length === 0) {
           errorMsg =
@@ -1663,39 +1665,47 @@ export default function PlansPage() {
     e.target.value = "";
   }
 
-  // Phase 8.2 / 8.2.2 — Restore file handler: inspect payload type, then validate.
-  // Gives specific guidance when a day-plan export is loaded here by mistake (D).
+  // Restore file handler: uses the safe backup file parser as the primary path,
+  // then peeks at the raw JSON type only to provide specific error guidance.
   function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    // Pre-read size guard (1 MB) — mirrors the guard inside parsePlannerBackupFile.
+    if (file.size > 1_048_576) {
+      setBackupRestoreError("File is too large to import (maximum: 1 MB).");
+      e.target.value = "";
+      return;
+    }
     const requestId = ++restoreRequestRef.current;
     const reader = new FileReader();
     reader.onload = (ev) => {
       if (requestId !== restoreRequestRef.current) return; // stale
       const text = (ev.target?.result as string) ?? "";
-      // Peek at the type field to give a specific user-facing message (D)
-      let rawJson: unknown = null;
-      try { rawJson = JSON.parse(text); } catch { /* fall through */ }
-      if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
-        const t = (rawJson as Record<string, unknown>).type;
-        if (t === "day-plan-export") {
-          setBackupRestoreError(
-            "This file is a day plan export. Use Import to load it into the active day."
-          );
-          setRestoreConfirmPayload(null);
-          return;
-        }
+      // Use the safe backup file parser as the primary validation path.
+      const payload = parsePlannerBackupFile(text);
+      if (payload) {
+        setBackupRestoreError("");
+        setRestoreConfirmPayload(payload);
+        return;
       }
-      const payload = parsePlannerBackupPayload(rawJson);
-      if (!payload) {
+      // Parse failed — peek at type field to give specific guidance.
+      let rawType: unknown = null;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          rawType = (parsed as Record<string, unknown>).type;
+        }
+      } catch { /* fall through */ }
+      if (rawType === "day-plan-export") {
+        setBackupRestoreError(
+          "This file is a day plan export. Use Import to load it into the active day."
+        );
+      } else {
         setBackupRestoreError(
           "Invalid file: expected a planner backup (disney-wait-planner-backup-*.json)."
         );
-        setRestoreConfirmPayload(null);
-        return;
       }
-      setBackupRestoreError("");
-      setRestoreConfirmPayload(payload);
+      setRestoreConfirmPayload(null);
     };
     reader.readAsText(file);
     e.target.value = "";
@@ -1713,7 +1723,7 @@ export default function PlansPage() {
     }));
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
     const restoredActiveDayId = normalizeDayId(data.activeDayId as string);
-    // Only persist dayMeta keys that belong to actual restored days (H)
+    // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
     const restoredDayMeta: Record<string, DayMeta> =
       data.dayMeta
@@ -3109,40 +3119,50 @@ export default function PlansPage() {
                   <p className="form-hint" style={{ marginBottom: "0.4rem" }}>
                     — or upload a file —
                   </p>
+                  {/* Hidden file inputs — each scoped to its own format, triggered by buttons below */}
+                  <input
+                    ref={modalTxtInputRef}
+                    type="file"
+                    accept=".txt,text/plain"
+                    className="file-input-hidden"
+                    onChange={(e) => { handleDayImportFile(e); setMode("view"); }}
+                  />
+                  <input
+                    ref={modalCsvInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="file-input-hidden"
+                    onChange={(e) => { handleDayImportFile(e); setMode("view"); }}
+                  />
+                  <input
+                    ref={modalJsonInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    className="file-input-hidden"
+                    onChange={(e) => { handleDayImportFile(e); setMode("view"); }}
+                  />
                   <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                    <label className="btn-file-label" htmlFor="file-import">
-                      📂 .txt file
-                      <input
-                        id="file-import"
-                        type="file"
-                        accept=".txt"
-                        className="file-input-hidden"
-                        onChange={handleFile}
-                      />
-                    </label>
-                    <label className="btn-file-label" htmlFor="csv-import">
-                      📊 .csv file
-                      <input
-                        id="csv-import"
-                        type="file"
-                        accept=".csv,text/csv"
-                        className="file-input-hidden"
-                        onChange={handleCSVFile}
-                      />
-                    </label>
-                    <label className="btn-file-label" htmlFor="json-import">
-                      📋 .json day plan
-                      <input
-                        id="json-import"
-                        type="file"
-                        accept=".json,application/json"
-                        className="file-input-hidden"
-                        onChange={(e) => {
-                          handleDayImportFile(e);
-                          setMode("view");
-                        }}
-                      />
-                    </label>
+                    <button
+                      type="button"
+                      className="btn-file-label"
+                      onClick={() => modalTxtInputRef.current?.click()}
+                    >
+                      📂 Text (.txt)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-file-label"
+                      onClick={() => modalCsvInputRef.current?.click()}
+                    >
+                      📊 Spreadsheet (.csv)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-file-label"
+                      onClick={() => modalJsonInputRef.current?.click()}
+                    >
+                      📋 Day plan (.json)
+                    </button>
                   </div>
                 </div>
               ) : (
