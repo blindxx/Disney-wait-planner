@@ -25,6 +25,7 @@ import {
   buildPlannerBackupPayload,
   parseDayPlanImportPayload,
   parsePlannerBackupFile,
+  MAX_IMPORT_BYTES,
   type DayExportItem,
   type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
@@ -1584,8 +1585,8 @@ export default function PlansPage() {
     // Clear stale pending/error state at the start of every new import attempt.
     setPendingDayImportItems(null);
     setDayImportError("");
-    // Size guard before reading (1 MB)
-    if (file.size > 1_048_576) {
+    // Size guard before reading
+    if (file.size > MAX_IMPORT_BYTES) {
       setDayImportError("File is too large to import (maximum: 1 MB).");
       e.target.value = "";
       return;
@@ -1675,8 +1676,8 @@ export default function PlansPage() {
   function handleRestoreFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    // Pre-read size guard (1 MB) — mirrors the guard inside parsePlannerBackupFile.
-    if (file.size > 1_048_576) {
+    // Pre-read size guard — mirrors the guard inside parsePlannerBackupFile.
+    if (file.size > MAX_IMPORT_BYTES) {
       setBackupRestoreError("File is too large to import (maximum: 1 MB).");
       e.target.value = "";
       return;
@@ -2219,6 +2220,12 @@ export default function PlansPage() {
         }
         .btn-file-label:active {
           background-color: #f3f4f6;
+        }
+        .btn-file-label--group {
+          flex: 1;
+          justify-content: center;
+          padding: 0.6rem 0.5rem;
+          min-width: 0;
         }
         .item-name-row {
           display: flex;
@@ -3113,7 +3120,7 @@ export default function PlansPage() {
                     En/em dashes are handled automatically.
                     Punctuation-only and time-only lines are skipped.
                   </p>
-                  <p className="form-hint" style={{ marginBottom: "0.4rem" }}>
+                  <p className="form-hint" style={{ margin: "0.25rem 0" }}>
                     — or upload a file —
                   </p>
                   {/* Hidden file inputs — each scoped to its own format, triggered by buttons below */}
@@ -3138,27 +3145,27 @@ export default function PlansPage() {
                     className="file-input-hidden"
                     onChange={(e) => { handleDayImportFile(e); setMode("view"); }}
                   />
-                  <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: "0.375rem" }}>
                     <button
                       type="button"
-                      className="btn-file-label"
+                      className="btn-file-label btn-file-label--group"
                       onClick={() => modalTxtInputRef.current?.click()}
                     >
-                      📂 Text (.txt)
+                      TXT
                     </button>
                     <button
                       type="button"
-                      className="btn-file-label"
+                      className="btn-file-label btn-file-label--group"
                       onClick={() => modalCsvInputRef.current?.click()}
                     >
-                      📊 Spreadsheet (.csv)
+                      CSV
                     </button>
                     <button
                       type="button"
-                      className="btn-file-label"
+                      className="btn-file-label btn-file-label--group"
                       onClick={() => modalJsonInputRef.current?.click()}
                     >
-                      📋 Day plan (.json)
+                      Day Plan
                     </button>
                   </div>
                 </div>

@@ -6,8 +6,8 @@
 //
 // No side effects. No storage reads/writes. No React dependencies.
 
-/** Maximum file size accepted for any import (1 MB). */
-const MAX_IMPORT_BYTES = 1_048_576;
+/** Maximum file size accepted for any import (1 MB). Shared with page.tsx UI guards. */
+export const MAX_IMPORT_BYTES = 1_048_576;
 
 // ===== SHARED PRIMITIVE TYPES =====
 
@@ -129,6 +129,9 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
   for (const dayId of d.days as unknown[]) {
     if (typeof dayId !== "string" || !VALID_DAY_ID_RE.test(dayId)) {
       throw new Error(`Invalid backup: invalid day ID "${String(dayId)}".`);
+    }
+    if (daysSet.has(dayId)) {
+      throw new Error(`Invalid backup: duplicate day ID "${dayId}" in data.days.`);
     }
     daysSet.add(dayId);
   }
