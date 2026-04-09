@@ -20,7 +20,6 @@ Reviewers should carefully check any changes affecting:
 */
 
 import { useState, useEffect, useMemo, useRef } from "react";
-import { FileText, Table2, ClipboardList } from "lucide-react";
 import {
   buildDayPlanExportPayload,
   buildPlannerBackupPayload,
@@ -3118,7 +3117,7 @@ export default function PlansPage() {
                       className="btn-file-label btn-file-label--group"
                       onClick={() => modalTxtInputRef.current?.click()}
                     >
-                      <FileText size={15} strokeWidth={1.75} />
+                      <span style={{ fontSize: "1rem", lineHeight: 1 }}>📄</span>
                       TXT
                     </button>
                     <button
@@ -3126,7 +3125,7 @@ export default function PlansPage() {
                       className="btn-file-label btn-file-label--group"
                       onClick={() => modalCsvInputRef.current?.click()}
                     >
-                      <Table2 size={15} strokeWidth={1.75} />
+                      <span style={{ fontSize: "1rem", lineHeight: 1 }}>📊</span>
                       CSV
                     </button>
                     <button
@@ -3134,7 +3133,7 @@ export default function PlansPage() {
                       className="btn-file-label btn-file-label--group"
                       onClick={() => modalJsonInputRef.current?.click()}
                     >
-                      <ClipboardList size={15} strokeWidth={1.75} />
+                      <span style={{ fontSize: "1rem", lineHeight: 1 }}>📋</span>
                       Day Plan
                     </button>
                   </div>
