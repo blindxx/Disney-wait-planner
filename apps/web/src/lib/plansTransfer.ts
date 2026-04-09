@@ -55,13 +55,19 @@ function isDayExportItem(v: unknown): v is DayExportItem {
 // Payload type: "planner-backup"
 // Contains full planner state: days, plans, activeDayId, and optional dayMeta.
 
+/**
+ * Plan item as it appears in a backup — dayId is required (validated at parse time).
+ * Narrower than PlanItem where dayId is optional.
+ */
+export type BackupPlanItem = PlanItem & { dayId: string };
+
 export type PlannerBackupPayload = {
   version: 1;
   type: "planner-backup";
   exportedAt: string;
   data: {
     days: string[];
-    plans: PlanItem[];
+    plans: BackupPlanItem[];
     activeDayId: string;
     dayMeta?: Record<string, { label?: string; date?: string }>;
   };
@@ -80,7 +86,8 @@ export function buildPlannerBackupPayload(state: {
     exportedAt: new Date().toISOString(),
     data: {
       days: state.days,
-      plans: state.plans,
+      // Cast accepted: at export time all in-memory items have a valid dayId assigned.
+      plans: state.plans as BackupPlanItem[],
       activeDayId: state.activeDayId,
       ...(state.dayMeta && Object.keys(state.dayMeta).length > 0
         ? { dayMeta: state.dayMeta }

@@ -1721,14 +1721,15 @@ export default function PlansPage() {
   function handleRestoreConfirm() {
     if (!restoreConfirmPayload) return;
     const { data } = restoreConfirmPayload;
-    const restoredPlans: PlanItem[] = (data.plans as PlanItem[]).map((it) => ({
+    // data.plans is BackupPlanItem[] — dayId is a required string (validated at parse time).
+    const restoredPlans: PlanItem[] = data.plans.map((it) => ({
       id: it.id,
       name: it.name,
       timeLabel: it.timeLabel,
-      dayId: normalizeDayId((it as PlanItem).dayId),
+      dayId: normalizeDayId(it.dayId),
     }));
-    const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
-    const restoredActiveDayId = normalizeDayId(data.activeDayId as string);
+    const restoredDays: string[] = [...new Set(data.days)].sort(daySort);
+    const restoredActiveDayId = normalizeDayId(data.activeDayId);
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
     const restoredDayMeta: Record<string, DayMeta> =
@@ -2683,7 +2684,7 @@ export default function PlansPage() {
           <div className="day-clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Clear all items from {dayDisplayLabel(clearDayTargetId, dayMeta)}?
+                Clear {itemCountByDay[clearDayTargetId] ?? 0} {(itemCountByDay[clearDayTargetId] ?? 0) === 1 ? "item" : "items"} from {dayDisplayLabel(clearDayTargetId, dayMeta)}?
               </span>
               <button
                 className="btn-cancel-delete"
@@ -2719,7 +2720,9 @@ export default function PlansPage() {
         {clearConfirm && (
           <div className="clear-confirm-row">
             <div className="confirm-row">
-              <span className="confirm-text">Clear all activities?</span>
+              <span className="confirm-text">
+                Clear all activities ({items.length} {items.length === 1 ? "item" : "items"} across {days.length} {days.length === 1 ? "day" : "days"})?
+              </span>
               <button
                 className="btn-cancel-delete"
                 onClick={() => setClearConfirm(false)}
