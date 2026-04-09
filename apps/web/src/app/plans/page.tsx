@@ -1694,11 +1694,19 @@ export default function PlansPage() {
     reseedNextId(restoredPlans);
     setItems(autoSortEnabled ? sortPlanItems(restoredPlans) : restoredPlans);
     setDays(restoredDays);
-    saveDays(restoredDays, daysKeyRef.current);
+    // Resolve fresh profile keys at write time — refs may be stale at restore time.
+    const _profileId = getActiveProfileId();
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    daysKeyRef.current = _daysKey;
+    activeDayKeyRef.current = _activeDayKey;
+    dayMetaKeyRef.current = _dayMetaKey;
+    saveDays(restoredDays, _daysKey);
     setActiveDayId(restoredActiveDayId);
-    saveActiveDayId(restoredActiveDayId, activeDayKeyRef.current);
+    saveActiveDayId(restoredActiveDayId, _activeDayKey);
     setDayMeta(restoredDayMeta);
-    saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
+    saveDayMeta(restoredDayMeta, _dayMetaKey);
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);
