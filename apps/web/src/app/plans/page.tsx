@@ -550,7 +550,6 @@ export default function PlansPage() {
   const itemsRef = useRef<PlanItem[]>([]);
   itemsRef.current = items;
   const [initialized, setInitialized] = useState(false);
-
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
   // Using refs ensures the values are stable across re-renders and available
   // in all effects without adding them as dependencies.
@@ -596,6 +595,10 @@ export default function PlansPage() {
   // Phase 8.0 — multi-day state (default to day-1; hydrated from storage on mount)
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
   const [days, setDays] = useState<string[]>(["day-1"]);
+  // Ref that always holds the latest days list — used in async callbacks and applyDayImport
+  // to check whether a targetDayId still exists without relying on stale closures.
+  const daysRef = useRef<string[]>(["day-1"]);
+  daysRef.current = days;
   // Phase 8.1 — day metadata (labels + dates) and per-profile storage key
   const dayMetaKeyRef = useRef("dwp:default:dayMeta");
   const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
@@ -1507,6 +1510,13 @@ export default function PlansPage() {
     wasEmpty: boolean,
     targetDayId: string
   ) {
+    // Guard: target day may have been removed after file selection but before apply.
+    // Use daysRef.current for a fresh check (avoids stale closure in async path).
+    if (!daysRef.current.includes(targetDayId)) {
+      setPendingDayImportItems(null);
+      setDayImportError("That day no longer exists. Please choose a day and try again.");
+      return;
+    }
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     const newItems: PlanItem[] = importedItems.map((it) => ({
       id: makeId(),
@@ -1728,10 +1738,15 @@ export default function PlansPage() {
       timeLabel: it.timeLabel,
       dayId: normalizeDayId(it.dayId),
     }));
-    const restoredDays: string[] = [...new Set(data.days)].sort(daySort);
-    const restoredActiveDayId = normalizeDayId(data.activeDayId);
+    // Ensure day-1 is always present — it is the app's permanent baseline day.
+    const uniqueDays = [...new Set(data.days)];
+    if (!uniqueDays.includes("day-1")) uniqueDays.push("day-1");
+    const restoredDays: string[] = uniqueDays.sort(daySort);
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
+    // Validate restoredActiveDayId against the final list; fall back to day-1 if absent.
+    const rawActiveDayId = normalizeDayId(data.activeDayId);
+    const restoredActiveDayId = restoredDaysSet.has(rawActiveDayId) ? rawActiveDayId : "day-1";
     const restoredDayMeta: Record<string, DayMeta> =
       data.dayMeta
         ? (Object.fromEntries(
