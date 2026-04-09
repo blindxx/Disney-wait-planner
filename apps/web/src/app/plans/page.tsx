@@ -579,10 +579,6 @@ export default function PlansPage() {
   // Only real import flows set this — manual add/edit paths do not.
   // Consumed (reset to false) immediately after the watcher reads it.
   const importJustRanRef = useRef(false);
-  // Monotonic counter for JSON import requests. Only the latest request's
-  // FileReader callback is allowed to commit state, preventing stale results
-  // from a previous (slower) import from overwriting a more recent import.
-  const jsonImportRequestRef = useRef(0);
   // Tracks how many items existed when the page first mounted. Used to
   // distinguish ordinary revisits (existing plans) from true import-triggered
   // inference events (items went from zero to non-zero in this lifecycle).
@@ -634,7 +630,7 @@ export default function PlansPage() {
     existingCount: number;
   } | null>(null);
   const [dayImportError, setDayImportError] = useState("");
-  // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
+  // Stale-request guard for day import — only the latest FileReader result commits state
   const dayImportRequestRef = useRef(0);
   // Refs for the three modal import file inputs (separate accept filters per type)
   const modalTxtInputRef = useRef<HTMLInputElement>(null);
@@ -1302,65 +1298,6 @@ export default function PlansPage() {
 
   function handleImport() {
     processImportText(importText);
-  }
-
-  function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = (ev.target?.result as string) ?? "";
-      processImportText(text);
-    };
-    reader.readAsText(file);
-    // Reset so selecting the same file again triggers onChange
-    e.target.value = "";
-  }
-
-  // Convert CSV rows into TXT-like lines and feed into the shared import pipeline.
-  // Format A (2+ cols): "<timeLabel> <name>" constructed from first two cells.
-  // Format B (1 col):   treat the single cell as a plain TXT line.
-  function processCSVText(text: string) {
-    const rows = text.split("\n");
-    const txtLines: string[] = [];
-    for (const row of rows) {
-      const trimmedRow = row.trim();
-      if (!trimmedRow) continue;
-      try {
-        const cells = parseCSVRow(trimmedRow);
-        if (cells.length === 0) continue;
-        // Skip exact CSV header rows (case-insensitive, trimmed comparison)
-        const c0 = cells[0].toLowerCase();
-        const c1 = cells.length >= 2 ? cells[1].toLowerCase() : "";
-        if (cells.length >= 2 && c0 === "timelabel" && c1 === "name") continue;
-        if (cells.length === 1 && c0 === "line") continue;
-        if (cells.length >= 2 && cells[1]) {
-          // Two-column: time + name → assemble TXT-style line
-          const timeCell = cells[0];
-          const nameCell = cells[1];
-          txtLines.push(timeCell ? `${timeCell} ${nameCell}` : nameCell);
-        } else if (cells[0]) {
-          // Single column: treat as plain TXT line
-          txtLines.push(cells[0]);
-        }
-      } catch {
-        // Skip malformed rows without crashing
-      }
-    }
-    // Delegate to existing pipeline (handles empty-result error, sort, persist)
-    processImportText(txtLines.join("\n"));
-  }
-
-  function handleCSVFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const text = (ev.target?.result as string) ?? "";
-      processCSVText(text);
-    };
-    reader.readAsText(file);
-    e.target.value = "";
   }
 
   function handleDelete(id: string) {
