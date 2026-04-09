@@ -1553,8 +1553,13 @@ export default function PlansPage() {
       if (fileName.endsWith(".json")) {
         // Inspect payload type before validating — reject full backups with guidance.
         let rawJson: unknown = null;
-        try { rawJson = JSON.parse(text); } catch { /* fall through to error */ }
-        if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
+        let jsonParsed = false;
+        try { rawJson = JSON.parse(text); jsonParsed = true; } catch { /* fall through */ }
+        if (!jsonParsed) {
+          errorMsg = "Invalid file: could not parse as JSON.";
+        } else if (typeof rawJson !== "object" || rawJson === null || Array.isArray(rawJson)) {
+          errorMsg = "Invalid file: expected a JSON object (day plan export).";
+        } else {
           const t = (rawJson as Record<string, unknown>).type;
           if (t === "planner-backup") {
             errorMsg =
@@ -1570,8 +1575,6 @@ export default function PlansPage() {
             errorMsg =
               "Invalid file: expected a day plan export (disney-wait-planner-day-*.json).";
           }
-        } else {
-          errorMsg = "Invalid file: could not parse as JSON.";
         }
       } else if (fileName.endsWith(".csv")) {
         const csvItems = parseCsvToDayItems(text);

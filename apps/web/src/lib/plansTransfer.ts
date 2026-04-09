@@ -128,7 +128,7 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
   }
   const d = data as Record<string, unknown>;
 
-  // Validate days array — must be non-empty with canonical IDs.
+  // Validate days array — must be non-empty with canonical IDs, must include day-1.
   if (!Array.isArray(d.days) || d.days.length === 0) {
     throw new Error("Invalid backup: data.days must be a non-empty array.");
   }
@@ -141,6 +141,9 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       throw new Error(`Invalid backup: duplicate day ID "${dayId}" in data.days.`);
     }
     daysSet.add(dayId);
+  }
+  if (!daysSet.has("day-1")) {
+    throw new Error('Invalid backup: data.days must include "day-1".');
   }
 
   // Validate plans array — shape, canonical dayId, dayId in days, no duplicate IDs.
