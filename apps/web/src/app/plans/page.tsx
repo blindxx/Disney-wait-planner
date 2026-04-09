@@ -2717,21 +2717,6 @@ export default function PlansPage() {
           </div>
         )}
 
-        <div className="sort-toggle-row">
-          <label className="sort-toggle-label">
-            <input
-              type="checkbox"
-              checked={autoSortEnabled}
-              onChange={(e) => handleToggleSort(e.target.checked)}
-            />
-            Auto-sort by time
-          </label>
-        </div>
-
-        <p className="wait-scope-label">
-          Wait overlay: {selectedResort}{selectedPark && PARK_LABELS[selectedPark] ? ` / ${PARK_LABELS[selectedPark]}` : ""}
-        </p>
-
         {clearConfirm && (
           <div className="clear-confirm-row">
             <div className="confirm-row">
@@ -2753,6 +2738,21 @@ export default function PlansPage() {
             </div>
           </div>
         )}
+
+        <div className="sort-toggle-row">
+          <label className="sort-toggle-label">
+            <input
+              type="checkbox"
+              checked={autoSortEnabled}
+              onChange={(e) => handleToggleSort(e.target.checked)}
+            />
+            Auto-sort by time
+          </label>
+        </div>
+
+        <p className="wait-scope-label">
+          Wait overlay: {selectedResort}{selectedPark && PARK_LABELS[selectedPark] ? ` / ${PARK_LABELS[selectedPark]}` : ""}
+        </p>
 
         {/* Phase 8.2 — Day import error display */}
         {dayImportError && (

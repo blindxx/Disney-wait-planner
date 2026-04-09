@@ -202,7 +202,12 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       throw new Error("Invalid backup: dayMeta must be a plain object when present.");
     }
     for (const [key, entry] of Object.entries(d.dayMeta as Record<string, unknown>)) {
-      if (!VALID_DAY_ID_RE.test(key)) continue;
+      if (!VALID_DAY_ID_RE.test(key)) {
+        throw new Error(`Invalid backup: dayMeta key "${key}" is not a valid day ID.`);
+      }
+      if (!daysSet.has(key)) {
+        throw new Error(`Invalid backup: dayMeta key "${key}" is not present in data.days.`);
+      }
       if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
         throw new Error(`Invalid backup: dayMeta["${key}"] must be a plain object.`);
       }
