@@ -1869,6 +1869,7 @@ export default function PlansPage() {
           }
         }
         .clear-confirm-row {
+          margin-top: 0.75rem;
           margin-bottom: 1rem;
         }
         .sort-toggle-row {
@@ -2035,7 +2036,7 @@ export default function PlansPage() {
         .confirm-row {
           display: flex;
           align-items: center;
-          gap: 0.5rem;
+          gap: 0.75rem;
           margin-top: 0.5rem;
           padding: 0.5rem 0.75rem;
           background-color: #fef2f2;
@@ -2170,6 +2171,9 @@ export default function PlansPage() {
           min-height: 160px;
           box-sizing: border-box;
           line-height: 1.7;
+        }
+        .form-textarea::placeholder {
+          opacity: 0.6;
         }
         .form-textarea:focus {
           border-color: #2563eb;
@@ -2701,8 +2705,8 @@ export default function PlansPage() {
             <div className="confirm-row">
               <span className="confirm-text">
                 {clearConfirm
-                  ? `Clear all activities (${items.length} ${items.length === 1 ? "item" : "items"} across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
-                  : `Clear all items from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
+                  ? `Clear all activities (${items.length} ${items.length === 1 ? "activity" : "activities"}, ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
+                  : `Clear all activities from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
