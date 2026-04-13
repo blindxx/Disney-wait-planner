@@ -1481,7 +1481,10 @@ export default function PlansPage() {
           (parsed as Record<string, unknown>).version === 1 &&
           Array.isArray((parsed as Record<string, unknown>).items)
         ) {
-          lightningItems = (parsed as Record<string, unknown>).items as LightningBackupItem[];
+          lightningItems = ((parsed as Record<string, unknown>).items as LightningBackupItem[])
+            // Phase 8.3.3 — normalize dayId at export time so pre-8.3 items
+            // (missing/invalid dayId) are safely canonical before entering the payload.
+            .map((it) => ({ ...it, dayId: normalizeDayId(it.dayId) }));
         }
       }
     } catch {}
