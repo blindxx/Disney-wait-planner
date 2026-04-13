@@ -1432,6 +1432,10 @@ export default function PlansPage() {
     initialItemCountRef.current = 0; // re-open import-inference eligibility
     try { localStorage.removeItem(resortKeyRef.current); } catch {}
     try { localStorage.removeItem(parkKeyRef.current); } catch {}
+    // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
+    // hidden day-scoped items survive into the next session (BUG C fix).
+    const _lightningKey = buildNamespacedKey(_profileId, "lightning");
+    try { localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: [] })); } catch {}
   }
 
   function handleToggleSort(checked: boolean) {
@@ -1745,6 +1749,11 @@ export default function PlansPage() {
     saveActiveDayId(restoredActiveDayId, activeDayKeyRef.current);
     setDayMeta(restoredDayMeta);
     saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
+    // Phase 8.3.2 — Restore replaces the full planner state. Lightning is not in the
+    // backup format; clear it so pre-restore Lightning items don't survive as hidden
+    // data across any day. Restore = full replacement (BUG D fix).
+    const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+    try { localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: [] })); } catch {}
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);

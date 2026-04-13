@@ -101,6 +101,32 @@ function migrateLightningDayIds(items: LightningItem[]): LightningItem[] {
   }));
 }
 
+// ===== DAY LIST LOADER (Phase 8.3.2) =====
+
+/**
+ * Load the planner day list from profile storage (read-only).
+ * Always guarantees "day-1" as the baseline.
+ * Used by safeActiveDayId to validate the active day against the known planner model.
+ */
+function loadKnownDays(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return ["day-1"];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return ["day-1"];
+    const seen = new Set<string>();
+    const valid: string[] = [];
+    for (const d of parsed as unknown[]) {
+      const id = normalizeDayId(d);
+      if (!seen.has(id)) { seen.add(id); valid.push(id); }
+    }
+    if (!seen.has("day-1")) valid.unshift("day-1");
+    return valid;
+  } catch {
+    return ["day-1"];
+  }
+}
+
 // ===== STORAGE =====
 
 const STORAGE_KEY = "dwp.lightning.v1";
@@ -254,6 +280,10 @@ export default function LightningPage() {
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   // Phase 8.3 — active day for filtering; read from localStorage on mount.
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
+  // Phase 8.3.2 — per-profile days key (read-only; Plans page owns writes).
+  const daysKeyRef = useRef("dwp:default:days");
+  // Phase 8.3.2 — known planner days for safe display-day validation.
+  const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
   // Tracks whether the user made a local edit after the current pull started.
   const localEditRef = useRef(false);
 
@@ -297,6 +327,9 @@ export default function LightningPage() {
     // Phase 8.3 — load the active day so Lightning reflects the current day.
     // normalizeDayId handles null (no stored value) → "day-1".
     setActiveDayId(normalizeDayId(localStorage.getItem(activeDayKeyRef.current)));
+    // Phase 8.3.2 — load known planner days for safe display-day validation.
+    daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
+    setKnownDays(loadKnownDays(daysKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
     setItems(loadFromStorage(lightningKeyRef.current));
@@ -463,14 +496,16 @@ export default function LightningPage() {
     [waitMap]
   );
 
-  // Phase 8.3.1 — Safe fallback: if activeDayId has no matching items, use the
-  // first item's dayId so the page never renders empty when items exist.
-  // This is a render-time guard only — nothing is persisted or globally mutated.
+  // Phase 8.3.2 — Safe display-day resolution using the known planner day model (BUG A fix).
+  // Rule: if activeDayId is a valid known planner day, use it exactly — even when zero
+  // Lightning items exist for that day. A blank valid day must stay blank.
+  // Fallback (stale/invalid activeDayId only): show first Lightning-populated day if
+  // one exists; otherwise "day-1". Nothing is persisted or globally mutated here.
   const safeActiveDayId = useMemo(() => {
-    if (items.some((it) => it.dayId === activeDayId)) return activeDayId;
+    if (knownDays.includes(activeDayId)) return activeDayId;
     if (items.length > 0) return items[0].dayId;
     return "day-1";
-  }, [items, activeDayId]);
+  }, [activeDayId, knownDays, items]);
 
   // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
   // All items are stored together; this view is scoped to the current day.
@@ -583,7 +618,7 @@ export default function LightningPage() {
       name: rideName.trim(),
       startTime: s,
       endTime: e,
-      dayId: activeDayId, // Phase 8.3 — attach to active day
+      dayId: safeActiveDayId, // Phase 8.3.2 — creation day === displayed day (BUG B fix)
     };
 
     setItems((prev) => [...prev, newItem]);
