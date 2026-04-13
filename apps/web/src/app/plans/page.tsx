@@ -1851,6 +1851,8 @@ export default function PlansPage() {
           }
           .plans-header-actions {
             flex-wrap: wrap;
+            gap: 0.625rem 0.5rem;
+            margin-top: 0.25rem;
           }
           .btn-clear {
             flex: 1 1 calc(50% - 0.25rem);
@@ -2689,24 +2691,26 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.1 — Clear day confirmation (targets clearDayTargetId, not activeDayId) */}
-        {clearDayTargetId !== null && (
-          <div className="day-clear-confirm-row">
+        {/* Phase 8.2.1 — Unified destructive confirmation: same stable location for Clear all & Clear day */}
+        {(clearConfirm || clearDayTargetId !== null) && (
+          <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Clear all items from {dayDisplayLabel(clearDayTargetId, dayMeta)}?
+                {clearConfirm
+                  ? "Clear all activities?"
+                  : `Clear all items from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
-                onClick={() => setClearDayTargetId(null)}
+                onClick={() => { setClearConfirm(false); setClearDayTargetId(null); }}
               >
                 Cancel
               </button>
               <button
                 className="btn-confirm-delete"
-                onClick={handleClearDay}
+                onClick={clearConfirm ? handleClearAll : handleClearDay}
               >
-                Yes, clear
+                {clearConfirm ? "Yes, clear all" : "Yes, clear"}
               </button>
             </div>
           </div>
@@ -2727,25 +2731,6 @@ export default function PlansPage() {
           Wait overlay: {selectedResort}{selectedPark && PARK_LABELS[selectedPark] ? ` / ${PARK_LABELS[selectedPark]}` : ""}
         </p>
 
-        {clearConfirm && (
-          <div className="clear-confirm-row">
-            <div className="confirm-row">
-              <span className="confirm-text">Clear all activities?</span>
-              <button
-                className="btn-cancel-delete"
-                onClick={() => setClearConfirm(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn-confirm-delete"
-                onClick={handleClearAll}
-              >
-                Yes, clear all
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Phase 8.2 — Day import error display */}
         {dayImportError && (
