@@ -2705,7 +2705,7 @@ export default function PlansPage() {
             <div className="confirm-row">
               <span className="confirm-text">
                 {clearConfirm
-                  ? `Clear all activities (${items.length} total, ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
+                  ? `Clear all activities (${items.length} total across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
                   : `Clear all activities from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
