@@ -1863,6 +1863,10 @@ export default function PlansPage() {
           .btn-add {
             flex: 0 0 100%;
           }
+          .btn-file-label {
+            flex: 1 1 auto;
+            justify-content: center;
+          }
         }
         .clear-confirm-row {
           margin-bottom: 1rem;
@@ -2118,7 +2122,7 @@ export default function PlansPage() {
           min-height: 0;
           overflow-y: auto;
           -webkit-overflow-scrolling: touch;
-          padding: 0 1.25rem;
+          padding: 0 1.25rem 1.25rem;
           /* scroll-padding keeps the focused input clear of the title bar */
           scroll-padding-top: 0.5rem;
         }
@@ -2165,7 +2169,7 @@ export default function PlansPage() {
           resize: vertical;
           min-height: 160px;
           box-sizing: border-box;
-          line-height: 1.5;
+          line-height: 1.7;
         }
         .form-textarea:focus {
           border-color: #2563eb;
@@ -2697,7 +2701,7 @@ export default function PlansPage() {
             <div className="confirm-row">
               <span className="confirm-text">
                 {clearConfirm
-                  ? "Clear all activities?"
+                  ? `Clear all activities (${items.length} ${items.length === 1 ? "item" : "items"} across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
                   : `Clear all items from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
@@ -3116,7 +3120,7 @@ export default function PlansPage() {
                     En/em dashes are handled automatically.
                     Punctuation-only and time-only lines are skipped.
                   </p>
-                  <p className="form-hint" style={{ marginBottom: "0.4rem" }}>
+                  <p className="form-hint" style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>
                     — or upload a file —
                   </p>
                   {/* Hidden file inputs — each scoped to its own format, triggered by buttons below */}
