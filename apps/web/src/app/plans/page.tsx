@@ -1844,6 +1844,24 @@ export default function PlansPage() {
           opacity: 0.3;
           cursor: not-allowed;
         }
+        @media (max-width: 640px) {
+          .plans-header {
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .plans-header-actions {
+            flex-wrap: wrap;
+          }
+          .btn-clear {
+            flex: 1 1 calc(50% - 0.25rem);
+          }
+          .btn-import {
+            flex: 1 1 calc(33.333% - 0.334rem);
+          }
+          .btn-add {
+            flex: 0 0 100%;
+          }
+        }
         .clear-confirm-row {
           margin-bottom: 1rem;
         }
