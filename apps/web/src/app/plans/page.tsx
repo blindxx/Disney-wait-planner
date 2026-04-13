@@ -26,6 +26,7 @@ import {
   parseDayPlanImportPayload,
   parsePlannerBackupFile,
   type DayExportItem,
+  type LightningBackupItem,
   type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
 import {
@@ -1468,11 +1469,28 @@ export default function PlansPage() {
 
   // Phase 8.2 — Export full planner backup (planner-backup format).
   function handleExportBackup() {
+    // Phase 8.3.2 — include current Lightning items in full backup.
+    let lightningItems: LightningBackupItem[] = [];
+    try {
+      const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      const rawLightning = localStorage.getItem(_lightningKey);
+      if (rawLightning) {
+        const parsed = JSON.parse(rawLightning) as unknown;
+        if (
+          typeof parsed === "object" && parsed !== null &&
+          (parsed as Record<string, unknown>).version === 1 &&
+          Array.isArray((parsed as Record<string, unknown>).items)
+        ) {
+          lightningItems = (parsed as Record<string, unknown>).items as LightningBackupItem[];
+        }
+      }
+    } catch {}
     const payload = buildPlannerBackupPayload({
       days,
       plans: items,
       activeDayId,
       dayMeta,
+      lightning: lightningItems,
     });
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -1749,11 +1767,18 @@ export default function PlansPage() {
     saveActiveDayId(restoredActiveDayId, activeDayKeyRef.current);
     setDayMeta(restoredDayMeta);
     saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
-    // Phase 8.3.2 — Restore replaces the full planner state. Lightning is not in the
-    // backup format; clear it so pre-restore Lightning items don't survive as hidden
-    // data across any day. Restore = full replacement (BUG D fix).
+    // Phase 8.3.2 — Full restore replaces Lightning from backup payload.
+    // data.lightning is present on new backups (fully replaces current state).
+    // data.lightning is absent on old backups — fall back to empty so no
+    // pre-restore items survive as hidden data across any day.
+    const restoredLightningItems: LightningBackupItem[] = (data.lightning ?? []).map((it) => ({
+      ...it,
+      dayId: normalizeDayId(it.dayId),
+    }));
     const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-    try { localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: [] })); } catch {}
+    try {
+      localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
+    } catch {}
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);

@@ -25,6 +25,18 @@ export type DayExportItem = {
   timeLabel: string;
 };
 
+/**
+ * Lightning Lane item shape used inside a full planner backup.
+ * Phase 8.3.2 — added to PlannerBackupPayload.data.lightning.
+ */
+export type LightningBackupItem = {
+  id: string;
+  name: string;
+  startTime: string;
+  endTime: string;
+  dayId: string;
+};
+
 // ===== INTERNAL HELPERS =====
 
 const VALID_DAY_ID_RE = /^day-([1-9]\d*)$/;
@@ -51,6 +63,18 @@ function isDayExportItem(v: unknown): v is DayExportItem {
   );
 }
 
+function isLightningBackupItem(v: unknown): v is LightningBackupItem {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  return (
+    typeof r.id === "string" &&
+    typeof r.name === "string" &&
+    typeof r.startTime === "string" &&
+    typeof r.endTime === "string" &&
+    typeof r.dayId === "string"
+  );
+}
+
 // ===== SYSTEM 1: PLANNER BACKUP / RESTORE =====
 // Payload type: "planner-backup"
 // Contains full planner state: days, plans, activeDayId, and optional dayMeta.
@@ -64,6 +88,9 @@ export type PlannerBackupPayload = {
     plans: PlanItem[];
     activeDayId: string;
     dayMeta?: Record<string, { label?: string; date?: string }>;
+    /** Phase 8.3.2 — Lightning items included in full backup. Optional for back-compat
+     *  with older backups that pre-date Lightning day support. */
+    lightning?: LightningBackupItem[];
   };
 };
 
@@ -73,6 +100,7 @@ export function buildPlannerBackupPayload(state: {
   plans: PlanItem[];
   activeDayId: string;
   dayMeta?: Record<string, { label?: string; date?: string }>;
+  lightning?: LightningBackupItem[];
 }): PlannerBackupPayload {
   return {
     version: 1,
@@ -85,6 +113,8 @@ export function buildPlannerBackupPayload(state: {
       ...(state.dayMeta && Object.keys(state.dayMeta).length > 0
         ? { dayMeta: state.dayMeta }
         : {}),
+      // Always include lightning (even empty array) so restores are unambiguous.
+      lightning: state.lightning ?? [],
     },
   };
 }
@@ -202,6 +232,22 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       }
       if ("date" in e && typeof e.date !== "string") {
         throw new Error(`Invalid backup: dayMeta["${key}"].date must be a string when present.`);
+      }
+    }
+  }
+
+  // lightning is optional (back-compat) — when present, validate item shapes.
+  if ("lightning" in d && d.lightning !== undefined) {
+    if (!Array.isArray(d.lightning)) {
+      throw new Error("Invalid backup: data.lightning must be an array when present.");
+    }
+    for (let i = 0; i < (d.lightning as unknown[]).length; i++) {
+      const item = (d.lightning as unknown[])[i];
+      if (!isLightningBackupItem(item)) {
+        throw new Error(
+          `Invalid backup: lightning item at index ${i} has unexpected shape ` +
+          `(expected {id, name, startTime, endTime, dayId} strings).`
+        );
       }
     }
   }

@@ -381,7 +381,20 @@ export default function LightningPage() {
         if (!localEditRef.current && cloud) {
           // Phase 8.3 — normalize dayIds from cloud items so legacy items
           // (no dayId) are safely migrated to "day-1" on hydration.
-          setItems(migrateLightningDayIds(cloud.items as LightningItem[]));
+          const cloudItems = migrateLightningDayIds(cloud.items as LightningItem[]);
+          setItems(cloudItems);
+          // Phase 8.3.2 — Refresh knownDays after cloud pull so safeActiveDayId
+          // doesn't stay stale on a fresh device where Plans page hasn't yet
+          // written the days list to localStorage. Merge pulled dayIds into the
+          // current known set — new days are added, nothing is removed.
+          if (cloudItems.length > 0) {
+            const pulledIds = [...new Set(cloudItems.map((it) => it.dayId))];
+            setKnownDays((prev) => {
+              const prevSet = new Set(prev);
+              const hasNew = pulledIds.some((id) => !prevSet.has(id));
+              return hasNew ? [...new Set([...prev, ...pulledIds])] : prev;
+            });
+          }
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
         // so sync pushes always include a complete dataset regardless of which page loads first.
