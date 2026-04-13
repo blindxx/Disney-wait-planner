@@ -1844,7 +1844,32 @@ export default function PlansPage() {
           opacity: 0.3;
           cursor: not-allowed;
         }
+        @media (max-width: 640px) {
+          .plans-header {
+            flex-direction: column;
+            align-items: stretch;
+          }
+          .plans-header-actions {
+            flex-wrap: wrap;
+            gap: 0.625rem 0.5rem;
+            margin-top: 0.25rem;
+          }
+          .btn-clear {
+            flex: 1 1 calc(50% - 0.25rem);
+          }
+          .btn-import {
+            flex: 1 1 calc(33.333% - 0.334rem);
+          }
+          .btn-add {
+            flex: 0 0 100%;
+          }
+          .btn-file-label {
+            flex: 1 1 auto;
+            justify-content: center;
+          }
+        }
         .clear-confirm-row {
+          margin-top: 0.75rem;
           margin-bottom: 1rem;
         }
         .sort-toggle-row {
@@ -2011,7 +2036,7 @@ export default function PlansPage() {
         .confirm-row {
           display: flex;
           align-items: center;
-          gap: 0.5rem;
+          gap: 0.75rem;
           margin-top: 0.5rem;
           padding: 0.5rem 0.75rem;
           background-color: #fef2f2;
@@ -2098,7 +2123,7 @@ export default function PlansPage() {
           min-height: 0;
           overflow-y: auto;
           -webkit-overflow-scrolling: touch;
-          padding: 0 1.25rem;
+          padding: 0 1.25rem 1.25rem;
           /* scroll-padding keeps the focused input clear of the title bar */
           scroll-padding-top: 0.5rem;
         }
@@ -2145,7 +2170,10 @@ export default function PlansPage() {
           resize: vertical;
           min-height: 160px;
           box-sizing: border-box;
-          line-height: 1.5;
+          line-height: 1.7;
+        }
+        .form-textarea::placeholder {
+          opacity: 0.6;
         }
         .form-textarea:focus {
           border-color: #2563eb;
@@ -2671,22 +2699,24 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.1 — Clear day confirmation (targets clearDayTargetId, not activeDayId) */}
-        {clearDayTargetId !== null && (
-          <div className="day-clear-confirm-row">
+        {/* Phase 8.2.1 — Unified destructive confirmation: same stable location for Clear all & Clear day */}
+        {(clearConfirm || clearDayTargetId !== null) && (
+          <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Clear all items from {dayDisplayLabel(clearDayTargetId, dayMeta)}?
+                {clearConfirm
+                  ? `Clear all activities (${items.length} total across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
+                  : `Clear all activities from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
-                onClick={() => setClearDayTargetId(null)}
+                onClick={() => { setClearConfirm(false); setClearDayTargetId(null); }}
               >
                 Cancel
               </button>
               <button
                 className="btn-confirm-delete"
-                onClick={handleClearDay}
+                onClick={clearConfirm ? handleClearAll : handleClearDay}
               >
                 Yes, clear
               </button>
@@ -2709,25 +2739,6 @@ export default function PlansPage() {
           Wait overlay: {selectedResort}{selectedPark && PARK_LABELS[selectedPark] ? ` / ${PARK_LABELS[selectedPark]}` : ""}
         </p>
 
-        {clearConfirm && (
-          <div className="clear-confirm-row">
-            <div className="confirm-row">
-              <span className="confirm-text">Clear all activities?</span>
-              <button
-                className="btn-cancel-delete"
-                onClick={() => setClearConfirm(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn-confirm-delete"
-                onClick={handleClearAll}
-              >
-                Yes, clear all
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Phase 8.2 — Day import error display */}
         {dayImportError && (
@@ -3113,7 +3124,7 @@ export default function PlansPage() {
                     En/em dashes are handled automatically.
                     Punctuation-only and time-only lines are skipped.
                   </p>
-                  <p className="form-hint" style={{ marginBottom: "0.4rem" }}>
+                  <p className="form-hint" style={{ marginTop: "1rem", marginBottom: "0.5rem" }}>
                     — or upload a file —
                   </p>
                   {/* Hidden file inputs — each scoped to its own format, triggered by buttons below */}
