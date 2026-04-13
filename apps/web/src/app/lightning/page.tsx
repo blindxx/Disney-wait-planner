@@ -463,11 +463,20 @@ export default function LightningPage() {
     [waitMap]
   );
 
+  // Phase 8.3.1 — Safe fallback: if activeDayId has no matching items, use the
+  // first item's dayId so the page never renders empty when items exist.
+  // This is a render-time guard only — nothing is persisted or globally mutated.
+  const safeActiveDayId = useMemo(() => {
+    if (items.some((it) => it.dayId === activeDayId)) return activeDayId;
+    if (items.length > 0) return items[0].dayId;
+    return "day-1";
+  }, [items, activeDayId]);
+
   // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
   // All items are stored together; this view is scoped to the current day.
   const displayedItems = useMemo(
-    () => items.filter((it) => it.dayId === activeDayId),
-    [items, activeDayId]
+    () => items.filter((it) => it.dayId === safeActiveDayId),
+    [items, safeActiveDayId]
   );
 
   // Compute time conflict sets from current day's items only (Phase 8.3),
