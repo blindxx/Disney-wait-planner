@@ -1143,13 +1143,17 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
-  // Phase 8.4.1 — Sync selectedPark to the active day's resolved park whenever
-  // the active day changes (or on first initialization).
-  // Priority: (1) per-day override, (2) inferred from day's items, (3) current selectedPark.
-  // This keeps selectedPark, the park tab highlight, and the scope label consistent.
-  // Dependencies intentionally limited to activeDayId / initialized / ready — the
-  // closure captures the latest dayParks/items/selectedResort/selectedPark values
-  // from the render that triggered the dep change, so the resolution is always fresh.
+  // Phase 8.4.1 — Sync selectedPark to the active day's resolved park.
+  // Re-runs whenever any input to resolveDayPark(activeDayId) changes:
+  //   activeDayId   — day switch
+  //   dayParks      — override set/cleared for any day
+  //   items         — plans added/edited/deleted/imported/restored
+  //   selectedResort — resort changed (affects valid parks + inference)
+  //   initialized / ready — hydration gates
+  // selectedPark is intentionally omitted: it is only the last-resort fallback
+  // inside the body, and including it would cause a write→re-run cycle on every
+  // sync. React bails out (no re-render) when setSelectedPark receives the same
+  // string value, so spurious runs on unrelated items/dayParks changes are free.
   useEffect(() => {
     if (!initialized || !ready) return;
     const override = dayParks[activeDayId];
@@ -1163,7 +1167,7 @@ export default function PlansPage() {
     setSelectedPark(resolved);
     try { localStorage.setItem(parkKeyRef.current, resolved); } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDayId, initialized, ready]);
+  }, [activeDayId, dayParks, items, selectedResort, initialized, ready]);
 
   // Phase 8.0 — create the next sequential day and switch to it.
   // Computes directly from current rendered days state; no functional updater
