@@ -498,17 +498,6 @@ const DAY_PARK_SHORT: Record<string, string> = {
   ak: "AK",
 };
 
-/** Options for the per-day park override selector. Empty string = Auto (inferred). */
-const DAY_PARK_OPTIONS: { value: string; label: string }[] = [
-  { value: "",          label: "Auto" },
-  { value: "mk",        label: "Magic Kingdom" },
-  { value: "epcot",     label: "EPCOT" },
-  { value: "hs",        label: "Hollywood Studios" },
-  { value: "ak",        label: "Animal Kingdom" },
-  { value: "disneyland", label: "Disneyland" },
-  { value: "dca",       label: "California Adventure" },
-];
-
 /**
  * Normalized attraction name → parkId lookup maps, built once at module load
  * from mock data. Used by inferDayPark to count park frequencies per day.
@@ -1154,6 +1143,28 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
+  // Phase 8.4.1 — Sync selectedPark to the active day's resolved park whenever
+  // the active day changes (or on first initialization).
+  // Priority: (1) per-day override, (2) inferred from day's items, (3) current selectedPark.
+  // This keeps selectedPark, the park tab highlight, and the scope label consistent.
+  // Dependencies intentionally limited to activeDayId / initialized / ready — the
+  // closure captures the latest dayParks/items/selectedResort/selectedPark values
+  // from the render that triggered the dep change, so the resolution is always fresh.
+  useEffect(() => {
+    if (!initialized || !ready) return;
+    const override = dayParks[activeDayId];
+    let resolved: ParkId;
+    if (override && PARK_TO_RESORT[override] === selectedResort) {
+      resolved = override as ParkId;
+    } else {
+      const dayItems = items.filter((it) => it.dayId === activeDayId);
+      resolved = (inferDayPark(dayItems, selectedResort) ?? selectedPark ?? RESORT_PARKS[selectedResort][0]) as ParkId;
+    }
+    setSelectedPark(resolved);
+    try { localStorage.setItem(parkKeyRef.current, resolved); } catch {}
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDayId, initialized, ready]);
+
   // Phase 8.0 — create the next sequential day and switch to it.
   // Computes directly from current rendered days state; no functional updater
   // captures, no side effects inside updater callbacks.
@@ -1196,19 +1207,31 @@ export default function PlansPage() {
     return (selectedPark ?? RESORT_PARKS[selectedResort][0]) as ParkId;
   }
 
-  // Phase 8.4 — set or clear the explicit park override for a given day.
+  // Phase 8.4 / 8.4.1 — set or clear the explicit park override for the active day.
+  // Validates that the chosen park belongs to the current resort before persisting.
+  // Also syncs selectedPark immediately so the UI stays consistent.
   function handleSetDayPark(dayId: string, parkId: string) {
+    // Phase 8.4.1 — reject cross-resort park IDs silently
+    if (parkId && PARK_TO_RESORT[parkId] !== selectedResort) return;
     const _profileId = getActiveProfileId();
     const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     const next = { ...dayParks };
-    if (parkId && parkId in PARK_TO_RESORT) {
+    if (parkId) {
       next[dayId] = parkId;
     } else {
       delete next[dayId]; // "" = Auto: remove override
     }
     setDayParks(next);
     saveDayParks(next, _dayParksKey);
+    // Phase 8.4.1 — sync selectedPark to the resolved park for this day.
+    // If parkId is set (manual), use it directly. If Auto (""), re-infer.
+    const resolvedId = parkId
+      || inferDayPark(items.filter((it) => it.dayId === dayId), selectedResort)
+      || (selectedPark ?? RESORT_PARKS[selectedResort][0]);
+    const resolved = resolvedId as ParkId;
+    setSelectedPark(resolved);
+    try { localStorage.setItem(parkKeyRef.current, resolved); } catch {}
   }
 
   // Phase 8.1 — open the edit-day label/date modal for a specific day.
@@ -2633,48 +2656,39 @@ export default function PlansPage() {
            overflow:hidden clips the default browser outline, so we use
            outline-offset:-2px to draw the indicator inside the element.
            :focus-visible only fires for keyboard navigation, never mouse. */
-        .day-pill button:focus-visible,
-        .day-pill select:focus-visible {
+        .day-pill button:focus-visible {
           outline: 2px solid #2563eb;
           outline-offset: -2px;
         }
-        .day-pill-active button:focus-visible,
-        .day-pill-active select:focus-visible {
+        .day-pill-active button:focus-visible {
           outline-color: #fff;
         }
-        /* Phase 8.4 — park indicator badge inside the day select button */
-        .day-park-tag {
-          font-size: 0.65rem;
-          font-weight: 500;
-          margin-left: 0.3rem;
-          opacity: 0.72;
-          letter-spacing: 0.01em;
+        /* Phase 8.4.1 — day park control on the sort-toggle row */
+        .sort-toggle-row {
+          justify-content: space-between;
         }
-        /* Phase 8.4 — per-day park override select in the day pill */
-        .btn-day-park-select {
-          background-color: #f9fafb;
-          color: #6b7280;
-          border: none;
-          font-size: 0.7rem;
-          font-weight: 500;
-          padding: 0 0.3rem;
-          cursor: pointer;
-          min-height: 36px;
-          max-width: 64px;
-          overflow: hidden;
-          transition: background-color 0.15s ease, color 0.15s ease;
-        }
-        .day-pill-active .btn-day-park-select {
-          background-color: #2563eb;
-          color: rgba(255, 255, 255, 0.75);
-        }
-        .btn-day-park-select:hover {
-          background-color: #e5e7eb;
+        .day-park-row-label {
+          display: flex;
+          align-items: center;
+          gap: 0.35rem;
+          font-size: 0.8rem;
           color: #374151;
+          white-space: nowrap;
+          flex-shrink: 0;
         }
-        .day-pill-active .btn-day-park-select:hover {
-          background-color: #1d4ed8;
-          color: #fff;
+        .day-park-row-select {
+          border: 1px solid #d1d5db;
+          border-radius: 6px;
+          background: #fff;
+          color: #374151;
+          font-size: 0.8rem;
+          padding: 0.25rem 0.4rem;
+          cursor: pointer;
+          min-height: 32px;
+        }
+        .day-park-row-select:focus {
+          outline: 2px solid #2563eb;
+          outline-offset: -1px;
         }
         .day-remove-confirm-row {
           margin-bottom: 1rem;
@@ -2847,27 +2861,7 @@ export default function PlansPage() {
                   {count > 0 && (
                     <span className="day-count">({count})</span>
                   )}
-                  {/* Phase 8.4 — park indicator badge */}
-                  {ready && (
-                    <span className="day-park-tag">
-                      [{DAY_PARK_SHORT[resolveDayPark(dayId)] ?? resolveDayPark(dayId).toUpperCase()}]
-                    </span>
-                  )}
                 </button>
-                <div className="day-pill-divider" aria-hidden="true" />
-                {/* Phase 8.4 — per-day park override selector */}
-                <select
-                  className="btn-day-park-select"
-                  value={dayParks[dayId] ?? ""}
-                  onChange={(e) => handleSetDayPark(dayId, e.target.value)}
-                  title="Park for this day (Auto = infer from rides)"
-                  onClick={(e) => e.stopPropagation()}
-                  aria-label={`Park override for ${label}`}
-                >
-                  {DAY_PARK_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
                 <div className="day-pill-divider" aria-hidden="true" />
                 {/* Edit label/date */}
                 <button
@@ -2980,6 +2974,23 @@ export default function PlansPage() {
             />
             Auto-sort by time
           </label>
+          {/* Phase 8.4.1 — per-day park dropdown (active day only, resort-filtered) */}
+          {ready && (
+            <label className="day-park-row-label">
+              Day park:
+              <select
+                className="day-park-row-select"
+                value={dayParks[activeDayId] ?? ""}
+                onChange={(e) => handleSetDayPark(activeDayId, e.target.value)}
+                aria-label="Park for active day"
+              >
+                <option value="">Auto</option>
+                {RESORT_PARKS[selectedResort].map((p) => (
+                  <option key={p} value={p}>{PARK_LABELS[p]}</option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
 
         <p className="wait-scope-label">
