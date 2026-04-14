@@ -16,7 +16,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId } from "@/lib/profileStorage";
+import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
@@ -62,12 +62,70 @@ type LightningItem = {
   name: string;
   startTime: string; // internal "H:MM" 24h format
   endTime: string;   // internal "H:MM" 24h format, or "" if no end time
+  dayId: string;     // Phase 8.3 — canonical "day-1", "day-2", etc.
 };
 
 type StoredSchema = {
   version: 1;
   items: LightningItem[];
 };
+
+// ===== DAY NORMALIZATION (Phase 8.3) =====
+
+// Canonical format: 1-based, no leading zeros — "day-1", "day-2", "day-10".
+const VALID_DAY_ID_RE = /^day-([1-9]\d*)$/;
+
+/**
+ * Normalize any raw value to a canonical day ID.
+ * Non-string, empty, whitespace-only, or malformed → "day-1".
+ */
+function normalizeDayId(raw: unknown): string {
+  if (typeof raw !== "string") return "day-1";
+  const trimmed = raw.trim();
+  return VALID_DAY_ID_RE.test(trimmed) ? trimmed : "day-1";
+}
+
+/**
+ * Normalize dayId on every Lightning item (idempotent).
+ * Handles missing, empty, or non-string dayId values.
+ * Returns the same array reference when no normalization is needed.
+ */
+function migrateLightningDayIds(items: LightningItem[]): LightningItem[] {
+  const needsMigration = items.some(
+    (it) => normalizeDayId(it.dayId as unknown) !== it.dayId
+  );
+  if (!needsMigration) return items;
+  return items.map((it) => ({
+    ...it,
+    dayId: normalizeDayId(it.dayId as unknown),
+  }));
+}
+
+// ===== DAY LIST LOADER (Phase 8.3.2) =====
+
+/**
+ * Load the planner day list from profile storage (read-only).
+ * Always guarantees "day-1" as the baseline.
+ * Used by safeActiveDayId to validate the active day against the known planner model.
+ */
+function loadKnownDays(key: string): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return ["day-1"];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return ["day-1"];
+    const seen = new Set<string>();
+    const valid: string[] = [];
+    for (const d of parsed as unknown[]) {
+      const id = normalizeDayId(d);
+      if (!seen.has(id)) { seen.add(id); valid.push(id); }
+    }
+    if (!seen.has("day-1")) valid.unshift("day-1");
+    return valid;
+  } catch {
+    return ["day-1"];
+  }
+}
 
 // ===== STORAGE =====
 
@@ -85,7 +143,9 @@ function loadFromStorage(key: string = STORAGE_KEY): LightningItem[] {
       (parsed as StoredSchema).version === 1 &&
       Array.isArray((parsed as StoredSchema).items)
     ) {
-      return (parsed as StoredSchema).items;
+      // Phase 8.3 — normalize dayId on every loaded item (handles legacy items with
+      // no dayId, invalid dayId, or non-string dayId — all normalize to "day-1").
+      return migrateLightningDayIds((parsed as StoredSchema).items as LightningItem[]);
     }
     // Wrong version or corrupt structure — clear and start fresh
     localStorage.removeItem(key);
@@ -216,6 +276,14 @@ export default function LightningPage() {
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   // Stable ref to the active profile id — used by sync effects.
   const activeProfileIdRef = useRef("default");
+  // Phase 8.3 — per-profile activeDayId key (read-only; Plans page owns writes).
+  const activeDayKeyRef = useRef("dwp:default:activeDayId");
+  // Phase 8.3 — active day for filtering; read from localStorage on mount.
+  const [activeDayId, setActiveDayId] = useState<string>("day-1");
+  // Phase 8.3.2 — per-profile days key (read-only; Plans page owns writes).
+  const daysKeyRef = useRef("dwp:default:days");
+  // Phase 8.3.2 — known planner days for safe display-day validation.
+  const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
   // Tracks whether the user made a local edit after the current pull started.
   const localEditRef = useRef(false);
 
@@ -254,6 +322,14 @@ export default function LightningPage() {
     setActiveProfileName(getActiveProfile().name);
     const currentProfileId = getActiveProfileId();
     activeProfileIdRef.current = currentProfileId;
+    // Phase 8.3 — set per-profile activeDayId key (read-only; Plans page owns writes).
+    activeDayKeyRef.current = buildNamespacedKey(currentProfileId, "activeDayId");
+    // Phase 8.3 — load the active day so Lightning reflects the current day.
+    // normalizeDayId handles null (no stored value) → "day-1".
+    setActiveDayId(normalizeDayId(localStorage.getItem(activeDayKeyRef.current)));
+    // Phase 8.3.2 — load known planner days for safe display-day validation.
+    daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
+    setKnownDays(loadKnownDays(daysKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
     setItems(loadFromStorage(lightningKeyRef.current));
@@ -303,7 +379,22 @@ export default function LightningPage() {
         // Only apply cloud lightning data if no local edits occurred while
         // the pull was in flight. Either way, open the sync gate.
         if (!localEditRef.current && cloud) {
-          setItems(cloud.items as LightningItem[]);
+          // Phase 8.3 — normalize dayIds from cloud items so legacy items
+          // (no dayId) are safely migrated to "day-1" on hydration.
+          const cloudItems = migrateLightningDayIds(cloud.items as LightningItem[]);
+          setItems(cloudItems);
+          // Phase 8.3.2 — Refresh knownDays after cloud pull so safeActiveDayId
+          // doesn't stay stale on a fresh device where Plans page hasn't yet
+          // written the days list to localStorage. Merge pulled dayIds into the
+          // current known set — new days are added, nothing is removed.
+          if (cloudItems.length > 0) {
+            const pulledIds = [...new Set(cloudItems.map((it) => it.dayId))];
+            setKnownDays((prev) => {
+              const prevSet = new Set(prev);
+              const hasNew = pulledIds.some((id) => !prevSet.has(id));
+              return hasNew ? [...new Set([...prev, ...pulledIds])] : prev;
+            });
+          }
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
         // so sync pushes always include a complete dataset regardless of which page loads first.
@@ -418,10 +509,29 @@ export default function LightningPage() {
     [waitMap]
   );
 
-  // Compute time conflict sets from current items, substituting live edit values
-  // for the item currently being edited so warnings update on every keystroke.
+  // Phase 8.3.2 — Safe display-day resolution using the known planner day model (BUG A fix).
+  // Rule: if activeDayId is a valid known planner day, use it exactly — even when zero
+  // Lightning items exist for that day. A blank valid day must stay blank.
+  // Fallback (stale/invalid activeDayId only): show first Lightning-populated day if
+  // one exists; otherwise "day-1". Nothing is persisted or globally mutated here.
+  const safeActiveDayId = useMemo(() => {
+    if (knownDays.includes(activeDayId)) return activeDayId;
+    if (items.length > 0) return items[0].dayId;
+    return "day-1";
+  }, [activeDayId, knownDays, items]);
+
+  // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
+  // All items are stored together; this view is scoped to the current day.
+  const displayedItems = useMemo(
+    () => items.filter((it) => it.dayId === safeActiveDayId),
+    [items, safeActiveDayId]
+  );
+
+  // Compute time conflict sets from current day's items only (Phase 8.3),
+  // substituting live edit values for the item currently being edited
+  // so warnings update on every keystroke.
   const { invalidIds: llInvalidIds, overlapCountById: llOverlapCountById } = useMemo(() => {
-    const conflictInput = items.map((item) => {
+    const conflictInput = displayedItems.map((item) => {
       if (item.id === editingId) {
         // Use live editing values when valid; fall back to stored values otherwise.
         const liveStart = normalizeTimeInput(editingStart) || item.startTime;
@@ -442,7 +552,7 @@ export default function LightningPage() {
       invalidIds: new Set(invalidRanges),
       overlapCountById,
     };
-  }, [items, editingId, editingStart, editingEnd]);
+  }, [displayedItems, editingId, editingStart, editingEnd]);
 
   function handleStartEdit(item: LightningItem) {
     setEditingId(item.id);
@@ -521,6 +631,7 @@ export default function LightningPage() {
       name: rideName.trim(),
       startTime: s,
       endTime: e,
+      dayId: safeActiveDayId, // Phase 8.3.2 — creation day === displayed day (BUG B fix)
     };
 
     setItems((prev) => [...prev, newItem]);
@@ -707,7 +818,7 @@ export default function LightningPage() {
       </p>
 
       {/* ── Reservation List ── */}
-      {!loaded ? null : items.length === 0 ? (
+      {!loaded ? null : displayedItems.length === 0 ? (
         <p
           style={{
             color: "#9ca3af",
@@ -720,7 +831,7 @@ export default function LightningPage() {
         </p>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-          {sortedItems(items, now).map((item) => {
+          {sortedItems(displayedItems, now).map((item) => {
             const bucket = getBucket(item, now);
             const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
             const waitEntry = lookupWait(item.name, waitMap, aliases);
