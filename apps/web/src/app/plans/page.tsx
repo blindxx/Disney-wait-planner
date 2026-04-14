@@ -1143,31 +1143,43 @@ export default function PlansPage() {
     return cleanup;
   }, [syncReady, sessionStatus]);
 
-  // Phase 8.4.1 — Sync selectedPark to the active day's resolved park.
-  // Re-runs whenever any input to resolveDayPark(activeDayId) changes:
-  //   activeDayId   — day switch
-  //   dayParks      — override set/cleared for any day
-  //   items         — plans added/edited/deleted/imported/restored
-  //   selectedResort — resort changed (affects valid parks + inference)
+  // Phase 8.4.2 — Sync selectedPark AND selectedResort to the active day's context.
+  // Re-runs when any input that determines the day's park/resort changes:
+  //   activeDayId  — day switch
+  //   dayParks     — override set/cleared for any day
+  //   items        — plans added/edited/deleted/imported/restored
   //   initialized / ready — hydration gates
-  // selectedPark is intentionally omitted: it is only the last-resort fallback
-  // inside the body, and including it would cause a write→re-run cycle on every
-  // sync. React bails out (no re-render) when setSelectedPark receives the same
-  // string value, so spurious runs on unrelated items/dayParks changes are free.
+  // selectedResort and selectedPark are intentionally omitted from deps:
+  //   both are written by this effect; including them would create a
+  //   write→re-run cycle. React bails out on same-value setState so spurious
+  //   re-runs from unchanged inputs are free, but the dep omission avoids
+  //   the extra render entirely.
   useEffect(() => {
     if (!initialized || !ready) return;
     const override = dayParks[activeDayId];
-    let resolved: ParkId;
-    if (override && PARK_TO_RESORT[override] === selectedResort) {
-      resolved = override as ParkId;
+    if (override && override in PARK_TO_RESORT) {
+      // Manual override — sync both park and resort to match the override.
+      const overrideResort = PARK_TO_RESORT[override] as ResortId;
+      setSelectedResort(overrideResort);
+      try { localStorage.setItem(resortKeyRef.current, overrideResort); } catch {}
+      setSelectedPark(override as ParkId);
+      try { localStorage.setItem(parkKeyRef.current, override); } catch {}
     } else {
+      // Auto — use inferPlansContext (resort-agnostic) so cross-resort days work.
       const dayItems = items.filter((it) => it.dayId === activeDayId);
-      resolved = (inferDayPark(dayItems, selectedResort) ?? selectedPark ?? RESORT_PARKS[selectedResort][0]) as ParkId;
+      const inferred = inferPlansContext(dayItems);
+      if (inferred.resort) {
+        const inferredResort = inferred.resort;
+        const inferredPark = (inferred.park ?? RESORT_PARKS[inferredResort][0]) as ParkId;
+        setSelectedResort(inferredResort);
+        try { localStorage.setItem(resortKeyRef.current, inferredResort); } catch {}
+        setSelectedPark(inferredPark);
+        try { localStorage.setItem(parkKeyRef.current, inferredPark); } catch {}
+      }
+      // Inference failed — no known attractions in this day; resort/park unchanged.
     }
-    setSelectedPark(resolved);
-    try { localStorage.setItem(parkKeyRef.current, resolved); } catch {}
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDayId, dayParks, items, selectedResort, initialized, ready]);
+  }, [activeDayId, dayParks, items, initialized, ready]);
 
   // Phase 8.0 — create the next sequential day and switch to it.
   // Computes directly from current rendered days state; no functional updater
@@ -1211,12 +1223,12 @@ export default function PlansPage() {
     return (selectedPark ?? RESORT_PARKS[selectedResort][0]) as ParkId;
   }
 
-  // Phase 8.4 / 8.4.1 — set or clear the explicit park override for the active day.
-  // Validates that the chosen park belongs to the current resort before persisting.
-  // Also syncs selectedPark immediately so the UI stays consistent.
+  // Phase 8.4.2 — set or clear the explicit park override for the active day.
+  // Accepts any valid parkId from either resort (cross-resort allowed).
+  // Syncs both selectedPark and selectedResort immediately for instant UI feedback.
   function handleSetDayPark(dayId: string, parkId: string) {
-    // Phase 8.4.1 — reject cross-resort park IDs silently
-    if (parkId && PARK_TO_RESORT[parkId] !== selectedResort) return;
+    // Reject unknown park IDs silently; empty string ("") = Auto (clear override).
+    if (parkId && !(parkId in PARK_TO_RESORT)) return;
     const _profileId = getActiveProfileId();
     const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
@@ -1228,14 +1240,26 @@ export default function PlansPage() {
     }
     setDayParks(next);
     saveDayParks(next, _dayParksKey);
-    // Phase 8.4.1 — sync selectedPark to the resolved park for this day.
-    // If parkId is set (manual), use it directly. If Auto (""), re-infer.
-    const resolvedId = parkId
-      || inferDayPark(items.filter((it) => it.dayId === dayId), selectedResort)
-      || (selectedPark ?? RESORT_PARKS[selectedResort][0]);
-    const resolved = resolvedId as ParkId;
-    setSelectedPark(resolved);
-    try { localStorage.setItem(parkKeyRef.current, resolved); } catch {}
+    if (parkId) {
+      // Manual — sync both park and resort from the chosen park.
+      const manualResort = PARK_TO_RESORT[parkId] as ResortId;
+      setSelectedResort(manualResort);
+      try { localStorage.setItem(resortKeyRef.current, manualResort); } catch {}
+      setSelectedPark(parkId as ParkId);
+      try { localStorage.setItem(parkKeyRef.current, parkId); } catch {}
+    } else {
+      // Auto — re-infer resort+park from this day's plans (resort-agnostic).
+      const inferred = inferPlansContext(items.filter((it) => it.dayId === dayId));
+      if (inferred.resort) {
+        const inferredResort = inferred.resort;
+        const inferredPark = (inferred.park ?? RESORT_PARKS[inferredResort][0]) as ParkId;
+        setSelectedResort(inferredResort);
+        try { localStorage.setItem(resortKeyRef.current, inferredResort); } catch {}
+        setSelectedPark(inferredPark);
+        try { localStorage.setItem(parkKeyRef.current, inferredPark); } catch {}
+      }
+      // Inference failed — resort/park unchanged.
+    }
   }
 
   // Phase 8.1 — open the edit-day label/date modal for a specific day.
@@ -2694,6 +2718,11 @@ export default function PlansPage() {
           outline: 2px solid #2563eb;
           outline-offset: -1px;
         }
+        .day-park-hint {
+          font-size: 0.75rem;
+          color: #6b7280;
+          margin: 0.2rem 0 0.5rem;
+        }
         .day-remove-confirm-row {
           margin-bottom: 1rem;
         }
@@ -2812,10 +2841,7 @@ export default function PlansPage() {
               <button
                 key={parkId}
                 className="plans-park-tab"
-                onClick={() => {
-                  setSelectedPark(parkId);
-                  try { localStorage.setItem(parkKeyRef.current, parkId); } catch {}
-                }}
+                onClick={() => handleSetDayPark(activeDayId, parkId)}
                 style={{
                   backgroundColor: resolveDayPark(activeDayId) === parkId ? "#1e3a5f" : "#f9fafb",
                   color: resolveDayPark(activeDayId) === parkId ? "#fff" : "#374151",
@@ -2996,6 +3022,9 @@ export default function PlansPage() {
             </label>
           )}
         </div>
+        {ready && (
+          <p className="day-park-hint">Auto = infer from plans. Selecting a park overrides this day.</p>
+        )}
 
         <p className="wait-scope-label">
           Wait overlay: {selectedResort}{ready ? ` / ${PARK_LABELS[resolveDayPark(activeDayId)] ?? resolveDayPark(activeDayId)}` : ""}
