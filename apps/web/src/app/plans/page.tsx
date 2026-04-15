@@ -1697,7 +1697,14 @@ export default function PlansPage() {
       dayMeta,
       lightning: lightningItems,
     });
-    const json = JSON.stringify(payload, null, 2);
+    // Phase 8.4.2 — include dayParks in backup so manual per-day park state
+    // round-trips correctly. We extend the payload data object directly
+    // (type cast) to preserve schema compatibility without touching plansTransfer.
+    const payloadWithDayParks = {
+      ...payload,
+      data: { ...payload.data, ...(Object.keys(dayParks).length > 0 ? { dayParks } : {}) },
+    };
+    const json = JSON.stringify(payloadWithDayParks, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -1995,9 +2002,20 @@ export default function PlansPage() {
     setDeleteConfirmId(null);
     setPendingDayImportItems(null);
     setDayImportError("");
-    // Phase 8.4 — clear day park overrides on restore (not stored in backup format)
-    setDayParks({});
-    saveDayParks({}, dayParksKeyRef.current);
+    // Phase 8.4.2 — restore dayParks from backup when present; fall back to {}
+    // for older backups that pre-date this field. Validate each entry before
+    // applying so a malformed backup cannot inject invalid park state.
+    const rawData = restoreConfirmPayload.data as Record<string, unknown>;
+    const restoredDayParks: Record<string, string> = {};
+    if (typeof rawData.dayParks === "object" && rawData.dayParks !== null && !Array.isArray(rawData.dayParks)) {
+      for (const [k, v] of Object.entries(rawData.dayParks as Record<string, unknown>)) {
+        if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT && restoredDaysSet.has(k)) {
+          restoredDayParks[k] = v;
+        }
+      }
+    }
+    setDayParks(restoredDayParks);
+    saveDayParks(restoredDayParks, dayParksKeyRef.current);
   }
 
   return (
