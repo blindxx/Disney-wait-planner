@@ -3041,7 +3041,7 @@ export default function PlansPage() {
           )}
         </div>
         {ready && (
-          <p className="day-park-hint">Auto = infer from plans. Selecting a park overrides this day.</p>
+          <p className="day-park-hint">Auto: uses your plans to pick a park. Selecting a park overrides this day.</p>
         )}
 
         <p className="wait-scope-label">
