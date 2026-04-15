@@ -691,10 +691,6 @@ export default function PlansPage() {
   // Phase 8.4 — per-day park overrides and per-profile storage key
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
-  // Phase 8.4.2 — tracks which dayId the user last manually clicked a resort tab on.
-  // When set and equal to activeDayId, the Auto sync path will not overwrite the user's
-  // explicit resort choice with inference. Cleared automatically on day switch.
-  const manualResortDayRef = useRef<string | null>(null);
   // Phase 8.1 — day control UI state
   // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
   const [removeConfirmDayId, setRemoveConfirmDayId] = useState<string | null>(null);
@@ -1160,12 +1156,6 @@ export default function PlansPage() {
   //   the extra render entirely.
   useEffect(() => {
     if (!initialized || !ready) return;
-    // Day switch: clear the same-day manual resort lock so the newly active day
-    // can own context. When activeDayId changes, the lock belongs to a different
-    // day and must not carry over.
-    if (manualResortDayRef.current !== null && manualResortDayRef.current !== activeDayId) {
-      manualResortDayRef.current = null;
-    }
     const override = dayParks[activeDayId];
     if (override && override in PARK_TO_RESORT) {
       // Manual override — sync both park and resort to match the override.
@@ -1175,11 +1165,7 @@ export default function PlansPage() {
       setSelectedPark(override as ParkId);
       try { localStorage.setItem(parkKeyRef.current, override); } catch {}
     } else {
-      // Auto path.
-      // If the user manually clicked a resort tab on this same active day, respect
-      // that choice — do not let inference overwrite it on subsequent items changes.
-      if (manualResortDayRef.current === activeDayId) return;
-      // Use inferPlansContext (resort-agnostic) so cross-resort days work.
+      // Auto — use inferPlansContext (resort-agnostic) so cross-resort days work.
       const dayItems = items.filter((it) => it.dayId === activeDayId);
       const inferred = inferPlansContext(dayItems);
       if (inferred.resort) {
@@ -2841,14 +2827,11 @@ export default function PlansPage() {
                 key={resortId}
                 className="plans-resort-tab"
                 onClick={() => {
-                  // Phase 8.4.2 — record same-day manual resort intent so the
-                  // Auto sync effect does not snap back on the next items change.
-                  manualResortDayRef.current = activeDayId;
-                  setSelectedResort(resortId);
-                  const firstPark = RESORT_PARKS[resortId][0];
-                  setSelectedPark(firstPark); // reset to first park of new resort
-                  try { localStorage.setItem(resortKeyRef.current, resortId); } catch {}
-                  try { localStorage.setItem(parkKeyRef.current, firstPark); } catch {}
+                  // Phase 8.4.2.1 — resort tab clicks are day-editing actions:
+                  // convert the active day to a manual override using the resort's
+                  // default park (DLR → disneyland, WDW → mk). This routes through
+                  // the same handler as dropdown and park buttons.
+                  handleSetDayPark(activeDayId, RESORT_PARKS[resortId][0]);
                 }}
                 style={{
                   backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
