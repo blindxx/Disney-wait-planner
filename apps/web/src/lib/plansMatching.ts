@@ -418,9 +418,17 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   // WDW
   { input: "everest",                resort: "WDW", expectedKey: "expedition everest" },
   { input: "expedition",             resort: "WDW", expectedKey: "expedition everest" },
-  { input: "rock n roller",          resort: "WDW", expectedKey: "rock n roller coaster starring aerosmith" },
-  { input: "rock and roller",        resort: "WDW", expectedKey: "rock n roller coaster starring aerosmith" },
-  { input: "aerosmith",              resort: "WDW", expectedKey: "rock n roller coaster starring aerosmith" },
+  { input: "rock n roller",                              resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "rock and roller",                           resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "aerosmith",                                 resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  // Legacy Aerosmith full name (with and without apostrophe) → new canonical
+  { input: "rock n roller coaster starring aerosmith",  resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "rock 'n' roller coaster starring aerosmith", resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  // New Muppets name — falls through alias stage to stage-1 key pass-through
+  { input: "rock n roller coaster starring the muppets", resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  // New shorthands
+  { input: "muppets",                                   resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "rockin roller coaster",                     resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
   { input: "tower of terror",        resort: "WDW", expectedKey: "the twilight zone tower of terror" },
   { input: "The Twilight Zone Tower of Terror", resort: "WDW", expectedKey: "the twilight zone tower of terror" },
   { input: "the haunted mansion",    resort: "WDW", expectedKey: "the haunted mansion" }, // exact match in waitMap
