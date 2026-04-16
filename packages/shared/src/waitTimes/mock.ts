@@ -714,7 +714,7 @@ const HS_RIDES: RideDef[] = [
   // ---- Sunset Boulevard ----
   {
     id: "hs-rock-n-roller-coaster",
-    name: "Rock 'n' Roller Coaster Starring Aerosmith",
+    name: "Rock 'n' Roller Coaster Starring The Muppets",
     land: "Sunset Boulevard",
     waitMins: 60,
   },

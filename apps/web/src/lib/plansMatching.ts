@@ -199,7 +199,7 @@ export const ALIASES_WDW: Record<string, string> = {
   tot:   "the twilight zone tower of terror",
   nrj:   "navi river journey",
   mfsr:  "millennium falcon smugglers run",
-  rnr:   "rock n roller coaster starring aerosmith",  // Rock 'n' Roller Coaster
+  rnr:   "rock n roller coaster starring the muppets",  // Rock 'n' Roller Coaster
 
   // ---- Common shorthands ----
   "flight of passage":           "avatar flight of passage",
@@ -220,13 +220,15 @@ export const ALIASES_WDW: Record<string, string> = {
   "remys ratatouille":           "remys ratatouille adventure",
   "tower of terror":             "the twilight zone tower of terror",
 
-  // ---- Rock 'n' Roller Coaster Starring Aerosmith (HS) ----
-  // normalizeKey strips apostrophes → "rock n roller coaster starring aerosmith"
-  "rock n roller":               "rock n roller coaster starring aerosmith",
-  "rock n roller coaster":       "rock n roller coaster starring aerosmith",
-  "rock and roller":             "rock n roller coaster starring aerosmith",
-  "rock and roller coaster":     "rock n roller coaster starring aerosmith",
-  "aerosmith":                   "rock n roller coaster starring aerosmith",
+  // ---- Rock 'n' Roller Coaster Starring The Muppets (HS) ----
+  // normalizeKey strips apostrophes → "rock n roller coaster starring the muppets"
+  // Old Aerosmith name aliased for backward-compat with existing saved Plans/Lightning data.
+  "rock n roller":                             "rock n roller coaster starring the muppets",
+  "rock n roller coaster":                     "rock n roller coaster starring the muppets",
+  "rock and roller":                           "rock n roller coaster starring the muppets",
+  "rock and roller coaster":                   "rock n roller coaster starring the muppets",
+  "aerosmith":                                 "rock n roller coaster starring the muppets",
+  "rock n roller coaster starring aerosmith":  "rock n roller coaster starring the muppets",
 
   "rise":                        "star wars rise of the resistance",
   "rise of the resistance":      "star wars rise of the resistance",
