@@ -292,7 +292,9 @@ const ALIASES_WDW = new Map<string, string>([
   ["rockin roller coaster",                         "rock 'n' roller coaster starring the muppets"],
   ["aerosmith",                                     "rock 'n' roller coaster starring the muppets"],
   ["rock n roller coaster starring aerosmith",      "rock 'n' roller coaster starring the muppets"],
+  ["rock 'n' roller coaster starring aerosmith",    "rock 'n' roller coaster starring the muppets"],
   ["rock n roller coaster starring the muppets",    "rock 'n' roller coaster starring the muppets"],
+  ["muppets",                                       "rock 'n' roller coaster starring the muppets"],
   // Buzz Lightyear's Space Ranger Spin (Magic Kingdom)
   ["buzz",                                       "buzz lightyear's space ranger spin"],
   ["buzz lightyear",                             "buzz lightyear's space ranger spin"],

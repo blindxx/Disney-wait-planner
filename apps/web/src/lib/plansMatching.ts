@@ -228,6 +228,8 @@ export const ALIASES_WDW: Record<string, string> = {
   "rock and roller":                           "rock n roller coaster starring the muppets",
   "rock and roller coaster":                   "rock n roller coaster starring the muppets",
   "aerosmith":                                 "rock n roller coaster starring the muppets",
+  "muppets":                                   "rock n roller coaster starring the muppets",
+  "rockin roller coaster":                     "rock n roller coaster starring the muppets",
   "rock n roller coaster starring aerosmith":  "rock n roller coaster starring the muppets",
 
   "rise":                        "star wars rise of the resistance",
