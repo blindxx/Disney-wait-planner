@@ -149,6 +149,97 @@ There is no cross-resort matching.
 
 ---
 
+## 🧠 Planner Data Model (Phase 8)
+
+### Canonical Attraction Identity & Aliases
+
+• UI always shows canonical name  
+• Matching accepts aliases and variants  
+• Handles API differences and renames  
+
+Example: Rock 'n' Roller Coaster (Aerosmith → Muppets)
+
+Rules:
+• Never key logic off display names  
+• Always resolve via normalization + alias mapping  
+
+---
+
+### Multi-Day Planning Model
+
+• Plans use dayId (day-1, day-2)  
+• Active day controls visible data  
+• No cross-day leakage  
+
+---
+
+### Day-Scoped Lightning
+
+• Lightning tied to specific day  
+• Mirrors Plans behavior  
+
+---
+
+### Day-Aware Park Context
+
+Priority:
+1. Manual  
+2. Auto (from plans)  
+3. Fallback  
+
+• Active day is authoritative  
+
+---
+
+### Import / Export Behavior
+
+• Backup = full dataset  
+• Import = active day only  
+• Backward compatible  
+
+---
+
+## 🛡️ System Guarantees
+
+The planner enforces strict deterministic behavior across all core systems.
+
+### Stable Attraction Identity
+
+• Attractions resolve to a single canonical identity  
+• Aliases never create duplicates  
+• Renames do not break existing data  
+
+---
+
+### No Cross-Day State Leakage
+
+• Each day is fully isolated  
+• Switching days cannot affect other days  
+
+---
+
+### Deterministic Matching
+
+• Same input always resolves to same attraction  
+• Independent of API formatting differences  
+
+---
+
+### Safe Sync Model
+
+• Pull-before-push prevents overwrites  
+• Sync gating prevents race conditions  
+
+---
+
+### Import Safety
+
+• Invalid data is rejected  
+• Legacy formats are normalized  
+• No corruption of existing plans  
+
+---
+
 ## 📋 Feature Summary
 
 ### Phase 1 — Wait Times
@@ -206,6 +297,25 @@ There is no cross-resort matching.
 - Smart Entry Suggestions component
 - Deterministic alias parity (DLR + WDW)
 
+### Phase 7 — Profiles & Sync
+
+• Multi-profile system with isolated storage namespaces  
+• Profile switching (create, rename, delete)  
+• Cloud sync with pull-before-push model  
+• Sync readiness gating and conflict protection  
+
+---
+
+### Phase 8 — Multi-Day Planning & Data Model
+
+• Multi-day planning system (day-based structure)  
+• Day-scoped Plans and Lightning  
+• Day-aware park context (manual + auto)  
+• Import/export (backup vs single-day restore)  
+• Canonical attraction identity + alias system  
+• API naming resilience (rename-safe matching)  
+• Strict day-scoped isolation with deterministic behavior guarantees  
+
 ---
 
 ## 🛠 Development Workflow
@@ -238,10 +348,14 @@ Never run build or dev at the repo root without `--filter web`.
 
 ## 🗺 Roadmap
 
-### Phase 7 — Settings + Sync
+### Phase 8 — Multi-Day Planning (Completed / In Progress)
 
-User preferences, persistent configuration, and optional account-based sync.
+Multi-day planning, Lightning, and park-aware systems.
 
-### Phase 8 — Multi-Day Planning
+---
 
-Support for planning across multiple park days within a single trip.
+### Phase 9 — Cross-Day Intelligence (Planned)
+
+• Cross-day optimization  
+• Smarter recommendations  
+• Multi-day insights  
