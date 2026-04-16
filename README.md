@@ -314,6 +314,7 @@ The planner enforces strict deterministic behavior across all core systems.
 • Import/export (backup vs single-day restore)  
 • Canonical attraction identity + alias system  
 • API naming resilience (rename-safe matching)  
+• Strict day-scoped isolation with deterministic behavior guarantees  
 
 ---
 
