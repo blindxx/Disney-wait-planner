@@ -284,14 +284,17 @@ function normalizeAttractionName(name: string): string {
 const ALIASES_WDW = new Map<string, string>([
   // Expedition Everest (Animal Kingdom) — Queue-Times uses full ride subtitle
   ["expedition everest - legend of the forbidden mountain", "expedition everest"],
-  // Rock 'n' Roller Coaster Starring Aerosmith (Hollywood Studios)
-  ["rnr",                                        "rock 'n' roller coaster starring aerosmith"],
-  ["rock n roller",                              "rock 'n' roller coaster starring aerosmith"],
-  ["rock n roller coaster",                      "rock 'n' roller coaster starring aerosmith"],
-  ["rock 'n' roller coaster",                    "rock 'n' roller coaster starring aerosmith"],
-  ["rockin roller coaster",                      "rock 'n' roller coaster starring aerosmith"],
-  ["aerosmith",                                  "rock 'n' roller coaster starring aerosmith"],
-  ["rock n roller coaster starring aerosmith",   "rock 'n' roller coaster starring aerosmith"],
+  // Rock 'n' Roller Coaster (Hollywood Studios) — supports both Aerosmith (old) and The Muppets (new) naming
+  ["rnr",                                           "rock 'n' roller coaster starring the muppets"],
+  ["rock n roller",                                 "rock 'n' roller coaster starring the muppets"],
+  ["rock n roller coaster",                         "rock 'n' roller coaster starring the muppets"],
+  ["rock 'n' roller coaster",                       "rock 'n' roller coaster starring the muppets"],
+  ["rockin roller coaster",                         "rock 'n' roller coaster starring the muppets"],
+  ["aerosmith",                                     "rock 'n' roller coaster starring the muppets"],
+  ["rock n roller coaster starring aerosmith",      "rock 'n' roller coaster starring the muppets"],
+  ["rock 'n' roller coaster starring aerosmith",    "rock 'n' roller coaster starring the muppets"],
+  ["rock n roller coaster starring the muppets",    "rock 'n' roller coaster starring the muppets"],
+  ["muppets",                                       "rock 'n' roller coaster starring the muppets"],
   // Buzz Lightyear's Space Ranger Spin (Magic Kingdom)
   ["buzz",                                       "buzz lightyear's space ranger spin"],
   ["buzz lightyear",                             "buzz lightyear's space ranger spin"],

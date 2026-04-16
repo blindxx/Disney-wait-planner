@@ -206,12 +206,12 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
   ],
   // ---- WDW: Hollywood Studios ----
   [
-    "hs:rock 'n' roller coaster starring aerosmith",
+    "hs:rock 'n' roller coaster starring the muppets",
     {
-      name: "Rock \u2019n\u2019 Roller Coaster Starring Aerosmith",
+      name: "Rock \u2019n\u2019 Roller Coaster Starring The Muppets",
       parkId: "hs",
       land: "Sunset Boulevard",
-      dateRange: "2026-03-02 - 2026-07-15",
+      dateRange: "2026-03-02 - 2026-05-25",
     },
   ],
   // ---- WDW: Animal Kingdom ----

@@ -199,7 +199,7 @@ export const ALIASES_WDW: Record<string, string> = {
   tot:   "the twilight zone tower of terror",
   nrj:   "navi river journey",
   mfsr:  "millennium falcon smugglers run",
-  rnr:   "rock n roller coaster starring aerosmith",  // Rock 'n' Roller Coaster
+  rnr:   "rock n roller coaster starring the muppets",  // Rock 'n' Roller Coaster
 
   // ---- Common shorthands ----
   "flight of passage":           "avatar flight of passage",
@@ -220,13 +220,17 @@ export const ALIASES_WDW: Record<string, string> = {
   "remys ratatouille":           "remys ratatouille adventure",
   "tower of terror":             "the twilight zone tower of terror",
 
-  // ---- Rock 'n' Roller Coaster Starring Aerosmith (HS) ----
-  // normalizeKey strips apostrophes → "rock n roller coaster starring aerosmith"
-  "rock n roller":               "rock n roller coaster starring aerosmith",
-  "rock n roller coaster":       "rock n roller coaster starring aerosmith",
-  "rock and roller":             "rock n roller coaster starring aerosmith",
-  "rock and roller coaster":     "rock n roller coaster starring aerosmith",
-  "aerosmith":                   "rock n roller coaster starring aerosmith",
+  // ---- Rock 'n' Roller Coaster Starring The Muppets (HS) ----
+  // normalizeKey strips apostrophes → "rock n roller coaster starring the muppets"
+  // Old Aerosmith name aliased for backward-compat with existing saved Plans/Lightning data.
+  "rock n roller":                             "rock n roller coaster starring the muppets",
+  "rock n roller coaster":                     "rock n roller coaster starring the muppets",
+  "rock and roller":                           "rock n roller coaster starring the muppets",
+  "rock and roller coaster":                   "rock n roller coaster starring the muppets",
+  "aerosmith":                                 "rock n roller coaster starring the muppets",
+  "muppets":                                   "rock n roller coaster starring the muppets",
+  "rockin roller coaster":                     "rock n roller coaster starring the muppets",
+  "rock n roller coaster starring aerosmith":  "rock n roller coaster starring the muppets",
 
   "rise":                        "star wars rise of the resistance",
   "rise of the resistance":      "star wars rise of the resistance",
@@ -414,9 +418,17 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   // WDW
   { input: "everest",                resort: "WDW", expectedKey: "expedition everest" },
   { input: "expedition",             resort: "WDW", expectedKey: "expedition everest" },
-  { input: "rock n roller",          resort: "WDW", expectedKey: "rock n roller coaster starring aerosmith" },
-  { input: "rock and roller",        resort: "WDW", expectedKey: "rock n roller coaster starring aerosmith" },
-  { input: "aerosmith",              resort: "WDW", expectedKey: "rock n roller coaster starring aerosmith" },
+  { input: "rock n roller",                              resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "rock and roller",                           resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "aerosmith",                                 resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  // Legacy Aerosmith full name (with and without apostrophe) → new canonical
+  { input: "rock n roller coaster starring aerosmith",  resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "rock 'n' roller coaster starring aerosmith", resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  // New Muppets name — falls through alias stage to stage-1 key pass-through
+  { input: "rock n roller coaster starring the muppets", resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  // New shorthands
+  { input: "muppets",                                   resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
+  { input: "rockin roller coaster",                     resort: "WDW", expectedKey: "rock n roller coaster starring the muppets" },
   { input: "tower of terror",        resort: "WDW", expectedKey: "the twilight zone tower of terror" },
   { input: "The Twilight Zone Tower of Terror", resort: "WDW", expectedKey: "the twilight zone tower of terror" },
   { input: "the haunted mansion",    resort: "WDW", expectedKey: "the haunted mansion" }, // exact match in waitMap
