@@ -144,6 +144,9 @@ export const ALIASES_DLR: Record<string, string> = {
   // ---- Soarin' Over California (DCA) ----
   // normalizeKey strips apostrophe: "soarin'" → "soarin"
   "soarin":                      "soarin over california",
+  // Phase 8.5 — "Soarin' Across America" is a limited-time name Queue-Times may
+  // return for both EPCOT and DCA. Map it to the local canonical name.
+  "soarin across america":       "soarin over california",
 
   // ---- Tiana's Bayou Adventure (DL Bayou Country) — cross-resort parity ----
   // Single token "tiana" cannot reach stage-2 (≥2 tokens required); alias needed.
@@ -259,6 +262,8 @@ export const ALIASES_WDW: Record<string, string> = {
   "big thunder":                 "big thunder mountain railroad",      // MK Frontierland
   "thunder mountain":            "big thunder mountain railroad",      // MK Frontierland
   "soarin":                      "soarin around the world",           // EPCOT World Nature
+  // Phase 8.5 — "Soarin' Across America" limited-time name (EPCOT and DCA).
+  "soarin across america":       "soarin around the world",
 
   // ---- Tiana's Bayou Adventure (MK Frontierland) — cross-resort parity ----
   "tiana":                       "tianas bayou adventure",
@@ -412,9 +417,10 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "rsr",                    resort: "DLR", expectedKey: "radiator springs racers" },
   { input: "web slinger",            resort: "DLR", expectedKey: "web slingers a spider man adventure" },
   { input: "webslingers",            resort: "DLR", expectedKey: "web slingers a spider man adventure" },
-  { input: "soarin",                 resort: "DLR", expectedKey: "soarin over california" },
-  { input: "soarin'",                resort: "DLR", expectedKey: "soarin over california" }, // apostrophe stripped
-  { input: "soarin over california", resort: "DLR", expectedKey: "soarin over california" }, // stage-1 exact match
+  { input: "soarin",                    resort: "DLR", expectedKey: "soarin over california" },
+  { input: "soarin'",                   resort: "DLR", expectedKey: "soarin over california" }, // apostrophe stripped
+  { input: "soarin over california",    resort: "DLR", expectedKey: "soarin over california" }, // stage-1 exact match
+  { input: "Soarin' Across America",    resort: "DLR", expectedKey: "soarin over california" }, // Phase 8.5
   // WDW
   { input: "everest",                resort: "WDW", expectedKey: "expedition everest" },
   { input: "expedition",             resort: "WDW", expectedKey: "expedition everest" },
@@ -444,6 +450,7 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "peoplemover",           resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
   { input: "gran fiesta",           resort: "WDW", expectedKey: "gran fiesta tour starring the three caballeros" },
   { input: "soarin",                resort: "WDW", expectedKey: "soarin around the world" }, // EPCOT
+  { input: "Soarin' Across America", resort: "WDW", expectedKey: "soarin around the world" }, // Phase 8.5
   // --- DLR: new additions ---
   { input: "indy",                  resort: "DLR", expectedKey: "indiana jones adventure" },
   { input: "matterhorn",            resort: "DLR", expectedKey: "matterhorn bobsleds" },

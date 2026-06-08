@@ -91,6 +91,9 @@ export type PlannerBackupPayload = {
     /** Phase 8.3.2 — Lightning items included in full backup. Optional for back-compat
      *  with older backups that pre-date Lightning day support. */
     lightning?: LightningBackupItem[];
+    /** Phase 8.5 — Per-day manual park overrides. Optional for back-compat with older
+     *  backups. Keys are canonical day IDs; values are park ID strings. */
+    dayParks?: Record<string, string>;
   };
 };
 
@@ -101,6 +104,8 @@ export function buildPlannerBackupPayload(state: {
   activeDayId: string;
   dayMeta?: Record<string, { label?: string; date?: string }>;
   lightning?: LightningBackupItem[];
+  /** Phase 8.5 — Per-day manual park overrides to preserve in backup. */
+  dayParks?: Record<string, string>;
 }): PlannerBackupPayload {
   return {
     version: 1,
@@ -115,6 +120,10 @@ export function buildPlannerBackupPayload(state: {
         : {}),
       // Always include lightning (even empty array) so restores are unambiguous.
       lightning: state.lightning ?? [],
+      // Include dayParks only when non-empty; omit for cleaner old-compat payloads.
+      ...(state.dayParks && Object.keys(state.dayParks).length > 0
+        ? { dayParks: state.dayParks }
+        : {}),
     },
   };
 }
@@ -232,6 +241,25 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       }
       if ("date" in e && typeof e.date !== "string") {
         throw new Error(`Invalid backup: dayMeta["${key}"].date must be a string when present.`);
+      }
+    }
+  }
+
+  // dayParks is optional (back-compat) — when present, validate structure only.
+  // Semantic park-ID validation (PARK_TO_RESORT check) is deferred to the restore
+  // handler so this module stays free of app-level park constants.
+  if ("dayParks" in d && d.dayParks !== undefined) {
+    if (
+      typeof d.dayParks !== "object" ||
+      d.dayParks === null ||
+      Array.isArray(d.dayParks)
+    ) {
+      throw new Error("Invalid backup: dayParks must be a plain object when present.");
+    }
+    for (const [key, val] of Object.entries(d.dayParks as Record<string, unknown>)) {
+      if (!VALID_DAY_ID_RE.test(key)) continue; // tolerate extra keys — restore filters them
+      if (typeof val !== "string") {
+        throw new Error(`Invalid backup: dayParks["${key}"] must be a string.`);
       }
     }
   }
