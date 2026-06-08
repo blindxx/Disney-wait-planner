@@ -261,9 +261,10 @@ export const ALIASES_WDW: Record<string, string> = {
   "smugglers":                   "millennium falcon smugglers run",    // HS Galaxy's Edge
   "big thunder":                 "big thunder mountain railroad",      // MK Frontierland
   "thunder mountain":            "big thunder mountain railroad",      // MK Frontierland
-  "soarin":                      "soarin around the world",           // EPCOT World Nature
-  // Phase 8.5 — "Soarin' Across America" limited-time name (EPCOT and DCA).
-  "soarin across america":       "soarin around the world",
+  // Phase 8.5.1 — EPCOT canonical is now "Soarin' Across America".
+  // "soarin" → new canonical key; "soarin around the world" kept for saved-plan back-compat.
+  "soarin":                      "soarin across america",             // EPCOT World Nature
+  "soarin around the world":     "soarin across america",             // old name back-compat
 
   // ---- Tiana's Bayou Adventure (MK Frontierland) — cross-resort parity ----
   "tiana":                       "tianas bayou adventure",
@@ -449,8 +450,9 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "kali",                  resort: "WDW", expectedKey: "kali river rapids" },
   { input: "peoplemover",           resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
   { input: "gran fiesta",           resort: "WDW", expectedKey: "gran fiesta tour starring the three caballeros" },
-  { input: "soarin",                resort: "WDW", expectedKey: "soarin around the world" }, // EPCOT
-  { input: "Soarin' Across America", resort: "WDW", expectedKey: "soarin around the world" }, // Phase 8.5
+  { input: "soarin",                   resort: "WDW", expectedKey: "soarin across america" }, // EPCOT
+  { input: "Soarin' Across America",   resort: "WDW", expectedKey: "soarin across america" }, // Phase 8.5.1: stage-1 exact
+  { input: "Soarin' Around the World", resort: "WDW", expectedKey: "soarin across america" }, // back-compat
   // --- DLR: new additions ---
   { input: "indy",                  resort: "DLR", expectedKey: "indiana jones adventure" },
   { input: "matterhorn",            resort: "DLR", expectedKey: "matterhorn bobsleds" },

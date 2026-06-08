@@ -342,9 +342,10 @@ const ALIASES_WDW = new Map<string, string>([
   ["kali river",                                 "kali river rapids"],
   // Magic Carpets of Aladdin (Magic Kingdom) — API includes leading "The"
   ["the magic carpets of aladdin",               "magic carpets of aladdin"],
-  // Soarin' Around the World (EPCOT) — Phase 8.5: "Across America" limited-time name
-  ["soarin' across america",                     "soarin' around the world"],
-  ["soarin across america",                      "soarin' around the world"],
+  // Soarin' Across America (EPCOT) — Phase 8.5.1: canonical renamed; "Around the World"
+  // kept as alias so Queue-Times entries with the old name still resolve.
+  ["soarin' around the world",                   "soarin' across america"],
+  ["soarin around the world",                    "soarin' across america"],
 ]);
 
 /**

@@ -604,7 +604,7 @@ const EPCOT_RIDES: RideDef[] = [
   // ---- World Nature ----
   {
     id: "epcot-soarin",
-    name: "Soarin\u2019 Around the World",
+    name: "Soarin\u2019 Across America",
     land: "World Nature",
     waitMins: 40,
   },
