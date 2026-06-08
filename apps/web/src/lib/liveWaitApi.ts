@@ -342,6 +342,10 @@ const ALIASES_WDW = new Map<string, string>([
   ["kali river",                                 "kali river rapids"],
   // Magic Carpets of Aladdin (Magic Kingdom) — API includes leading "The"
   ["the magic carpets of aladdin",               "magic carpets of aladdin"],
+  // Soarin' Across America (EPCOT) — Phase 8.5.1: canonical renamed; "Around the World"
+  // kept as alias so Queue-Times entries with the old name still resolve.
+  ["soarin' around the world",                   "soarin' across america"],
+  ["soarin around the world",                    "soarin' across america"],
 ]);
 
 /**
@@ -356,6 +360,9 @@ const ALIASES_DLR = new Map<string, string>([
   // "it's a small world" (Disneyland) — mock name has surrounding typographic quotes;
   // Queue-Times omits them. Both sides normalized, value retains the literal " chars.
   ["it's a small world",                         "\"it's a small world\""],
+  // Soarin' Over California (DCA) — Phase 8.5: "Across America" limited-time name
+  ["soarin' across america",                     "soarin' over california"],
+  ["soarin across america",                      "soarin' over california"],
 ]);
 
 function normalizeQueueTimesResponse(
