@@ -882,35 +882,9 @@ export default function PlansPage() {
       return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[] };
     }
 
-    // Derive the resort for each day using only that day's own context.
-    // Deliberately avoids selectedResort/activeDayId so results are stable
-    // regardless of which day is currently active.
-    //   1. Explicit dayParks override → derive resort from its park
-    //   2. Resort-level scoring via inferPlansContext (counts DLR-only vs WDW-only
-    //      attraction matches across all items in the day).  This correctly handles
-    //      multi-park WDW days: e.g. Space Mountain (shared) + Expedition Everest
-    //      (WDW-only) scores WDW=1 unambiguous vs DLR=0, so the day is WDW.
-    //      Using inferDayPark (park-level) would return null for WDW (tie between
-    //      MK and AK) while returning a DLR park for Space Mountain — misclassifying
-    //      the day as DLR.
-    //   3. No match or tied → leave unset (resolved per-item in resolveAttractionKey)
-    const dayResortMap = new Map<string, ResortId>();
-    for (const dayId of days) {
-      const override = dayParks[dayId];
-      if (override && override in PARK_TO_RESORT) {
-        dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
-        continue;
-      }
-      const dayItems = items.filter((it) => it.dayId === dayId);
-      const inferred = inferPlansContext(dayItems);
-      if (inferred.resort) {
-        dayResortMap.set(dayId, inferred.resort);
-      }
-      // else: ambiguous or empty — leave unset; tryResolve handles it per-item below.
-    }
-
     // Run the full 3-stage pipeline (mirrors lookupWait) against one resort's
     // ride-park map.  Returns the canonical ride-map key on success, null otherwise.
+    // Defined first so the dayResortMap loop can use it for the consistency check.
     function tryResolve(name: string, resort: ResortId): string | null {
       const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
       const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
@@ -930,14 +904,67 @@ export default function PlansPage() {
       return hit;
     }
 
+    // Derive the resort for each day using only that day's own context.
+    // Deliberately avoids selectedResort/activeDayId so results are stable
+    // regardless of which day is currently active.
+    //
+    //   1. Explicit dayParks override → derive resort from its park.
+    //
+    //   2. inferPlansContext unambiguous scoring — items that resolve to only one
+    //      resort provide a definitive signal.  Handles multi-park WDW days (e.g.
+    //      Space Mountain @ MK + Expedition Everest @ AK): Everest is WDW-only so
+    //      WDW wins even though the day spans two parks.
+    //
+    //   3. Park-consistency tiebreaker — used when inferPlansContext returns
+    //      undefined (all items are cross-resort, e.g. Rise + Space Mountain).
+    //      Resolves each item in both resort maps and collects the set of parks
+    //      each resort would assign.  If one resort maps all matched items to a
+    //      single park while the other maps them to multiple parks, the
+    //      single-park resort is the reliable choice.
+    //      Example: Rise → disneyland, Space Mountain → disneyland (DLR = 1 park)
+    //               Rise → hs,         Space Mountain → mk          (WDW = 2 parks)
+    //      → Day is DLR.  If both or neither are single-park, leave unset.
+    //
+    //   4. Truly ambiguous (e.g. only Rise, which maps to one park in each resort) →
+    //      leave unset; resolveAttractionKey skips those items as ambiguous.
+    const dayResortMap = new Map<string, ResortId>();
+    for (const dayId of days) {
+      const override = dayParks[dayId];
+      if (override && override in PARK_TO_RESORT) {
+        dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
+        continue;
+      }
+      const dayItems = items.filter((it) => it.dayId === dayId);
+
+      // Step 2: inferPlansContext (unambiguous + frequency scoring)
+      const inferred = inferPlansContext(dayItems);
+      if (inferred.resort) {
+        dayResortMap.set(dayId, inferred.resort);
+        continue;
+      }
+
+      // Step 3: park-consistency tiebreaker
+      const dlrDayParks = new Set<string>();
+      const wdwDayParks = new Set<string>();
+      for (const it of dayItems) {
+        const dk = tryResolve(it.name, "DLR");
+        if (dk) { const p = RIDE_TO_PARK_DLR.get(dk); if (p) dlrDayParks.add(p); }
+        const wk = tryResolve(it.name, "WDW");
+        if (wk) { const p = RIDE_TO_PARK_WDW.get(wk); if (p) wdwDayParks.add(p); }
+      }
+      const dlrSinglePark = dlrDayParks.size === 1;
+      const wdwSinglePark = wdwDayParks.size === 1;
+      if (dlrSinglePark && !wdwSinglePark) { dayResortMap.set(dayId, "DLR"); continue; }
+      if (wdwSinglePark && !dlrSinglePark) { dayResortMap.set(dayId, "WDW"); continue; }
+      // Step 4: truly ambiguous — leave unset
+    }
+
     // Resolve a name to a stable composite key (resort:canonicalKey).
     // When the day's resort is known, only that resort's map is tried.
-    // When the resort is ambiguous (unset), both maps are tried:
-    //   - exactly one match  → use that resort
-    //   - both match         → use DLR as a stable, active-day-independent tiebreak
-    //   - neither            → not an attraction, return null
-    // The resort-scoped composite key prevents cross-resort collisions (e.g.
-    // Rise of the Resistance at DL vs HS are kept as separate groups).
+    // When the resort is still unresolvable (unset after all steps above),
+    // both maps are tried: exactly one match → use that resort,
+    // both match or neither → skip as ambiguous.
+    // The resort-scoped key prevents cross-resort collisions.
     function resolveAttractionKey(name: string, dayId: string): { compositeKey: string } | null {
       const knownResort = dayResortMap.get(dayId);
       if (knownResort !== undefined) {
@@ -952,6 +979,7 @@ export default function PlansPage() {
       // Both match or neither — ambiguous without context, skip
       return null;
     }
+
 
     const validDayIds = new Set(days);
 
