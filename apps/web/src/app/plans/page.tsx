@@ -939,7 +939,7 @@ export default function PlansPage() {
       const wdwKey = tryResolve(name, "WDW");
       if (dlrKey && !wdwKey) return { compositeKey: `DLR:${dlrKey}` };
       if (wdwKey && !dlrKey) return { compositeKey: `WDW:${wdwKey}` };
-      if (dlrKey && wdwKey)  return { compositeKey: `DLR:${dlrKey}` }; // stable tiebreak
+      // Both match or neither — ambiguous without context, skip
       return null;
     }
 
