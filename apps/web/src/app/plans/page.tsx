@@ -875,14 +875,50 @@ export default function PlansPage() {
     if (!initialized || days.length < 2) {
       return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[] };
     }
-    const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
 
-    // Plan duplicates across days
+    // Derive the best-guess resort for each day so alias resolution is
+    // per-item rather than global. Priority matches resolveDayPark:
+    //   1. Explicit dayParks override → derive resort from its park
+    //   2. Frequency inference via inferDayPark for each resort
+    //   3. Fall back to selectedResort
+    const dayResortMap = new Map<string, ResortId>();
+    for (const dayId of days) {
+      const override = dayParks[dayId];
+      if (override && override in PARK_TO_RESORT) {
+        dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
+        continue;
+      }
+      const dayItems = items.filter((it) => it.dayId === dayId);
+      const dlrPark = inferDayPark(dayItems, "DLR");
+      const wdwPark = inferDayPark(dayItems, "WDW");
+      if (dlrPark && !wdwPark) { dayResortMap.set(dayId, "DLR"); continue; }
+      if (wdwPark && !dlrPark) { dayResortMap.set(dayId, "WDW"); continue; }
+      dayResortMap.set(dayId, selectedResort);
+    }
+
+    // Resolve a name to a canonical attraction key using the day's resort aliases.
+    // Returns null when the resolved key is not in that resort's ride map,
+    // i.e. the item is a generic activity (Lunch, Hotel break, Morning Block …).
+    // Uses a resort-scoped composite key so same-named attractions at different
+    // resorts (Space Mountain @ DLR vs WDW) are never collapsed together.
+    function resolveAttractionKey(name: string, dayId: string): { compositeKey: string; resort: ResortId } | null {
+      const resort = dayResortMap.get(dayId) ?? selectedResort;
+      const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+      const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+      const key = resolveIdentityKey(name, aliases);
+      if (!rideMap.has(key)) return null;
+      return { compositeKey: `${resort}:${key}`, resort };
+    }
+
+    // Plan duplicates — only attraction-matched items
     const planByKey = new Map<string, { name: string; dayIds: Set<string> }>();
     for (const item of items) {
-      const key = resolveIdentityKey(item.name, aliases);
-      if (!planByKey.has(key)) planByKey.set(key, { name: item.name, dayIds: new Set() });
-      planByKey.get(key)!.dayIds.add(item.dayId);
+      const resolved = resolveAttractionKey(item.name, item.dayId);
+      if (!resolved) continue;
+      if (!planByKey.has(resolved.compositeKey)) {
+        planByKey.set(resolved.compositeKey, { name: item.name, dayIds: new Set() });
+      }
+      planByKey.get(resolved.compositeKey)!.dayIds.add(item.dayId);
     }
     const planDuplicates: CrossDayDuplicate[] = [];
     for (const { name, dayIds } of planByKey.values()) {
@@ -891,7 +927,8 @@ export default function PlansPage() {
       }
     }
 
-    // Lightning duplicates across days — read from localStorage
+    // Lightning duplicates across days — read from localStorage.
+    // Applies the same per-day resort resolution and attraction-only filter.
     const lightningDuplicates: CrossDayDuplicate[] = [];
     try {
       const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
@@ -902,9 +939,12 @@ export default function PlansPage() {
         const llByKey = new Map<string, { name: string; dayIds: Set<string> }>();
         for (const it of llItems) {
           if (!it.name || !it.dayId) continue;
-          const key = resolveIdentityKey(it.name, aliases);
-          if (!llByKey.has(key)) llByKey.set(key, { name: it.name, dayIds: new Set() });
-          llByKey.get(key)!.dayIds.add(it.dayId);
+          const resolved = resolveAttractionKey(it.name, it.dayId);
+          if (!resolved) continue;
+          if (!llByKey.has(resolved.compositeKey)) {
+            llByKey.set(resolved.compositeKey, { name: it.name, dayIds: new Set() });
+          }
+          llByKey.get(resolved.compositeKey)!.dayIds.add(it.dayId);
         }
         for (const { name, dayIds } of llByKey.values()) {
           if (dayIds.size > 1) {
@@ -918,7 +958,7 @@ export default function PlansPage() {
 
     return { planDuplicates, lightningDuplicates };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialized, items, days, selectedResort]);
+  }, [initialized, items, days, dayParks, selectedResort]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
