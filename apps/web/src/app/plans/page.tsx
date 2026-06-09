@@ -73,6 +73,8 @@ type PlanItem = {
 
 type Mode = "view" | "add" | "edit" | "import" | "edit-day";
 
+type CrossDayDuplicate = { displayName: string; dayIds: string[] };
+
 let nextId = 1;
 function makeId() {
   return String(nextId++);
@@ -626,6 +628,22 @@ function saveDayParks(parks: Record<string, string>, key: string): void {
   try { localStorage.setItem(key, JSON.stringify(parks)); } catch {}
 }
 
+// ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
+
+/**
+ * Resolve a raw plan/lightning item name to its canonical identity key for
+ * cross-day duplicate detection. Mirrors Stage 1 + Stage 3 of lookupWait
+ * without requiring a populated waitMap — alias-only resolution is sufficient
+ * to identify the same attraction across name variants.
+ */
+function resolveIdentityKey(name: string, aliases: Record<string, string>): string {
+  const key = normalizeKey(stripAnnotations(name));
+  const aliasTarget =
+    aliases[key] ??
+    (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
+  return aliasTarget ?? key;
+}
+
 // ===== COMPONENT =====
 
 export default function PlansPage() {
@@ -846,6 +864,61 @@ export default function PlansPage() {
       overlapCountById,
     };
   }, [displayedItems]);
+
+  // Phase 8.6 — Cross-day duplicate detection (informational only).
+  // Detects plan attractions and lightning selections that appear on multiple
+  // distinct days. Uses alias-based identity resolution so renamed/aliased
+  // variants (e.g. Rock 'n' Roller Coaster Aerosmith vs Muppets) count as the
+  // same attraction. Lightning items are read from localStorage since the plans
+  // page does not hold lightning state; re-reads whenever `items` changes.
+  const crossDayChecks = useMemo(() => {
+    if (!initialized || days.length < 2) {
+      return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[] };
+    }
+    const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+
+    // Plan duplicates across days
+    const planByKey = new Map<string, { name: string; dayIds: Set<string> }>();
+    for (const item of items) {
+      const key = resolveIdentityKey(item.name, aliases);
+      if (!planByKey.has(key)) planByKey.set(key, { name: item.name, dayIds: new Set() });
+      planByKey.get(key)!.dayIds.add(item.dayId);
+    }
+    const planDuplicates: CrossDayDuplicate[] = [];
+    for (const { name, dayIds } of planByKey.values()) {
+      if (dayIds.size > 1) {
+        planDuplicates.push({ displayName: name, dayIds: [...dayIds].sort(daySort) });
+      }
+    }
+
+    // Lightning duplicates across days — read from localStorage
+    const lightningDuplicates: CrossDayDuplicate[] = [];
+    try {
+      const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      const raw = localStorage.getItem(_llKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { items?: Array<{ name?: string; dayId?: string }> };
+        const llItems = Array.isArray(parsed?.items) ? parsed.items : [];
+        const llByKey = new Map<string, { name: string; dayIds: Set<string> }>();
+        for (const it of llItems) {
+          if (!it.name || !it.dayId) continue;
+          const key = resolveIdentityKey(it.name, aliases);
+          if (!llByKey.has(key)) llByKey.set(key, { name: it.name, dayIds: new Set() });
+          llByKey.get(key)!.dayIds.add(it.dayId);
+        }
+        for (const { name, dayIds } of llByKey.values()) {
+          if (dayIds.size > 1) {
+            lightningDuplicates.push({ displayName: name, dayIds: [...dayIds].sort(daySort) });
+          }
+        }
+      }
+    } catch {
+      // localStorage read errors — silently skip
+    }
+
+    return { planDuplicates, lightningDuplicates };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialized, items, days, selectedResort]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
@@ -2739,6 +2812,45 @@ export default function PlansPage() {
         .day-clear-confirm-row {
           margin-bottom: 1rem;
         }
+        .cross-day-checks {
+          margin-top: 1.5rem;
+          padding: 0.75rem 1rem;
+          background-color: #fffbeb;
+          border: 1px solid #fcd34d;
+          border-radius: 8px;
+        }
+        .cross-day-checks-title {
+          font-size: 0.85rem;
+          font-weight: 600;
+          color: #92400e;
+          margin-bottom: 0.5rem;
+        }
+        .cross-day-checks-group-label {
+          font-size: 0.8rem;
+          font-weight: 600;
+          color: #78350f;
+          margin: 0.5rem 0 0.25rem;
+        }
+        .cross-day-checks-list {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+        }
+        .cross-day-checks-item {
+          font-size: 0.8rem;
+          color: #92400e;
+          padding: 0.2rem 0;
+          display: flex;
+          gap: 0.4rem;
+          align-items: baseline;
+          flex-wrap: wrap;
+        }
+        .cross-day-checks-name {
+          font-weight: 500;
+        }
+        .cross-day-checks-days {
+          color: #b45309;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -3216,6 +3328,43 @@ export default function PlansPage() {
               </li>
             ))}
           </ul>
+        )}
+
+        {/* Phase 8.6 — Cross-Day Checks: shown only when duplicate attractions exist across days */}
+        {initialized && (crossDayChecks.planDuplicates.length > 0 || crossDayChecks.lightningDuplicates.length > 0) && (
+          <div className="cross-day-checks">
+            <div className="cross-day-checks-title">⚠ Cross-Day Checks</div>
+            {crossDayChecks.planDuplicates.length > 0 && (
+              <>
+                <div className="cross-day-checks-group-label">Same attraction planned on multiple days:</div>
+                <ul className="cross-day-checks-list">
+                  {crossDayChecks.planDuplicates.map((dup) => (
+                    <li key={dup.displayName} className="cross-day-checks-item">
+                      <span className="cross-day-checks-name">{dup.displayName}</span>
+                      <span className="cross-day-checks-days">
+                        — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {crossDayChecks.lightningDuplicates.length > 0 && (
+              <>
+                <div className="cross-day-checks-group-label">Same Lightning Lane on multiple days:</div>
+                <ul className="cross-day-checks-list">
+                  {crossDayChecks.lightningDuplicates.map((dup) => (
+                    <li key={dup.displayName} className="cross-day-checks-item">
+                      <span className="cross-day-checks-name">{dup.displayName}</span>
+                      <span className="cross-day-checks-days">
+                        — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
         )}
       </div>
 
