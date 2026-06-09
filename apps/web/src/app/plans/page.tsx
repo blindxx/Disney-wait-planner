@@ -882,8 +882,14 @@ export default function PlansPage() {
     // Deliberately avoids selectedResort/activeDayId so results are stable
     // regardless of which day is currently active.
     //   1. Explicit dayParks override → derive resort from its park
-    //   2. Frequency inference via inferDayPark for each resort independently
-    //   3. No match → leave unset (resolved per-item in resolveAttractionKey)
+    //   2. Resort-level scoring via inferPlansContext (counts DLR-only vs WDW-only
+    //      attraction matches across all items in the day).  This correctly handles
+    //      multi-park WDW days: e.g. Space Mountain (shared) + Expedition Everest
+    //      (WDW-only) scores WDW=1 unambiguous vs DLR=0, so the day is WDW.
+    //      Using inferDayPark (park-level) would return null for WDW (tie between
+    //      MK and AK) while returning a DLR park for Space Mountain — misclassifying
+    //      the day as DLR.
+    //   3. No match or tied → leave unset (resolved per-item in resolveAttractionKey)
     const dayResortMap = new Map<string, ResortId>();
     for (const dayId of days) {
       const override = dayParks[dayId];
@@ -892,11 +898,11 @@ export default function PlansPage() {
         continue;
       }
       const dayItems = items.filter((it) => it.dayId === dayId);
-      const dlrPark = inferDayPark(dayItems, "DLR");
-      const wdwPark = inferDayPark(dayItems, "WDW");
-      if (dlrPark && !wdwPark) { dayResortMap.set(dayId, "DLR"); continue; }
-      if (wdwPark && !dlrPark) { dayResortMap.set(dayId, "WDW"); continue; }
-      // Ambiguous or no data — leave unset; tryResolve handles it per-item below.
+      const inferred = inferPlansContext(dayItems);
+      if (inferred.resort) {
+        dayResortMap.set(dayId, inferred.resort);
+      }
+      // else: ambiguous or empty — leave unset; tryResolve handles it per-item below.
     }
 
     // Run the full 3-stage pipeline (mirrors lookupWait) against one resort's
