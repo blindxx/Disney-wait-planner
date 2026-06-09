@@ -904,29 +904,59 @@ export default function PlansPage() {
       return hit;
     }
 
+    // Read Lightning items from localStorage once so they can supplement resort
+    // inference for Lightning-only days (no plan items) below.
+    // Grouped by dayId; only valid current days are kept (same filter as the
+    // duplicate scan). Errors silently produce an empty map.
+    const llItemsByDay = new Map<string, Array<{ name: string }>>();
+    const _validDayIdsForInference = new Set(days);
+    try {
+      const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      const _raw = localStorage.getItem(_llKey);
+      if (_raw) {
+        const _parsed = JSON.parse(_raw) as { items?: Array<{ name?: string; dayId?: string }> };
+        for (const it of (Array.isArray(_parsed?.items) ? _parsed.items : [])) {
+          if (!it.name || !it.dayId || !_validDayIdsForInference.has(it.dayId)) continue;
+          const bucket = llItemsByDay.get(it.dayId) ?? [];
+          bucket.push({ name: it.name });
+          llItemsByDay.set(it.dayId, bucket);
+        }
+      }
+    } catch { /* localStorage errors — leave llItemsByDay empty */ }
+
+    // Apply the two inference steps (unambiguous scoring + park-consistency) to
+    // a list of named items and return a ResortId or undefined.
+    function inferResortFromItems(namedItems: { name: string }[]): ResortId | undefined {
+      if (namedItems.length === 0) return undefined;
+      // Step A: inferPlansContext (unambiguous + frequency scoring)
+      const inf = inferPlansContext(
+        namedItems.map((it) => ({ id: "", name: it.name, timeLabel: "" }))
+      );
+      if (inf.resort) return inf.resort;
+      // Step B: park-consistency tiebreaker
+      const dlrP = new Set<string>();
+      const wdwP = new Set<string>();
+      for (const it of namedItems) {
+        const dk = tryResolve(it.name, "DLR");
+        if (dk) { const p = RIDE_TO_PARK_DLR.get(dk); if (p) dlrP.add(p); }
+        const wk = tryResolve(it.name, "WDW");
+        if (wk) { const p = RIDE_TO_PARK_WDW.get(wk); if (p) wdwP.add(p); }
+      }
+      if (dlrP.size === 1 && wdwP.size !== 1) return "DLR";
+      if (wdwP.size === 1 && dlrP.size !== 1) return "WDW";
+      return undefined;
+    }
+
     // Derive the resort for each day using only that day's own context.
     // Deliberately avoids selectedResort/activeDayId so results are stable
     // regardless of which day is currently active.
     //
     //   1. Explicit dayParks override → derive resort from its park.
-    //
-    //   2. inferPlansContext unambiguous scoring — items that resolve to only one
-    //      resort provide a definitive signal.  Handles multi-park WDW days (e.g.
-    //      Space Mountain @ MK + Expedition Everest @ AK): Everest is WDW-only so
-    //      WDW wins even though the day spans two parks.
-    //
-    //   3. Park-consistency tiebreaker — used when inferPlansContext returns
-    //      undefined (all items are cross-resort, e.g. Rise + Space Mountain).
-    //      Resolves each item in both resort maps and collects the set of parks
-    //      each resort would assign.  If one resort maps all matched items to a
-    //      single park while the other maps them to multiple parks, the
-    //      single-park resort is the reliable choice.
-    //      Example: Rise → disneyland, Space Mountain → disneyland (DLR = 1 park)
-    //               Rise → hs,         Space Mountain → mk          (WDW = 2 parks)
-    //      → Day is DLR.  If both or neither are single-park, leave unset.
-    //
-    //   4. Truly ambiguous (e.g. only Rise, which maps to one park in each resort) →
-    //      leave unset; resolveAttractionKey skips those items as ambiguous.
+    //   2+3. Plan items: inferPlansContext (unambiguous scoring) then
+    //        park-consistency tiebreaker.
+    //   4+5. Lightning items (same two steps) — covers Lightning-only days that
+    //        have no plan entries.
+    //   6. Truly ambiguous → leave unset; resolveAttractionKey skips those items.
     const dayResortMap = new Map<string, ResortId>();
     for (const dayId of days) {
       const override = dayParks[dayId];
@@ -934,29 +964,16 @@ export default function PlansPage() {
         dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
         continue;
       }
-      const dayItems = items.filter((it) => it.dayId === dayId);
 
-      // Step 2: inferPlansContext (unambiguous + frequency scoring)
-      const inferred = inferPlansContext(dayItems);
-      if (inferred.resort) {
-        dayResortMap.set(dayId, inferred.resort);
-        continue;
-      }
+      // Steps 2+3: plan items
+      const planResort = inferResortFromItems(items.filter((it) => it.dayId === dayId));
+      if (planResort) { dayResortMap.set(dayId, planResort); continue; }
 
-      // Step 3: park-consistency tiebreaker
-      const dlrDayParks = new Set<string>();
-      const wdwDayParks = new Set<string>();
-      for (const it of dayItems) {
-        const dk = tryResolve(it.name, "DLR");
-        if (dk) { const p = RIDE_TO_PARK_DLR.get(dk); if (p) dlrDayParks.add(p); }
-        const wk = tryResolve(it.name, "WDW");
-        if (wk) { const p = RIDE_TO_PARK_WDW.get(wk); if (p) wdwDayParks.add(p); }
-      }
-      const dlrSinglePark = dlrDayParks.size === 1;
-      const wdwSinglePark = wdwDayParks.size === 1;
-      if (dlrSinglePark && !wdwSinglePark) { dayResortMap.set(dayId, "DLR"); continue; }
-      if (wdwSinglePark && !dlrSinglePark) { dayResortMap.set(dayId, "WDW"); continue; }
-      // Step 4: truly ambiguous — leave unset
+      // Steps 4+5: Lightning items (fallback for Lightning-only days)
+      const llResort = inferResortFromItems(llItemsByDay.get(dayId) ?? []);
+      if (llResort) { dayResortMap.set(dayId, llResort); continue; }
+
+      // Step 6: truly ambiguous — leave unset
     }
 
     // Resolve a name to a stable composite key (resort:canonicalKey).
@@ -980,8 +997,6 @@ export default function PlansPage() {
       return null;
     }
 
-
-    const validDayIds = new Set(days);
 
     // Derive a human-readable park label from a composite key ("DLR:canonical key").
     // Falls back to resort string if the canonical key isn't in either ride map.
@@ -1017,39 +1032,29 @@ export default function PlansPage() {
       }
     }
 
-    // Lightning duplicates across days — read from localStorage.
-    // Stale entries (dayId not in current days) are skipped before resolution.
+    // Lightning duplicates across days — reuse llItemsByDay (already read,
+    // filtered to current days, and grouped by dayId above).
     const lightningDuplicates: CrossDayDuplicate[] = [];
-    try {
-      const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-      const raw = localStorage.getItem(_llKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { items?: Array<{ name?: string; dayId?: string }> };
-        const llItems = Array.isArray(parsed?.items) ? parsed.items : [];
-        const llByKey = new Map<string, { name: string; dayIds: Set<string> }>();
-        for (const it of llItems) {
-          if (!it.name || !it.dayId) continue;
-          if (!validDayIds.has(it.dayId)) continue; // skip stale entries for deleted days
-          const resolved = resolveAttractionKey(it.name, it.dayId);
-          if (!resolved) continue;
-          if (!llByKey.has(resolved.compositeKey)) {
-            llByKey.set(resolved.compositeKey, { name: it.name, dayIds: new Set() });
-          }
-          llByKey.get(resolved.compositeKey)!.dayIds.add(it.dayId);
+    const llByKey = new Map<string, { name: string; dayIds: Set<string> }>();
+    for (const [llDayId, llDayItems] of llItemsByDay.entries()) {
+      for (const it of llDayItems) {
+        const resolved = resolveAttractionKey(it.name, llDayId);
+        if (!resolved) continue;
+        if (!llByKey.has(resolved.compositeKey)) {
+          llByKey.set(resolved.compositeKey, { name: it.name, dayIds: new Set() });
         }
-        for (const [compositeKey, { name, dayIds }] of llByKey.entries()) {
-          if (dayIds.size > 1) {
-            lightningDuplicates.push({
-              compositeKey,
-              displayName: name,
-              parkLabel: parkLabelFromCompositeKey(compositeKey),
-              dayIds: [...dayIds].sort(daySort),
-            });
-          }
-        }
+        llByKey.get(resolved.compositeKey)!.dayIds.add(llDayId);
       }
-    } catch {
-      // localStorage read errors — silently skip
+    }
+    for (const [compositeKey, { name, dayIds }] of llByKey.entries()) {
+      if (dayIds.size > 1) {
+        lightningDuplicates.push({
+          compositeKey,
+          displayName: name,
+          parkLabel: parkLabelFromCompositeKey(compositeKey),
+          dayIds: [...dayIds].sort(daySort),
+        });
+      }
     }
 
     return { planDuplicates, lightningDuplicates };
