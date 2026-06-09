@@ -702,6 +702,10 @@ export default function PlansPage() {
   // while the GET /api/sync/plans request is in-flight. Set true after pull
   // completes (authenticated path) or immediately (unauthenticated path).
   const [syncReady, setSyncReady] = useState(false);
+  // Incremented whenever Lightning localStorage data is written by this page
+  // (cloud pull hydration) so crossDayChecks reruns without waiting for a
+  // plan/day change to happen first.
+  const [lightningVersion, setLightningVersion] = useState(0);
   // Phase 8.0 — multi-day state (default to day-1; hydrated from storage on mount)
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
   const [days, setDays] = useState<string[]>(["day-1"]);
@@ -1022,7 +1026,7 @@ export default function PlansPage() {
 
     return { planDuplicates, lightningDuplicates };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialized, items, days, dayParks]);
+  }, [initialized, items, days, dayParks, lightningVersion]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
@@ -1293,6 +1297,9 @@ export default function PlansPage() {
                 profileKeysForPull.lightning,
                 JSON.stringify(planner.lightning)
               );
+              // Invalidate crossDayChecks so Lightning duplicates recompute
+              // immediately without waiting for a plan/day state change.
+              setLightningVersion((v) => v + 1);
             } catch {
               hydrationSucceeded = false;
             }
