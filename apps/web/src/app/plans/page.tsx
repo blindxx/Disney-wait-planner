@@ -75,7 +75,7 @@ type PlanItem = {
 
 type Mode = "view" | "add" | "edit" | "import" | "edit-day";
 
-type CrossDayDuplicate = { displayName: string; dayIds: string[] };
+type CrossDayDuplicate = { compositeKey: string; displayName: string; parkLabel: string; dayIds: string[] };
 
 let nextId = 1;
 function makeId() {
@@ -945,6 +945,18 @@ export default function PlansPage() {
 
     const validDayIds = new Set(days);
 
+    // Derive a human-readable park label from a composite key ("DLR:canonical key").
+    // Falls back to resort string if the canonical key isn't in either ride map.
+    function parkLabelFromCompositeKey(compositeKey: string): string {
+      const colon = compositeKey.indexOf(":");
+      if (colon === -1) return compositeKey;
+      const resort = compositeKey.slice(0, colon) as ResortId;
+      const canonicalKey = compositeKey.slice(colon + 1);
+      const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+      const parkId = rideMap.get(canonicalKey) as ParkId | undefined;
+      return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
+    }
+
     // Plan duplicates — only attraction-matched items
     const planByKey = new Map<string, { name: string; dayIds: Set<string> }>();
     for (const item of items) {
@@ -956,9 +968,14 @@ export default function PlansPage() {
       planByKey.get(resolved.compositeKey)!.dayIds.add(item.dayId);
     }
     const planDuplicates: CrossDayDuplicate[] = [];
-    for (const { name, dayIds } of planByKey.values()) {
+    for (const [compositeKey, { name, dayIds }] of planByKey.entries()) {
       if (dayIds.size > 1) {
-        planDuplicates.push({ displayName: name, dayIds: [...dayIds].sort(daySort) });
+        planDuplicates.push({
+          compositeKey,
+          displayName: name,
+          parkLabel: parkLabelFromCompositeKey(compositeKey),
+          dayIds: [...dayIds].sort(daySort),
+        });
       }
     }
 
@@ -982,9 +999,14 @@ export default function PlansPage() {
           }
           llByKey.get(resolved.compositeKey)!.dayIds.add(it.dayId);
         }
-        for (const { name, dayIds } of llByKey.values()) {
+        for (const [compositeKey, { name, dayIds }] of llByKey.entries()) {
           if (dayIds.size > 1) {
-            lightningDuplicates.push({ displayName: name, dayIds: [...dayIds].sort(daySort) });
+            lightningDuplicates.push({
+              compositeKey,
+              displayName: name,
+              parkLabel: parkLabelFromCompositeKey(compositeKey),
+              dayIds: [...dayIds].sort(daySort),
+            });
           }
         }
       }
@@ -3415,10 +3437,10 @@ export default function PlansPage() {
                 <div className="cross-day-checks-group-label">Same attraction planned on multiple days:</div>
                 <ul className="cross-day-checks-list">
                   {crossDayChecks.planDuplicates.map((dup) => (
-                    <li key={dup.displayName} className="cross-day-checks-item">
+                    <li key={dup.compositeKey} className="cross-day-checks-item">
                       <span className="cross-day-checks-name">{dup.displayName}</span>
                       <span className="cross-day-checks-days">
-                        — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
+                        ({dup.parkLabel}) — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
                       </span>
                     </li>
                   ))}
@@ -3430,10 +3452,10 @@ export default function PlansPage() {
                 <div className="cross-day-checks-group-label">Same Lightning Lane on multiple days:</div>
                 <ul className="cross-day-checks-list">
                   {crossDayChecks.lightningDuplicates.map((dup) => (
-                    <li key={dup.displayName} className="cross-day-checks-item">
+                    <li key={dup.compositeKey} className="cross-day-checks-item">
                       <span className="cross-day-checks-name">{dup.displayName}</span>
                       <span className="cross-day-checks-days">
-                        — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
+                        ({dup.parkLabel}) — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
                       </span>
                     </li>
                   ))}
