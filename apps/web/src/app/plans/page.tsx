@@ -878,11 +878,12 @@ export default function PlansPage() {
       return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[] };
     }
 
-    // Derive the best-guess resort for each day so alias resolution is
-    // per-item rather than global. Priority matches resolveDayPark:
+    // Derive the resort for each day using only that day's own context.
+    // Deliberately avoids selectedResort/activeDayId so results are stable
+    // regardless of which day is currently active.
     //   1. Explicit dayParks override → derive resort from its park
-    //   2. Frequency inference via inferDayPark for each resort
-    //   3. Fall back to selectedResort
+    //   2. Frequency inference via inferDayPark for each resort independently
+    //   3. No match → leave unset (resolved per-item in resolveAttractionKey)
     const dayResortMap = new Map<string, ResortId>();
     for (const dayId of days) {
       const override = dayParks[dayId];
@@ -895,36 +896,51 @@ export default function PlansPage() {
       const wdwPark = inferDayPark(dayItems, "WDW");
       if (dlrPark && !wdwPark) { dayResortMap.set(dayId, "DLR"); continue; }
       if (wdwPark && !dlrPark) { dayResortMap.set(dayId, "WDW"); continue; }
-      dayResortMap.set(dayId, selectedResort);
+      // Ambiguous or no data — leave unset; tryResolve handles it per-item below.
     }
 
-    // Resolve a name to a canonical attraction key using the day's resort aliases.
-    // Mirrors the full 3-stage lookupWait pipeline against the ride-park map so
-    // containment matches (e.g. "Millennium Falcon" → smugglers run) resolve the
-    // same way the wait overlay does. Returns null for generic activities.
-    // Uses a resort-scoped composite key so same-named attractions at different
-    // resorts (Space Mountain @ DLR vs WDW) are never collapsed together.
-    function resolveAttractionKey(name: string, dayId: string): { compositeKey: string; resort: ResortId } | null {
-      const resort = dayResortMap.get(dayId) ?? selectedResort;
+    // Run the full 3-stage pipeline (mirrors lookupWait) against one resort's
+    // ride-park map.  Returns the canonical ride-map key on success, null otherwise.
+    function tryResolve(name: string, resort: ResortId): string | null {
       const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
       const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-
-      // Stage 1 + 3: exact key and alias lookup (resolveIdentityKey covers both)
+      // Stage 1 + 3: exact / alias
       const key = resolveIdentityKey(name, aliases);
-      if (rideMap.has(key)) return { compositeKey: `${resort}:${key}`, resort };
-
-      // Stage 2: whole-word containment (≥2 meaningful tokens, unambiguous match)
+      if (rideMap.has(key)) return key;
+      // Stage 2: whole-word containment (≥2 tokens, unambiguous)
       const tokens = tokenize(key);
       if (tokens.length < 2) return null;
-      let matchedKey: string | null = null;
+      let hit: string | null = null;
       for (const attrKey of rideMap.keys()) {
         if (containsWholeWordSequence(attrKey, tokens)) {
-          if (matchedKey !== null) return null; // ambiguous — skip
-          matchedKey = attrKey;
+          if (hit !== null) return null; // ambiguous
+          hit = attrKey;
         }
       }
-      if (!matchedKey) return null;
-      return { compositeKey: `${resort}:${matchedKey}`, resort };
+      return hit;
+    }
+
+    // Resolve a name to a stable composite key (resort:canonicalKey).
+    // When the day's resort is known, only that resort's map is tried.
+    // When the resort is ambiguous (unset), both maps are tried:
+    //   - exactly one match  → use that resort
+    //   - both match         → use DLR as a stable, active-day-independent tiebreak
+    //   - neither            → not an attraction, return null
+    // The resort-scoped composite key prevents cross-resort collisions (e.g.
+    // Rise of the Resistance at DL vs HS are kept as separate groups).
+    function resolveAttractionKey(name: string, dayId: string): { compositeKey: string } | null {
+      const knownResort = dayResortMap.get(dayId);
+      if (knownResort !== undefined) {
+        const k = tryResolve(name, knownResort);
+        return k ? { compositeKey: `${knownResort}:${k}` } : null;
+      }
+      // Day resort is ambiguous — try both independently
+      const dlrKey = tryResolve(name, "DLR");
+      const wdwKey = tryResolve(name, "WDW");
+      if (dlrKey && !wdwKey) return { compositeKey: `DLR:${dlrKey}` };
+      if (wdwKey && !dlrKey) return { compositeKey: `WDW:${wdwKey}` };
+      if (dlrKey && wdwKey)  return { compositeKey: `DLR:${dlrKey}` }; // stable tiebreak
+      return null;
     }
 
     const validDayIds = new Set(days);
@@ -947,7 +963,7 @@ export default function PlansPage() {
     }
 
     // Lightning duplicates across days — read from localStorage.
-    // Applies the same per-day resort resolution and attraction-only filter.
+    // Stale entries (dayId not in current days) are skipped before resolution.
     const lightningDuplicates: CrossDayDuplicate[] = [];
     try {
       const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
@@ -978,7 +994,7 @@ export default function PlansPage() {
 
     return { planDuplicates, lightningDuplicates };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialized, items, days, dayParks, selectedResort]);
+  }, [initialized, items, days, dayParks]);
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
