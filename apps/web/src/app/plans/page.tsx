@@ -50,6 +50,8 @@ import {
   ALIASES_WDW,
   lookupWait,
   stripAnnotations,
+  tokenize,
+  containsWholeWordSequence,
 } from "@/lib/plansMatching";
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
@@ -897,18 +899,35 @@ export default function PlansPage() {
     }
 
     // Resolve a name to a canonical attraction key using the day's resort aliases.
-    // Returns null when the resolved key is not in that resort's ride map,
-    // i.e. the item is a generic activity (Lunch, Hotel break, Morning Block …).
+    // Mirrors the full 3-stage lookupWait pipeline against the ride-park map so
+    // containment matches (e.g. "Millennium Falcon" → smugglers run) resolve the
+    // same way the wait overlay does. Returns null for generic activities.
     // Uses a resort-scoped composite key so same-named attractions at different
     // resorts (Space Mountain @ DLR vs WDW) are never collapsed together.
     function resolveAttractionKey(name: string, dayId: string): { compositeKey: string; resort: ResortId } | null {
       const resort = dayResortMap.get(dayId) ?? selectedResort;
       const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
       const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+
+      // Stage 1 + 3: exact key and alias lookup (resolveIdentityKey covers both)
       const key = resolveIdentityKey(name, aliases);
-      if (!rideMap.has(key)) return null;
-      return { compositeKey: `${resort}:${key}`, resort };
+      if (rideMap.has(key)) return { compositeKey: `${resort}:${key}`, resort };
+
+      // Stage 2: whole-word containment (≥2 meaningful tokens, unambiguous match)
+      const tokens = tokenize(key);
+      if (tokens.length < 2) return null;
+      let matchedKey: string | null = null;
+      for (const attrKey of rideMap.keys()) {
+        if (containsWholeWordSequence(attrKey, tokens)) {
+          if (matchedKey !== null) return null; // ambiguous — skip
+          matchedKey = attrKey;
+        }
+      }
+      if (!matchedKey) return null;
+      return { compositeKey: `${resort}:${matchedKey}`, resort };
     }
+
+    const validDayIds = new Set(days);
 
     // Plan duplicates — only attraction-matched items
     const planByKey = new Map<string, { name: string; dayIds: Set<string> }>();
@@ -939,6 +958,7 @@ export default function PlansPage() {
         const llByKey = new Map<string, { name: string; dayIds: Set<string> }>();
         for (const it of llItems) {
           if (!it.name || !it.dayId) continue;
+          if (!validDayIds.has(it.dayId)) continue; // skip stale entries for deleted days
           const resolved = resolveAttractionKey(it.name, it.dayId);
           if (!resolved) continue;
           if (!llByKey.has(resolved.compositeKey)) {
