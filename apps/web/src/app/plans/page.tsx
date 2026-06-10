@@ -894,9 +894,11 @@ export default function PlansPage() {
   // same attraction. Lightning items are read from localStorage since the plans
   // page does not hold lightning state; re-reads whenever `items` changes.
   const crossDayChecks = useMemo(() => {
-    if (!initialized || days.length < 2) {
-      return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[], lightningPlanConflicts: [] as LightningPlanConflict[] };
-    }
+    const empty = { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[], lightningPlanConflicts: [] as LightningPlanConflict[] };
+    if (!initialized) return empty;
+    // Cross-day duplicate checks require at least two days; lightning/plan conflicts
+    // run on any initialized state including single-day itineraries.
+    const runDuplicates = days.length >= 2;
 
     // Run the full 3-stage pipeline (mirrors lookupWait) against one resort's
     // ride-park map.  Returns the canonical ride-map key on success, null otherwise.
@@ -1127,12 +1129,11 @@ export default function PlansPage() {
       return result;
     }
 
-    // Plan duplicates
-    const planDuplicates = buildDuplicates(
-      items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel }))
-    );
+    // Cross-day duplicate checks — only when there are 2+ days
+    const planDuplicates = runDuplicates
+      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel })))
+      : [];
 
-    // Lightning duplicates across days
     const llFlatEntries: Array<{ name: string; dayId: string; timeLabel?: string }> = [];
     for (const [llDayId, llDayItems] of llItemsByDay) {
       for (const it of llDayItems) {
@@ -1143,7 +1144,7 @@ export default function PlansPage() {
         });
       }
     }
-    const lightningDuplicates = buildDuplicates(llFlatEntries);
+    const lightningDuplicates = runDuplicates ? buildDuplicates(llFlatEntries) : [];
 
     // Phase 8.7 — Lightning vs Plan conflict detection (informational, same day only).
     // Detects when a plan item and a lightning item refer to the same attraction on the
