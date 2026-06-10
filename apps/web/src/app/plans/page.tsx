@@ -1046,7 +1046,10 @@ export default function PlansPage() {
     function buildDuplicates(
       entries: Array<{ name: string; dayId: string; timeLabel?: string }>
     ): CrossDayDuplicate[] {
-      type CompositeEntry = { name: string; dayIds: Set<string>; timesByDay: Map<string, string> };
+      // timesByDay: all distinct parsed start times per dayId (Set<string> per day).
+      // Using a Set per day deduplicates repeated identical entries on the same day
+      // and allows collecting all times before cross-day comparison.
+      type CompositeEntry = { name: string; dayIds: Set<string>; timesByDay: Map<string, Set<string>> };
       const byComposite = new Map<string, CompositeEntry>();
 
       for (const entry of entries) {
@@ -1057,10 +1060,12 @@ export default function PlansPage() {
         }
         const ce = byComposite.get(resolved.compositeKey)!;
         ce.dayIds.add(entry.dayId);
-        // Capture start time for conflict detection (first entry per dayId wins)
-        if (entry.timeLabel && !ce.timesByDay.has(entry.dayId)) {
+        if (entry.timeLabel) {
           const rm = entry.timeLabel.match(/^(\d{1,2}:\d{2})/);
-          if (rm) ce.timesByDay.set(entry.dayId, rm[1]);
+          if (rm) {
+            if (!ce.timesByDay.has(entry.dayId)) ce.timesByDay.set(entry.dayId, new Set());
+            ce.timesByDay.get(entry.dayId)!.add(rm[1]);
+          }
         }
       }
 
@@ -1083,7 +1088,11 @@ export default function PlansPage() {
 
         for (const [compositeKey, ce] of sections) {
           for (const d of ce.dayIds) allDays.add(d);
-          for (const t of ce.timesByDay.values()) allTimes.push(t);
+          // Collect (dayId, time) pairs; one entry per distinct (day, time) combination.
+          // The same time on the same day counts once regardless of how many items share it.
+          for (const [dayId, times] of ce.timesByDay) {
+            for (const t of times) allTimes.push(`${dayId}:${t}`);
+          }
           parkSections.push({
             parkLabel: parkLabelFromCompositeKey(compositeKey),
             dayIds: [...ce.dayIds].sort(daySort),
@@ -1091,8 +1100,19 @@ export default function PlansPage() {
         }
 
         if (allDays.size > 1) {
-          // Time conflict: the same start time appears on more than one day for this attraction
-          const hasTimeConflict = allTimes.length > 1 && new Set(allTimes).size < allTimes.length;
+          // Time conflict: the same start time appears on 2+ distinct days for this attraction.
+          // allTimes entries are "dayId:time" — extract just the time parts and check whether
+          // any time value occurs for more than one distinct day.
+          const timeTodays = new Map<string, Set<string>>();
+          for (const token of allTimes) {
+            // token format: "day-N:H:MM" — dayId contains no colon; split at first colon
+            const firstColon = token.indexOf(":");
+            const dayPart = token.slice(0, firstColon);   // "day-1"
+            const timePart = token.slice(firstColon + 1); // "10:00"
+            if (!timeTodays.has(timePart)) timeTodays.set(timePart, new Set());
+            timeTodays.get(timePart)!.add(dayPart);
+          }
+          const hasTimeConflict = [...timeTodays.values()].some((days) => days.size >= 2);
           result.push({
             identityKey,
             displayName,
