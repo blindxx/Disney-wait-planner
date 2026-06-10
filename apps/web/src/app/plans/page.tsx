@@ -1149,6 +1149,19 @@ export default function PlansPage() {
     // Phase 8.7 — Lightning vs Plan conflict detection (informational, same day only).
     // Detects when a plan item and a lightning item refer to the same attraction on the
     // same day with overlapping or identical times — warns about potential double-booking.
+    //
+    // Identity matching uses two tiers:
+    //   1. Strict: resolveAttractionKey (resort-scoped composite key)
+    //   2. Same-day fallback: used only here when strict returns null (attraction is
+    //      ambiguous across DLR/WDW maps). Computes resolveIdentityKey under both alias
+    //      maps and allows a match only when both maps agree on the same normalized key,
+    //      preventing resort-divergent aliases (e.g. Soarin') from creating false positives.
+    function fallbackIdentityKey(name: string): string | null {
+      const dlrKey = resolveIdentityKey(name, ALIASES_DLR);
+      const wdwKey = resolveIdentityKey(name, ALIASES_WDW);
+      return dlrKey === wdwKey ? dlrKey : null;
+    }
+
     const lightningPlanConflicts: LightningPlanConflict[] = [];
     const seenConflicts = new Set<string>();
 
@@ -1167,14 +1180,18 @@ export default function PlansPage() {
       if (planStartMin < 0) continue;
 
       const planResolved = resolveAttractionKey(item.name, item.dayId);
-      if (!planResolved) continue;
-      const planIdentity = identityKeyFrom(planResolved.compositeKey);
+      const planIdentity = planResolved
+        ? identityKeyFrom(planResolved.compositeKey)
+        : fallbackIdentityKey(item.name);
+      if (!planIdentity) continue;
 
       for (const llIt of llItemsByDay.get(item.dayId) ?? []) {
         if (!llIt.startTime) continue;
         const llResolved = resolveAttractionKey(llIt.name, item.dayId);
-        if (!llResolved) continue;
-        if (identityKeyFrom(llResolved.compositeKey) !== planIdentity) continue;
+        const llIdentity = llResolved
+          ? identityKeyFrom(llResolved.compositeKey)
+          : fallbackIdentityKey(llIt.name);
+        if (!llIdentity || llIdentity !== planIdentity) continue;
 
         const llStartMin = toMin(llIt.startTime);
         if (llStartMin < 0) continue;
