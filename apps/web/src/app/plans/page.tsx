@@ -75,7 +75,23 @@ type PlanItem = {
 
 type Mode = "view" | "add" | "edit" | "import" | "edit-day";
 
-type CrossDayDuplicate = { compositeKey: string; displayName: string; parkLabel: string; dayIds: string[] };
+// Phase 8.7 — park-sectioned duplicate type
+type ParkSection = { parkLabel: string; dayIds: string[] };
+type CrossDayDuplicate = {
+  identityKey: string;       // canonical key without resort prefix
+  displayName: string;
+  parkSections: ParkSection[];
+  totalDays: number;         // distinct days across all park sections
+  hasTimeConflict: boolean;  // same time appears on multiple days for this attraction
+};
+// Phase 8.7 — lightning vs plan conflict
+type LightningPlanConflict = {
+  id: string;
+  attractionName: string;
+  planDayId: string;
+  planTime: string;
+  lightningTime: string;
+};
 
 let nextId = 1;
 function makeId() {
@@ -878,9 +894,11 @@ export default function PlansPage() {
   // same attraction. Lightning items are read from localStorage since the plans
   // page does not hold lightning state; re-reads whenever `items` changes.
   const crossDayChecks = useMemo(() => {
-    if (!initialized || days.length < 2) {
-      return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[] };
-    }
+    const empty = { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[], lightningPlanConflicts: [] as LightningPlanConflict[] };
+    if (!initialized) return empty;
+    // Cross-day duplicate checks require at least two days; lightning/plan conflicts
+    // run on any initialized state including single-day itineraries.
+    const runDuplicates = days.length >= 2;
 
     // Run the full 3-stage pipeline (mirrors lookupWait) against one resort's
     // ride-park map.  Returns the canonical ride-map key on success, null otherwise.
@@ -908,17 +926,19 @@ export default function PlansPage() {
     // inference for Lightning-only days (no plan items) below.
     // Grouped by dayId; only valid current days are kept (same filter as the
     // duplicate scan). Errors silently produce an empty map.
-    const llItemsByDay = new Map<string, Array<{ name: string }>>();
+    // Phase 8.7 — also capture startTime/endTime for lightning/plan conflict detection.
+    type LLItem = { name: string; startTime: string; endTime: string };
+    const llItemsByDay = new Map<string, Array<LLItem>>();
     const _validDayIdsForInference = new Set(days);
     try {
       const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
       const _raw = localStorage.getItem(_llKey);
       if (_raw) {
-        const _parsed = JSON.parse(_raw) as { items?: Array<{ name?: string; dayId?: string }> };
+        const _parsed = JSON.parse(_raw) as { items?: Array<{ name?: string; dayId?: string; startTime?: string; endTime?: string }> };
         for (const it of (Array.isArray(_parsed?.items) ? _parsed.items : [])) {
           if (!it.name || !it.dayId || !_validDayIdsForInference.has(it.dayId)) continue;
           const bucket = llItemsByDay.get(it.dayId) ?? [];
-          bucket.push({ name: it.name });
+          bucket.push({ name: it.name, startTime: it.startTime ?? "", endTime: it.endTime ?? "" });
           llItemsByDay.set(it.dayId, bucket);
         }
       }
@@ -1010,54 +1030,202 @@ export default function PlansPage() {
       return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
     }
 
-    // Plan duplicates — only attraction-matched items
-    const planByKey = new Map<string, { name: string; dayIds: Set<string> }>();
-    for (const item of items) {
-      const resolved = resolveAttractionKey(item.name, item.dayId);
-      if (!resolved) continue;
-      if (!planByKey.has(resolved.compositeKey)) {
-        planByKey.set(resolved.compositeKey, { name: item.name, dayIds: new Set() });
-      }
-      planByKey.get(resolved.compositeKey)!.dayIds.add(item.dayId);
-    }
-    const planDuplicates: CrossDayDuplicate[] = [];
-    for (const [compositeKey, { name, dayIds }] of planByKey.entries()) {
-      if (dayIds.size > 1) {
-        planDuplicates.push({
-          compositeKey,
-          displayName: name,
-          parkLabel: parkLabelFromCompositeKey(compositeKey),
-          dayIds: [...dayIds].sort(daySort),
-        });
-      }
+    // Phase 8.7 — local toMin helper (mirrors timeConflicts.ts, scoped here)
+    function toMin(t: string): number {
+      const m = t.match(/^(\d{1,2}):(\d{2})$/);
+      return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : -1;
     }
 
-    // Lightning duplicates across days — reuse llItemsByDay (already read,
-    // filtered to current days, and grouped by dayId above).
-    const lightningDuplicates: CrossDayDuplicate[] = [];
-    const llByKey = new Map<string, { name: string; dayIds: Set<string> }>();
-    for (const [llDayId, llDayItems] of llItemsByDay.entries()) {
-      for (const it of llDayItems) {
-        const resolved = resolveAttractionKey(it.name, llDayId);
+    // Phase 8.7 — extract canonical identity key (strip "resort:" prefix)
+    function identityKeyFrom(compositeKey: string): string {
+      const c = compositeKey.indexOf(":");
+      return c >= 0 ? compositeKey.slice(c + 1) : compositeKey;
+    }
+
+    // Phase 8.7 — build duplicates grouped by canonical identity key (not compositeKey).
+    // First pass: accumulate dayIds and first-seen times per compositeKey.
+    // Second pass: merge compositeKey entries into identity groups for cross-resort grouping.
+    function buildDuplicates(
+      entries: Array<{ name: string; dayId: string; timeLabel?: string }>
+    ): CrossDayDuplicate[] {
+      // timesByDay: all distinct parsed start times per dayId (Set<string> per day).
+      // Using a Set per day deduplicates repeated identical entries on the same day
+      // and allows collecting all times before cross-day comparison.
+      type CompositeEntry = { name: string; dayIds: Set<string>; timesByDay: Map<string, Set<string>> };
+      const byComposite = new Map<string, CompositeEntry>();
+
+      for (const entry of entries) {
+        const resolved = resolveAttractionKey(entry.name, entry.dayId);
         if (!resolved) continue;
-        if (!llByKey.has(resolved.compositeKey)) {
-          llByKey.set(resolved.compositeKey, { name: it.name, dayIds: new Set() });
+        if (!byComposite.has(resolved.compositeKey)) {
+          byComposite.set(resolved.compositeKey, { name: entry.name, dayIds: new Set(), timesByDay: new Map() });
         }
-        llByKey.get(resolved.compositeKey)!.dayIds.add(llDayId);
+        const ce = byComposite.get(resolved.compositeKey)!;
+        ce.dayIds.add(entry.dayId);
+        if (entry.timeLabel) {
+          const rm = entry.timeLabel.match(/^(\d{1,2}:\d{2})/);
+          if (rm) {
+            if (!ce.timesByDay.has(entry.dayId)) ce.timesByDay.set(entry.dayId, new Set());
+            ce.timesByDay.get(entry.dayId)!.add(rm[1]);
+          }
+        }
+      }
+
+      // Second pass: group by identity key
+      type IdentityEntry = { displayName: string; sections: Map<string, CompositeEntry> };
+      const byIdentity = new Map<string, IdentityEntry>();
+      for (const [compositeKey, ce] of byComposite) {
+        const iKey = identityKeyFrom(compositeKey);
+        if (!byIdentity.has(iKey)) {
+          byIdentity.set(iKey, { displayName: ce.name, sections: new Map() });
+        }
+        byIdentity.get(iKey)!.sections.set(compositeKey, ce);
+      }
+
+      const result: CrossDayDuplicate[] = [];
+      for (const [identityKey, { displayName, sections }] of byIdentity) {
+        const allDays = new Set<string>();
+        const parkSections: ParkSection[] = [];
+        const allTimes: string[] = [];
+
+        for (const [compositeKey, ce] of sections) {
+          for (const d of ce.dayIds) allDays.add(d);
+          // Collect (dayId, time) pairs; one entry per distinct (day, time) combination.
+          // The same time on the same day counts once regardless of how many items share it.
+          for (const [dayId, times] of ce.timesByDay) {
+            for (const t of times) allTimes.push(`${dayId}:${t}`);
+          }
+          parkSections.push({
+            parkLabel: parkLabelFromCompositeKey(compositeKey),
+            dayIds: [...ce.dayIds].sort(daySort),
+          });
+        }
+
+        if (allDays.size > 1) {
+          // Time conflict: the same start time appears on 2+ distinct days for this attraction.
+          // allTimes entries are "dayId:time" — extract just the time parts and check whether
+          // any time value occurs for more than one distinct day.
+          const timeTodays = new Map<string, Set<string>>();
+          for (const token of allTimes) {
+            // token format: "day-N:H:MM" — dayId contains no colon; split at first colon
+            const firstColon = token.indexOf(":");
+            const dayPart = token.slice(0, firstColon);   // "day-1"
+            const timePart = token.slice(firstColon + 1); // "10:00"
+            if (!timeTodays.has(timePart)) timeTodays.set(timePart, new Set());
+            timeTodays.get(timePart)!.add(dayPart);
+          }
+          const hasTimeConflict = [...timeTodays.values()].some((days) => days.size >= 2);
+          result.push({
+            identityKey,
+            displayName,
+            parkSections: parkSections
+              .filter((s) => s.dayIds.length > 0)
+              .sort((a, b) => a.parkLabel.localeCompare(b.parkLabel)),
+            totalDays: allDays.size,
+            hasTimeConflict,
+          });
+        }
+      }
+      return result;
+    }
+
+    // Cross-day duplicate checks — only when there are 2+ days
+    const planDuplicates = runDuplicates
+      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel })))
+      : [];
+
+    const llFlatEntries: Array<{ name: string; dayId: string; timeLabel?: string }> = [];
+    for (const [llDayId, llDayItems] of llItemsByDay) {
+      for (const it of llDayItems) {
+        llFlatEntries.push({
+          name: it.name,
+          dayId: llDayId,
+          timeLabel: it.startTime ? (it.endTime ? `${it.startTime}-${it.endTime}` : it.startTime) : undefined,
+        });
       }
     }
-    for (const [compositeKey, { name, dayIds }] of llByKey.entries()) {
-      if (dayIds.size > 1) {
-        lightningDuplicates.push({
-          compositeKey,
-          displayName: name,
-          parkLabel: parkLabelFromCompositeKey(compositeKey),
-          dayIds: [...dayIds].sort(daySort),
+    const lightningDuplicates = runDuplicates ? buildDuplicates(llFlatEntries) : [];
+
+    // Phase 8.7 — Lightning vs Plan conflict detection (informational, same day only).
+    // Detects when a plan item and a lightning item refer to the same attraction on the
+    // same day with overlapping or identical times — warns about potential double-booking.
+    //
+    // Identity matching uses two tiers:
+    //   1. Strict: resolveAttractionKey (resort-scoped composite key)
+    //   2. Same-day fallback: used only here when strict returns null (attraction is
+    //      ambiguous across DLR/WDW maps). Computes resolveIdentityKey under both alias
+    //      maps and allows a match only when both maps agree on the same normalized key,
+    //      preventing resort-divergent aliases (e.g. Soarin') from creating false positives.
+    function fallbackIdentityKey(name: string): string | null {
+      const dlrKey = resolveIdentityKey(name, ALIASES_DLR);
+      const wdwKey = resolveIdentityKey(name, ALIASES_WDW);
+      return dlrKey === wdwKey ? dlrKey : null;
+    }
+
+    const lightningPlanConflicts: LightningPlanConflict[] = [];
+    const seenConflicts = new Set<string>();
+
+    for (const item of items) {
+      if (!item.timeLabel) continue;
+      // Parse plan time
+      let planStartMin = -1;
+      let planEndMin: number | null = null;
+      const rangeM = item.timeLabel.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+      if (rangeM) {
+        planStartMin = toMin(rangeM[1]);
+        planEndMin = toMin(rangeM[2]);
+      } else if (/^\d{1,2}:\d{2}$/.test(item.timeLabel)) {
+        planStartMin = toMin(item.timeLabel);
+      }
+      if (planStartMin < 0) continue;
+
+      const planResolved = resolveAttractionKey(item.name, item.dayId);
+      const planIdentity = planResolved
+        ? identityKeyFrom(planResolved.compositeKey)
+        : fallbackIdentityKey(item.name);
+      if (!planIdentity) continue;
+
+      for (const llIt of llItemsByDay.get(item.dayId) ?? []) {
+        if (!llIt.startTime) continue;
+        const llResolved = resolveAttractionKey(llIt.name, item.dayId);
+        const llIdentity = llResolved
+          ? identityKeyFrom(llResolved.compositeKey)
+          : fallbackIdentityKey(llIt.name);
+        if (!llIdentity || llIdentity !== planIdentity) continue;
+
+        const llStartMin = toMin(llIt.startTime);
+        if (llStartMin < 0) continue;
+        const llEndMin = llIt.endTime ? toMin(llIt.endTime) : null;
+
+        // Overlap test
+        let hasOverlap = false;
+        if (planEndMin !== null && planEndMin > planStartMin && llEndMin !== null && llEndMin > llStartMin) {
+          hasOverlap = planStartMin < llEndMin && llStartMin < planEndMin;
+        } else if (planEndMin === null && llEndMin !== null && llEndMin > llStartMin) {
+          hasOverlap = planStartMin >= llStartMin && planStartMin < llEndMin;
+        } else if (planEndMin !== null && planEndMin > planStartMin && llEndMin === null) {
+          hasOverlap = llStartMin >= planStartMin && llStartMin < planEndMin;
+        } else {
+          hasOverlap = planStartMin === llStartMin;
+        }
+        if (!hasOverlap) continue;
+
+        const conflictKey = `${item.id}:${llIt.name}:${item.dayId}`;
+        if (seenConflicts.has(conflictKey)) continue;
+        seenConflicts.add(conflictKey);
+
+        const llTimeLabel = llIt.endTime ? `${llIt.startTime}–${llIt.endTime}` : llIt.startTime;
+        lightningPlanConflicts.push({
+          id: conflictKey,
+          attractionName: item.name,
+          planDayId: item.dayId,
+          planTime: item.timeLabel,
+          lightningTime: llTimeLabel,
         });
       }
     }
 
-    return { planDuplicates, lightningDuplicates };
+    return { planDuplicates, lightningDuplicates, lightningPlanConflicts };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized, items, days, dayParks, lightningVersion]);
 
@@ -2995,6 +3163,29 @@ export default function PlansPage() {
         .cross-day-checks-days {
           color: #b45309;
         }
+        /* Phase 8.7 — park-section layout inside a duplicate entry */
+        .cross-day-checks-park-section {
+          display: flex;
+          gap: 0.3rem;
+          align-items: baseline;
+          padding-left: 0.5rem;
+          font-size: 0.78rem;
+        }
+        .cross-day-checks-park-label {
+          color: #78350f;
+          font-weight: 500;
+          min-width: 0;
+        }
+        .cross-day-checks-severity {
+          font-weight: 400;
+          color: #b45309;
+          font-size: 0.75rem;
+        }
+        .cross-day-checks-time-flag {
+          font-weight: 400;
+          color: #b45309;
+          font-size: 0.75rem;
+        }
       `}</style>
 
       <div className="plans-container">
@@ -3474,8 +3665,8 @@ export default function PlansPage() {
           </ul>
         )}
 
-        {/* Phase 8.6 — Cross-Day Checks: shown only when duplicate attractions exist across days */}
-        {initialized && (crossDayChecks.planDuplicates.length > 0 || crossDayChecks.lightningDuplicates.length > 0) && (
+        {/* Phase 8.7 — Cross-Day Checks: shown only when duplicates or conflicts exist */}
+        {initialized && (crossDayChecks.planDuplicates.length > 0 || crossDayChecks.lightningDuplicates.length > 0 || crossDayChecks.lightningPlanConflicts.length > 0) && (
           <div className="cross-day-checks">
             <div className="cross-day-checks-title">⚠ Cross-Day Checks</div>
             {crossDayChecks.planDuplicates.length > 0 && (
@@ -3483,11 +3674,18 @@ export default function PlansPage() {
                 <div className="cross-day-checks-group-label">Same attraction planned on multiple days:</div>
                 <ul className="cross-day-checks-list">
                   {crossDayChecks.planDuplicates.map((dup) => (
-                    <li key={dup.compositeKey} className="cross-day-checks-item">
-                      <span className="cross-day-checks-name">{dup.displayName}</span>
-                      <span className="cross-day-checks-days">
-                        ({dup.parkLabel}) — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
+                    <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.15rem" }}>
+                      <span className="cross-day-checks-name">
+                        {dup.displayName}
+                        {dup.totalDays >= 4 && <span className="cross-day-checks-severity"> ·· {dup.totalDays} days</span>}
+                        {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
                       </span>
+                      {dup.parkSections.map((sec) => (
+                        <span key={sec.parkLabel} className="cross-day-checks-park-section">
+                          <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
+                          <span className="cross-day-checks-days">{sec.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}</span>
+                        </span>
+                      ))}
                     </li>
                   ))}
                 </ul>
@@ -3498,10 +3696,31 @@ export default function PlansPage() {
                 <div className="cross-day-checks-group-label">Same Lightning Lane on multiple days:</div>
                 <ul className="cross-day-checks-list">
                   {crossDayChecks.lightningDuplicates.map((dup) => (
-                    <li key={dup.compositeKey} className="cross-day-checks-item">
-                      <span className="cross-day-checks-name">{dup.displayName}</span>
+                    <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.15rem" }}>
+                      <span className="cross-day-checks-name">
+                        {dup.displayName}
+                        {dup.totalDays >= 4 && <span className="cross-day-checks-severity"> ·· {dup.totalDays} days</span>}
+                      </span>
+                      {dup.parkSections.map((sec) => (
+                        <span key={sec.parkLabel} className="cross-day-checks-park-section">
+                          <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
+                          <span className="cross-day-checks-days">{sec.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}</span>
+                        </span>
+                      ))}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {crossDayChecks.lightningPlanConflicts.length > 0 && (
+              <>
+                <div className="cross-day-checks-group-label">Lightning Lane overlaps with planned time:</div>
+                <ul className="cross-day-checks-list">
+                  {crossDayChecks.lightningPlanConflicts.map((c) => (
+                    <li key={c.id} className="cross-day-checks-item">
+                      <span className="cross-day-checks-name">{c.attractionName}</span>
                       <span className="cross-day-checks-days">
-                        ({dup.parkLabel}) — {dup.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}
+                        {dayDisplayLabel(c.planDayId, dayMeta)} — Plan: {c.planTime} / Lightning: {c.lightningTime}
                       </span>
                     </li>
                   ))}
