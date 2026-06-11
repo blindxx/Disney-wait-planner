@@ -1214,7 +1214,9 @@ export default function PlansPage() {
         if (seenConflicts.has(conflictKey)) continue;
         seenConflicts.add(conflictKey);
 
-        const llTimeLabel = llIt.endTime ? `${llIt.startTime}–${llIt.endTime}` : llIt.startTime;
+        const llTimeLabel = llIt.endTime
+          ? `${formatTimeLabel(llIt.startTime)}–${formatTimeLabel(llIt.endTime)}`
+          : formatTimeLabel(llIt.startTime);
         lightningPlanConflicts.push({
           id: conflictKey,
           attractionName: item.name,
