@@ -3721,7 +3721,16 @@ export default function PlansPage() {
                         {dup.parkSections.map((sec) => (
                           <span key={sec.parkLabel} className="cross-day-checks-park-section">
                             <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
-                            <span className="cross-day-checks-days">{sec.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}</span>
+                            <span className="cross-day-checks-days">
+                              {sec.dayIds.map((d, i) => (
+                                <span key={d}>
+                                  {i > 0 && ", "}
+                                  {d === activeDayId
+                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
+                                    : dayDisplayLabel(d, dayMeta)}
+                                </span>
+                              ))}
+                            </span>
                           </span>
                         ))}
                       </li>
@@ -3739,7 +3748,16 @@ export default function PlansPage() {
                         {dup.parkSections.map((sec) => (
                           <span key={sec.parkLabel} className="cross-day-checks-park-section">
                             <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
-                            <span className="cross-day-checks-days">{sec.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}</span>
+                            <span className="cross-day-checks-days">
+                              {sec.dayIds.map((d, i) => (
+                                <span key={d}>
+                                  {i > 0 && ", "}
+                                  {d === activeDayId
+                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
+                                    : dayDisplayLabel(d, dayMeta)}
+                                </span>
+                              ))}
+                            </span>
                           </span>
                         ))}
                       </li>
@@ -3755,7 +3773,7 @@ export default function PlansPage() {
                       <li key={c.id} className="cross-day-checks-item">
                         <span className="cross-day-checks-name">{c.attractionName}</span>
                         <span className="cross-day-checks-days">
-                          Plan {c.planTime} · Lightning {c.lightningTime}
+                          Plan {formatTimeLabel(c.planTime)} · Lightning {formatTimeLabel(c.lightningTime)}
                         </span>
                       </li>
                     ))}
