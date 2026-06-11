@@ -3769,7 +3769,7 @@ export default function PlansPage() {
               )}
               {activeConflicts.length > 0 && (
                 <>
-                  <div className="cross-day-checks-group-label">Lightning overlaps plan</div>
+                  <div className="cross-day-checks-group-label">Lightning conflicts</div>
                   <ul className="cross-day-checks-list">
                     {activeConflicts.map((c) => (
                       <li key={c.id} className="cross-day-checks-item">
