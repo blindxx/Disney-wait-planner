@@ -1214,7 +1214,9 @@ export default function PlansPage() {
         if (seenConflicts.has(conflictKey)) continue;
         seenConflicts.add(conflictKey);
 
-        const llTimeLabel = llIt.endTime ? `${llIt.startTime}–${llIt.endTime}` : llIt.startTime;
+        const llTimeLabel = llIt.endTime
+          ? `${formatTimeLabel(llIt.startTime)}–${formatTimeLabel(llIt.endTime)}`
+          : formatTimeLabel(llIt.startTime);
         lightningPlanConflicts.push({
           id: conflictKey,
           attractionName: item.name,
@@ -3132,49 +3134,67 @@ export default function PlansPage() {
           border-radius: 8px;
         }
         .cross-day-checks-title {
-          font-size: 0.85rem;
+          font-size: 0.8rem;
           font-weight: 600;
           color: #92400e;
           margin-bottom: 0.5rem;
+          letter-spacing: 0.01em;
         }
         .cross-day-checks-group-label {
-          font-size: 0.8rem;
+          font-size: 0.75rem;
           font-weight: 600;
           color: #78350f;
-          margin: 0.5rem 0 0.25rem;
+          margin: 0.6rem 0 0.2rem;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+        .cross-day-checks-group-label:first-of-type {
+          margin-top: 0;
         }
         .cross-day-checks-list {
           list-style: none;
           padding: 0;
-          margin: 0;
+          margin: 0 0 0.25rem;
         }
         .cross-day-checks-item {
           font-size: 0.8rem;
           color: #92400e;
-          padding: 0.2rem 0;
+          padding: 0.25rem 0;
           display: flex;
-          gap: 0.4rem;
+          gap: 0.35rem;
           align-items: baseline;
           flex-wrap: wrap;
+          border-top: 1px solid #fde68a;
+        }
+        .cross-day-checks-item:first-child {
+          border-top: none;
         }
         .cross-day-checks-name {
           font-weight: 500;
+          word-break: break-word;
         }
         .cross-day-checks-days {
           color: #b45309;
+          word-break: break-word;
         }
-        /* Phase 8.7 — park-section layout inside a duplicate entry */
         .cross-day-checks-park-section {
           display: flex;
-          gap: 0.3rem;
+          gap: 0;
           align-items: baseline;
           padding-left: 0.5rem;
           font-size: 0.78rem;
+          flex-wrap: wrap;
+          width: 100%;
         }
         .cross-day-checks-park-label {
           color: #78350f;
           font-weight: 500;
           min-width: 0;
+          margin-right: 0.3rem;
+        }
+        .cross-day-checks-park-label::after {
+          content: " —";
+          font-weight: 400;
         }
         .cross-day-checks-severity {
           font-weight: 400;
@@ -3183,8 +3203,16 @@ export default function PlansPage() {
         }
         .cross-day-checks-time-flag {
           font-weight: 400;
-          color: #b45309;
+          color: #ef4444;
           font-size: 0.75rem;
+        }
+        @media (max-width: 480px) {
+          .cross-day-checks {
+            padding: 0.6rem 0.75rem;
+          }
+          .cross-day-checks-park-section {
+            padding-left: 0.35rem;
+          }
         }
       `}</style>
 
@@ -3665,70 +3693,98 @@ export default function PlansPage() {
           </ul>
         )}
 
-        {/* Phase 8.7 — Cross-Day Checks: shown only when duplicates or conflicts exist */}
-        {initialized && (crossDayChecks.planDuplicates.length > 0 || crossDayChecks.lightningDuplicates.length > 0 || crossDayChecks.lightningPlanConflicts.length > 0) && (
-          <div className="cross-day-checks">
-            <div className="cross-day-checks-title">⚠ Cross-Day Checks</div>
-            {crossDayChecks.planDuplicates.length > 0 && (
-              <>
-                <div className="cross-day-checks-group-label">Same attraction planned on multiple days:</div>
-                <ul className="cross-day-checks-list">
-                  {crossDayChecks.planDuplicates.map((dup) => (
-                    <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.15rem" }}>
-                      <span className="cross-day-checks-name">
-                        {dup.displayName}
-                        {dup.totalDays >= 4 && <span className="cross-day-checks-severity"> ·· {dup.totalDays} days</span>}
-                        {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
-                      </span>
-                      {dup.parkSections.map((sec) => (
-                        <span key={sec.parkLabel} className="cross-day-checks-park-section">
-                          <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
-                          <span className="cross-day-checks-days">{sec.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}</span>
+        {/* Phase 8.7.1 — Cross-Day Checks: active-day filtered, shown only when relevant entries exist */}
+        {initialized && (() => {
+          // Render-only filtering: only show groups that include the active day.
+          // Detection logic (crossDayChecks) is unchanged.
+          const activePlanDups = crossDayChecks.planDuplicates.filter((dup) =>
+            dup.parkSections.some((sec) => sec.dayIds.includes(activeDayId))
+          );
+          const activeLightningDups = crossDayChecks.lightningDuplicates.filter((dup) =>
+            dup.parkSections.some((sec) => sec.dayIds.includes(activeDayId))
+          );
+          const activeConflicts = crossDayChecks.lightningPlanConflicts.filter(
+            (c) => c.planDayId === activeDayId
+          );
+          if (activePlanDups.length === 0 && activeLightningDups.length === 0 && activeConflicts.length === 0) return null;
+          return (
+            <div className="cross-day-checks">
+              <div className="cross-day-checks-title">Cross-Day Checks</div>
+              {activePlanDups.length > 0 && (
+                <>
+                  <div className="cross-day-checks-group-label">Planned on multiple days</div>
+                  <ul className="cross-day-checks-list">
+                    {activePlanDups.map((dup) => (
+                      <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
+                        <span className="cross-day-checks-name">
+                          {dup.displayName}
+                          {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
                         </span>
-                      ))}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-            {crossDayChecks.lightningDuplicates.length > 0 && (
-              <>
-                <div className="cross-day-checks-group-label">Same Lightning Lane on multiple days:</div>
-                <ul className="cross-day-checks-list">
-                  {crossDayChecks.lightningDuplicates.map((dup) => (
-                    <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.15rem" }}>
-                      <span className="cross-day-checks-name">
-                        {dup.displayName}
-                        {dup.totalDays >= 4 && <span className="cross-day-checks-severity"> ·· {dup.totalDays} days</span>}
-                      </span>
-                      {dup.parkSections.map((sec) => (
-                        <span key={sec.parkLabel} className="cross-day-checks-park-section">
-                          <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
-                          <span className="cross-day-checks-days">{sec.dayIds.map((d) => dayDisplayLabel(d, dayMeta)).join(", ")}</span>
+                        {dup.parkSections.map((sec) => (
+                          <span key={sec.parkLabel} className="cross-day-checks-park-section">
+                            <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
+                            <span className="cross-day-checks-days">
+                              {sec.dayIds.map((d, i) => (
+                                <span key={d}>
+                                  {i > 0 && ", "}
+                                  {d === activeDayId
+                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
+                                    : dayDisplayLabel(d, dayMeta)}
+                                </span>
+                              ))}
+                            </span>
+                          </span>
+                        ))}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {activeLightningDups.length > 0 && (
+                <>
+                  <div className="cross-day-checks-group-label">Lightning Lane on multiple days</div>
+                  <ul className="cross-day-checks-list">
+                    {activeLightningDups.map((dup) => (
+                      <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
+                        <span className="cross-day-checks-name">{dup.displayName}</span>
+                        {dup.parkSections.map((sec) => (
+                          <span key={sec.parkLabel} className="cross-day-checks-park-section">
+                            <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
+                            <span className="cross-day-checks-days">
+                              {sec.dayIds.map((d, i) => (
+                                <span key={d}>
+                                  {i > 0 && ", "}
+                                  {d === activeDayId
+                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
+                                    : dayDisplayLabel(d, dayMeta)}
+                                </span>
+                              ))}
+                            </span>
+                          </span>
+                        ))}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {activeConflicts.length > 0 && (
+                <>
+                  <div className="cross-day-checks-group-label">Lightning conflicts</div>
+                  <ul className="cross-day-checks-list">
+                    {activeConflicts.map((c) => (
+                      <li key={c.id} className="cross-day-checks-item">
+                        <span className="cross-day-checks-name">{c.attractionName}</span>
+                        <span className="cross-day-checks-days">
+                          Plan {formatTimeLabel(c.planTime)} · Lightning {formatTimeLabel(c.lightningTime)}
                         </span>
-                      ))}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-            {crossDayChecks.lightningPlanConflicts.length > 0 && (
-              <>
-                <div className="cross-day-checks-group-label">Lightning Lane overlaps with planned time:</div>
-                <ul className="cross-day-checks-list">
-                  {crossDayChecks.lightningPlanConflicts.map((c) => (
-                    <li key={c.id} className="cross-day-checks-item">
-                      <span className="cross-day-checks-name">{c.attractionName}</span>
-                      <span className="cross-day-checks-days">
-                        {dayDisplayLabel(c.planDayId, dayMeta)} — Plan: {c.planTime} / Lightning: {c.lightningTime}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </div>
-        )}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Phase 8.2 — Backup / Restore modal */}
