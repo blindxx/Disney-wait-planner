@@ -683,7 +683,8 @@ export default function LightningPage() {
   safeActiveDayIdRef.current = safeActiveDayId;
 
   // Phase 8.8 — Resolved park for the active day, matching My Plans resolution order:
-  //   1. Manual override (dayParks entry) → Manual mode
+  //   1. Manual override (dayParks entry) that matches selectedResort → Manual mode
+  //      (same resort guard as My Plans: PARK_TO_RESORT[override] === selectedResort)
   //   2. Infer from plan items for this day via inferPlansContext → Auto mode
   //   3. null → Auto mode, "no park set yet"
   const { resolvedDayPark, dayParkMode } = useMemo<{
@@ -691,7 +692,7 @@ export default function LightningPage() {
     dayParkMode: "Manual" | "Auto";
   }>(() => {
     const override = dayParks[safeActiveDayId];
-    if (override && override in PARK_TO_RESORT) {
+    if (override && PARK_TO_RESORT[override] === selectedResort) {
       return { resolvedDayPark: override, dayParkMode: "Manual" };
     }
     const inferred = inferPlansContext(
@@ -701,7 +702,7 @@ export default function LightningPage() {
       return { resolvedDayPark: inferred.park, dayParkMode: "Auto" };
     }
     return { resolvedDayPark: null, dayParkMode: "Auto" };
-  }, [dayParks, safeActiveDayId, planDayItems]);
+  }, [dayParks, safeActiveDayId, planDayItems, selectedResort]);
 
   // Phase 8.8 — Build a map from normalized attraction name → parkId for mismatch detection.
   // Intentionally covers all resorts so the lookup is correct even when the resolved day
