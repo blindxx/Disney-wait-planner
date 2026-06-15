@@ -8,6 +8,7 @@ import {
   formatSingleTime,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
+import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
   type AttractionWait,
@@ -55,7 +56,23 @@ const PARK_LABELS: Record<ParkId, string> = {
   ak: "Animal Kingdom",
 };
 
+/** Parks that belong to each resort — used to validate dayParks overrides. */
+const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
+  disneyland: "DLR",
+  dca: "DLR",
+  mk: "WDW",
+  epcot: "WDW",
+  hs: "WDW",
+  ak: "WDW",
+};
+
 // ===== TYPES =====
+
+// Phase 8.8 — Day metadata (read-only mirror of My Plans structure)
+type DayMeta = {
+  label?: string;
+  date?: string;
+};
 
 type LightningItem = {
   id: string;
@@ -124,6 +141,97 @@ function loadKnownDays(key: string): string[] {
     return valid;
   } catch {
     return ["day-1"];
+  }
+}
+
+// ===== DAY CONTEXT HELPERS (Phase 8.8) =====
+
+/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
+function dayLabelFromId(dayId: string): string {
+  const n = parseInt(dayId.split("-")[1], 10);
+  return isNaN(n) ? dayId : `Day ${n}`;
+}
+
+/** Human-readable day label using optional dayMeta (no date formatting — label only). */
+function dayContextLabel(dayId: string, meta: Record<string, DayMeta>): string {
+  const label = meta[dayId]?.label?.trim();
+  return label || dayLabelFromId(dayId);
+}
+
+/** Load per-day park overrides from profile-scoped localStorage (read-only on Lightning page). */
+function loadDayParks(key: string): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+        result[k] = v;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Load day metadata from profile-scoped localStorage (read-only on Lightning page). */
+function loadDayMeta(key: string): Record<string, DayMeta> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, DayMeta> = {};
+    for (const [dayId, rawMeta] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!VALID_DAY_ID_RE.test(dayId)) continue;
+      if (typeof rawMeta !== "object" || rawMeta === null) continue;
+      const entry = rawMeta as Record<string, unknown>;
+      const label = typeof entry.label === "string" ? entry.label.trim() : "";
+      if (label) result[dayId] = { label };
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Load plan item names for the active day from the profile's plans storage key.
+ * Only name + dayId are needed — no other fields are read.
+ * Handles both v0 (raw array) and v1 ({version,items}) schemas.
+ */
+function loadPlanItemsForDay(plansKey: string, dayId: string): { name: string }[] {
+  try {
+    const raw = localStorage.getItem(plansKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    let items: unknown[];
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      Array.isArray((parsed as Record<string, unknown>).items)
+    ) {
+      items = (parsed as { items: unknown[] }).items;
+    } else if (Array.isArray(parsed)) {
+      items = parsed;
+    } else {
+      return [];
+    }
+    return items
+      .filter(
+        (it): it is { name: string; dayId?: string } =>
+          typeof it === "object" &&
+          it !== null &&
+          typeof (it as Record<string, unknown>).name === "string"
+      )
+      .filter((it) => (it.dayId ?? "day-1") === dayId)
+      .map((it) => ({ name: it.name }));
+  } catch {
+    return [];
   }
 }
 
@@ -284,6 +392,19 @@ export default function LightningPage() {
   const daysKeyRef = useRef("dwp:default:days");
   // Phase 8.3.2 — known planner days for safe display-day validation.
   const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
+  // Phase 8.8 — per-day park overrides (read-only; Plans page owns writes).
+  const dayParksKeyRef = useRef("dwp:default:dayParks");
+  const [dayParks, setDayParks] = useState<Record<string, string>>({});
+  // Phase 8.8 — day metadata for display labels (read-only).
+  const dayMetaKeyRef = useRef("dwp:default:dayMeta");
+  const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
+  // Phase 8.8 — plan items for the active day, read from profile plans storage
+  // so Lightning can infer the auto park the same way My Plans does.
+  const plansKeyRef = useRef("dwp:default:plans");
+  const [planDayItems, setPlanDayItems] = useState<{ name: string }[]>([]);
+  // Stable ref used inside storage event handler to get current safeActiveDayId
+  // without adding it to the effect dependency array.
+  const safeActiveDayIdRef = useRef("day-1");
   // Tracks whether the user made a local edit after the current pull started.
   const localEditRef = useRef(false);
 
@@ -330,6 +451,15 @@ export default function LightningPage() {
     // Phase 8.3.2 — load known planner days for safe display-day validation.
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
     setKnownDays(loadKnownDays(daysKeyRef.current));
+    // Phase 8.8 — load day park overrides and metadata (read-only context display).
+    dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
+    setDayParks(loadDayParks(dayParksKeyRef.current));
+    dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
+    setDayMeta(loadDayMeta(dayMetaKeyRef.current));
+    // Phase 8.8 — load plan items so auto park can be inferred the same way My Plans does.
+    plansKeyRef.current = buildNamespacedKey(currentProfileId, "plans");
+    const loadedActiveDayId = normalizeDayId(localStorage.getItem(buildNamespacedKey(currentProfileId, "activeDayId")));
+    setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, loadedActiveDayId));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
     setItems(loadFromStorage(lightningKeyRef.current));
@@ -409,6 +539,9 @@ export default function LightningPage() {
                 profileKeysForPull.plans,
                 JSON.stringify(planner.plans)
               );
+              // Same-tab writes do not fire a storage event, so refresh planDayItems
+              // explicitly now that cloud plan data is in localStorage.
+              setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
             } catch {
               hydrationSucceeded = false;
             }
@@ -519,6 +652,114 @@ export default function LightningPage() {
     if (items.length > 0) return items[0].dayId;
     return "day-1";
   }, [activeDayId, knownDays, items]);
+
+  // Phase 8.8 — Listen for storage changes from My Plans (active day, dayParks, dayMeta).
+  // Plans page owns writes; Lightning page reads reactively.
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      if (e.key === activeDayKeyRef.current && e.newValue !== null) {
+        const newDay = normalizeDayId(e.newValue);
+        setActiveDayId(newDay);
+        // Reload plan items scoped to the newly active day.
+        setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, newDay));
+      }
+      if (e.key === daysKeyRef.current) {
+        setKnownDays(loadKnownDays(daysKeyRef.current));
+      }
+      if (e.key === dayParksKeyRef.current) {
+        setDayParks(loadDayParks(dayParksKeyRef.current));
+      }
+      if (e.key === dayMetaKeyRef.current) {
+        setDayMeta(loadDayMeta(dayMetaKeyRef.current));
+      }
+      if (e.key === plansKeyRef.current) {
+        // Plans changed — re-infer using current active day.
+        setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, safeActiveDayIdRef.current));
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Keep safeActiveDayIdRef in sync so the storage handler can read it without
+  // capturing a stale closure.
+  safeActiveDayIdRef.current = safeActiveDayId;
+
+  // Phase 8.8 — Resolved park for the active day, matching My Plans resolution order:
+  //   1. Manual override (dayParks entry) that matches selectedResort → Manual mode
+  //      (same resort guard as My Plans: PARK_TO_RESORT[override] === selectedResort)
+  //   2. Infer from plan items for this day via inferPlansContext → Auto mode
+  //   3. null → Auto mode, "no park set yet"
+  const { resolvedDayPark, dayParkMode } = useMemo<{
+    resolvedDayPark: string | null;
+    dayParkMode: "Manual" | "Auto";
+  }>(() => {
+    const override = dayParks[safeActiveDayId];
+    if (override && PARK_TO_RESORT[override] === selectedResort) {
+      return { resolvedDayPark: override, dayParkMode: "Manual" };
+    }
+    const inferred = inferPlansContext(
+      planDayItems.map((it, i) => ({ id: String(i), name: it.name, timeLabel: "" }))
+    );
+    if (inferred.park) {
+      return { resolvedDayPark: inferred.park, dayParkMode: "Auto" };
+    }
+    return { resolvedDayPark: null, dayParkMode: "Auto" };
+  }, [dayParks, safeActiveDayId, planDayItems, selectedResort]);
+
+  // Resort to use for mismatch lookups: prefer the resort of the resolved day park
+  // so that MK-day + DLR overlay still resolves MK attractions correctly.
+  const mismatchResort: ResortId =
+    (resolvedDayPark ? (PARK_TO_RESORT[resolvedDayPark] ?? null) : null) ?? selectedResort;
+
+  // Phase 8.8 — Build wait and park-id maps scoped to mismatchResort.
+  // Scoping to one resort eliminates same-name cross-resort collisions (e.g. Space Mountain
+  // exists in both DLR and WDW with different parks) and ensures lookupWait receives entries
+  // from the resort the day actually belongs to, not the Lightning overlay resort.
+  const { mismatchWaitMap, mismatchParkIdMap } = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const wMap = new Map<string, WaitEntry>();
+    const pMap = new Map<string, string>();
+    for (const a of source) {
+      if (a.resortId !== mismatchResort) continue;
+      wMap.set(normalizeKey(a.name), {
+        status: a.status,
+        waitMins: a.waitMins,
+        canonicalName: a.name,
+      });
+      pMap.set(normalizeKey(a.name), a.parkId as string);
+    }
+    return { mismatchWaitMap: wMap, mismatchParkIdMap: pMap };
+  }, [mismatchResort, liveAttractions]);
+
+  // Phase 8.8 — Mismatch warning for add form.
+  // Shown whenever the resolved day park (manual or auto-inferred) differs from the
+  // attraction's park. No resolved park → no warning.
+  const addFormMismatchWarning = useMemo<string | null>(() => {
+    if (!resolvedDayPark || !rideName.trim()) return null;
+    const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+    const waitEntry = lookupWait(rideName.trim(), mismatchWaitMap, aliases);
+    if (!waitEntry) return null;
+    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    if (!attractionPark || attractionPark === resolvedDayPark) return null;
+    const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
+    const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
+    return `This attraction is in ${attractionParkLabel}, but this day is currently set to ${dayParkLabel}.`;
+  }, [resolvedDayPark, mismatchResort, rideName, mismatchWaitMap, mismatchParkIdMap]);
+
+  // Phase 8.8 — Mismatch warning for inline edit form.
+  const editMismatchWarning = useMemo<string | null>(() => {
+    if (!resolvedDayPark || !editingName.trim()) return null;
+    const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+    const waitEntry = lookupWait(editingName.trim(), mismatchWaitMap, aliases);
+    if (!waitEntry) return null;
+    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    if (!attractionPark || attractionPark === resolvedDayPark) return null;
+    const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
+    const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
+    return `This attraction is in ${attractionParkLabel}, but this day is currently set to ${dayParkLabel}.`;
+  }, [resolvedDayPark, mismatchResort, editingName, mismatchWaitMap, mismatchParkIdMap]);
 
   // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
   // All items are stored together; this view is scoped to the current day.
@@ -679,6 +920,42 @@ export default function LightningPage() {
         )}
       </div>
 
+      {/* ── Phase 8.8: Active Day Context Banner ── */}
+      {loaded && (
+        <div
+          style={{
+            background: "#eff6ff",
+            border: "1px solid #bfdbfe",
+            borderRadius: 10,
+            padding: "0.6rem 1rem",
+            marginBottom: "1rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "0.5rem",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#1e40af", lineHeight: 1.3 }}>
+              {dayContextLabel(safeActiveDayId, dayMeta)}
+            </div>
+            {resolvedDayPark ? (
+              <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
+                {PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark}{" "}
+                <span style={{ color: "#93c5fd" }}>({dayParkMode})</span>
+              </div>
+            ) : (
+              <div style={{ fontSize: "0.78rem", color: "#93c5fd", marginTop: 1 }}>
+                Auto — no park set yet
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: "0.72rem", color: "#93c5fd", textAlign: "right", lineHeight: 1.4 }}>
+            Set active day<br />in My Plans
+          </div>
+        </div>
+      )}
+
       {/* ── Add Form ── */}
       <div
         style={{
@@ -714,6 +991,27 @@ export default function LightningPage() {
             onKeyDown={(e) => { if (e.key === "Enter" && formValid) handleAdd(); }}
           />
         </div>
+
+        {/* Phase 8.8 — Park mismatch warning (informational only, does not block save) */}
+        {addFormMismatchWarning && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: "0.4rem",
+              background: "#fffbeb",
+              border: "1px solid #fcd34d",
+              borderRadius: 8,
+              padding: "0.5rem 0.75rem",
+              marginBottom: "0.875rem",
+              fontSize: "0.8rem",
+              color: "#92400e",
+            }}
+          >
+            <span style={{ flexShrink: 0 }}>⚠</span>
+            <span>{addFormMismatchWarning}</span>
+          </div>
+        )}
 
         {/* Start Time */}
         <div style={{ marginBottom: "0.875rem" }}>
@@ -862,6 +1160,7 @@ export default function LightningPage() {
                 suggestions={suggestions}
                 isInvalid={llInvalidIds.has(item.id)}
                 overlapCount={llOverlapCountById[item.id] ?? 0}
+                editMismatchWarning={editingId === item.id ? editMismatchWarning : null}
               />
             );
           })}
@@ -895,6 +1194,7 @@ function ReservationCard({
   suggestions,
   isInvalid,
   overlapCount,
+  editMismatchWarning,
 }: {
   item: LightningItem;
   bucket: Bucket;
@@ -917,6 +1217,7 @@ function ReservationCard({
   suggestions: string[];
   isInvalid: boolean;
   overlapCount: number;
+  editMismatchWarning: string | null;
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
@@ -982,6 +1283,26 @@ function ReservationCard({
                 onKeyDown={(e) => { if (e.key === "Escape") onEditCancel(); }}
                 autoFocus
               />
+              {/* Phase 8.8 — Park mismatch warning in inline edit (informational only) */}
+              {editMismatchWarning && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "0.3rem",
+                    background: "#fffbeb",
+                    border: "1px solid #fcd34d",
+                    borderRadius: 6,
+                    padding: "0.35rem 0.6rem",
+                    marginTop: 6,
+                    fontSize: "0.75rem",
+                    color: "#92400e",
+                  }}
+                >
+                  <span style={{ flexShrink: 0 }}>⚠</span>
+                  <span>{editMismatchWarning}</span>
+                </div>
+              )}
               {/* Start time (prefilled in 12h, accepts any format) */}
               <div style={{ marginTop: 6 }}>
                 <input
