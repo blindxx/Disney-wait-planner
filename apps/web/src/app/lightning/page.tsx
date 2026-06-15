@@ -539,6 +539,9 @@ export default function LightningPage() {
                 profileKeysForPull.plans,
                 JSON.stringify(planner.plans)
               );
+              // Same-tab writes do not fire a storage event, so refresh planDayItems
+              // explicitly now that cloud plan data is in localStorage.
+              setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
             } catch {
               hydrationSucceeded = false;
             }
