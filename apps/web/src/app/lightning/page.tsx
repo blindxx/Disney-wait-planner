@@ -856,8 +856,8 @@ export default function LightningPage() {
                 <span style={{ color: "#93c5fd" }}>(Manual)</span>
               </div>
             ) : (
-              <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
-                <span style={{ color: "#93c5fd" }}>(Auto)</span>
+              <div style={{ fontSize: "0.78rem", color: "#93c5fd", marginTop: 1 }}>
+                Auto — no park set yet
               </div>
             )}
           </div>
