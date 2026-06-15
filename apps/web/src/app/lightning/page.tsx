@@ -745,7 +745,7 @@ export default function LightningPage() {
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
-    return `This attraction belongs to ${attractionParkLabel} but this day is currently set to ${dayParkLabel}.`;
+    return `This attraction is in ${attractionParkLabel}, but this day is currently set to ${dayParkLabel}.`;
   }, [resolvedDayPark, mismatchResort, rideName, mismatchWaitMap, mismatchParkIdMap]);
 
   // Phase 8.8 — Mismatch warning for inline edit form.
@@ -758,7 +758,7 @@ export default function LightningPage() {
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
-    return `This attraction belongs to ${attractionParkLabel} but this day is currently set to ${dayParkLabel}.`;
+    return `This attraction is in ${attractionParkLabel}, but this day is currently set to ${dayParkLabel}.`;
   }, [resolvedDayPark, mismatchResort, editingName, mismatchWaitMap, mismatchParkIdMap]);
 
   // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
