@@ -55,7 +55,23 @@ const PARK_LABELS: Record<ParkId, string> = {
   ak: "Animal Kingdom",
 };
 
+/** Parks that belong to each resort — used to validate dayParks overrides. */
+const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
+  disneyland: "DLR",
+  dca: "DLR",
+  mk: "WDW",
+  epcot: "WDW",
+  hs: "WDW",
+  ak: "WDW",
+};
+
 // ===== TYPES =====
+
+// Phase 8.8 — Day metadata (read-only mirror of My Plans structure)
+type DayMeta = {
+  label?: string;
+  date?: string;
+};
 
 type LightningItem = {
   id: string;
@@ -124,6 +140,60 @@ function loadKnownDays(key: string): string[] {
     return valid;
   } catch {
     return ["day-1"];
+  }
+}
+
+// ===== DAY CONTEXT HELPERS (Phase 8.8) =====
+
+/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
+function dayLabelFromId(dayId: string): string {
+  const n = parseInt(dayId.split("-")[1], 10);
+  return isNaN(n) ? dayId : `Day ${n}`;
+}
+
+/** Human-readable day label using optional dayMeta (no date formatting — label only). */
+function dayContextLabel(dayId: string, meta: Record<string, DayMeta>): string {
+  const label = meta[dayId]?.label?.trim();
+  return label || dayLabelFromId(dayId);
+}
+
+/** Load per-day park overrides from profile-scoped localStorage (read-only on Lightning page). */
+function loadDayParks(key: string): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+        result[k] = v;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Load day metadata from profile-scoped localStorage (read-only on Lightning page). */
+function loadDayMeta(key: string): Record<string, DayMeta> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, DayMeta> = {};
+    for (const [dayId, rawMeta] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!VALID_DAY_ID_RE.test(dayId)) continue;
+      if (typeof rawMeta !== "object" || rawMeta === null) continue;
+      const entry = rawMeta as Record<string, unknown>;
+      const label = typeof entry.label === "string" ? entry.label.trim() : "";
+      if (label) result[dayId] = { label };
+    }
+    return result;
+  } catch {
+    return {};
   }
 }
 
@@ -284,6 +354,12 @@ export default function LightningPage() {
   const daysKeyRef = useRef("dwp:default:days");
   // Phase 8.3.2 — known planner days for safe display-day validation.
   const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
+  // Phase 8.8 — per-day park overrides (read-only; Plans page owns writes).
+  const dayParksKeyRef = useRef("dwp:default:dayParks");
+  const [dayParks, setDayParks] = useState<Record<string, string>>({});
+  // Phase 8.8 — day metadata for display labels (read-only).
+  const dayMetaKeyRef = useRef("dwp:default:dayMeta");
+  const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
   // Tracks whether the user made a local edit after the current pull started.
   const localEditRef = useRef(false);
 
@@ -330,6 +406,11 @@ export default function LightningPage() {
     // Phase 8.3.2 — load known planner days for safe display-day validation.
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
     setKnownDays(loadKnownDays(daysKeyRef.current));
+    // Phase 8.8 — load day park overrides and metadata (read-only context display).
+    dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
+    setDayParks(loadDayParks(dayParksKeyRef.current));
+    dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
+    setDayMeta(loadDayMeta(dayMetaKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
     setItems(loadFromStorage(lightningKeyRef.current));
@@ -520,6 +601,77 @@ export default function LightningPage() {
     return "day-1";
   }, [activeDayId, knownDays, items]);
 
+  // Phase 8.8 — Listen for storage changes from My Plans (active day, dayParks, dayMeta).
+  // Plans page owns writes; Lightning page reads reactively.
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      if (e.key === activeDayKeyRef.current && e.newValue !== null) {
+        setActiveDayId(normalizeDayId(e.newValue));
+      }
+      if (e.key === daysKeyRef.current) {
+        setKnownDays(loadKnownDays(daysKeyRef.current));
+      }
+      if (e.key === dayParksKeyRef.current) {
+        setDayParks(loadDayParks(dayParksKeyRef.current));
+      }
+      if (e.key === dayMetaKeyRef.current) {
+        setDayMeta(loadDayMeta(dayMetaKeyRef.current));
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Phase 8.8 — Resolved park for the active day (manual override or "auto").
+  // Manual: dayParks has an explicit override for this day.
+  // Auto: no override — park cannot be inferred without plan items on Lightning page.
+  const resolvedDayPark = useMemo<string | null>(() => {
+    const override = dayParks[safeActiveDayId];
+    if (override && override in PARK_TO_RESORT) return override;
+    return null; // auto — no override set
+  }, [dayParks, safeActiveDayId]);
+
+  const dayParkMode: "Manual" | "Auto" = resolvedDayPark ? "Manual" : "Auto";
+
+  // Phase 8.8 — Build a map from normalized attraction name → parkId for mismatch detection.
+  const attractionParkIdMap = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const map = new Map<string, string>();
+    for (const a of source) {
+      if (a.resortId !== selectedResort) continue;
+      map.set(normalizeKey(a.name), a.parkId as string);
+    }
+    return map;
+  }, [selectedResort, liveAttractions]);
+
+  // Phase 8.8 — Mismatch warning for add form: shown when a resolved manual park differs
+  // from the attraction's park. Auto days have no resolved park, so no warning is shown.
+  const addFormMismatchWarning = useMemo<string | null>(() => {
+    if (!resolvedDayPark || !rideName.trim()) return null;
+    const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+    const waitEntry = lookupWait(rideName.trim(), waitMap, aliases);
+    if (!waitEntry) return null;
+    const attractionPark = attractionParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    if (!attractionPark || attractionPark === resolvedDayPark) return null;
+    const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
+    const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
+    return `This attraction belongs to ${attractionParkLabel} but this day is currently set to ${dayParkLabel}.`;
+  }, [resolvedDayPark, rideName, selectedResort, waitMap, attractionParkIdMap]);
+
+  // Phase 8.8 — Mismatch warning for inline edit form.
+  const editMismatchWarning = useMemo<string | null>(() => {
+    if (!resolvedDayPark || !editingName.trim()) return null;
+    const aliases = selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+    const waitEntry = lookupWait(editingName.trim(), waitMap, aliases);
+    if (!waitEntry) return null;
+    const attractionPark = attractionParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    if (!attractionPark || attractionPark === resolvedDayPark) return null;
+    const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
+    const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
+    return `This attraction belongs to ${attractionParkLabel} but this day is currently set to ${dayParkLabel}.`;
+  }, [resolvedDayPark, editingName, selectedResort, waitMap, attractionParkIdMap]);
+
   // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
   // All items are stored together; this view is scoped to the current day.
   const displayedItems = useMemo(
@@ -679,6 +831,42 @@ export default function LightningPage() {
         )}
       </div>
 
+      {/* ── Phase 8.8: Active Day Context Banner ── */}
+      {loaded && (
+        <div
+          style={{
+            background: "#eff6ff",
+            border: "1px solid #bfdbfe",
+            borderRadius: 10,
+            padding: "0.6rem 1rem",
+            marginBottom: "1rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "0.5rem",
+          }}
+        >
+          <div>
+            <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#1e40af", lineHeight: 1.3 }}>
+              {dayContextLabel(safeActiveDayId, dayMeta)}
+            </div>
+            {resolvedDayPark ? (
+              <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
+                {PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark}{" "}
+                <span style={{ color: "#93c5fd" }}>(Manual)</span>
+              </div>
+            ) : (
+              <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
+                <span style={{ color: "#93c5fd" }}>(Auto)</span>
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: "0.72rem", color: "#93c5fd", textAlign: "right", lineHeight: 1.4 }}>
+            Set active day<br />in My Plans
+          </div>
+        </div>
+      )}
+
       {/* ── Add Form ── */}
       <div
         style={{
@@ -714,6 +902,27 @@ export default function LightningPage() {
             onKeyDown={(e) => { if (e.key === "Enter" && formValid) handleAdd(); }}
           />
         </div>
+
+        {/* Phase 8.8 — Park mismatch warning (informational only, does not block save) */}
+        {addFormMismatchWarning && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: "0.4rem",
+              background: "#fffbeb",
+              border: "1px solid #fcd34d",
+              borderRadius: 8,
+              padding: "0.5rem 0.75rem",
+              marginBottom: "0.875rem",
+              fontSize: "0.8rem",
+              color: "#92400e",
+            }}
+          >
+            <span style={{ flexShrink: 0 }}>⚠</span>
+            <span>{addFormMismatchWarning}</span>
+          </div>
+        )}
 
         {/* Start Time */}
         <div style={{ marginBottom: "0.875rem" }}>
@@ -862,6 +1071,7 @@ export default function LightningPage() {
                 suggestions={suggestions}
                 isInvalid={llInvalidIds.has(item.id)}
                 overlapCount={llOverlapCountById[item.id] ?? 0}
+                editMismatchWarning={editingId === item.id ? editMismatchWarning : null}
               />
             );
           })}
@@ -895,6 +1105,7 @@ function ReservationCard({
   suggestions,
   isInvalid,
   overlapCount,
+  editMismatchWarning,
 }: {
   item: LightningItem;
   bucket: Bucket;
@@ -917,6 +1128,7 @@ function ReservationCard({
   suggestions: string[];
   isInvalid: boolean;
   overlapCount: number;
+  editMismatchWarning: string | null;
 }) {
   const showCountdown = bucket === "soon" || bucket === "upcoming";
   const countdown = showCountdown ? formatCountdown(item, now) : "";
@@ -982,6 +1194,26 @@ function ReservationCard({
                 onKeyDown={(e) => { if (e.key === "Escape") onEditCancel(); }}
                 autoFocus
               />
+              {/* Phase 8.8 — Park mismatch warning in inline edit (informational only) */}
+              {editMismatchWarning && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "0.3rem",
+                    background: "#fffbeb",
+                    border: "1px solid #fcd34d",
+                    borderRadius: 6,
+                    padding: "0.35rem 0.6rem",
+                    marginTop: 6,
+                    fontSize: "0.75rem",
+                    color: "#92400e",
+                  }}
+                >
+                  <span style={{ flexShrink: 0 }}>⚠</span>
+                  <span>{editMismatchWarning}</span>
+                </div>
+              )}
               {/* Start time (prefilled in 12h, accepts any format) */}
               <div style={{ marginTop: 6 }}>
                 <input
