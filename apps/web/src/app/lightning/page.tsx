@@ -704,23 +704,31 @@ export default function LightningPage() {
     return { resolvedDayPark: null, dayParkMode: "Auto" };
   }, [dayParks, safeActiveDayId, planDayItems, selectedResort]);
 
-  // Phase 8.8 — Build a map from normalized attraction name → parkId for mismatch detection.
-  // Intentionally covers all resorts so the lookup is correct even when the resolved day
-  // park belongs to a different resort than the current Lightning overlay.
-  const attractionParkIdMap = useMemo(() => {
-    const source =
-      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
-    const map = new Map<string, string>();
-    for (const a of source) {
-      map.set(normalizeKey(a.name), a.parkId as string);
-    }
-    return map;
-  }, [liveAttractions]);
-
   // Resort to use for mismatch lookups: prefer the resort of the resolved day park
   // so that MK-day + DLR overlay still resolves MK attractions correctly.
   const mismatchResort: ResortId =
     (resolvedDayPark ? (PARK_TO_RESORT[resolvedDayPark] ?? null) : null) ?? selectedResort;
+
+  // Phase 8.8 — Build wait and park-id maps scoped to mismatchResort.
+  // Scoping to one resort eliminates same-name cross-resort collisions (e.g. Space Mountain
+  // exists in both DLR and WDW with different parks) and ensures lookupWait receives entries
+  // from the resort the day actually belongs to, not the Lightning overlay resort.
+  const { mismatchWaitMap, mismatchParkIdMap } = useMemo(() => {
+    const source =
+      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
+    const wMap = new Map<string, WaitEntry>();
+    const pMap = new Map<string, string>();
+    for (const a of source) {
+      if (a.resortId !== mismatchResort) continue;
+      wMap.set(normalizeKey(a.name), {
+        status: a.status,
+        waitMins: a.waitMins,
+        canonicalName: a.name,
+      });
+      pMap.set(normalizeKey(a.name), a.parkId as string);
+    }
+    return { mismatchWaitMap: wMap, mismatchParkIdMap: pMap };
+  }, [mismatchResort, liveAttractions]);
 
   // Phase 8.8 — Mismatch warning for add form.
   // Shown whenever the resolved day park (manual or auto-inferred) differs from the
@@ -728,27 +736,27 @@ export default function LightningPage() {
   const addFormMismatchWarning = useMemo<string | null>(() => {
     if (!resolvedDayPark || !rideName.trim()) return null;
     const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
-    const waitEntry = lookupWait(rideName.trim(), waitMap, aliases);
+    const waitEntry = lookupWait(rideName.trim(), mismatchWaitMap, aliases);
     if (!waitEntry) return null;
-    const attractionPark = attractionParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
     return `This attraction belongs to ${attractionParkLabel} but this day is currently set to ${dayParkLabel}.`;
-  }, [resolvedDayPark, mismatchResort, rideName, waitMap, attractionParkIdMap]);
+  }, [resolvedDayPark, mismatchResort, rideName, mismatchWaitMap, mismatchParkIdMap]);
 
   // Phase 8.8 — Mismatch warning for inline edit form.
   const editMismatchWarning = useMemo<string | null>(() => {
     if (!resolvedDayPark || !editingName.trim()) return null;
     const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
-    const waitEntry = lookupWait(editingName.trim(), waitMap, aliases);
+    const waitEntry = lookupWait(editingName.trim(), mismatchWaitMap, aliases);
     if (!waitEntry) return null;
-    const attractionPark = attractionParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
     return `This attraction belongs to ${attractionParkLabel} but this day is currently set to ${dayParkLabel}.`;
-  }, [resolvedDayPark, mismatchResort, editingName, waitMap, attractionParkIdMap]);
+  }, [resolvedDayPark, mismatchResort, editingName, mismatchWaitMap, mismatchParkIdMap]);
 
   // Phase 8.3 — Items visible in the active day (display-only; storage unchanged).
   // All items are stored together; this view is scoped to the current day.
