@@ -942,7 +942,7 @@ export default function LightningPage() {
             {resolvedDayPark ? (
               <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
                 {PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark}{" "}
-                <span style={{ color: "#93c5fd" }}>(Manual)</span>
+                <span style={{ color: "#93c5fd" }}>({dayParkMode})</span>
               </div>
             ) : (
               <div style={{ fontSize: "0.78rem", color: "#93c5fd", marginTop: 1 }}>
