@@ -413,18 +413,28 @@ Never run build or dev at the repo root without `--filter web`.
 
 ---
 
-### Phase 9 — Tomorrow Assistant Platform Integration (Planned)
+### Phase 9 — Planner Content Expansion (Planned)
 
-• Architecture discovery for assistant integration  
-• Shared intelligence layer across planner and assistant  
-• Assistant integration for day-aware recommendations  
+• Dining Smart Entry (Oga's Cantina, Sci-Fi Dine-In Theater, Be Our Guest, Blue Bayou)  
+• Entertainment Smart Entry (Fantasmic!, Happily Ever After, World of Color, Festival of Fantasy)  
+• Park-aware content labels  
+• Planner content type expansion  
+• No wait overlays for non-attractions  
+
+---
+
+### Phase 10 — Tomorrow Assistant Platform Integration (Future)
+
+• Architecture discovery  
+• Shared intelligence layer  
+• Planner integration  
 • Future Discord integration evaluation  
 
 ---
 
-### Phase 10 — Advanced Trip Planning (Future)
+### Phase 11 — Advanced Trip Planning (Future)
 
-• Trip templates for common park strategies  
-• Plan sharing between users  
-• Planning analytics and trip insights  
+• Trip templates  
+• Plan sharing  
+• Planning analytics  
 • Advanced strategy tools  
