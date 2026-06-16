@@ -3259,6 +3259,7 @@ export default function PlansPage() {
                 setClearDayTargetId(null);
                 setClearConfirm(true);
               }}
+              title="Clears the planner and resets it to Day 1."
             >
               Clear all
             </button>
@@ -3278,7 +3279,7 @@ export default function PlansPage() {
             {/* Phase 8.2.4 fix A — Import button opens the modal (not OS file picker directly) */}
             <button
               className="btn-import"
-              title="Import day plan (.json / .txt / .csv)"
+              title="Import plans into the current day (.json / .txt / .csv)."
               onClick={() => openImport()}
             >
               Import
@@ -3287,7 +3288,7 @@ export default function PlansPage() {
               className="btn-import"
               onClick={handleExportDay}
               disabled={displayedItems.length === 0}
-              title="Exports the active day only."
+              title="Exports this day, including plans and Lightning selections."
             >
               Day Export
             </button>
@@ -3298,7 +3299,7 @@ export default function PlansPage() {
                 setRestoreConfirmPayload(null);
                 setShowBackupRestore(true);
               }}
-              title="Backup or restore full planner"
+              title="Back up or restore your entire planner."
             >
               Backup
             </button>
@@ -3849,7 +3850,7 @@ export default function PlansPage() {
                     style={{ width: "100%", textAlign: "center" }}
                     onClick={() => { handleExportDay(); }}
                     disabled={items.filter((it) => it.dayId === activeDayId).length === 0}
-                    title="Exports the active day only."
+                    title="Exports this day, including plans and Lightning selections."
                   >
                     Day Export
                   </button>
