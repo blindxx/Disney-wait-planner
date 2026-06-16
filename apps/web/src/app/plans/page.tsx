@@ -880,6 +880,21 @@ export default function PlansPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightningVersion, days]);
 
+  // Phase 8.9.2 — Listen for Lightning storage changes made from the Lightning page
+  // or another tab so lightningClearAllStats stays fresh without a full page reload.
+  // Bumps lightningVersion (same counter used by crossDayChecks and lightningClearAllStats)
+  // on any external write to the active profile's lightning key.
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      if (e.key === expectedKey) {
+        setLightningVersion((v) => v + 1);
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
   // Compute time conflict sets scoped to the active day only (Phase 8.0.3).
   // Previously used `items` (all days), which produced false overlap warnings
   // between plans on different days. Now uses displayedItems so conflicts are

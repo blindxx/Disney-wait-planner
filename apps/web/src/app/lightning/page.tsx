@@ -894,7 +894,10 @@ export default function LightningPage() {
   function handleClearDayLightning() {
     const target = clearDayLightningTarget;
     if (!target) return;
-    setItems((prev) => prev.filter((item) => item.dayId !== target));
+    setItems((prev) => {
+      if (!prev.some((item) => item.dayId === target)) return prev;
+      return prev.filter((item) => item.dayId !== target);
+    });
     setClearDayLightningTarget(null);
   }
 
