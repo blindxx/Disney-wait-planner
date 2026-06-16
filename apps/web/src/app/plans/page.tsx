@@ -3288,7 +3288,7 @@ export default function PlansPage() {
           <div className="plans-header-actions">
             <button
               className="btn-clear"
-              disabled={items.length === 0 && lightningClearAllStats.count === 0}
+              disabled={!syncReady || (items.length === 0 && lightningClearAllStats.count === 0)}
               onClick={() => {
                 setRemoveConfirmDayId(null);
                 setClearDayTargetId(null);
