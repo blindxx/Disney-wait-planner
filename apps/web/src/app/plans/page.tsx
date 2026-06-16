@@ -3524,7 +3524,7 @@ export default function PlansPage() {
                       const _planDays = new Set(Object.keys(itemCountByDay));
                       lightningClearAllStats.dayIds.forEach((d) => _planDays.add(d));
                       const _days = _planDays.size;
-                      return `Clear all plans and Lightning (${_total} total across ${_days} ${_days === 1 ? "day" : "days"})?`;
+                      return `Clear all plans and Lightning (${_total} items across ${_days} ${_days === 1 ? "day" : "days"})?`;
                     })()
                   : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
