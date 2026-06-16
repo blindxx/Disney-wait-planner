@@ -345,10 +345,11 @@ export function buildDayPlanExportPayload(
     version: 1,
     type: "day-plan-export",
     exportedAt: new Date().toISOString(),
-    items: activeDayPlans.map(({ id, name, timeLabel }) => ({
+    items: activeDayPlans.map(({ id, name, timeLabel, type }) => ({
       id,
       name,
       timeLabel,
+      ...(type && type !== "attraction" ? { type } : {}),
     })),
   };
 }
