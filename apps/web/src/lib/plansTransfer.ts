@@ -11,11 +11,15 @@ const MAX_IMPORT_BYTES = 1_048_576;
 
 // ===== SHARED PRIMITIVE TYPES =====
 
+// Phase 9.0 — content type for planner items
+export type PlannerItemType = "attraction" | "dining" | "entertainment";
+
 export type PlanItem = {
   id: string;
   name: string;
   timeLabel: string;
   dayId?: string; // optional — absent in day exports, present in backups
+  type?: PlannerItemType; // Phase 9.0 — optional for back-compat; consumers default missing to "attraction"
 };
 
 /** Day-export items intentionally omit dayId (per spec). */
@@ -23,6 +27,7 @@ export type DayExportItem = {
   id: string;
   name: string;
   timeLabel: string;
+  type?: PlannerItemType; // Phase 9.0 — optional for back-compat
 };
 
 /**
@@ -340,10 +345,11 @@ export function buildDayPlanExportPayload(
     version: 1,
     type: "day-plan-export",
     exportedAt: new Date().toISOString(),
-    items: activeDayPlans.map(({ id, name, timeLabel }) => ({
+    items: activeDayPlans.map(({ id, name, timeLabel, type }) => ({
       id,
       name,
       timeLabel,
+      ...(type && type !== "attraction" ? { type } : {}),
     })),
   };
 }

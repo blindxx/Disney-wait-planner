@@ -66,11 +66,15 @@ import {
   cancelScheduledSync,
 } from "@/lib/syncHelper";
 
+// Phase 9.0 — content type foundation
+type PlannerItemType = "attraction" | "dining" | "entertainment";
+
 type PlanItem = {
   id: string;
   name: string;
   timeLabel: string;
   dayId: string; // Phase 8.0
+  type: PlannerItemType; // Phase 9.0 — defaults to "attraction"
 };
 
 type Mode = "view" | "add" | "edit" | "import" | "edit-day";
@@ -172,6 +176,24 @@ function parseCSVRow(line: string): string[] {
 const STORAGE_KEY = "dwp.myPlans";
 const SCHEMA_VERSION = 1;
 
+// Phase 9.0 — coerce unknown raw type value to PlannerItemType, defaulting to "attraction".
+function coercePlannerItemType(raw: unknown): PlannerItemType {
+  if (raw === "dining" || raw === "entertainment") return raw;
+  return "attraction";
+}
+
+// Phase 9.0 — ensure every loaded item has a valid type field.
+function normalizePlanItem(raw: unknown): PlanItem {
+  const r = raw as Record<string, unknown>;
+  return {
+    id: r.id as string,
+    name: r.name as string,
+    timeLabel: r.timeLabel as string,
+    dayId: r.dayId as string,
+    type: coercePlannerItemType(r.type),
+  };
+}
+
 function loadFromStorage(key: string = STORAGE_KEY): PlanItem[] {
   try {
     const raw = localStorage.getItem(key);
@@ -186,7 +208,7 @@ function loadFromStorage(key: string = STORAGE_KEY): PlanItem[] {
       Array.isArray(parsed.items)
     ) {
       if (parsed.version === 1) {
-        return parsed.items as PlanItem[];
+        return (parsed.items as unknown[]).map(normalizePlanItem);
       }
       // Unknown future version — start empty
       return [];
@@ -199,7 +221,7 @@ function loadFromStorage(key: string = STORAGE_KEY): PlanItem[] {
       } catch {
         // best-effort migration write — ignore quota errors
       }
-      return parsed as PlanItem[];
+      return (parsed as unknown[]).map(normalizePlanItem);
     }
     // Corrupt or unrecognised — start empty
     return [];
@@ -1494,7 +1516,7 @@ export default function PlansPage() {
         // in flight. Either way, open the sync gate so edits can push.
         if (!localEditRef.current && cloud) {
           // Phase 8.0.1 — normalize dayIds from cloud before applying to state.
-          const cloudItems = migrateDayIds(cloud.items as PlanItem[]);
+          const cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
           reseedNextId(cloudItems);
           setItems(cloudItems);
           // Merge cloud item day IDs into the days list.
@@ -1860,7 +1882,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: "attraction" as PlannerItemType }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1890,6 +1912,7 @@ export default function PlansPage() {
           name: stripEnDashSuffix(parsed.name),
           timeLabel: parsed.timeLabel,
           dayId: activeDayId,
+          type: "attraction" as PlannerItemType,
         });
       }
     }
@@ -2183,6 +2206,7 @@ export default function PlansPage() {
       name: it.name,
       timeLabel: it.timeLabel,
       dayId: targetDayId,
+      type: coercePlannerItemType((it as { type?: unknown }).type),
     }));
     setItems((prev) => {
       const withoutTargetDay = prev.filter((it) => it.dayId !== targetDayId);
@@ -2391,12 +2415,16 @@ export default function PlansPage() {
   function handleRestoreConfirm() {
     if (!restoreConfirmPayload) return;
     const { data } = restoreConfirmPayload;
-    const restoredPlans: PlanItem[] = (data.plans as PlanItem[]).map((it) => ({
-      id: it.id,
-      name: it.name,
-      timeLabel: it.timeLabel,
-      dayId: normalizeDayId((it as PlanItem).dayId),
-    }));
+    const restoredPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
+      const r = it as Record<string, unknown>;
+      return {
+        id: r.id as string,
+        name: r.name as string,
+        timeLabel: r.timeLabel as string,
+        dayId: normalizeDayId(r.dayId),
+        type: coercePlannerItemType(r.type),
+      };
+    });
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
     // Phase 8.9 — always land on Day 1 after restore, regardless of what was
     // active in the backup or before the restore was triggered.
@@ -3640,6 +3668,7 @@ export default function PlansPage() {
                   <div className="item-top">
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div className="item-name-row">
+                        {item.type === "dining" ? <span aria-label="Dining" style={{ marginRight: "0.25rem" }}>🍽️</span> : item.type === "entertainment" ? <span aria-label="Entertainment" style={{ marginRight: "0.25rem" }}>🎆</span> : null}
                         <span className="item-name">{item.name}</span>
                         {(() => {
                           const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
