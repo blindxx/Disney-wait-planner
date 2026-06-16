@@ -3486,7 +3486,7 @@ export default function PlansPage() {
               <span className="confirm-text">
                 {clearConfirm
                   ? `Clear all plans and Lightning (${items.length} total across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
-                  : `Clear all plans from this day?`}
+                  : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
