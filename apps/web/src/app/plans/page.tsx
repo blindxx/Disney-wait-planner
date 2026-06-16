@@ -3287,7 +3287,7 @@ export default function PlansPage() {
               className="btn-import"
               onClick={handleExportDay}
               disabled={displayedItems.length === 0}
-              title="Export active day plan"
+              title="Exports the active day only."
             >
               Day Export
             </button>
@@ -3832,7 +3832,7 @@ export default function PlansPage() {
                     className="btn-import"
                     style={{ width: "100%", textAlign: "center" }}
                     onClick={handleExportBackup}
-                    title="Full backup — includes plans, Lightning, days, labels, and park overrides"
+                    title="Includes plans, Lightning selections, days, labels, and park overrides."
                   >
                     Full Backup
                   </button>
@@ -3840,7 +3840,7 @@ export default function PlansPage() {
                     className="btn-import"
                     style={{ width: "100%", textAlign: "center" }}
                     onClick={handleExportPlansBackup}
-                    title="Plans backup — includes plans, days, labels, and park overrides; excludes Lightning"
+                    title="Includes plans, days, labels, and park overrides. Excludes Lightning selections."
                   >
                     Plans Backup
                   </button>
@@ -3849,7 +3849,7 @@ export default function PlansPage() {
                     style={{ width: "100%", textAlign: "center" }}
                     onClick={() => { handleExportDay(); }}
                     disabled={items.filter((it) => it.dayId === activeDayId).length === 0}
-                    title="Export active day only"
+                    title="Exports the active day only."
                   >
                     Day Export
                   </button>
