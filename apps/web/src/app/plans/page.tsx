@@ -861,6 +861,25 @@ export default function PlansPage() {
     return counts;
   }, [items]);
 
+  // Phase 8.9.2 — Lightning totals for Clear All enable/disable and confirmation count.
+  // Reads from localStorage so it stays in sync with the Lightning page edits (lightningVersion
+  // bumps whenever this page writes lightning storage, covering Clear All and sync hydration).
+  const lightningClearAllStats = useMemo(() => {
+    try {
+      const _key = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      const _raw = localStorage.getItem(_key);
+      if (_raw) {
+        const _parsed = JSON.parse(_raw) as { items?: Array<{ dayId?: string }> };
+        const _items = Array.isArray(_parsed?.items) ? _parsed.items : [];
+        const _daySet = new Set<string>();
+        for (const it of _items) { if (it.dayId) _daySet.add(it.dayId); }
+        return { count: _items.length, dayIds: _daySet };
+      }
+    } catch { /* ignore */ }
+    return { count: 0, dayIds: new Set<string>() };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightningVersion, days]);
+
   // Compute time conflict sets scoped to the active day only (Phase 8.0.3).
   // Previously used `items` (all days), which produced false overlap warnings
   // between plans on different days. Now uses displayedItems so conflicts are
@@ -3254,7 +3273,7 @@ export default function PlansPage() {
           <div className="plans-header-actions">
             <button
               className="btn-clear"
-              disabled={items.length === 0}
+              disabled={items.length === 0 && lightningClearAllStats.count === 0}
               onClick={() => {
                 setRemoveConfirmDayId(null);
                 setClearDayTargetId(null);
@@ -3485,7 +3504,13 @@ export default function PlansPage() {
             <div className="confirm-row">
               <span className="confirm-text">
                 {clearConfirm
-                  ? `Clear all plans and Lightning (${items.length} total across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
+                  ? (() => {
+                      const _total = items.length + lightningClearAllStats.count;
+                      const _planDays = new Set(Object.keys(itemCountByDay));
+                      lightningClearAllStats.dayIds.forEach((d) => _planDays.add(d));
+                      const _days = _planDays.size;
+                      return `Clear all plans and Lightning (${_total} total across ${_days} ${_days === 1 ? "day" : "days"})?`;
+                    })()
                   : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
