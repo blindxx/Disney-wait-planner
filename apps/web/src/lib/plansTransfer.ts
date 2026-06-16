@@ -172,6 +172,11 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
     daysSet.add(dayId);
   }
 
+  // day-1 is a permanent base day — reject backups that omit it.
+  if (!daysSet.has("day-1")) {
+    throw new Error("Invalid backup: data.days must include day-1.");
+  }
+
   // Validate plans array — shape, canonical dayId, dayId in days, no duplicate IDs.
   if (!Array.isArray(d.plans)) {
     throw new Error("Invalid backup: data.plans must be an array.");

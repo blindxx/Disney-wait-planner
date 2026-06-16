@@ -2342,7 +2342,9 @@ export default function PlansPage() {
       dayId: normalizeDayId((it as PlanItem).dayId),
     }));
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
-    const restoredActiveDayId = normalizeDayId(data.activeDayId as string);
+    // Phase 8.9 — always land on Day 1 after restore, regardless of what was
+    // active in the backup or before the restore was triggered.
+    const restoredActiveDayId = "day-1";
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
     const restoredDayMeta: Record<string, DayMeta> =
