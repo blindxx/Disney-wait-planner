@@ -734,7 +734,7 @@ export default function PlansPage() {
   // Phase 8.1 — day control UI state
   // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
   const [removeConfirmDayId, setRemoveConfirmDayId] = useState<string | null>(null);
-  // clearDayTargetId: the specific day ID to clear (null = no pending clear-day action).
+  // clearDayTargetId: the specific day ID to clear plans from (null = no pending action).
   // Carries the intended target explicitly so modal and header actions cannot cross-target.
   const [clearDayTargetId, setClearDayTargetId] = useState<string | null>(null);
   // Phase 8.1 — edit-day modal state
@@ -860,6 +860,40 @@ export default function PlansPage() {
     }
     return counts;
   }, [items]);
+
+  // Phase 8.9.2 — Lightning totals for Clear All enable/disable and confirmation count.
+  // Reads from localStorage so it stays in sync with the Lightning page edits (lightningVersion
+  // bumps whenever this page writes lightning storage, covering Clear All and sync hydration).
+  const lightningClearAllStats = useMemo(() => {
+    try {
+      const _key = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      const _raw = localStorage.getItem(_key);
+      if (_raw) {
+        const _parsed = JSON.parse(_raw) as { items?: Array<{ dayId?: string }> };
+        const _items = Array.isArray(_parsed?.items) ? _parsed.items : [];
+        const _daySet = new Set<string>();
+        for (const it of _items) { if (it.dayId) _daySet.add(it.dayId); }
+        return { count: _items.length, dayIds: _daySet };
+      }
+    } catch { /* ignore */ }
+    return { count: 0, dayIds: new Set<string>() };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightningVersion, days]);
+
+  // Phase 8.9.2 — Listen for Lightning storage changes made from the Lightning page
+  // or another tab so lightningClearAllStats stays fresh without a full page reload.
+  // Bumps lightningVersion (same counter used by crossDayChecks and lightningClearAllStats)
+  // on any external write to the active profile's lightning key.
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
+      if (e.key === expectedKey) {
+        setLightningVersion((v) => v + 1);
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   // Compute time conflict sets scoped to the active day only (Phase 8.0.3).
   // Previously used `items` (all days), which produced false overlap warnings
@@ -1749,6 +1783,7 @@ export default function PlansPage() {
     setClearDayTargetId(null);
   }
 
+
   function openAdd() {
     setFormName("");
     setFormTime("");
@@ -2517,7 +2552,8 @@ export default function PlansPage() {
             margin-top: 0.25rem;
           }
           .btn-clear {
-            flex: 1 1 calc(50% - 0.25rem);
+            flex: 1 1 100%;
+            font-size: 0.9rem;
           }
           .btn-import {
             flex: 1 1 calc(33.333% - 0.334rem);
@@ -3252,14 +3288,13 @@ export default function PlansPage() {
           <div className="plans-header-actions">
             <button
               className="btn-clear"
-              disabled={items.length === 0}
+              disabled={!syncReady || (items.length === 0 && lightningClearAllStats.count === 0)}
               onClick={() => {
-                // Fix 4: reset sibling confirms before opening this one
                 setRemoveConfirmDayId(null);
                 setClearDayTargetId(null);
                 setClearConfirm(true);
               }}
-              title="Clears the planner and resets it to Day 1."
+              title="Clears all plans and Lightning from the planner and resets it to Day 1."
             >
               Clear all
             </button>
@@ -3267,14 +3302,13 @@ export default function PlansPage() {
               className="btn-clear"
               disabled={displayedItems.length === 0}
               onClick={() => {
-                // Fix 4: reset sibling confirms before opening this one
                 setRemoveConfirmDayId(null);
                 setClearConfirm(false);
                 setClearDayTargetId(activeDayId);
               }}
-              title="Clear items from this day only"
+              title="Clear plans from this day only. Lightning selections are preserved."
             >
-              Clear day
+              Clear Day Plans
             </button>
             {/* Phase 8.2.4 fix A — Import button opens the modal (not OS file picker directly) */}
             <button
@@ -3479,14 +3513,20 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.2.1 — Unified destructive confirmation: same stable location for Clear all & Clear day */}
+        {/* Phase 8.9.2 — Unified destructive confirmation: Clear All, Clear Day Plans */}
         {(clearConfirm || clearDayTargetId !== null) && (
           <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
                 {clearConfirm
-                  ? `Clear all activities (${items.length} total across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
-                  : `Clear all activities from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
+                  ? (() => {
+                      const _total = items.length + lightningClearAllStats.count;
+                      const _planDays = new Set(Object.keys(itemCountByDay));
+                      lightningClearAllStats.dayIds.forEach((d) => _planDays.add(d));
+                      const _days = _planDays.size;
+                      return `Clear all plans and Lightning (${_total} items across ${_days} ${_days === 1 ? "day" : "days"})?`;
+                    })()
+                  : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
