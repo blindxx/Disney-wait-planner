@@ -167,35 +167,80 @@ Rules:
 
 ### Multi-Day Planning Model
 
-• Plans use dayId (day-1, day-2)  
-• Active day controls visible data  
-• No cross-day leakage  
+• Plans are day-scoped using a dayId (e.g. day-1, day-2)  
+• Each day has an optional label and date  
+• Active day controls which Plans and Lightning are visible  
+• No cross-day leakage — switching days does not affect other days  
+• Clear Day Plans removes all plan entries for the active day only  
+• Clear All removes plans, lightning, and day metadata across all days  
 
 ---
 
 ### Day-Scoped Lightning
 
-• Lightning tied to specific day  
-• Mirrors Plans behavior  
+• Lightning reservations are tied to a specific day via dayId  
+• Active day determines which Lightning entries are shown  
+• Mirrors Plans behavior for isolation and clearing  
+• Clear Day Lightning removes Lightning for the active day only  
 
 ---
 
 ### Day-Aware Park Context
 
 Priority:
-1. Manual  
-2. Auto (from plans)  
-3. Fallback  
+1. Manual — user-selected park overrides everything  
+2. Auto — derived from the active day's plan entries  
+3. Fallback — resort default  
 
-• Active day is authoritative  
+• Active day is authoritative for park context resolution  
+• Park context is stored per-day and preserved across backups  
+• Auto/manual mode is persisted independently per day  
 
 ---
 
-### Import / Export Behavior
+### Backup & Restore Behavior
 
-• Backup = full dataset  
-• Import = active day only  
-• Backward compatible  
+Three export scopes are supported:
+
+**Full Backup**
+• Includes: Plans, Lightning, Days, day metadata, day park metadata  
+• Restores the complete multi-day trip state  
+
+**Plans Backup**
+• Includes: Plans, Days, day metadata, day park metadata  
+• Does not include Lightning  
+
+**Day Export**
+• Includes: Active day Plans and Lightning only  
+• Scoped to the currently active day  
+
+Restore behavior:
+• Restore always opens Day 1 after import  
+• Metadata preview is shown before confirming restore  
+• Day park context is preserved across backup and restore  
+• Backward compatibility is maintained for pre-Phase 8 backup formats  
+
+---
+
+### Cross-Day Intelligence
+
+The system provides informational cross-day awareness. No automatic itinerary modification is performed.
+
+**Duplicate Detection**
+• Duplicate attraction detection across days  
+• Duplicate Lightning detection across days  
+• Park-aware duplicate grouping (same park only)  
+• Resort-aware duplicate grouping (same resort only)  
+
+**Conflict Detection**
+• Lightning vs Plan conflict detection (same attraction, overlapping time)  
+• Cross-day timing conflict detection for shared attraction windows  
+
+**Visibility & Severity**
+• Active-day visibility filtering — only active day entries appear in primary views  
+• Duplicate severity indicators distinguish exact vs. probable duplicates  
+
+These signals are informational only. The system surfaces conflicts and duplicates without modifying the itinerary.
 
 ---
 
@@ -306,15 +351,22 @@ The planner enforces strict deterministic behavior across all core systems.
 
 ---
 
-### Phase 8 — Multi-Day Planning & Data Model
+### Phase 8 — Multi-Day Planning Platform
 
-• Multi-day planning system (day-based structure)  
-• Day-scoped Plans and Lightning  
-• Day-aware park context (manual + auto)  
-• Import/export (backup vs single-day restore)  
+• Multi-day planning (day-labeled, date-stamped day structure)  
+• Day-scoped Plans with Clear Day Plans and Clear All support  
+• Day-scoped Lightning with Clear Day Lightning support  
+• Day-aware park context (auto and manual modes, persisted per day)  
+• Full Backup, Plans Backup, and Day Export scopes  
+• Restore metadata preview and Day 1 restore behavior  
+• Backward-compatible restore for pre-Phase 8 backup formats  
+• Cross-day duplicate detection (attractions and Lightning)  
+• Cross-day conflict detection (Lightning vs Plan, timing conflicts)  
+• Active-day visibility filtering with duplicate severity indicators  
 • Canonical attraction identity + alias system  
 • API naming resilience (rename-safe matching)  
 • Strict day-scoped isolation with deterministic behavior guarantees  
+• Planner UX hardening across all day-aware flows  
 
 ---
 
@@ -348,14 +400,31 @@ Never run build or dev at the repo root without `--filter web`.
 
 ## 🗺 Roadmap
 
-### Phase 8 — Multi-Day Planning (Completed / In Progress)
+### Phase 8 — Multi-Day Planning Platform (Complete)
 
-Multi-day planning, Lightning, and park-aware systems.
+• Multi-day planning (day-labeled, date-stamped structure)  
+• Multi-day Lightning (day-scoped reservations)  
+• Day-aware park context (auto/manual modes)  
+• Full Backup, Plans Backup, and Day Export  
+• Restore metadata preview and Day 1 restore behavior  
+• Cross-day intelligence (duplicate and conflict detection)  
+• Active-day visibility filtering  
+• UX hardening across all day-aware flows  
 
 ---
 
-### Phase 9 — Cross-Day Intelligence (Planned)
+### Phase 9 — Tomorrow Assistant Platform Integration (Planned)
 
-• Cross-day optimization  
-• Smarter recommendations  
-• Multi-day insights  
+• Architecture discovery for assistant integration  
+• Shared intelligence layer across planner and assistant  
+• Assistant integration for day-aware recommendations  
+• Future Discord integration evaluation  
+
+---
+
+### Phase 10 — Advanced Trip Planning (Future)
+
+• Trip templates for common park strategies  
+• Plan sharing between users  
+• Planning analytics and trip insights  
+• Advanced strategy tools  
