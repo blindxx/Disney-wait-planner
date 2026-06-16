@@ -407,6 +407,8 @@ export default function LightningPage() {
   const safeActiveDayIdRef = useRef("day-1");
   // Tracks whether the user made a local edit after the current pull started.
   const localEditRef = useRef(false);
+  // Phase 8.9.2 — confirmation flag for Clear Day Lightning action.
+  const [clearDayLightningConfirm, setClearDayLightningConfirm] = useState(false);
 
   // Auth session — used to trigger cloud pull on sign-in.
   const { status: sessionStatus } = useSession();
@@ -887,6 +889,13 @@ export default function LightningPage() {
     setItems((prev) => prev.filter((item) => item.id !== id));
   }
 
+  // Phase 8.9.2 — removes all Lightning entries for the active day only.
+  // Uses setItems() so the existing persist + scheduleSync effects fire normally.
+  function handleClearDayLightning() {
+    setItems((prev) => prev.filter((item) => item.dayId !== safeActiveDayId));
+    setClearDayLightningConfirm(false);
+  }
+
   function handleStartBlur() {
     if (!startRaw.trim()) {
       setStartError("");
@@ -915,10 +924,50 @@ export default function LightningPage() {
     <div style={{ maxWidth: 560, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "1rem" }}>
         <h1 className="title" style={{ margin: 0 }}>Lightning Lane</h1>
-        {activeProfileName && (
-          <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          {activeProfileName && (
+            <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
+          )}
+          <button
+            style={{
+              background: "#fff",
+              color: "#dc2626",
+              border: "1px solid #fca5a5",
+              borderRadius: 8,
+              fontSize: "0.85rem",
+              fontWeight: 600,
+              padding: "0.4rem 0.75rem",
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+            onClick={() => setClearDayLightningConfirm(true)}
+            title="Clear Lightning selections from this day only. Plans are preserved."
+          >
+            Clear Day Lightning
+          </button>
+        </div>
       </div>
+
+      {/* Phase 8.9.2 — Clear Day Lightning confirmation */}
+      {clearDayLightningConfirm && (
+        <div style={{ marginBottom: "1rem", padding: "0.6rem 1rem", background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+          <span style={{ fontSize: "0.9rem", color: "#b91c1c", flex: 1 }}>
+            Clear all Lightning selections from this day?
+          </span>
+          <button
+            style={{ background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem" }}
+            onClick={() => setClearDayLightningConfirm(false)}
+          >
+            Cancel
+          </button>
+          <button
+            style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", fontWeight: 600 }}
+            onClick={handleClearDayLightning}
+          >
+            Yes, clear
+          </button>
+        </div>
+      )}
 
       {/* ── Phase 8.8: Active Day Context Banner ── */}
       {loaded && (

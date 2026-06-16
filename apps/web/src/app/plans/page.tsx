@@ -737,8 +737,6 @@ export default function PlansPage() {
   // clearDayTargetId: the specific day ID to clear plans from (null = no pending action).
   // Carries the intended target explicitly so modal and header actions cannot cross-target.
   const [clearDayTargetId, setClearDayTargetId] = useState<string | null>(null);
-  // clearDayLightningId: the specific day ID to clear lightning from (null = no pending action).
-  const [clearDayLightningId, setClearDayLightningId] = useState<string | null>(null);
   // Phase 8.1 — edit-day modal state
   const [editingDayId, setEditingDayId] = useState<string | null>(null);
   const [editDayLabel, setEditDayLabel] = useState("");
@@ -1751,28 +1749,6 @@ export default function PlansPage() {
     setClearDayTargetId(null);
   }
 
-  function handleClearDayLightning() {
-    const target = clearDayLightningId;
-    if (!target) return;
-    const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-    try {
-      const raw = localStorage.getItem(_lightningKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as unknown;
-        if (
-          typeof parsed === "object" && parsed !== null &&
-          (parsed as Record<string, unknown>).version === 1 &&
-          Array.isArray((parsed as Record<string, unknown>).items)
-        ) {
-          const filtered = ((parsed as Record<string, unknown>).items as Array<Record<string, unknown>>)
-            .filter((it) => it.dayId !== target);
-          localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: filtered }));
-          setLightningVersion((v) => v + 1);
-        }
-      }
-    } catch {}
-    setClearDayLightningId(null);
-  }
 
   function openAdd() {
     setFormName("");
@@ -2016,7 +1992,6 @@ export default function PlansPage() {
     setClearConfirm(false);
     // Fix 5: reset all day-level transient UI state on full reset
     setClearDayTargetId(null);
-    setClearDayLightningId(null);
     setRemoveConfirmDayId(null);
     // Phase 8.1 — full reset: revert to one empty Day 1, clear all day metadata.
     const _profileId = getActiveProfileId();
@@ -2543,7 +2518,8 @@ export default function PlansPage() {
             margin-top: 0.25rem;
           }
           .btn-clear {
-            flex: 1 1 calc(50% - 0.25rem);
+            flex: 1 1 100%;
+            font-size: 0.9rem;
           }
           .btn-import {
             flex: 1 1 calc(33.333% - 0.334rem);
@@ -3282,7 +3258,6 @@ export default function PlansPage() {
               onClick={() => {
                 setRemoveConfirmDayId(null);
                 setClearDayTargetId(null);
-                setClearDayLightningId(null);
                 setClearConfirm(true);
               }}
               title="Clears all plans and Lightning from the planner and resets it to Day 1."
@@ -3295,24 +3270,11 @@ export default function PlansPage() {
               onClick={() => {
                 setRemoveConfirmDayId(null);
                 setClearConfirm(false);
-                setClearDayLightningId(null);
                 setClearDayTargetId(activeDayId);
               }}
               title="Clear plans from this day only. Lightning selections are preserved."
             >
               Clear Day Plans
-            </button>
-            <button
-              className="btn-clear"
-              onClick={() => {
-                setRemoveConfirmDayId(null);
-                setClearConfirm(false);
-                setClearDayTargetId(null);
-                setClearDayLightningId(activeDayId);
-              }}
-              title="Clear Lightning selections from this day only. Plans are preserved."
-            >
-              Clear Day Lightning
             </button>
             {/* Phase 8.2.4 fix A — Import button opens the modal (not OS file picker directly) */}
             <button
@@ -3517,26 +3479,24 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.9.2 — Unified destructive confirmation: Clear All, Clear Day Plans, Clear Day Lightning */}
-        {(clearConfirm || clearDayTargetId !== null || clearDayLightningId !== null) && (
+        {/* Phase 8.9.2 — Unified destructive confirmation: Clear All, Clear Day Plans */}
+        {(clearConfirm || clearDayTargetId !== null) && (
           <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
                 {clearConfirm
                   ? `Clear all plans and Lightning (${items.length} total across ${Object.keys(itemCountByDay).length} ${Object.keys(itemCountByDay).length === 1 ? "day" : "days"})?`
-                  : clearDayTargetId !== null
-                  ? `Clear all plans from this day?`
-                  : `Clear all Lightning selections from this day?`}
+                  : `Clear all plans from this day?`}
               </span>
               <button
                 className="btn-cancel-delete"
-                onClick={() => { setClearConfirm(false); setClearDayTargetId(null); setClearDayLightningId(null); }}
+                onClick={() => { setClearConfirm(false); setClearDayTargetId(null); }}
               >
                 Cancel
               </button>
               <button
                 className="btn-confirm-delete"
-                onClick={clearConfirm ? handleClearAll : clearDayTargetId !== null ? handleClearDay : handleClearDayLightning}
+                onClick={clearConfirm ? handleClearAll : handleClearDay}
               >
                 Yes, clear
               </button>
