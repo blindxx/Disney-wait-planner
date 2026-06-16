@@ -2096,6 +2096,27 @@ export default function PlansPage() {
     URL.revokeObjectURL(url);
   }
 
+  // Phase 8.9.1 — Export plans-only backup (no Lightning).
+  function handleExportPlansBackup() {
+    const payload = buildPlannerBackupPayload({
+      days,
+      plans: items,
+      activeDayId,
+      dayMeta,
+      lightning: [],
+      dayParks,
+    });
+    const json = JSON.stringify(payload, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const today = new Date().toISOString().slice(0, 10);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `disney-wait-planner-plans-backup-${today}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   // Phase 8.2 — Day plan context inference helper.
   // Runs inference only when importing into an empty day (bootstrap behavior).
   // Marks contextInferredRef=true so the reactive items-watcher does not re-run.
@@ -3268,7 +3289,7 @@ export default function PlansPage() {
               disabled={displayedItems.length === 0}
               title="Export active day plan"
             >
-              Export
+              Day Export
             </button>
             <button
               className="btn-import"
@@ -3803,19 +3824,36 @@ export default function PlansPage() {
             <h2 className="modal-title">Backup / Restore</h2>
             <div className="modal-body">
 
-              {/* Backup section */}
+              {/* Export section */}
               <div className="form-field">
-                <p className="form-label">Backup planner</p>
-                <p className="form-hint" style={{ marginBottom: "0.75rem" }}>
-                  Downloads a full backup of all days, items, and labels. File name: <code>disney-wait-planner-backup-YYYY-MM-DD.json</code>
-                </p>
-                <button
-                  className="btn-import"
-                  style={{ width: "100%", textAlign: "center" }}
-                  onClick={handleExportBackup}
-                >
-                  Download backup
-                </button>
+                <p className="form-label">Export</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                  <button
+                    className="btn-import"
+                    style={{ width: "100%", textAlign: "center" }}
+                    onClick={handleExportBackup}
+                    title="Full backup — includes plans, Lightning, days, labels, and park overrides"
+                  >
+                    Full Backup
+                  </button>
+                  <button
+                    className="btn-import"
+                    style={{ width: "100%", textAlign: "center" }}
+                    onClick={handleExportPlansBackup}
+                    title="Plans backup — includes plans, days, labels, and park overrides; excludes Lightning"
+                  >
+                    Plans Backup
+                  </button>
+                  <button
+                    className="btn-import"
+                    style={{ width: "100%", textAlign: "center" }}
+                    onClick={() => { handleExportDay(); }}
+                    disabled={items.filter((it) => it.dayId === activeDayId).length === 0}
+                    title="Export active day only"
+                  >
+                    Day Export
+                  </button>
+                </div>
               </div>
 
               {/* Divider */}
@@ -3829,22 +3867,42 @@ export default function PlansPage() {
                 </p>
 
                 {restoreConfirmPayload ? (
-                  <div className="confirm-row">
-                    <span className="confirm-text">
-                      Replace entire planner with backup ({restoreConfirmPayload.data.days.length} {restoreConfirmPayload.data.days.length === 1 ? "day" : "days"}, {restoreConfirmPayload.data.plans.length} {restoreConfirmPayload.data.plans.length === 1 ? "item" : "items"})?
-                    </span>
-                    <button
-                      className="btn-cancel-delete"
-                      onClick={() => setRestoreConfirmPayload(null)}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="btn-confirm-delete"
-                      onClick={handleRestoreConfirm}
-                    >
-                      Yes, restore
-                    </button>
+                  <div>
+                    <div style={{ marginBottom: "0.75rem", fontSize: "0.8125rem", color: "#6b7280", lineHeight: 1.5 }}>
+                      <div>
+                        <strong>Created:</strong>{" "}
+                        {(() => {
+                          try {
+                            return new Date(restoreConfirmPayload.exportedAt).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+                          } catch {
+                            return restoreConfirmPayload.exportedAt;
+                          }
+                        })()}
+                      </div>
+                      <div><strong>Contains:</strong></div>
+                      <ul style={{ margin: "0.25rem 0 0 1rem", padding: 0 }}>
+                        <li>{restoreConfirmPayload.data.days.length} {restoreConfirmPayload.data.days.length === 1 ? "Day" : "Days"}</li>
+                        <li>{restoreConfirmPayload.data.plans.length} {restoreConfirmPayload.data.plans.length === 1 ? "Plan" : "Plans"}</li>
+                        {(restoreConfirmPayload.data.lightning?.length ?? 0) > 0 && (
+                          <li>{restoreConfirmPayload.data.lightning!.length} Lightning {restoreConfirmPayload.data.lightning!.length === 1 ? "Selection" : "Selections"}</li>
+                        )}
+                      </ul>
+                    </div>
+                    <div className="confirm-row">
+                      <span className="confirm-text">Replace entire planner with this backup?</span>
+                      <button
+                        className="btn-cancel-delete"
+                        onClick={() => setRestoreConfirmPayload(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="btn-confirm-delete"
+                        onClick={handleRestoreConfirm}
+                      >
+                        Yes, restore
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <label className="btn-file-label" style={{ width: "100%", justifyContent: "center", boxSizing: "border-box" }}>
