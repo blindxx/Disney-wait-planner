@@ -213,45 +213,47 @@ function stripDiningSuffix(str: string): string {
 }
 
 /**
- * Resolve a (possibly aliased) typed name to its canonical DINING_KEYS entry.
- * Stage 1: exact normalized match. Stage 3: alias lookup. Returns null when
- * neither resolves (caller may still fall back to containment matching).
+ * Resolve a (possibly aliased or partially-typed) name to its canonical
+ * DINING_KEYS entry. Single source of truth for dining recognition — every
+ * consumer (isDiningName, getDiningLocation, park/day inference) resolves
+ * through this function so a name like "Blue Bayou" or "Rose and Crown"
+ * matches consistently everywhere instead of being recognized as dining in
+ * one place but failing to resolve metadata in another.
  *
- * Exported so other inference systems (e.g. day park/resort inference in
- * plansContextInference.ts and page.tsx) can resolve dining aliases through
- * this single source of truth instead of duplicating DINING_ALIASES lookup
- * logic.
+ * Stage 1: exact normalized match.
+ * Stage 3: alias lookup (DINING_ALIASES).
+ * Stage 2: whole-word containment (≥2 meaningful tokens, unambiguous) —
+ * mirrors lookupWait()'s containment stage so minor wording differences
+ * (e.g. dropped "Restaurant") still resolve.
+ * Returns null when nothing resolves.
  */
 export function resolveDiningKey(name: string): string | null {
   const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
   if (DINING_KEYS.has(key)) return key;
+
   const aliasTarget = DINING_ALIASES[key];
   if (aliasTarget && DINING_KEYS.has(aliasTarget)) return aliasTarget;
-  return null;
-}
 
-/**
- * True when the given activity name matches a known dining location.
- * Stage 1: exact normalized match. Stage 3: alias lookup.
- * Stage 2: whole-word containment (≥2 meaningful tokens required) against
- * the known dining key set — mirrors lookupWait()'s containment stage so
- * minor wording differences (e.g. dropped "Restaurant") still resolve.
- */
-export function isDiningName(name: string): boolean {
-  if (resolveDiningKey(name)) return true;
-
-  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
   const tokens = tokenize(key);
-  if (tokens.length < 2) return false;
-
+  if (tokens.length < 2) return null;
+  let hit: string | null = null;
   let matchCount = 0;
   for (const diningKey of DINING_KEYS) {
     if (containsWholeWordSequence(diningKey, tokens)) {
       matchCount++;
-      if (matchCount > 1) return false;
+      if (matchCount > 1) return null;
+      hit = diningKey;
     }
   }
-  return matchCount === 1;
+  return matchCount === 1 ? hit : null;
+}
+
+/**
+ * True when the given activity name matches a known dining location
+ * (exact, alias, or containment — see resolveDiningKey).
+ */
+export function isDiningName(name: string): boolean {
+  return resolveDiningKey(name) !== null;
 }
 
 /**

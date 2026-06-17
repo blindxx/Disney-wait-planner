@@ -549,11 +549,13 @@ const DAY_PARK_SHORT: Record<string, string> = {
 };
 
 /**
- * Normalized name → parkId lookup maps, built once at module load from mock
- * attraction data and the dining dataset. Used by inferDayPark to count park
- * frequencies per day. Dining entries with no single-park identity (resort
- * hotels, Downtown Disney, Disney Springs) are omitted here, same as in
- * plansContextInference.ts.
+ * Normalized attraction name → parkId lookup maps, built once at module load
+ * from mock data. Used by crossDayChecks (duplicate detection, identity
+ * matching, park labels) and by inferDayPark for attraction-based park
+ * frequency counting. Attraction-only — deliberately NOT seeded with dining
+ * data, so dining never participates in attraction duplicate/identity
+ * matching (see DINING_PARK_DLR/WDW below for the dining-only equivalent
+ * used purely for park inference).
  */
 const RIDE_TO_PARK_DLR = new Map<string, string>();
 const RIDE_TO_PARK_WDW = new Map<string, string>();
@@ -561,10 +563,21 @@ for (const _inf of mockAttractionWaits) {
   if (_inf.resortId === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_inf.name), _inf.parkId);
   else if (_inf.resortId === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_inf.name), _inf.parkId);
 }
+
+/**
+ * Normalized dining name → parkId lookup maps, built once at module load
+ * from DINING_PLACES. Used ONLY by inferDayPark for park inference — never
+ * consumed by duplicate detection or attraction identity matching, keeping
+ * dining fully isolated from those attraction-oriented pipelines. Dining
+ * entries with no single-park identity (resort hotels, Downtown Disney,
+ * Disney Springs) are omitted, same as in plansContextInference.ts.
+ */
+const DINING_PARK_DLR = new Map<string, string>();
+const DINING_PARK_WDW = new Map<string, string>();
 for (const _d of DINING_PLACES) {
   if (!_d.parkId) continue;
-  if (_d.resort === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_d.name), _d.parkId);
-  else if (_d.resort === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
+  if (_d.resort === "DLR") DINING_PARK_DLR.set(normalizeKey(_d.name), _d.parkId);
+  else if (_d.resort === "WDW") DINING_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
 }
 
 /**
@@ -637,6 +650,7 @@ const DISPLAY_CANONICAL_RIDE_NAME = true;
 function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | null {
   if (dayItems.length === 0) return null;
   const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+  const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
   const parkCount = new Map<string, number>();
   for (const item of dayItems) {
@@ -647,8 +661,10 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
       if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
     }
     if (!parkId) {
+      // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
+      // which feeds attraction duplicate/identity matching elsewhere.
       const diningKey = resolveDiningKey(item.name);
-      if (diningKey) parkId = map.get(diningKey) ?? null;
+      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
@@ -989,11 +1005,11 @@ export default function PlansPage() {
       const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
       const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
       // Stage 1 + 3: exact / alias
+      // Deliberately attraction-only (rideMap never contains dining data) so
+      // dining items can never resolve here and contaminate duplicate /
+      // identity matching below.
       const key = resolveIdentityKey(name, aliases);
       if (rideMap.has(key)) return key;
-      // Stage 3b: dining alias lookup (single source of truth: diningSuggestions.ts)
-      const diningKey = resolveDiningKey(name);
-      if (diningKey && rideMap.has(diningKey)) return diningKey;
       // Stage 2: whole-word containment (≥2 tokens, unambiguous)
       const tokens = tokenize(key);
       if (tokens.length < 2) return null;
