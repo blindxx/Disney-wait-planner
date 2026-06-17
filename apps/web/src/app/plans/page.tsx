@@ -52,6 +52,13 @@ import {
   resolveDiningKey,
   DINING_PLACES,
 } from "@/lib/diningSuggestions";
+import {
+  getEntertainmentSuggestions,
+  getEntertainmentLocation,
+  getEntertainmentCanonicalName,
+  resolveEntertainmentKey,
+  ENTERTAINMENT_PLACES,
+} from "@/lib/entertainmentSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -582,6 +589,20 @@ for (const _d of DINING_PLACES) {
 }
 
 /**
+ * Normalized entertainment name → parkId lookup maps, built once at module
+ * load from ENTERTAINMENT_PLACES. Mirrors DINING_PARK_DLR/WDW — used ONLY by
+ * inferDayPark for park inference, kept isolated from attraction duplicate/
+ * identity matching.
+ */
+const ENTERTAINMENT_PARK_DLR = new Map<string, string>();
+const ENTERTAINMENT_PARK_WDW = new Map<string, string>();
+for (const _e of ENTERTAINMENT_PLACES) {
+  if (!_e.parkId) continue;
+  if (_e.resort === "DLR") ENTERTAINMENT_PARK_DLR.set(normalizeKey(_e.name), _e.parkId);
+  else if (_e.resort === "WDW") ENTERTAINMENT_PARK_WDW.set(normalizeKey(_e.name), _e.parkId);
+}
+
+/**
  * Read and validate resort from localStorage.
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
@@ -652,6 +673,7 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
   if (dayItems.length === 0) return null;
   const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
   const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
+  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
   const parkCount = new Map<string, number>();
   for (const item of dayItems) {
@@ -666,6 +688,11 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
       // which feeds attraction duplicate/identity matching elsewhere.
       const diningKey = resolveDiningKey(item.name);
       if (diningKey) parkId = diningMap.get(diningKey) ?? null;
+    }
+    if (!parkId) {
+      // Entertainment lookup uses its own isolated map, mirroring dining.
+      const entertainmentKey = resolveEntertainmentKey(item.name);
+      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
@@ -907,6 +934,7 @@ export default function PlansPage() {
     () => [
       ...Array.from(waitMap.values()).map((v) => v.canonicalName),
       ...getDiningSuggestions(selectedResort),
+      ...getEntertainmentSuggestions(selectedResort),
     ],
     [waitMap, selectedResort]
   );
@@ -3782,6 +3810,19 @@ export default function PlansPage() {
                               <div className="item-canonical">{diningCanonicalName}</div>
                             )}
                             <div className="item-park">{diningLocation}</div>
+                          </>
+                        );
+                      })()}
+                      {item.type === "entertainment" && (() => {
+                        const entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, selectedResort);
+                        const entertainmentLocation = getEntertainmentLocation(item.name, selectedResort);
+                        if (!entertainmentLocation) return null;
+                        return (
+                          <>
+                            {entertainmentCanonicalName && entertainmentCanonicalName !== item.name && (
+                              <div className="item-canonical">{entertainmentCanonicalName}</div>
+                            )}
+                            <div className="item-park">{entertainmentLocation}</div>
                           </>
                         );
                       })()}

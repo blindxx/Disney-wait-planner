@@ -50,6 +50,7 @@ import {
   stripAnnotations,
 } from "@/lib/plansMatching";
 import { DINING_PLACES, resolveDiningKey } from "@/lib/diningSuggestions";
+import { ENTERTAINMENT_PLACES, resolveEntertainmentKey } from "@/lib/entertainmentSuggestions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
 // parkId is null for dining locations with no single-park identity (resort
@@ -59,9 +60,10 @@ type ResolvedContext = { parkId: ParkId | null; resortId: ResortId };
 
 /**
  * Build a normalized-name → {parkId, resortId} map for one resort.
- * Combines attraction wait data with known dining locations (Phase 9.2) so
- * dining-only days can resolve park context the same way attraction-only
- * days already do.
+ * Combines attraction wait data with known dining locations (Phase 9.1)
+ * and known entertainment offerings (Phase 9.2) so dining/entertainment-only
+ * days can resolve park context the same way attraction-only days already
+ * do.
  */
 function buildInferenceMap(resortId: ResortId): Map<string, ResolvedContext> {
   const map = new Map<string, ResolvedContext>();
@@ -72,6 +74,10 @@ function buildInferenceMap(resortId: ResortId): Map<string, ResolvedContext> {
   for (const d of DINING_PLACES) {
     if (d.resort !== resortId) continue;
     map.set(normalizeKey(d.name), { parkId: d.parkId ?? null, resortId });
+  }
+  for (const e of ENTERTAINMENT_PLACES) {
+    if (e.resort !== resortId) continue;
+    map.set(normalizeKey(e.name), { parkId: e.parkId ?? null, resortId });
   }
   return map;
 }
@@ -108,6 +114,16 @@ function tryResolve(
   if (diningKey) {
     const diningResult = map.get(diningKey);
     if (diningResult) return diningResult;
+  }
+
+  // Stage 3c: entertainment alias lookup, via entertainmentSuggestions.ts's
+  // single source of truth, so entertainment shorthand (e.g. "HEA",
+  // "Starlight") participates in inference exactly like canonical
+  // entertainment names.
+  const entertainmentKey = resolveEntertainmentKey(name);
+  if (entertainmentKey) {
+    const entertainmentResult = map.get(entertainmentKey);
+    if (entertainmentResult) return entertainmentResult;
   }
 
   return null;
