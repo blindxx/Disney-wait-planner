@@ -91,6 +91,7 @@ function tryResolve(
   name: string,
   map: Map<string, ResolvedContext>,
   aliases: Record<string, string>,
+  resortId: ResortId,
 ): ResolvedContext | null {
   const key = normalizeKey(stripAnnotations(name));
 
@@ -120,7 +121,7 @@ function tryResolve(
   // single source of truth, so entertainment shorthand (e.g. "HEA",
   // "Starlight") participates in inference exactly like canonical
   // entertainment names.
-  const entertainmentKey = resolveEntertainmentKey(name);
+  const entertainmentKey = resolveEntertainmentKey(name, resortId);
   if (entertainmentKey) {
     const entertainmentResult = map.get(entertainmentKey);
     if (entertainmentResult) return entertainmentResult;
@@ -145,8 +146,8 @@ export function inferPlansContext(
 
   // Pre-compute both resort matches for every plan item in one pass.
   const allMatches = plans.map((p) => ({
-    dlr: tryResolve(p.name, dlrMap, ALIASES_DLR),
-    wdw: tryResolve(p.name, wdwMap, ALIASES_WDW),
+    dlr: tryResolve(p.name, dlrMap, ALIASES_DLR, "DLR"),
+    wdw: tryResolve(p.name, wdwMap, ALIASES_WDW, "WDW"),
   }));
 
   // ── Stage 1: Determine resort ──────────────────────────────────────────────

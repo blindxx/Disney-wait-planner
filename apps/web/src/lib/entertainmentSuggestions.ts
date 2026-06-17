@@ -14,19 +14,18 @@
  * without a data model redesign. availabilityType is data-only in Phase
  * 9.2 — it is stored but never rendered as a badge/warning/filter.
  *
- * isEntertainmentName() mirrors the stage-1 (exact) + stage-2 (whole-word
- * containment) logic used by lookupWait() in plansMatching.ts and by
- * isDiningName() in diningSuggestions.ts, so a known entertainment name is
- * recognized the same way attraction and dining names already are.
+ * isEntertainmentName() uses stage-1 (exact) + stage-3 (alias) matching
+ * only — no whole-word containment stage. Unlike dining names, several
+ * entertainment titles share leading words with well-known attractions
+ * (e.g. "Indiana Jones" / "Indiana Jones Epic Stunt Spectacular", "Finding
+ * Nemo" / "Finding Nemo: The Big Blue... and Beyond!"), so a containment
+ * match would misclassify common attraction shorthand as entertainment.
+ * Recognition is therefore deliberately conservative: only an exact title
+ * or an explicit alias counts.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
-import {
-  normalizeKey,
-  stripAnnotations,
-  tokenize,
-  containsWholeWordSequence,
-} from "./plansMatching";
+import { normalizeKey, stripAnnotations } from "./plansMatching";
 
 /**
  * Recurrence pattern for an entertainment offering. Data-only metadata in
@@ -113,12 +112,16 @@ const ENTERTAINMENT_KEYS: Set<string> = new Set(
 );
 
 /**
- * Manual alias map for common guest-entered entertainment shorthand —
- * mirrors DINING_ALIASES in diningSuggestions.ts (no fuzzy matching, just
- * an explicit lookup table).
+ * Manual alias map for common guest-entered entertainment shorthand that is
+ * unambiguous regardless of resort — mirrors DINING_ALIASES in
+ * diningSuggestions.ts (no fuzzy matching, just an explicit lookup table).
  *
  * Keys:   normalizeKey() output of the user-entered alias.
  * Values: normalizeKey() output of the canonical ENTERTAINMENT_PLACES name.
+ *
+ * Generic shorthand that could plausibly mean a different show at each
+ * resort (e.g. "Halloween Parade") is deliberately NOT here — see
+ * ENTERTAINMENT_ALIASES_BY_RESORT below.
  */
 const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "hea": "happily ever after",
@@ -137,15 +140,32 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "disney adventure friends": "disney adventure friends cavalcade",
   "not so spooky": "disneys not so spooky spectacular",
   "not so spooky fireworks": "disneys not so spooky spectacular",
-  "halloween fireworks": "disneys not so spooky spectacular",
   "hocus pocus": "hocus pocus villain spelltacular",
   "villain spelltacular": "hocus pocus villain spelltacular",
   "christmastime fireworks": "minnies wonderful christmastime fireworks",
   "minnies fireworks": "minnies wonderful christmastime fireworks",
-  "christmas fireworks": "minnies wonderful christmastime fireworks",
   "most merriest celebration": "mickeys most merriest celebration",
   "oogie boogie parade": "frightfully fun parade",
-  "halloween parade": "frightfully fun parade",
+};
+
+/**
+ * Resort-scoped alias overrides for shorthand that is genuinely ambiguous
+ * across resorts (the same generic phrase names a different DLR vs. WDW
+ * show). Only consulted when a resort is supplied to resolveEntertainmentKey
+ * — with no resort, these intentionally do not match (no match beats a
+ * wrong-resort guess).
+ */
+const ENTERTAINMENT_ALIASES_BY_RESORT: Record<ResortId, Record<string, string>> = {
+  DLR: {
+    "halloween parade": "frightfully fun parade",
+    "halloween fireworks": "halloween screams",
+    "christmas fireworks": "believe in holiday magic",
+  },
+  WDW: {
+    "halloween parade": "mickeys boo to you halloween parade",
+    "halloween fireworks": "disneys not so spooky spectacular",
+    "christmas fireworks": "minnies wonderful christmastime fireworks",
+  },
 };
 
 /**
@@ -159,44 +179,43 @@ function stripEntertainmentSuffix(str: string): string {
 }
 
 /**
- * Resolve a (possibly aliased or partially-typed) name to its canonical
- * ENTERTAINMENT_KEYS entry. Single source of truth for entertainment
- * recognition — every consumer (isEntertainmentName, getEntertainmentLocation,
- * park/day inference) resolves through this function. Mirrors
- * resolveDiningKey() in diningSuggestions.ts.
+ * Resolve a (possibly aliased) name to its canonical ENTERTAINMENT_KEYS
+ * entry. Single source of truth for entertainment recognition — every
+ * consumer (isEntertainmentName, getEntertainmentLocation, park/day
+ * inference) resolves through this function.
  *
  * Stage 1: exact normalized match.
- * Stage 3: alias lookup (ENTERTAINMENT_ALIASES).
- * Stage 2: whole-word containment (≥2 meaningful tokens, unambiguous).
+ * Stage 3: alias lookup — resort-unambiguous aliases first, then (only when
+ *          resort is supplied) the resort-scoped alias overrides.
+ *
+ * Deliberately no whole-word containment stage (unlike resolveDiningKey) —
+ * see the module doc comment for why: it would let attraction shorthand
+ * like "Indiana Jones" or "Finding Nemo" resolve as entertainment.
  * Returns null when nothing resolves.
  */
-export function resolveEntertainmentKey(name: string): string | null {
+export function resolveEntertainmentKey(name: string, resort?: ResortId): string | null {
   const key = normalizeKey(stripAnnotations(stripEntertainmentSuffix(name)));
   if (ENTERTAINMENT_KEYS.has(key)) return key;
 
   const aliasTarget = ENTERTAINMENT_ALIASES[key];
   if (aliasTarget && ENTERTAINMENT_KEYS.has(aliasTarget)) return aliasTarget;
 
-  const tokens = tokenize(key);
-  if (tokens.length < 2) return null;
-  let hit: string | null = null;
-  let matchCount = 0;
-  for (const entKey of ENTERTAINMENT_KEYS) {
-    if (containsWholeWordSequence(entKey, tokens)) {
-      matchCount++;
-      if (matchCount > 1) return null;
-      hit = entKey;
-    }
+  if (resort) {
+    const resortAliasTarget = ENTERTAINMENT_ALIASES_BY_RESORT[resort][key];
+    if (resortAliasTarget && ENTERTAINMENT_KEYS.has(resortAliasTarget)) return resortAliasTarget;
   }
-  return matchCount === 1 ? hit : null;
+
+  return null;
 }
 
 /**
  * True when the given activity name matches a known entertainment offering
- * (exact, alias, or containment — see resolveEntertainmentKey).
+ * (exact or alias — see resolveEntertainmentKey). Pass resort when known so
+ * resort-scoped aliases (e.g. "Halloween Parade") resolve correctly; without
+ * it, only resort-unambiguous names/aliases match.
  */
-export function isEntertainmentName(name: string): boolean {
-  return resolveEntertainmentKey(name) !== null;
+export function isEntertainmentName(name: string, resort?: ResortId): boolean {
+  return resolveEntertainmentKey(name, resort) !== null;
 }
 
 /**
@@ -234,7 +253,7 @@ export function getEntertainmentSuggestions(resort: ResortId): string[] {
  * resort. Returns undefined for unknown/custom names.
  */
 export function getEntertainmentLocation(name: string, resort: ResortId): string | undefined {
-  const key = resolveEntertainmentKey(name);
+  const key = resolveEntertainmentKey(name, resort);
   if (!key) return undefined;
   const matches = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
   if (matches.length === 0) return undefined;
@@ -247,7 +266,7 @@ export function getEntertainmentLocation(name: string, resort: ResortId): string
  * resort. Returns undefined for unknown/custom names.
  */
 export function getEntertainmentCanonicalName(name: string, resort: ResortId): string | undefined {
-  const key = resolveEntertainmentKey(name);
+  const key = resolveEntertainmentKey(name, resort);
   if (!key) return undefined;
   const matches = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
   if (matches.length === 0) return undefined;
@@ -264,7 +283,7 @@ export function getEntertainmentAvailabilityType(
   name: string,
   resort: ResortId,
 ): EntertainmentAvailabilityType | undefined {
-  const key = resolveEntertainmentKey(name);
+  const key = resolveEntertainmentKey(name, resort);
   if (!key) return undefined;
   const matches = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
   if (matches.length === 0) return undefined;

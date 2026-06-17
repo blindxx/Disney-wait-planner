@@ -691,7 +691,7 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
     }
     if (!parkId) {
       // Entertainment lookup uses its own isolated map, mirroring dining.
-      const entertainmentKey = resolveEntertainmentKey(item.name);
+      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
       if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
@@ -1956,7 +1956,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed) }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed, selectedResort) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1977,7 +1977,7 @@ export default function PlansPage() {
                 type:
                   trimmed === editTarget.name
                     ? it.type
-                    : inferPlannerItemType(trimmed),
+                    : inferPlannerItemType(trimmed, selectedResort),
               }
             : it
         );
@@ -2002,7 +2002,7 @@ export default function PlansPage() {
           name: importedName,
           timeLabel: parsed.timeLabel,
           dayId: activeDayId,
-          type: inferPlannerItemType(importedName),
+          type: inferPlannerItemType(importedName, selectedResort),
         });
       }
     }
@@ -2302,7 +2302,7 @@ export default function PlansPage() {
         name: it.name,
         timeLabel: it.timeLabel,
         dayId: targetDayId,
-        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name),
+        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name, selectedResort),
       };
     });
     setItems((prev) => {
