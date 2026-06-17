@@ -48,6 +48,7 @@ import {
   isDiningName,
   getDiningSuggestions,
   getDiningLocation,
+  DINING_PLACES,
 } from "@/lib/diningSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
@@ -547,14 +548,22 @@ const DAY_PARK_SHORT: Record<string, string> = {
 };
 
 /**
- * Normalized attraction name → parkId lookup maps, built once at module load
- * from mock data. Used by inferDayPark to count park frequencies per day.
+ * Normalized name → parkId lookup maps, built once at module load from mock
+ * attraction data and the dining dataset. Used by inferDayPark to count park
+ * frequencies per day. Dining entries with no single-park identity (resort
+ * hotels, Downtown Disney, Disney Springs) are omitted here, same as in
+ * plansContextInference.ts.
  */
 const RIDE_TO_PARK_DLR = new Map<string, string>();
 const RIDE_TO_PARK_WDW = new Map<string, string>();
 for (const _inf of mockAttractionWaits) {
   if (_inf.resortId === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_inf.name), _inf.parkId);
   else if (_inf.resortId === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_inf.name), _inf.parkId);
+}
+for (const _d of DINING_PLACES) {
+  if (!_d.parkId) continue;
+  if (_d.resort === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_d.name), _d.parkId);
+  else if (_d.resort === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
 }
 
 /**

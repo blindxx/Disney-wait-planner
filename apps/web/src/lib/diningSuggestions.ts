@@ -18,7 +18,7 @@
  * dining name is recognized the same way attraction names already are.
  */
 
-import type { ResortId } from "@disney-wait-planner/shared";
+import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import {
   normalizeKey,
   stripAnnotations,
@@ -32,31 +32,38 @@ export type DiningPlace = {
   resort: ResortId;
   /** Park/area/resort display label shown under the activity name. */
   location: string;
+  /**
+   * The theme park this location is inside, when it is one of the six core
+   * parks — used so dining can participate in day park inference alongside
+   * attractions. Omitted for resort hotels, Downtown Disney, and Disney
+   * Springs locations, which have no single-park identity.
+   */
+  parkId?: ParkId;
 };
 
 export const DINING_PLACES: DiningPlace[] = [
   // ---- Disneyland Park / DCA — table service ----
-  { name: "Blue Bayou Restaurant", resort: "DLR", location: "Disneyland Park" },
-  { name: "Carthay Circle Restaurant", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Blue Bayou Restaurant", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Carthay Circle Restaurant", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
   { name: "Napa Rose", resort: "DLR", location: "Disney's Grand Californian Hotel" },
   { name: "Storytellers Cafe", resort: "DLR", location: "Disney's Grand Californian Hotel" },
   { name: "Steakhouse 55", resort: "DLR", location: "Disneyland Hotel" },
-  { name: "Cafe Orleans", resort: "DLR", location: "Disneyland Park" },
-  { name: "Plaza Inn", resort: "DLR", location: "Disneyland Park" },
-  { name: "Lamplight Lounge", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Cafe Orleans", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Plaza Inn", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Lamplight Lounge", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
   { name: "Goofy's Kitchen", resort: "DLR", location: "Disneyland Hotel" },
 
   // ---- Disneyland Park / DCA — destination-style quick service ----
-  { name: "Bengal Barbecue", resort: "DLR", location: "Disneyland Park" },
-  { name: "Galactic Grill", resort: "DLR", location: "Disneyland Park" },
-  { name: "Award Wieners", resort: "DLR", location: "Disney California Adventure" },
-  { name: "Pym Test Kitchen", resort: "DLR", location: "Disney California Adventure" },
-  { name: "Smokejumpers Grill", resort: "DLR", location: "Disney California Adventure" },
-  { name: "Tropical Hideaway", resort: "DLR", location: "Disneyland Park" },
-  { name: "Red Rose Taverne", resort: "DLR", location: "Disneyland Park" },
-  { name: "Ronto Roasters", resort: "DLR", location: "Disneyland Park" },
-  { name: "Docking Bay 7 Food and Cargo", resort: "DLR", location: "Disneyland Park" },
-  { name: "Oga's Cantina", resort: "DLR", location: "Disneyland Park" },
+  { name: "Bengal Barbecue", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Galactic Grill", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Award Wieners", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
+  { name: "Pym Test Kitchen", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
+  { name: "Smokejumpers Grill", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
+  { name: "Tropical Hideaway", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Red Rose Taverne", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Ronto Roasters", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Docking Bay 7 Food and Cargo", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Oga's Cantina", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
 
   // ---- Downtown Disney (Anaheim) ----
   { name: "Naples Ristorante e Bar", resort: "DLR", location: "Downtown Disney" },
@@ -65,58 +72,58 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Earl of Sandwich", resort: "DLR", location: "Downtown Disney" },
 
   // ---- Magic Kingdom — table service ----
-  { name: "Be Our Guest Restaurant", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Cinderella's Royal Table", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Liberty Tree Tavern", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Tony's Town Square Restaurant", resort: "WDW", location: "Magic Kingdom" },
-  { name: "The Crystal Palace", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Skipper Canteen", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Be Our Guest Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Cinderella's Royal Table", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Liberty Tree Tavern", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Tony's Town Square Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "The Crystal Palace", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Skipper Canteen", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
 
   // ---- Magic Kingdom — destination-style quick service ----
-  { name: "Cosmic Ray's Starlight Cafe", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Pecos Bill Tall Tale Inn and Cafe", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Columbia Harbour House", resort: "WDW", location: "Magic Kingdom" },
-  { name: "Pinocchio Village Haus", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Cosmic Ray's Starlight Cafe", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Pecos Bill Tall Tale Inn and Cafe", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Columbia Harbour House", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Pinocchio Village Haus", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
 
   // ---- EPCOT — World Showcase + Future World/World Celebration ----
   { name: "Topolino's Terrace", resort: "WDW", location: "Disney's Riviera Resort" },
-  { name: "Space 220", resort: "WDW", location: "EPCOT" },
-  { name: "Le Cellier Steakhouse", resort: "WDW", location: "EPCOT" },
-  { name: "Akershus Royal Banquet Hall", resort: "WDW", location: "EPCOT" },
-  { name: "Garden Grill", resort: "WDW", location: "EPCOT" },
-  { name: "Sunshine Seasons", resort: "WDW", location: "EPCOT" },
-  { name: "Rose & Crown Dining Room", resort: "WDW", location: "EPCOT" },
-  { name: "Teppan Edo", resort: "WDW", location: "EPCOT" },
-  { name: "Tokyo Dining", resort: "WDW", location: "EPCOT" },
-  { name: "Via Napoli", resort: "WDW", location: "EPCOT" },
-  { name: "Tutto Italia", resort: "WDW", location: "EPCOT" },
-  { name: "Biergarten", resort: "WDW", location: "EPCOT" },
-  { name: "Chefs de France", resort: "WDW", location: "EPCOT" },
-  { name: "San Angel Inn", resort: "WDW", location: "EPCOT" },
-  { name: "La Hacienda de San Angel", resort: "WDW", location: "EPCOT" },
-  { name: "Nine Dragons", resort: "WDW", location: "EPCOT" },
-  { name: "Spice Road Table", resort: "WDW", location: "EPCOT" },
-  { name: "Regal Eagle Smokehouse", resort: "WDW", location: "EPCOT" },
-  { name: "Katsura Grill", resort: "WDW", location: "EPCOT" },
+  { name: "Space 220", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Le Cellier Steakhouse", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Akershus Royal Banquet Hall", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Garden Grill", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Sunshine Seasons", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Rose & Crown Dining Room", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Teppan Edo", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Tokyo Dining", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Via Napoli", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Tutto Italia", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Biergarten", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Chefs de France", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "San Angel Inn", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "La Hacienda de San Angel", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Nine Dragons", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Spice Road Table", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Regal Eagle Smokehouse", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Katsura Grill", resort: "WDW", location: "EPCOT", parkId: "epcot" },
 
   // ---- Hollywood Studios ----
-  { name: "Sci-Fi Dine-In Theater Restaurant", resort: "WDW", location: "Hollywood Studios" },
-  { name: "50's Prime Time Cafe", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Hollywood Brown Derby", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Roundup Rodeo BBQ", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Backlot Express", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Woody's Lunch Box", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Docking Bay 7 Food and Cargo", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Ronto Roasters", resort: "WDW", location: "Hollywood Studios" },
-  { name: "ABC Commissary", resort: "WDW", location: "Hollywood Studios" },
-  { name: "Oga's Cantina", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Sci-Fi Dine-In Theater Restaurant", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "50's Prime Time Cafe", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Hollywood Brown Derby", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Roundup Rodeo BBQ", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Backlot Express", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Woody's Lunch Box", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Docking Bay 7 Food and Cargo", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Ronto Roasters", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "ABC Commissary", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
+  { name: "Oga's Cantina", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
 
   // ---- Animal Kingdom ----
-  { name: "Tiffins", resort: "WDW", location: "Animal Kingdom" },
-  { name: "Tusker House", resort: "WDW", location: "Animal Kingdom" },
-  { name: "Yak & Yeti Restaurant", resort: "WDW", location: "Animal Kingdom" },
-  { name: "Satu'li Canteen", resort: "WDW", location: "Animal Kingdom" },
-  { name: "Flame Tree Barbecue", resort: "WDW", location: "Animal Kingdom" },
+  { name: "Tiffins", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
+  { name: "Tusker House", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
+  { name: "Yak & Yeti Restaurant", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
+  { name: "Satu'li Canteen", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
+  { name: "Flame Tree Barbecue", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
 
   // ---- Disney Springs ----
   { name: "Chef Art Smith's Homecomin'", resort: "WDW", location: "Disney Springs" },
