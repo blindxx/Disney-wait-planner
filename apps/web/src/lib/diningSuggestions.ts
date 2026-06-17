@@ -52,6 +52,10 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Plaza Inn", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
   { name: "Lamplight Lounge", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
   { name: "Goofy's Kitchen", resort: "DLR", location: "Disneyland Hotel" },
+  { name: "Carnation Cafe", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "River Belle Terrace", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Rancho del Zocalo Restaurante", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
+  { name: "Wine Country Trattoria", resort: "DLR", location: "Disney California Adventure", parkId: "dca" },
 
   // ---- Disneyland Park / DCA — destination-style quick service ----
   { name: "Bengal Barbecue", resort: "DLR", location: "Disneyland Park", parkId: "disneyland" },
@@ -70,6 +74,9 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Black Tap", resort: "DLR", location: "Downtown Disney" },
   { name: "Salt & Straw", resort: "DLR", location: "Downtown Disney" },
   { name: "Earl of Sandwich", resort: "DLR", location: "Downtown Disney" },
+  { name: "Paseo", resort: "DLR", location: "Downtown Disney" },
+  { name: "Centrico", resort: "DLR", location: "Downtown Disney" },
+  { name: "Tiendita", resort: "DLR", location: "Downtown Disney" },
 
   // ---- Magic Kingdom — table service ----
   { name: "Be Our Guest Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
@@ -77,13 +84,16 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Liberty Tree Tavern", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
   { name: "Tony's Town Square Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
   { name: "The Crystal Palace", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
-  { name: "Skipper Canteen", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Jungle Navigation Co. LTD Skipper Canteen", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "The Plaza Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "The Diamond Horseshoe", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
 
   // ---- Magic Kingdom — destination-style quick service ----
   { name: "Cosmic Ray's Starlight Cafe", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
   { name: "Pecos Bill Tall Tale Inn and Cafe", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
   { name: "Columbia Harbour House", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
   { name: "Pinocchio Village Haus", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
+  { name: "Beak and Barrel", resort: "WDW", location: "Magic Kingdom", parkId: "mk" },
 
   // ---- EPCOT — World Showcase + Future World/World Celebration ----
   { name: "Topolino's Terrace", resort: "WDW", location: "Disney's Riviera Resort" },
@@ -105,6 +115,9 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Spice Road Table", resort: "WDW", location: "EPCOT", parkId: "epcot" },
   { name: "Regal Eagle Smokehouse", resort: "WDW", location: "EPCOT", parkId: "epcot" },
   { name: "Katsura Grill", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "GEO-82", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Shiki-Sai: Sushi Izakaya", resort: "WDW", location: "EPCOT", parkId: "epcot" },
+  { name: "Coral Reef Restaurant", resort: "WDW", location: "EPCOT", parkId: "epcot" },
 
   // ---- Hollywood Studios ----
   { name: "Sci-Fi Dine-In Theater Restaurant", resort: "WDW", location: "Hollywood Studios", parkId: "hs" },
@@ -124,6 +137,7 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Yak & Yeti Restaurant", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
   { name: "Satu'li Canteen", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
   { name: "Flame Tree Barbecue", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
+  { name: "Nomad Lounge", resort: "WDW", location: "Animal Kingdom", parkId: "ak" },
 
   // ---- Disney Springs ----
   { name: "Chef Art Smith's Homecomin'", resort: "WDW", location: "Disney Springs" },
@@ -161,6 +175,33 @@ const DINING_KEYS: Set<string> = new Set(
 );
 
 /**
+ * Manual alias map for common guest-entered dining shorthand — mirrors the
+ * ALIASES_DLR / ALIASES_WDW philosophy in plansMatching.ts (no fuzzy
+ * matching, just an explicit lookup table).
+ *
+ * Keys:   normalizeKey() output of the user-entered alias.
+ * Values: normalizeKey() output of the canonical DINING_PLACES name.
+ *
+ * Needed mainly for shorthand that the stage-2 containment check in
+ * isDiningName() can't reach (single-token names like "CRT", or names that
+ * drop/reorder words relative to the canonical form), and for
+ * getDiningLocation(), which only does exact-key lookup.
+ */
+const DINING_ALIASES: Record<string, string> = {
+  "skipper canteen":  "jungle navigation co ltd skipper canteen",
+  "rose and crown":   "rose crown dining room",
+  "brown derby":      "hollywood brown derby",
+  "coral reef":       "coral reef restaurant",
+  "rancho del zocalo": "rancho del zocalo restaurante",
+  "storytellers":     "storytellers cafe",
+  "plaza restaurant": "the plaza restaurant",
+  "be our guest":     "be our guest restaurant",
+  "crt":              "cinderellas royal table",
+  // "Ohana" needs no alias: normalizeKey() already strips the apostrophe
+  // from "'Ohana", so "Ohana" hits the exact-match stage directly.
+};
+
+/**
  * Strip a disambiguation suffix appended by getDiningSuggestions(), e.g.
  * "Oga's Cantina — Hollywood Studios" → "Oga's Cantina". No-op when absent.
  * Kept local to dining (not in plansMatching.ts) since attraction names
@@ -172,16 +213,29 @@ function stripDiningSuffix(str: string): string {
 }
 
 /**
+ * Resolve a (possibly aliased) typed name to its canonical DINING_KEYS entry.
+ * Stage 1: exact normalized match. Stage 3: alias lookup. Returns null when
+ * neither resolves (caller may still fall back to containment matching).
+ */
+function resolveDiningKey(name: string): string | null {
+  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
+  if (DINING_KEYS.has(key)) return key;
+  const aliasTarget = DINING_ALIASES[key];
+  if (aliasTarget && DINING_KEYS.has(aliasTarget)) return aliasTarget;
+  return null;
+}
+
+/**
  * True when the given activity name matches a known dining location.
- * Stage 1: exact normalized match.
+ * Stage 1: exact normalized match. Stage 3: alias lookup.
  * Stage 2: whole-word containment (≥2 meaningful tokens required) against
  * the known dining key set — mirrors lookupWait()'s containment stage so
  * minor wording differences (e.g. dropped "Restaurant") still resolve.
  */
 export function isDiningName(name: string): boolean {
-  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
-  if (DINING_KEYS.has(key)) return true;
+  if (resolveDiningKey(name)) return true;
 
+  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
   const tokens = tokenize(key);
   if (tokens.length < 2) return false;
 
@@ -241,7 +295,8 @@ export function getDiningSuggestions(resort: ResortId): string[] {
  * Returns undefined for unknown/custom names.
  */
 export function getDiningLocation(name: string, resort: ResortId): string | undefined {
-  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
+  const key = resolveDiningKey(name);
+  if (!key) return undefined;
   const matches = DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
