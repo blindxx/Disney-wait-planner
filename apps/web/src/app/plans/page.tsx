@@ -45,7 +45,6 @@ import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
-  isDiningName,
   getDiningSuggestions,
   getDiningLocation,
   getDiningCanonicalName,
@@ -56,6 +55,7 @@ import {
   getEntertainmentSuggestions,
   getEntertainmentLocation,
   getEntertainmentCanonicalName,
+  getEntertainmentAvailabilityType,
   resolveEntertainmentKey,
   ENTERTAINMENT_PLACES,
 } from "@/lib/entertainmentSuggestions";
@@ -1968,16 +1968,16 @@ export default function PlansPage() {
                 name: trimmed,
                 timeLabel: timeWindow,
                 // Recompute type only when the name changed — preserves any
-                // existing type when just the time window is edited.
-                // Entertainment is never auto-downgraded to attraction just
-                // because dining inference doesn't recognize the new name —
-                // only an explicit dining match can change it.
+                // existing type when just the time window is edited. When
+                // the name does change, always recompute from the new name
+                // (inferPlannerItemType checks entertainment, then dining,
+                // then falls back to attraction) so editing an entertainment
+                // item into a known attraction correctly downgrades it
+                // instead of being pinned to "entertainment" forever.
                 type:
                   trimmed === editTarget.name
                     ? it.type
-                    : editTarget.type === "entertainment" && !isDiningName(trimmed)
-                      ? "entertainment"
-                      : inferPlannerItemType(trimmed),
+                    : inferPlannerItemType(trimmed),
               }
             : it
         );
@@ -2808,6 +2808,14 @@ export default function PlansPage() {
         .item-park {
           font-size: 0.7rem;
           color: #9ca3af;
+          line-height: 1.3;
+          margin-top: 0.1rem;
+          word-break: break-word;
+        }
+        .item-availability {
+          font-size: 0.7rem;
+          color: #9ca3af;
+          font-style: italic;
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
@@ -3817,12 +3825,22 @@ export default function PlansPage() {
                         const entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, selectedResort);
                         const entertainmentLocation = getEntertainmentLocation(item.name, selectedResort);
                         if (!entertainmentLocation) return null;
+                        const availabilityType = getEntertainmentAvailabilityType(item.name, selectedResort);
+                        const availabilityLabel =
+                          availabilityType === "seasonal"
+                            ? "Seasonal Event"
+                            : availabilityType === "limited"
+                              ? "Limited-Time Entertainment"
+                              : null;
                         return (
                           <>
                             {entertainmentCanonicalName && entertainmentCanonicalName !== item.name && (
                               <div className="item-canonical">{entertainmentCanonicalName}</div>
                             )}
                             <div className="item-park">{entertainmentLocation}</div>
+                            {availabilityLabel && (
+                              <div className="item-availability">{availabilityLabel}</div>
+                            )}
                           </>
                         );
                       })()}

@@ -38,6 +38,15 @@ import {
  */
 export type EntertainmentAvailabilityType = "regular" | "seasonal" | "limited";
 
+/**
+ * Optional seasonal/holiday theme tag for entertainment with
+ * availabilityType "seasonal" or "limited". Data-only, like
+ * availabilityType — not surfaced in any UI yet. Lets future phases group
+ * or label recurring holiday entertainment without re-deriving it from
+ * free-text names.
+ */
+export type EntertainmentTheme = "halloween" | "christmas" | "anniversary";
+
 export type EntertainmentPlace = {
   name: string;
   resort: ResortId;
@@ -51,6 +60,8 @@ export type EntertainmentPlace = {
   parkId?: ParkId;
   /** Optional recurrence metadata — see EntertainmentAvailabilityType. */
   availabilityType?: EntertainmentAvailabilityType;
+  /** Optional seasonal/holiday theme — see EntertainmentTheme. */
+  availabilityTheme?: EntertainmentTheme;
 };
 
 export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
@@ -58,14 +69,15 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Fantasmic!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
   { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
   { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Magic Happens", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
+  { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
   { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
   { name: "Disney Stars on Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal" },
-  { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal" },
-  { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal" },
+  { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "seasonal", availabilityTheme: "halloween" },
 
   // ---- Magic Kingdom ----
   { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
@@ -74,8 +86,13 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Mickey's PhilharMagic", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
   { name: "Enchanted Tiki Room", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
   { name: "Country Bear Musical Jamboree", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal" },
-  { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal" },
+  { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
+  { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Disney's Not-So-Spooky Spectacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Hocus Pocus Villain Spelltacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Minnie's Wonderful Christmastime Fireworks", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- EPCOT ----
   { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
@@ -115,6 +132,20 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "tiki room": "enchanted tiki room",
   "country bear jamboree": "country bear musical jamboree",
   "fotf": "festival of fantasy parade",
+  "magic happens": "magic happens parade",
+  "adventure friends cavalcade": "disney adventure friends cavalcade",
+  "disney adventure friends": "disney adventure friends cavalcade",
+  "not so spooky": "disneys not so spooky spectacular",
+  "not so spooky fireworks": "disneys not so spooky spectacular",
+  "halloween fireworks": "disneys not so spooky spectacular",
+  "hocus pocus": "hocus pocus villain spelltacular",
+  "villain spelltacular": "hocus pocus villain spelltacular",
+  "christmastime fireworks": "minnies wonderful christmastime fireworks",
+  "minnies fireworks": "minnies wonderful christmastime fireworks",
+  "christmas fireworks": "minnies wonderful christmastime fireworks",
+  "most merriest celebration": "mickeys most merriest celebration",
+  "oogie boogie parade": "frightfully fun parade",
+  "halloween parade": "frightfully fun parade",
 };
 
 /**
