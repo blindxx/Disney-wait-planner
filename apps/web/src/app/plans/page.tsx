@@ -43,7 +43,7 @@ import {
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
-import { isDiningName } from "@/lib/diningSuggestions";
+import { inferPlannerItemType, DINING_PLACE_NAMES } from "@/lib/diningSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -863,9 +863,9 @@ export default function PlansPage() {
     return map;
   }, [selectedResort, liveAttractions]);
 
-  // Canonical attraction names for autocomplete in the add/edit modal.
+  // Canonical attraction + known dining names for autocomplete in the add/edit modal.
   const suggestions = useMemo(
-    () => Array.from(waitMap.values()).map((v) => v.canonicalName),
+    () => [...Array.from(waitMap.values()).map((v) => v.canonicalName), ...DINING_PLACE_NAMES],
     [waitMap]
   );
 
@@ -1883,15 +1883,21 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const itemType: PlannerItemType = isDiningName(trimmed) ? "dining" : "attraction";
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: itemType }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
       setItems((prev) => {
         const next = prev.map((it) =>
           it.id === editTarget.id
-            ? { ...it, name: trimmed, timeLabel: timeWindow }
+            ? {
+                ...it,
+                name: trimmed,
+                timeLabel: timeWindow,
+                // Recompute type only when the name changed — preserves any
+                // existing type when just the time window is edited.
+                type: trimmed !== editTarget.name ? inferPlannerItemType(trimmed) : it.type,
+              }
             : it
         );
         return autoSortEnabled ? sortPlanItems(next) : next;
@@ -1915,7 +1921,7 @@ export default function PlansPage() {
           name: importedName,
           timeLabel: parsed.timeLabel,
           dayId: activeDayId,
-          type: isDiningName(importedName) ? "dining" : "attraction",
+          type: inferPlannerItemType(importedName),
         });
       }
     }

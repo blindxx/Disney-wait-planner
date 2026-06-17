@@ -18,6 +18,7 @@ import {
   tokenize,
   containsWholeWordSequence,
 } from "./plansMatching";
+import type { PlannerItemType } from "./plansTransfer";
 
 export const DINING_PLACE_NAMES: string[] = [
   // ---- Disneyland Park / DCA — table service ----
@@ -29,6 +30,7 @@ export const DINING_PLACE_NAMES: string[] = [
   "Cafe Orleans",
   "Plaza Inn",
   "Lamplight Lounge",
+  "Story Book Dining at Artist Point",
 
   // ---- Disneyland Park / DCA — destination-style quick service ----
   "Bengal Barbecue",
@@ -42,41 +44,80 @@ export const DINING_PLACE_NAMES: string[] = [
   "Docking Bay 7 Food and Cargo",
   "Oga's Cantina",
 
-  // ---- Walt Disney World — table service ----
+  // ---- Downtown Disney (Anaheim) ----
+  "Naples Ristorante e Bar",
+  "Black Tap",
+  "Salt & Straw",
+
+  // ---- Magic Kingdom — table service ----
   "Be Our Guest Restaurant",
   "Cinderella's Royal Table",
   "Liberty Tree Tavern",
   "Tony's Town Square Restaurant",
   "The Crystal Palace",
   "Skipper Canteen",
+
+  // ---- Magic Kingdom — destination-style quick service ----
+  "Cosmic Ray's Starlight Cafe",
+  "Pecos Bill Tall Tale Inn and Cafe",
+  "Columbia Harbour House",
+  "Pinocchio Village Haus",
+
+  // ---- EPCOT ----
   "Topolino's Terrace",
-  "California Grill",
-  "Narcoossee's",
-  "'Ohana",
-  "Sci-Fi Dine-In Theater Restaurant",
-  "50's Prime Time Cafe",
-  "Hollywood Brown Derby",
-  "Mama Melrose's Ristorante Italiano",
-  "Tiffins",
-  "Yak & Yeti Restaurant",
-  "Rainforest Cafe",
   "Space 220",
   "Le Cellier Steakhouse",
   "Akershus Royal Banquet Hall",
   "Garden Grill",
+  "Sunshine Seasons",
+
+  // ---- Hollywood Studios ----
+  "Sci-Fi Dine-In Theater Restaurant",
+  "50's Prime Time Cafe",
+  "Hollywood Brown Derby",
+  "Mama Melrose's Ristorante Italiano",
+  "Roundup Rodeo BBQ",
+  "Backlot Express",
+  "Woody's Lunch Box",
+  "Docking Bay 7 Food and Cargo",
+  "Ronto Roasters",
+  "ABC Commissary",
+
+  // ---- Animal Kingdom ----
+  "Tiffins",
+  "Tusker House",
+  "Yak & Yeti Restaurant",
+  "Satu'li Canteen",
+  "Flame Tree Barbecue",
+  "Regal Eagle Smokehouse",
+
+  // ---- Disney Springs ----
+  "Chef Art Smith's Homecomin'",
+  "Wine Bar George",
+  "The BOATHOUSE",
+  "Morimoto Asia",
+  "Jaleo",
+  "Raglan Road",
+  "STK Orlando",
+  "Summer House on the Lake",
+  "Gideon's Bakehouse",
+  "Earl of Sandwich",
+  "D-Luxe Burger",
+  "Chicken Guy!",
+  "Din Tai Fung",
+  "Jock Lindsey's Hangar Bar",
+
+  // ---- Major WDW resorts ----
+  "Chef Mickey's",
+  "California Grill",
+  "Narcoossee's",
+  "'Ohana",
   "Boma",
   "Jiko",
   "Sanaa",
-
-  // ---- Walt Disney World — destination-style quick service ----
-  "Satu'li Canteen",
-  "Flame Tree Barbecue",
-  "Pecos Bill Tall Tale Inn and Cafe",
-  "Columbia Harbour House",
-  "Woody's Lunch Box",
-  "Regal Eagle Smokehouse",
-  "Sunshine Seasons",
-  "ABC Commissary",
+  "Rainforest Cafe",
+  "Jazz Kitchen Coastal Grill & Patio",
+  "Ballast Point",
 ];
 
 const DINING_KEYS: Set<string> = new Set(
@@ -105,4 +146,14 @@ export function isDiningName(name: string): boolean {
     }
   }
   return matchCount === 1;
+}
+
+/**
+ * Infer a planner item's type from its current activity name.
+ * Single source of truth for Add/Edit/import — keeps name-based type
+ * inference consistent everywhere a name is entered or changed.
+ * Extend here (not at call sites) when entertainment recognition lands.
+ */
+export function inferPlannerItemType(name: string): PlannerItemType {
+  return isDiningName(name) ? "dining" : "attraction";
 }
