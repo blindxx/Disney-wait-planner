@@ -49,16 +49,29 @@ import {
   ALIASES_WDW,
   stripAnnotations,
 } from "@/lib/plansMatching";
+import { DINING_PLACES, resolveDiningKey } from "@/lib/diningSuggestions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
-type ResolvedContext = { parkId: ParkId; resortId: ResortId };
+// parkId is null for dining locations with no single-park identity (resort
+// hotels, Downtown Disney, Disney Springs) — they still count as a resort
+// signal (Stage 1) but are excluded from park scoring (Stage 2).
+type ResolvedContext = { parkId: ParkId | null; resortId: ResortId };
 
-/** Build a normalized-name → {parkId, resortId} map for one resort. */
+/**
+ * Build a normalized-name → {parkId, resortId} map for one resort.
+ * Combines attraction wait data with known dining locations (Phase 9.2) so
+ * dining-only days can resolve park context the same way attraction-only
+ * days already do.
+ */
 function buildInferenceMap(resortId: ResortId): Map<string, ResolvedContext> {
   const map = new Map<string, ResolvedContext>();
   for (const a of mockAttractionWaits) {
     if (a.resortId !== resortId) continue;
     map.set(normalizeKey(a.name), { parkId: a.parkId as ParkId, resortId });
+  }
+  for (const d of DINING_PLACES) {
+    if (d.resort !== resortId) continue;
+    map.set(normalizeKey(d.name), { parkId: d.parkId ?? null, resortId });
   }
   return map;
 }
@@ -86,6 +99,15 @@ function tryResolve(
   if (aliasTarget) {
     const aliasResult = map.get(aliasTarget);
     if (aliasResult) return aliasResult;
+  }
+
+  // Stage 3b: dining alias lookup, via diningSuggestions.ts's single source
+  // of truth (DINING_ALIASES), so dining shorthand (e.g. "CRT", "Rose and
+  // Crown") participates in inference exactly like canonical dining names.
+  const diningKey = resolveDiningKey(name);
+  if (diningKey) {
+    const diningResult = map.get(diningKey);
+    if (diningResult) return diningResult;
   }
 
   return null;
@@ -154,7 +176,7 @@ export function inferPlansContext(
 
   for (const m of allMatches) {
     const resolved = resort === "DLR" ? m.dlr : m.wdw;
-    if (!resolved) continue;
+    if (!resolved || resolved.parkId === null) continue;
     parkCount.set(resolved.parkId, (parkCount.get(resolved.parkId) ?? 0) + 1);
   }
 
@@ -182,7 +204,7 @@ export function inferPlansContext(
   // top set. Iterate from the end (most recent) to the start (oldest).
   for (let i = plans.length - 1; i >= 0; i--) {
     const resolved = resort === "DLR" ? allMatches[i].dlr : allMatches[i].wdw;
-    if (!resolved) continue;
+    if (!resolved || resolved.parkId === null) continue;
     if (topParks.includes(resolved.parkId)) {
       return { resort, park: resolved.parkId };
     }

@@ -43,6 +43,15 @@ import {
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
+import {
+  inferPlannerItemType,
+  isDiningName,
+  getDiningSuggestions,
+  getDiningLocation,
+  getDiningCanonicalName,
+  resolveDiningKey,
+  DINING_PLACES,
+} from "@/lib/diningSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -542,13 +551,34 @@ const DAY_PARK_SHORT: Record<string, string> = {
 
 /**
  * Normalized attraction name → parkId lookup maps, built once at module load
- * from mock data. Used by inferDayPark to count park frequencies per day.
+ * from mock data. Used by crossDayChecks (duplicate detection, identity
+ * matching, park labels) and by inferDayPark for attraction-based park
+ * frequency counting. Attraction-only — deliberately NOT seeded with dining
+ * data, so dining never participates in attraction duplicate/identity
+ * matching (see DINING_PARK_DLR/WDW below for the dining-only equivalent
+ * used purely for park inference).
  */
 const RIDE_TO_PARK_DLR = new Map<string, string>();
 const RIDE_TO_PARK_WDW = new Map<string, string>();
 for (const _inf of mockAttractionWaits) {
   if (_inf.resortId === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_inf.name), _inf.parkId);
   else if (_inf.resortId === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_inf.name), _inf.parkId);
+}
+
+/**
+ * Normalized dining name → parkId lookup maps, built once at module load
+ * from DINING_PLACES. Used ONLY by inferDayPark for park inference — never
+ * consumed by duplicate detection or attraction identity matching, keeping
+ * dining fully isolated from those attraction-oriented pipelines. Dining
+ * entries with no single-park identity (resort hotels, Downtown Disney,
+ * Disney Springs) are omitted, same as in plansContextInference.ts.
+ */
+const DINING_PARK_DLR = new Map<string, string>();
+const DINING_PARK_WDW = new Map<string, string>();
+for (const _d of DINING_PLACES) {
+  if (!_d.parkId) continue;
+  if (_d.resort === "DLR") DINING_PARK_DLR.set(normalizeKey(_d.name), _d.parkId);
+  else if (_d.resort === "WDW") DINING_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
 }
 
 /**
@@ -621,6 +651,7 @@ const DISPLAY_CANONICAL_RIDE_NAME = true;
 function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | null {
   if (dayItems.length === 0) return null;
   const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+  const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
   const parkCount = new Map<string, number>();
   for (const item of dayItems) {
@@ -629,6 +660,12 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
     if (!parkId) {
       const aliasTarget = aliases[key] ?? (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
       if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
+    }
+    if (!parkId) {
+      // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
+      // which feeds attraction duplicate/identity matching elsewhere.
+      const diningKey = resolveDiningKey(item.name);
+      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
@@ -862,10 +899,16 @@ export default function PlansPage() {
     return map;
   }, [selectedResort, liveAttractions]);
 
-  // Canonical attraction names for autocomplete in the add/edit modal.
+  // Canonical attraction + known dining names for autocomplete in the add/edit modal.
+  // Dining names are scoped to the active resort, mirroring the attraction
+  // waitMap scoping above — disambiguated with a location suffix only when
+  // the same name exists at more than one location within that resort.
   const suggestions = useMemo(
-    () => Array.from(waitMap.values()).map((v) => v.canonicalName),
-    [waitMap]
+    () => [
+      ...Array.from(waitMap.values()).map((v) => v.canonicalName),
+      ...getDiningSuggestions(selectedResort),
+    ],
+    [waitMap, selectedResort]
   );
 
   // Phase 8.0 — Items visible in the current day (display-only; storage unchanged).
@@ -963,6 +1006,9 @@ export default function PlansPage() {
       const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
       const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
       // Stage 1 + 3: exact / alias
+      // Deliberately attraction-only (rideMap never contains dining data) so
+      // dining items can never resolve here and contaminate duplicate /
+      // identity matching below.
       const key = resolveIdentityKey(name, aliases);
       if (rideMap.has(key)) return key;
       // Stage 2: whole-word containment (≥2 tokens, unambiguous)
@@ -1882,14 +1928,29 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: "attraction" as PlannerItemType }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
       setItems((prev) => {
         const next = prev.map((it) =>
           it.id === editTarget.id
-            ? { ...it, name: trimmed, timeLabel: timeWindow }
+            ? {
+                ...it,
+                name: trimmed,
+                timeLabel: timeWindow,
+                // Recompute type only when the name changed — preserves any
+                // existing type when just the time window is edited.
+                // Entertainment is never auto-downgraded to attraction just
+                // because dining inference doesn't recognize the new name —
+                // only an explicit dining match can change it.
+                type:
+                  trimmed === editTarget.name
+                    ? it.type
+                    : editTarget.type === "entertainment" && !isDiningName(trimmed)
+                      ? "entertainment"
+                      : inferPlannerItemType(trimmed),
+              }
             : it
         );
         return autoSortEnabled ? sortPlanItems(next) : next;
@@ -1907,12 +1968,13 @@ export default function PlansPage() {
       const normalized = line.replace(/[\u2013\u2014]/g, "-");
       const parsed = parseLine(normalized);
       if (parsed) {
+        const importedName = stripEnDashSuffix(parsed.name);
         newItems.push({
           id: makeId(),
-          name: stripEnDashSuffix(parsed.name),
+          name: importedName,
           timeLabel: parsed.timeLabel,
           dayId: activeDayId,
-          type: "attraction" as PlannerItemType,
+          type: inferPlannerItemType(importedName),
         });
       }
     }
@@ -2201,13 +2263,20 @@ export default function PlansPage() {
     targetDayId: string
   ) {
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
-    const newItems: PlanItem[] = importedItems.map((it) => ({
-      id: makeId(),
-      name: it.name,
-      timeLabel: it.timeLabel,
-      dayId: targetDayId,
-      type: coercePlannerItemType((it as { type?: unknown }).type),
-    }));
+    // TXT/CSV day-plan files never carry a `type` field, so fall back to
+    // name-based inference there (keeps dining recognition consistent across
+    // every import method); an explicit `type` from a JSON day-plan export
+    // is preserved as-is via coercePlannerItemType.
+    const newItems: PlanItem[] = importedItems.map((it) => {
+      const rawType = (it as { type?: unknown }).type;
+      return {
+        id: makeId(),
+        name: it.name,
+        timeLabel: it.timeLabel,
+        dayId: targetDayId,
+        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name),
+      };
+    });
     setItems((prev) => {
       const withoutTargetDay = prev.filter((it) => it.dayId !== targetDayId);
       const next = [...withoutTargetDay, ...newItems];
@@ -3700,6 +3769,19 @@ export default function PlansPage() {
                             {parkLabel && (
                               <div className="item-park">{parkLabel}</div>
                             )}
+                          </>
+                        );
+                      })()}
+                      {item.type === "dining" && (() => {
+                        const diningCanonicalName = getDiningCanonicalName(item.name, selectedResort);
+                        const diningLocation = getDiningLocation(item.name, selectedResort);
+                        if (!diningLocation) return null;
+                        return (
+                          <>
+                            {diningCanonicalName && diningCanonicalName !== item.name && (
+                              <div className="item-canonical">{diningCanonicalName}</div>
+                            )}
+                            <div className="item-park">{diningLocation}</div>
                           </>
                         );
                       })()}
