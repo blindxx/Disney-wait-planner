@@ -43,7 +43,12 @@ import {
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
-import { inferPlannerItemType, DINING_PLACE_NAMES } from "@/lib/diningSuggestions";
+import {
+  inferPlannerItemType,
+  isDiningName,
+  getDiningSuggestions,
+  getDiningLocation,
+} from "@/lib/diningSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -864,9 +869,15 @@ export default function PlansPage() {
   }, [selectedResort, liveAttractions]);
 
   // Canonical attraction + known dining names for autocomplete in the add/edit modal.
+  // Dining names are scoped to the active resort, mirroring the attraction
+  // waitMap scoping above — disambiguated with a location suffix only when
+  // the same name exists at more than one location within that resort.
   const suggestions = useMemo(
-    () => [...Array.from(waitMap.values()).map((v) => v.canonicalName), ...DINING_PLACE_NAMES],
-    [waitMap]
+    () => [
+      ...Array.from(waitMap.values()).map((v) => v.canonicalName),
+      ...getDiningSuggestions(selectedResort),
+    ],
+    [waitMap, selectedResort]
   );
 
   // Phase 8.0 — Items visible in the current day (display-only; storage unchanged).
@@ -1896,7 +1907,15 @@ export default function PlansPage() {
                 timeLabel: timeWindow,
                 // Recompute type only when the name changed — preserves any
                 // existing type when just the time window is edited.
-                type: trimmed !== editTarget.name ? inferPlannerItemType(trimmed) : it.type,
+                // Entertainment is never auto-downgraded to attraction just
+                // because dining inference doesn't recognize the new name —
+                // only an explicit dining match can change it.
+                type:
+                  trimmed === editTarget.name
+                    ? it.type
+                    : editTarget.type === "entertainment" && !isDiningName(trimmed)
+                      ? "entertainment"
+                      : inferPlannerItemType(trimmed),
               }
             : it
         );
@@ -2210,13 +2229,20 @@ export default function PlansPage() {
     targetDayId: string
   ) {
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
-    const newItems: PlanItem[] = importedItems.map((it) => ({
-      id: makeId(),
-      name: it.name,
-      timeLabel: it.timeLabel,
-      dayId: targetDayId,
-      type: coercePlannerItemType((it as { type?: unknown }).type),
-    }));
+    // TXT/CSV day-plan files never carry a `type` field, so fall back to
+    // name-based inference there (keeps dining recognition consistent across
+    // every import method); an explicit `type` from a JSON day-plan export
+    // is preserved as-is via coercePlannerItemType.
+    const newItems: PlanItem[] = importedItems.map((it) => {
+      const rawType = (it as { type?: unknown }).type;
+      return {
+        id: makeId(),
+        name: it.name,
+        timeLabel: it.timeLabel,
+        dayId: targetDayId,
+        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name),
+      };
+    });
     setItems((prev) => {
       const withoutTargetDay = prev.filter((it) => it.dayId !== targetDayId);
       const next = [...withoutTargetDay, ...newItems];
@@ -3711,6 +3737,11 @@ export default function PlansPage() {
                             )}
                           </>
                         );
+                      })()}
+                      {item.type === "dining" && (() => {
+                        const diningLocation = getDiningLocation(item.name, selectedResort);
+                        if (!diningLocation) return null;
+                        return <div className="item-park">{diningLocation}</div>;
                       })()}
                       {item.timeLabel && (
                         <div className="item-time">

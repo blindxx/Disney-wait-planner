@@ -2,16 +2,23 @@
  * diningSuggestions.ts — Phase 9.1 Dining Smart Entry recognition.
  *
  * Known dining locations across Disneyland Resort and Walt Disney World.
- * Covers major table-service restaurants plus destination-style quick-service
- * locations guests commonly build itineraries around. Deliberately excludes
- * Starbucks, Joffrey's, carts, kiosks, festival booths, and other transient
- * snack/food locations that aren't planned as standalone activities.
+ * Covers reservation-based table service, character dining, signature
+ * dining, dinner shows, and destination-style quick-service locations
+ * guests commonly build itineraries around. Deliberately excludes
+ * Starbucks, Joffrey's, carts, kiosks, festival booths, resort quick
+ * service / food courts, pool bars, coffee locations, grab-and-go
+ * markets, and generic lounges.
+ *
+ * Each entry carries lightweight metadata (resort + park/area label) so
+ * the planner can show location context and disambiguate same-named
+ * locations that exist at both resorts (e.g. Oga's Cantina).
  *
  * isDiningName() mirrors the stage-1 (exact) + stage-2 (whole-word
  * containment) logic used by lookupWait() in plansMatching.ts, so a known
  * dining name is recognized the same way attraction names already are.
  */
 
+import type { ResortId } from "@disney-wait-planner/shared";
 import {
   normalizeKey,
   stripAnnotations,
@@ -20,109 +27,142 @@ import {
 } from "./plansMatching";
 import type { PlannerItemType } from "./plansTransfer";
 
-export const DINING_PLACE_NAMES: string[] = [
+export type DiningPlace = {
+  name: string;
+  resort: ResortId;
+  /** Park/area/resort display label shown under the activity name. */
+  location: string;
+};
+
+export const DINING_PLACES: DiningPlace[] = [
   // ---- Disneyland Park / DCA — table service ----
-  "Blue Bayou Restaurant",
-  "Carthay Circle Restaurant",
-  "Napa Rose",
-  "Storytellers Cafe",
-  "Steakhouse 55",
-  "Cafe Orleans",
-  "Plaza Inn",
-  "Lamplight Lounge",
-  "Story Book Dining at Artist Point",
+  { name: "Blue Bayou Restaurant", resort: "DLR", location: "Disneyland Park" },
+  { name: "Carthay Circle Restaurant", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Napa Rose", resort: "DLR", location: "Disney's Grand Californian Hotel" },
+  { name: "Storytellers Cafe", resort: "DLR", location: "Disney's Grand Californian Hotel" },
+  { name: "Steakhouse 55", resort: "DLR", location: "Disneyland Hotel" },
+  { name: "Cafe Orleans", resort: "DLR", location: "Disneyland Park" },
+  { name: "Plaza Inn", resort: "DLR", location: "Disneyland Park" },
+  { name: "Lamplight Lounge", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Goofy's Kitchen", resort: "DLR", location: "Disneyland Hotel" },
 
   // ---- Disneyland Park / DCA — destination-style quick service ----
-  "Bengal Barbecue",
-  "Galactic Grill",
-  "Award Wieners",
-  "Pym Test Kitchen",
-  "Smokejumpers Grill",
-  "Tropical Hideaway",
-  "Red Rose Taverne",
-  "Ronto Roasters",
-  "Docking Bay 7 Food and Cargo",
-  "Oga's Cantina",
+  { name: "Bengal Barbecue", resort: "DLR", location: "Disneyland Park" },
+  { name: "Galactic Grill", resort: "DLR", location: "Disneyland Park" },
+  { name: "Award Wieners", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Pym Test Kitchen", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Smokejumpers Grill", resort: "DLR", location: "Disney California Adventure" },
+  { name: "Tropical Hideaway", resort: "DLR", location: "Disneyland Park" },
+  { name: "Red Rose Taverne", resort: "DLR", location: "Disneyland Park" },
+  { name: "Ronto Roasters", resort: "DLR", location: "Disneyland Park" },
+  { name: "Docking Bay 7 Food and Cargo", resort: "DLR", location: "Disneyland Park" },
+  { name: "Oga's Cantina", resort: "DLR", location: "Disneyland Park" },
 
   // ---- Downtown Disney (Anaheim) ----
-  "Naples Ristorante e Bar",
-  "Black Tap",
-  "Salt & Straw",
+  { name: "Naples Ristorante e Bar", resort: "DLR", location: "Downtown Disney" },
+  { name: "Black Tap", resort: "DLR", location: "Downtown Disney" },
+  { name: "Salt & Straw", resort: "DLR", location: "Downtown Disney" },
+  { name: "Earl of Sandwich", resort: "DLR", location: "Downtown Disney" },
 
   // ---- Magic Kingdom — table service ----
-  "Be Our Guest Restaurant",
-  "Cinderella's Royal Table",
-  "Liberty Tree Tavern",
-  "Tony's Town Square Restaurant",
-  "The Crystal Palace",
-  "Skipper Canteen",
+  { name: "Be Our Guest Restaurant", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Cinderella's Royal Table", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Liberty Tree Tavern", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Tony's Town Square Restaurant", resort: "WDW", location: "Magic Kingdom" },
+  { name: "The Crystal Palace", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Skipper Canteen", resort: "WDW", location: "Magic Kingdom" },
 
   // ---- Magic Kingdom — destination-style quick service ----
-  "Cosmic Ray's Starlight Cafe",
-  "Pecos Bill Tall Tale Inn and Cafe",
-  "Columbia Harbour House",
-  "Pinocchio Village Haus",
+  { name: "Cosmic Ray's Starlight Cafe", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Pecos Bill Tall Tale Inn and Cafe", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Columbia Harbour House", resort: "WDW", location: "Magic Kingdom" },
+  { name: "Pinocchio Village Haus", resort: "WDW", location: "Magic Kingdom" },
 
-  // ---- EPCOT ----
-  "Topolino's Terrace",
-  "Space 220",
-  "Le Cellier Steakhouse",
-  "Akershus Royal Banquet Hall",
-  "Garden Grill",
-  "Sunshine Seasons",
+  // ---- EPCOT — World Showcase + Future World/World Celebration ----
+  { name: "Topolino's Terrace", resort: "WDW", location: "Disney's Riviera Resort" },
+  { name: "Space 220", resort: "WDW", location: "EPCOT" },
+  { name: "Le Cellier Steakhouse", resort: "WDW", location: "EPCOT" },
+  { name: "Akershus Royal Banquet Hall", resort: "WDW", location: "EPCOT" },
+  { name: "Garden Grill", resort: "WDW", location: "EPCOT" },
+  { name: "Sunshine Seasons", resort: "WDW", location: "EPCOT" },
+  { name: "Rose & Crown Dining Room", resort: "WDW", location: "EPCOT" },
+  { name: "Teppan Edo", resort: "WDW", location: "EPCOT" },
+  { name: "Tokyo Dining", resort: "WDW", location: "EPCOT" },
+  { name: "Via Napoli", resort: "WDW", location: "EPCOT" },
+  { name: "Tutto Italia", resort: "WDW", location: "EPCOT" },
+  { name: "Biergarten", resort: "WDW", location: "EPCOT" },
+  { name: "Chefs de France", resort: "WDW", location: "EPCOT" },
+  { name: "San Angel Inn", resort: "WDW", location: "EPCOT" },
+  { name: "La Hacienda de San Angel", resort: "WDW", location: "EPCOT" },
+  { name: "Nine Dragons", resort: "WDW", location: "EPCOT" },
+  { name: "Spice Road Table", resort: "WDW", location: "EPCOT" },
+  { name: "Regal Eagle Smokehouse", resort: "WDW", location: "EPCOT" },
+  { name: "Katsura Grill", resort: "WDW", location: "EPCOT" },
 
   // ---- Hollywood Studios ----
-  "Sci-Fi Dine-In Theater Restaurant",
-  "50's Prime Time Cafe",
-  "Hollywood Brown Derby",
-  "Mama Melrose's Ristorante Italiano",
-  "Roundup Rodeo BBQ",
-  "Backlot Express",
-  "Woody's Lunch Box",
-  "Docking Bay 7 Food and Cargo",
-  "Ronto Roasters",
-  "ABC Commissary",
+  { name: "Sci-Fi Dine-In Theater Restaurant", resort: "WDW", location: "Hollywood Studios" },
+  { name: "50's Prime Time Cafe", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Hollywood Brown Derby", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Roundup Rodeo BBQ", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Backlot Express", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Woody's Lunch Box", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Docking Bay 7 Food and Cargo", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Ronto Roasters", resort: "WDW", location: "Hollywood Studios" },
+  { name: "ABC Commissary", resort: "WDW", location: "Hollywood Studios" },
+  { name: "Oga's Cantina", resort: "WDW", location: "Hollywood Studios" },
 
   // ---- Animal Kingdom ----
-  "Tiffins",
-  "Tusker House",
-  "Yak & Yeti Restaurant",
-  "Satu'li Canteen",
-  "Flame Tree Barbecue",
-  "Regal Eagle Smokehouse",
+  { name: "Tiffins", resort: "WDW", location: "Animal Kingdom" },
+  { name: "Tusker House", resort: "WDW", location: "Animal Kingdom" },
+  { name: "Yak & Yeti Restaurant", resort: "WDW", location: "Animal Kingdom" },
+  { name: "Satu'li Canteen", resort: "WDW", location: "Animal Kingdom" },
+  { name: "Flame Tree Barbecue", resort: "WDW", location: "Animal Kingdom" },
 
   // ---- Disney Springs ----
-  "Chef Art Smith's Homecomin'",
-  "Wine Bar George",
-  "The BOATHOUSE",
-  "Morimoto Asia",
-  "Jaleo",
-  "Raglan Road",
-  "STK Orlando",
-  "Summer House on the Lake",
-  "Gideon's Bakehouse",
-  "Earl of Sandwich",
-  "D-Luxe Burger",
-  "Chicken Guy!",
-  "Din Tai Fung",
-  "Jock Lindsey's Hangar Bar",
+  { name: "Chef Art Smith's Homecomin'", resort: "WDW", location: "Disney Springs" },
+  { name: "Wine Bar George", resort: "WDW", location: "Disney Springs" },
+  { name: "The BOATHOUSE", resort: "WDW", location: "Disney Springs" },
+  { name: "Morimoto Asia", resort: "WDW", location: "Disney Springs" },
+  { name: "Jaleo", resort: "WDW", location: "Disney Springs" },
+  { name: "Raglan Road", resort: "WDW", location: "Disney Springs" },
+  { name: "STK Orlando", resort: "WDW", location: "Disney Springs" },
+  { name: "Summer House on the Lake", resort: "WDW", location: "Disney Springs" },
+  { name: "Gideon's Bakehouse", resort: "WDW", location: "Disney Springs" },
+  { name: "Earl of Sandwich", resort: "WDW", location: "Disney Springs" },
+  { name: "D-Luxe Burger", resort: "WDW", location: "Disney Springs" },
+  { name: "Chicken Guy!", resort: "WDW", location: "Disney Springs" },
+  { name: "Din Tai Fung", resort: "WDW", location: "Disney Springs" },
 
-  // ---- Major WDW resorts ----
-  "Chef Mickey's",
-  "California Grill",
-  "Narcoossee's",
-  "'Ohana",
-  "Boma",
-  "Jiko",
-  "Sanaa",
-  "Rainforest Cafe",
-  "Jazz Kitchen Coastal Grill & Patio",
-  "Ballast Point",
+  // ---- Major WDW resorts — character / signature / dinner-show dining ----
+  { name: "Chef Mickey's", resort: "WDW", location: "Disney's Contemporary Resort" },
+  { name: "California Grill", resort: "WDW", location: "Disney's Contemporary Resort" },
+  { name: "Steakhouse 71", resort: "WDW", location: "Disney's Contemporary Resort" },
+  { name: "Narcoossee's", resort: "WDW", location: "Disney's Grand Floridian Resort" },
+  { name: "'Ohana", resort: "WDW", location: "Disney's Polynesian Resort" },
+  { name: "Boma", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
+  { name: "Jiko", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
+  { name: "Sanaa", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
+  { name: "Beaches & Cream", resort: "WDW", location: "Disney's Beach Club Resort" },
+  { name: "Cape May Cafe", resort: "WDW", location: "Disney's Beach Club Resort" },
+  { name: "Whispering Canyon Cafe", resort: "WDW", location: "Disney's Wilderness Lodge" },
+  { name: "Story Book Dining at Artist Point", resort: "WDW", location: "Disney's Wilderness Lodge" },
+  { name: "Sebastian's Bistro", resort: "WDW", location: "Disney's Caribbean Beach Resort" },
 ];
 
 const DINING_KEYS: Set<string> = new Set(
-  DINING_PLACE_NAMES.map((name) => normalizeKey(name)),
+  DINING_PLACES.map((p) => normalizeKey(p.name)),
 );
+
+/**
+ * Strip a disambiguation suffix appended by getDiningSuggestions(), e.g.
+ * "Oga's Cantina — Hollywood Studios" → "Oga's Cantina". No-op when absent.
+ * Kept local to dining (not in plansMatching.ts) since attraction names
+ * never carry this suffix format.
+ */
+function stripDiningSuffix(str: string): string {
+  const idx = str.indexOf(" — ");
+  return idx === -1 ? str : str.slice(0, idx);
+}
 
 /**
  * True when the given activity name matches a known dining location.
@@ -132,7 +172,7 @@ const DINING_KEYS: Set<string> = new Set(
  * minor wording differences (e.g. dropped "Restaurant") still resolve.
  */
 export function isDiningName(name: string): boolean {
-  const key = normalizeKey(stripAnnotations(name));
+  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
   if (DINING_KEYS.has(key)) return true;
 
   const tokens = tokenize(key);
@@ -156,4 +196,46 @@ export function isDiningName(name: string): boolean {
  */
 export function inferPlannerItemType(name: string): PlannerItemType {
   return isDiningName(name) ? "dining" : "attraction";
+}
+
+/**
+ * Autocomplete suggestion list, scoped to the active resort (mirrors how
+ * attraction suggestions are scoped to selectedResort via waitMap). Names
+ * that exist at both resorts under different locations (e.g. Oga's Cantina)
+ * are disambiguated with " — <location>" only when more than one distinct
+ * location remains within the scoped list.
+ */
+export function getDiningSuggestions(resort: ResortId): string[] {
+  const scoped = DINING_PLACES.filter((p) => p.resort === resort);
+  const byKey = new Map<string, DiningPlace[]>();
+  for (const place of scoped) {
+    const key = normalizeKey(place.name);
+    const list = byKey.get(key) ?? [];
+    list.push(place);
+    byKey.set(key, list);
+  }
+  const result: string[] = [];
+  for (const places of byKey.values()) {
+    const distinctLocations = new Set(places.map((p) => p.location));
+    if (distinctLocations.size <= 1) {
+      result.push(places[0].name);
+    } else {
+      for (const p of places) {
+        result.push(`${p.name} — ${p.location}`);
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Resolve the display location label for a dining item's current name,
+ * preferring a match within the active resort, falling back to any resort.
+ * Returns undefined for unknown/custom names.
+ */
+export function getDiningLocation(name: string, resort: ResortId): string | undefined {
+  const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
+  const matches = DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
+  if (matches.length === 0) return undefined;
+  return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
 }
