@@ -48,6 +48,7 @@ import {
   isDiningName,
   getDiningSuggestions,
   getDiningLocation,
+  resolveDiningKey,
   DINING_PLACES,
 } from "@/lib/diningSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
@@ -645,6 +646,10 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
       const aliasTarget = aliases[key] ?? (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
       if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
     }
+    if (!parkId) {
+      const diningKey = resolveDiningKey(item.name);
+      if (diningKey) parkId = map.get(diningKey) ?? null;
+    }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
   if (parkCount.size === 0) return null;
@@ -986,6 +991,9 @@ export default function PlansPage() {
       // Stage 1 + 3: exact / alias
       const key = resolveIdentityKey(name, aliases);
       if (rideMap.has(key)) return key;
+      // Stage 3b: dining alias lookup (single source of truth: diningSuggestions.ts)
+      const diningKey = resolveDiningKey(name);
+      if (diningKey && rideMap.has(diningKey)) return diningKey;
       // Stage 2: whole-word containment (≥2 tokens, unambiguous)
       const tokens = tokenize(key);
       if (tokens.length < 2) return null;

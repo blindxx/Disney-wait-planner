@@ -49,7 +49,7 @@ import {
   ALIASES_WDW,
   stripAnnotations,
 } from "@/lib/plansMatching";
-import { DINING_PLACES } from "@/lib/diningSuggestions";
+import { DINING_PLACES, resolveDiningKey } from "@/lib/diningSuggestions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
 // parkId is null for dining locations with no single-park identity (resort
@@ -99,6 +99,15 @@ function tryResolve(
   if (aliasTarget) {
     const aliasResult = map.get(aliasTarget);
     if (aliasResult) return aliasResult;
+  }
+
+  // Stage 3b: dining alias lookup, via diningSuggestions.ts's single source
+  // of truth (DINING_ALIASES), so dining shorthand (e.g. "CRT", "Rose and
+  // Crown") participates in inference exactly like canonical dining names.
+  const diningKey = resolveDiningKey(name);
+  if (diningKey) {
+    const diningResult = map.get(diningKey);
+    if (diningResult) return diningResult;
   }
 
   return null;

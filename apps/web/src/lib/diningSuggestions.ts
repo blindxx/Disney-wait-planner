@@ -216,8 +216,13 @@ function stripDiningSuffix(str: string): string {
  * Resolve a (possibly aliased) typed name to its canonical DINING_KEYS entry.
  * Stage 1: exact normalized match. Stage 3: alias lookup. Returns null when
  * neither resolves (caller may still fall back to containment matching).
+ *
+ * Exported so other inference systems (e.g. day park/resort inference in
+ * plansContextInference.ts and page.tsx) can resolve dining aliases through
+ * this single source of truth instead of duplicating DINING_ALIASES lookup
+ * logic.
  */
-function resolveDiningKey(name: string): string | null {
+export function resolveDiningKey(name: string): string | null {
   const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
   if (DINING_KEYS.has(key)) return key;
   const aliasTarget = DINING_ALIASES[key];
