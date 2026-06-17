@@ -43,6 +43,7 @@ import {
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
+import { isDiningName } from "@/lib/diningSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -1882,7 +1883,8 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: "attraction" as PlannerItemType }];
+        const itemType: PlannerItemType = isDiningName(trimmed) ? "dining" : "attraction";
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: itemType }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1907,12 +1909,13 @@ export default function PlansPage() {
       const normalized = line.replace(/[\u2013\u2014]/g, "-");
       const parsed = parseLine(normalized);
       if (parsed) {
+        const importedName = stripEnDashSuffix(parsed.name);
         newItems.push({
           id: makeId(),
-          name: stripEnDashSuffix(parsed.name),
+          name: importedName,
           timeLabel: parsed.timeLabel,
           dayId: activeDayId,
-          type: "attraction" as PlannerItemType,
+          type: isDiningName(importedName) ? "dining" : "attraction",
         });
       }
     }
