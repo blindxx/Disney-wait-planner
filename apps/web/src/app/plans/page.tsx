@@ -48,6 +48,7 @@ import {
   isDiningName,
   getDiningSuggestions,
   getDiningLocation,
+  getDiningCanonicalName,
   resolveDiningKey,
   DINING_PLACES,
 } from "@/lib/diningSuggestions";
@@ -3772,9 +3773,17 @@ export default function PlansPage() {
                         );
                       })()}
                       {item.type === "dining" && (() => {
+                        const diningCanonicalName = getDiningCanonicalName(item.name, selectedResort);
                         const diningLocation = getDiningLocation(item.name, selectedResort);
                         if (!diningLocation) return null;
-                        return <div className="item-park">{diningLocation}</div>;
+                        return (
+                          <>
+                            {diningCanonicalName && diningCanonicalName !== item.name && (
+                              <div className="item-canonical">{diningCanonicalName}</div>
+                            )}
+                            <div className="item-park">{diningLocation}</div>
+                          </>
+                        );
                       })()}
                       {item.timeLabel && (
                         <div className="item-time">

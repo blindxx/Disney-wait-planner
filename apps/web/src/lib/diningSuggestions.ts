@@ -308,3 +308,17 @@ export function getDiningLocation(name: string, resort: ResortId): string | unde
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
 }
+
+/**
+ * Resolve the canonical display name for a dining item's current name,
+ * preferring a match within the active resort, falling back to any resort.
+ * Returns undefined for unknown/custom names. Mirrors how lookupWait()
+ * exposes a canonical attraction name for alias-entered ride titles.
+ */
+export function getDiningCanonicalName(name: string, resort: ResortId): string | undefined {
+  const key = resolveDiningKey(name);
+  if (!key) return undefined;
+  const matches = DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
+  if (matches.length === 0) return undefined;
+  return (matches.find((p) => p.resort === resort) ?? matches[0]).name;
+}
