@@ -71,7 +71,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
   { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
-  { name: "Disney Stars on Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
@@ -79,7 +78,7 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
+  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
 
   // ---- Magic Kingdom ----
