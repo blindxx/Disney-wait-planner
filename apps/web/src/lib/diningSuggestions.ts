@@ -26,6 +26,7 @@ import {
   containsWholeWordSequence,
 } from "./plansMatching";
 import type { PlannerItemType } from "./plansTransfer";
+import { isEntertainmentName } from "./entertainmentSuggestions";
 
 export type DiningPlace = {
   name: string;
@@ -260,9 +261,13 @@ export function isDiningName(name: string): boolean {
  * Infer a planner item's type from its current activity name.
  * Single source of truth for Add/Edit/import — keeps name-based type
  * inference consistent everywhere a name is entered or changed.
- * Extend here (not at call sites) when entertainment recognition lands.
+ * resort is passed through to isEntertainmentName so resort-scoped
+ * entertainment aliases (e.g. "Halloween Parade") resolve to the correct
+ * resort's show instead of guessing; entertainment is checked first since
+ * it never overlaps with known dining names.
  */
-export function inferPlannerItemType(name: string): PlannerItemType {
+export function inferPlannerItemType(name: string, resort: ResortId): PlannerItemType {
+  if (isEntertainmentName(name, resort)) return "entertainment";
   return isDiningName(name) ? "dining" : "attraction";
 }
 

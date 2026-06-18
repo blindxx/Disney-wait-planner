@@ -45,13 +45,20 @@ import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
-  isDiningName,
   getDiningSuggestions,
   getDiningLocation,
   getDiningCanonicalName,
   resolveDiningKey,
   DINING_PLACES,
 } from "@/lib/diningSuggestions";
+import {
+  getEntertainmentSuggestions,
+  getEntertainmentLocation,
+  getEntertainmentCanonicalName,
+  getEntertainmentAvailabilityType,
+  resolveEntertainmentKey,
+  ENTERTAINMENT_PLACES,
+} from "@/lib/entertainmentSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -582,6 +589,20 @@ for (const _d of DINING_PLACES) {
 }
 
 /**
+ * Normalized entertainment name → parkId lookup maps, built once at module
+ * load from ENTERTAINMENT_PLACES. Mirrors DINING_PARK_DLR/WDW — used ONLY by
+ * inferDayPark for park inference, kept isolated from attraction duplicate/
+ * identity matching.
+ */
+const ENTERTAINMENT_PARK_DLR = new Map<string, string>();
+const ENTERTAINMENT_PARK_WDW = new Map<string, string>();
+for (const _e of ENTERTAINMENT_PLACES) {
+  if (!_e.parkId) continue;
+  if (_e.resort === "DLR") ENTERTAINMENT_PARK_DLR.set(normalizeKey(_e.name), _e.parkId);
+  else if (_e.resort === "WDW") ENTERTAINMENT_PARK_WDW.set(normalizeKey(_e.name), _e.parkId);
+}
+
+/**
  * Read and validate resort from localStorage.
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
@@ -652,6 +673,7 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
   if (dayItems.length === 0) return null;
   const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
   const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
+  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
   const parkCount = new Map<string, number>();
   for (const item of dayItems) {
@@ -666,6 +688,11 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
       // which feeds attraction duplicate/identity matching elsewhere.
       const diningKey = resolveDiningKey(item.name);
       if (diningKey) parkId = diningMap.get(diningKey) ?? null;
+    }
+    if (!parkId) {
+      // Entertainment lookup uses its own isolated map, mirroring dining.
+      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
+      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
@@ -907,6 +934,7 @@ export default function PlansPage() {
     () => [
       ...Array.from(waitMap.values()).map((v) => v.canonicalName),
       ...getDiningSuggestions(selectedResort),
+      ...getEntertainmentSuggestions(selectedResort),
     ],
     [waitMap, selectedResort]
   );
@@ -1928,7 +1956,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed) }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed, selectedResort) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1940,16 +1968,16 @@ export default function PlansPage() {
                 name: trimmed,
                 timeLabel: timeWindow,
                 // Recompute type only when the name changed — preserves any
-                // existing type when just the time window is edited.
-                // Entertainment is never auto-downgraded to attraction just
-                // because dining inference doesn't recognize the new name —
-                // only an explicit dining match can change it.
+                // existing type when just the time window is edited. When
+                // the name does change, always recompute from the new name
+                // (inferPlannerItemType checks entertainment, then dining,
+                // then falls back to attraction) so editing an entertainment
+                // item into a known attraction correctly downgrades it
+                // instead of being pinned to "entertainment" forever.
                 type:
                   trimmed === editTarget.name
                     ? it.type
-                    : editTarget.type === "entertainment" && !isDiningName(trimmed)
-                      ? "entertainment"
-                      : inferPlannerItemType(trimmed),
+                    : inferPlannerItemType(trimmed, selectedResort),
               }
             : it
         );
@@ -1974,7 +2002,7 @@ export default function PlansPage() {
           name: importedName,
           timeLabel: parsed.timeLabel,
           dayId: activeDayId,
-          type: inferPlannerItemType(importedName),
+          type: inferPlannerItemType(importedName, selectedResort),
         });
       }
     }
@@ -2274,7 +2302,7 @@ export default function PlansPage() {
         name: it.name,
         timeLabel: it.timeLabel,
         dayId: targetDayId,
-        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name),
+        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name, selectedResort),
       };
     });
     setItems((prev) => {
@@ -2780,6 +2808,14 @@ export default function PlansPage() {
         .item-park {
           font-size: 0.7rem;
           color: #9ca3af;
+          line-height: 1.3;
+          margin-top: 0.1rem;
+          word-break: break-word;
+        }
+        .item-availability {
+          font-size: 0.7rem;
+          color: #9ca3af;
+          font-style: italic;
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
@@ -3782,6 +3818,29 @@ export default function PlansPage() {
                               <div className="item-canonical">{diningCanonicalName}</div>
                             )}
                             <div className="item-park">{diningLocation}</div>
+                          </>
+                        );
+                      })()}
+                      {item.type === "entertainment" && (() => {
+                        const entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, selectedResort);
+                        const entertainmentLocation = getEntertainmentLocation(item.name, selectedResort);
+                        if (!entertainmentLocation) return null;
+                        const availabilityType = getEntertainmentAvailabilityType(item.name, selectedResort);
+                        const availabilityLabel =
+                          availabilityType === "seasonal"
+                            ? "Seasonal Event"
+                            : availabilityType === "limited"
+                              ? "Limited-Time Entertainment"
+                              : null;
+                        return (
+                          <>
+                            {entertainmentCanonicalName && entertainmentCanonicalName !== item.name && (
+                              <div className="item-canonical">{entertainmentCanonicalName}</div>
+                            )}
+                            <div className="item-park">{entertainmentLocation}</div>
+                            {availabilityLabel && (
+                              <div className="item-availability">{availabilityLabel}</div>
+                            )}
                           </>
                         );
                       })()}
