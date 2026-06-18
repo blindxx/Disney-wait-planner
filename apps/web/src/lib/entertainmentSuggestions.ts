@@ -77,6 +77,10 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
+  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
+  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
+  { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
 
   // ---- Magic Kingdom ----
   { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
@@ -146,6 +150,10 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "minnies fireworks": "minnies wonderful christmastime fireworks",
   "most merriest celebration": "mickeys most merriest celebration",
   "oogie boogie parade": "frightfully fun parade",
+  "together forever": "together forever a pixar nighttime spectacular",
+  "pixar nighttime spectacular": "together forever a pixar nighttime spectacular",
+  "better together": "better together a pixar pals celebration",
+  "pixar pals celebration": "better together a pixar pals celebration",
 };
 
 /**
