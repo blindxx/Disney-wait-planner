@@ -109,10 +109,14 @@ function cacheKey(resortId: ResortId, parkId: ParkId): string {
 // ============================================
 
 /**
- * Namespace prefix for all sessionStorage keys.
- * Scoped per-tab; clears automatically when the tab/session closes.
+ * Namespace prefix for all sessionStorage/localStorage keys.
+ * Scoped per-tab (sessionStorage) / per-browser (localStorage); the
+ * `v2` segment bumps whenever the normalization/dedup logic changes, so a
+ * previously persisted entry computed by an older version of
+ * normalizeQueueTimesResponse is never read back — it simply misses under
+ * the new key and a fresh fetch is triggered instead.
  */
-const SS_PREFIX = "dwp:wt:";
+const SS_PREFIX = "dwp:wt:v2:";
 
 /** Shape of the value stored in sessionStorage — kept minimal. */
 type StoredEntry = {
