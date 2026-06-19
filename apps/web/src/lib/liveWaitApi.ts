@@ -109,10 +109,14 @@ function cacheKey(resortId: ResortId, parkId: ParkId): string {
 // ============================================
 
 /**
- * Namespace prefix for all sessionStorage keys.
- * Scoped per-tab; clears automatically when the tab/session closes.
+ * Namespace prefix for all sessionStorage/localStorage keys.
+ * Scoped per-tab (sessionStorage) / per-browser (localStorage); the
+ * `v2` segment bumps whenever the normalization/dedup logic changes, so a
+ * previously persisted entry computed by an older version of
+ * normalizeQueueTimesResponse is never read back — it simply misses under
+ * the new key and a fresh fetch is triggered instead.
  */
-const SS_PREFIX = "dwp:wt:";
+const SS_PREFIX = "dwp:wt:v2:";
 
 /** Shape of the value stored in sessionStorage — kept minimal. */
 type StoredEntry = {
@@ -365,6 +369,22 @@ const ALIASES_DLR = new Map<string, string>([
   ["soarin across america",                      "soarin' over california"],
 ]);
 
+/**
+ * Returns true if `candidate` is strictly fresher than `current` based on
+ * `last_updated`. Used to resolve duplicate provider rows that normalize to
+ * the same attraction identity — the freshest timestamp wins.
+ *
+ * Unparseable/missing timestamps never beat an existing valid one, so a
+ * malformed duplicate can't clobber a good record.
+ */
+function isFresher(candidate: QTRide, current: QTRide): boolean {
+  const candidateTime = Date.parse(candidate.last_updated);
+  const currentTime = Date.parse(current.last_updated);
+  if (Number.isNaN(candidateTime)) return false;
+  if (Number.isNaN(currentTime)) return true;
+  return candidateTime > currentTime;
+}
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -385,29 +405,27 @@ function normalizeQueueTimesResponse(
 
   const qt = body as QTResponse;
 
-  // Build normalized name → live ride lookup.
-  // Keys are canonicalized so smart vs straight punctuation variants match.
+  // Build canonical attraction identity → live ride lookup.
+  //
+  // Queue-Times can return multiple rows that resolve to the same effective
+  // attraction identity — either literal name duplicates, or an old/new
+  // alias pair (e.g. a stale row under the old name alongside a fresh row
+  // under the current name). Resolving each ride to its canonical identity
+  // *before* comparing freshness ensures the freshest row always wins,
+  // regardless of which literal name it was published under.
+  const aliasMap =
+    resortId === "WDW" ? ALIASES_WDW : resortId === "DLR" ? ALIASES_DLR : null;
+
   const liveByName = new Map<string, QTRide>();
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
-      liveByName.set(normalizeAttractionName(ride.name), ride);
-    }
-  }
-
-  // Alias expansion: if Queue-Times uses a short/alternate name, map it to
-  // the canonical mock name so the per-ride lookup below finds the live entry.
-  if (resortId === "WDW") {
-    for (const [alias, canonical] of ALIASES_WDW) {
-      if (!liveByName.has(canonical) && liveByName.has(alias)) {
-        liveByName.set(canonical, liveByName.get(alias)!);
+      const normName = normalizeAttractionName(ride.name);
+      const key = aliasMap?.get(normName) ?? normName;
+      const existing = liveByName.get(key);
+      if (existing && !isFresher(ride, existing)) {
+        continue;
       }
-    }
-  }
-  if (resortId === "DLR") {
-    for (const [alias, canonical] of ALIASES_DLR) {
-      if (!liveByName.has(canonical) && liveByName.has(alias)) {
-        liveByName.set(canonical, liveByName.get(alias)!);
-      }
+      liveByName.set(key, ride);
     }
   }
 
@@ -430,7 +448,7 @@ function normalizeQueueTimesResponse(
   //   2. Planned closure (UPCOMING/ENDED) → fall through to live
   //   3. Live says not open              → "DOWN"   (temporary outage)
   //   4. Live says open                  → "OPERATING" with live wait time
-  return mockPark.map((mockRide): AttractionWait => {
+  const resolved = mockPark.map((mockRide): AttractionWait => {
     const normName = normalizeAttractionName(mockRide.name);
     const closureKey = `${parkId}:${normName}`;
     const live = liveByName.get(normName);
@@ -476,6 +494,52 @@ function normalizeQueueTimesResponse(
       updatedAt: live.last_updated,
     };
   });
+
+  // Final safeguard: collapse any resolved attractions that share the same
+  // canonical identity (alias-equivalent names) into a single record, keeping
+  // whichever has the freshest `updatedAt`. This guarantees the array the UI
+  // actually renders and sorts can never contain a stale duplicate, even if
+  // some other path were to introduce one upstream of this point.
+  return dedupeByCanonicalIdentity(resolved, aliasMap);
+}
+
+/**
+ * Collapses attractions that resolve to the same canonical identity
+ * (via the resort's alias map, falling back to the normalized name),
+ * keeping only the entry with the freshest `updatedAt`. Order of first
+ * occurrence is preserved for ties/no-duplicates so existing sort/filter
+ * behavior is unaffected.
+ */
+function dedupeByCanonicalIdentity(
+  attractions: AttractionWait[],
+  aliasMap: Map<string, string> | null,
+): AttractionWait[] {
+  const byKey = new Map<string, AttractionWait>();
+  const keyOrder: string[] = [];
+
+  for (const attraction of attractions) {
+    const normName = normalizeAttractionName(attraction.name);
+    const key = aliasMap?.get(normName) ?? normName;
+    const existing = byKey.get(key);
+
+    if (!existing) {
+      byKey.set(key, attraction);
+      keyOrder.push(key);
+      continue;
+    }
+
+    const existingTime = Date.parse(existing.updatedAt);
+    const candidateTime = Date.parse(attraction.updatedAt);
+    const candidateIsFresher =
+      !Number.isNaN(candidateTime) &&
+      (Number.isNaN(existingTime) || candidateTime > existingTime);
+
+    if (candidateIsFresher) {
+      byKey.set(key, attraction);
+    }
+  }
+
+  return keyOrder.map((key) => byKey.get(key)!);
 }
 
 // ============================================
