@@ -365,6 +365,22 @@ const ALIASES_DLR = new Map<string, string>([
   ["soarin across america",                      "soarin' over california"],
 ]);
 
+/**
+ * Returns true if `candidate` is strictly fresher than `current` based on
+ * `last_updated`. Used to resolve duplicate provider rows that normalize to
+ * the same attraction identity — the freshest timestamp wins.
+ *
+ * Unparseable/missing timestamps never beat an existing valid one, so a
+ * malformed duplicate can't clobber a good record.
+ */
+function isFresher(candidate: QTRide, current: QTRide): boolean {
+  const candidateTime = Date.parse(candidate.last_updated);
+  const currentTime = Date.parse(current.last_updated);
+  if (Number.isNaN(candidateTime)) return false;
+  if (Number.isNaN(currentTime)) return true;
+  return candidateTime > currentTime;
+}
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -387,10 +403,20 @@ function normalizeQueueTimesResponse(
 
   // Build normalized name → live ride lookup.
   // Keys are canonicalized so smart vs straight punctuation variants match.
+  //
+  // Queue-Times can return multiple rows that normalize to the same attraction
+  // identity (e.g. a stale duplicate alongside the current record). When that
+  // happens, keep the row with the freshest `last_updated` timestamp so a
+  // stale duplicate never overrides a newer one.
   const liveByName = new Map<string, QTRide>();
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
-      liveByName.set(normalizeAttractionName(ride.name), ride);
+      const key = normalizeAttractionName(ride.name);
+      const existing = liveByName.get(key);
+      if (existing && !isFresher(ride, existing)) {
+        continue;
+      }
+      liveByName.set(key, ride);
     }
   }
 
