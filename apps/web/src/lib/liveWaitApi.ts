@@ -401,39 +401,27 @@ function normalizeQueueTimesResponse(
 
   const qt = body as QTResponse;
 
-  // Build normalized name → live ride lookup.
-  // Keys are canonicalized so smart vs straight punctuation variants match.
+  // Build canonical attraction identity → live ride lookup.
   //
-  // Queue-Times can return multiple rows that normalize to the same attraction
-  // identity (e.g. a stale duplicate alongside the current record). When that
-  // happens, keep the row with the freshest `last_updated` timestamp so a
-  // stale duplicate never overrides a newer one.
+  // Queue-Times can return multiple rows that resolve to the same effective
+  // attraction identity — either literal name duplicates, or an old/new
+  // alias pair (e.g. a stale row under the old name alongside a fresh row
+  // under the current name). Resolving each ride to its canonical identity
+  // *before* comparing freshness ensures the freshest row always wins,
+  // regardless of which literal name it was published under.
+  const aliasMap =
+    resortId === "WDW" ? ALIASES_WDW : resortId === "DLR" ? ALIASES_DLR : null;
+
   const liveByName = new Map<string, QTRide>();
   for (const land of qt.lands) {
     for (const ride of land.rides ?? []) {
-      const key = normalizeAttractionName(ride.name);
+      const normName = normalizeAttractionName(ride.name);
+      const key = aliasMap?.get(normName) ?? normName;
       const existing = liveByName.get(key);
       if (existing && !isFresher(ride, existing)) {
         continue;
       }
       liveByName.set(key, ride);
-    }
-  }
-
-  // Alias expansion: if Queue-Times uses a short/alternate name, map it to
-  // the canonical mock name so the per-ride lookup below finds the live entry.
-  if (resortId === "WDW") {
-    for (const [alias, canonical] of ALIASES_WDW) {
-      if (!liveByName.has(canonical) && liveByName.has(alias)) {
-        liveByName.set(canonical, liveByName.get(alias)!);
-      }
-    }
-  }
-  if (resortId === "DLR") {
-    for (const [alias, canonical] of ALIASES_DLR) {
-      if (!liveByName.has(canonical) && liveByName.has(alias)) {
-        liveByName.set(canonical, liveByName.get(alias)!);
-      }
     }
   }
 
