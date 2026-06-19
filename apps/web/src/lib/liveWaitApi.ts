@@ -251,6 +251,14 @@ type QTLand = {
 
 type QTResponse = {
   lands: QTLand[];
+  /**
+   * Queue-Times also returns a top-level `rides` array for rides not yet
+   * assigned to a land (e.g. newly added/renamed rides). These must be
+   * merged into the same freshness resolution as `lands[].rides`, or a
+   * fresher top-level row can be silently invisible to the app while a
+   * stale land-nested row for the same attraction continues to be shown.
+   */
+  rides?: QTRide[];
 };
 
 /**
@@ -416,17 +424,18 @@ function normalizeQueueTimesResponse(
   const aliasMap =
     resortId === "WDW" ? ALIASES_WDW : resortId === "DLR" ? ALIASES_DLR : null;
 
+  const allRides: QTRide[] = qt.lands.flatMap((land) => land.rides ?? []);
+  allRides.push(...(qt.rides ?? []));
+
   const liveByName = new Map<string, QTRide>();
-  for (const land of qt.lands) {
-    for (const ride of land.rides ?? []) {
-      const normName = normalizeAttractionName(ride.name);
-      const key = aliasMap?.get(normName) ?? normName;
-      const existing = liveByName.get(key);
-      if (existing && !isFresher(ride, existing)) {
-        continue;
-      }
-      liveByName.set(key, ride);
+  for (const ride of allRides) {
+    const normName = normalizeAttractionName(ride.name);
+    const key = aliasMap?.get(normName) ?? normName;
+    const existing = liveByName.get(key);
+    if (existing && !isFresher(ride, existing)) {
+      continue;
     }
+    liveByName.set(key, ride);
   }
 
   // Dev-only: warn about live rides that have no mock counterpart.
