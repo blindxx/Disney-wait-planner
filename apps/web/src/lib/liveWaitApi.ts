@@ -444,7 +444,7 @@ function normalizeQueueTimesResponse(
   //   2. Planned closure (UPCOMING/ENDED) → fall through to live
   //   3. Live says not open              → "DOWN"   (temporary outage)
   //   4. Live says open                  → "OPERATING" with live wait time
-  return mockPark.map((mockRide): AttractionWait => {
+  const resolved = mockPark.map((mockRide): AttractionWait => {
     const normName = normalizeAttractionName(mockRide.name);
     const closureKey = `${parkId}:${normName}`;
     const live = liveByName.get(normName);
@@ -490,6 +490,52 @@ function normalizeQueueTimesResponse(
       updatedAt: live.last_updated,
     };
   });
+
+  // Final safeguard: collapse any resolved attractions that share the same
+  // canonical identity (alias-equivalent names) into a single record, keeping
+  // whichever has the freshest `updatedAt`. This guarantees the array the UI
+  // actually renders and sorts can never contain a stale duplicate, even if
+  // some other path were to introduce one upstream of this point.
+  return dedupeByCanonicalIdentity(resolved, aliasMap);
+}
+
+/**
+ * Collapses attractions that resolve to the same canonical identity
+ * (via the resort's alias map, falling back to the normalized name),
+ * keeping only the entry with the freshest `updatedAt`. Order of first
+ * occurrence is preserved for ties/no-duplicates so existing sort/filter
+ * behavior is unaffected.
+ */
+function dedupeByCanonicalIdentity(
+  attractions: AttractionWait[],
+  aliasMap: Map<string, string> | null,
+): AttractionWait[] {
+  const byKey = new Map<string, AttractionWait>();
+  const keyOrder: string[] = [];
+
+  for (const attraction of attractions) {
+    const normName = normalizeAttractionName(attraction.name);
+    const key = aliasMap?.get(normName) ?? normName;
+    const existing = byKey.get(key);
+
+    if (!existing) {
+      byKey.set(key, attraction);
+      keyOrder.push(key);
+      continue;
+    }
+
+    const existingTime = Date.parse(existing.updatedAt);
+    const candidateTime = Date.parse(attraction.updatedAt);
+    const candidateIsFresher =
+      !Number.isNaN(candidateTime) &&
+      (Number.isNaN(existingTime) || candidateTime > existingTime);
+
+    if (candidateIsFresher) {
+      byKey.set(key, attraction);
+    }
+  }
+
+  return keyOrder.map((key) => byKey.get(key)!);
 }
 
 // ============================================
