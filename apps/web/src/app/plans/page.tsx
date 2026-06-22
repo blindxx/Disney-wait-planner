@@ -1052,6 +1052,19 @@ export default function PlansPage() {
       return hit;
     }
 
+    // Phase 9.3 — type-scoped canonical key resolution. Dispatches to the
+    // dining/entertainment resolvers (already used elsewhere for park
+    // inference) for non-attraction items, reusing tryResolve unchanged for
+    // attractions. Each type's canonical key space is independent (dining
+    // and entertainment keys are global, not resort-scoped), so this only
+    // consults `resort` for attractions and for entertainment's optional
+    // resort-scoped alias overrides.
+    function tryResolveByType(name: string, resort: ResortId, type: PlannerItemType): string | null {
+      if (type === "dining") return resolveDiningKey(name);
+      if (type === "entertainment") return resolveEntertainmentKey(name, resort);
+      return tryResolve(name, resort);
+    }
+
     // Read Lightning items from localStorage once so they can supplement resort
     // inference for Lightning-only days (no plan items) below.
     // Grouped by dayId; only valid current days are kept (same filter as the
@@ -1126,37 +1139,65 @@ export default function PlansPage() {
       // Step 6: truly ambiguous — leave unset
     }
 
-    // Resolve a name to a stable composite key (resort:canonicalKey).
+    // Resolve a name to a stable composite key (type:resort:canonicalKey).
     // When the day's resort is known, only that resort's map is tried.
     // When the resort is still unresolvable (unset after all steps above),
     // both maps are tried: exactly one match → use that resort,
     // both match or neither → skip as ambiguous.
-    // The resort-scoped key prevents cross-resort collisions.
-    function resolveAttractionKey(name: string, dayId: string): { compositeKey: string } | null {
+    // The resort-scoped key prevents cross-resort collisions; the leading
+    // type tag (Phase 9.3) prevents cross-type collisions (an attraction and
+    // a dining item can never merge into the same duplicate group even if
+    // their canonical keys happened to coincide).
+    function resolveAttractionKey(
+      name: string,
+      dayId: string,
+      type: PlannerItemType = "attraction"
+    ): { compositeKey: string } | null {
       const knownResort = dayResortMap.get(dayId);
       if (knownResort !== undefined) {
-        const k = tryResolve(name, knownResort);
-        return k ? { compositeKey: `${knownResort}:${k}` } : null;
+        const k = tryResolveByType(name, knownResort, type);
+        return k ? { compositeKey: `${type}:${knownResort}:${k}` } : null;
       }
       // Day resort is ambiguous — try both independently
-      const dlrKey = tryResolve(name, "DLR");
-      const wdwKey = tryResolve(name, "WDW");
-      if (dlrKey && !wdwKey) return { compositeKey: `DLR:${dlrKey}` };
-      if (wdwKey && !dlrKey) return { compositeKey: `WDW:${wdwKey}` };
-      // Both match or neither — ambiguous without context, skip
+      const dlrKey = tryResolveByType(name, "DLR", type);
+      const wdwKey = tryResolveByType(name, "WDW", type);
+      // Dining/entertainment canonical keys are resort-agnostic, so both
+      // resorts agreeing on the same key is expected, not ambiguous — use
+      // either resort for the (display-only) park label.
+      if (dlrKey && wdwKey && dlrKey === wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
+      if (dlrKey && !wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
+      if (wdwKey && !dlrKey) return { compositeKey: `${type}:WDW:${wdwKey}` };
+      // Both match (different keys) or neither — ambiguous without context, skip
       return null;
     }
 
 
-    // Derive a human-readable park label from a composite key ("DLR:canonical key").
-    // Falls back to resort string if the canonical key isn't in either ride map.
+    // Split a "type:resort:canonicalKey" composite key into its parts.
+    function splitCompositeKey(compositeKey: string): { type: PlannerItemType; resort: ResortId; canonicalKey: string } | null {
+      const firstColon = compositeKey.indexOf(":");
+      const secondColon = compositeKey.indexOf(":", firstColon + 1);
+      if (firstColon === -1 || secondColon === -1) return null;
+      return {
+        type: compositeKey.slice(0, firstColon) as PlannerItemType,
+        resort: compositeKey.slice(firstColon + 1, secondColon) as ResortId,
+        canonicalKey: compositeKey.slice(secondColon + 1),
+      };
+    }
+
+    // Derive a human-readable park label from a composite key
+    // ("type:resort:canonical key"). Falls back to resort string if the
+    // canonical key isn't in the matching type's park map.
     function parkLabelFromCompositeKey(compositeKey: string): string {
-      const colon = compositeKey.indexOf(":");
-      if (colon === -1) return compositeKey;
-      const resort = compositeKey.slice(0, colon) as ResortId;
-      const canonicalKey = compositeKey.slice(colon + 1);
-      const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-      const parkId = rideMap.get(canonicalKey) as ParkId | undefined;
+      const parts = splitCompositeKey(compositeKey);
+      if (!parts) return compositeKey;
+      const { type, resort, canonicalKey } = parts;
+      const map =
+        type === "dining"
+          ? (resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW)
+          : type === "entertainment"
+            ? (resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW)
+            : (resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW);
+      const parkId = map.get(canonicalKey) as ParkId | undefined;
       return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
     }
 
@@ -1166,17 +1207,22 @@ export default function PlansPage() {
       return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : -1;
     }
 
-    // Phase 8.7 — extract canonical identity key (strip "resort:" prefix)
+    // Phase 8.7 — extract canonical identity key (strip "resort:" segment).
+    // Phase 9.3 — keeps the leading "type:" segment so identity keys from
+    // different planner item types can never collide (content-type isolation).
     function identityKeyFrom(compositeKey: string): string {
-      const c = compositeKey.indexOf(":");
-      return c >= 0 ? compositeKey.slice(c + 1) : compositeKey;
+      const firstColon = compositeKey.indexOf(":");
+      const secondColon = compositeKey.indexOf(":", firstColon + 1);
+      if (firstColon === -1) return compositeKey;
+      if (secondColon === -1) return compositeKey.slice(firstColon + 1);
+      return `${compositeKey.slice(0, firstColon)}:${compositeKey.slice(secondColon + 1)}`;
     }
 
     // Phase 8.7 — build duplicates grouped by canonical identity key (not compositeKey).
     // First pass: accumulate dayIds and first-seen times per compositeKey.
     // Second pass: merge compositeKey entries into identity groups for cross-resort grouping.
     function buildDuplicates(
-      entries: Array<{ name: string; dayId: string; timeLabel?: string }>
+      entries: Array<{ name: string; dayId: string; timeLabel?: string; type?: PlannerItemType }>
     ): CrossDayDuplicate[] {
       // timesByDay: all distinct parsed start times per dayId (Set<string> per day).
       // Using a Set per day deduplicates repeated identical entries on the same day
@@ -1185,7 +1231,7 @@ export default function PlansPage() {
       const byComposite = new Map<string, CompositeEntry>();
 
       for (const entry of entries) {
-        const resolved = resolveAttractionKey(entry.name, entry.dayId);
+        const resolved = resolveAttractionKey(entry.name, entry.dayId, entry.type ?? "attraction");
         if (!resolved) continue;
         if (!byComposite.has(resolved.compositeKey)) {
           byComposite.set(resolved.compositeKey, { name: entry.name, dayIds: new Set(), timesByDay: new Map() });
@@ -1261,7 +1307,7 @@ export default function PlansPage() {
 
     // Cross-day duplicate checks — only when there are 2+ days
     const planDuplicates = runDuplicates
-      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel })))
+      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel, type: it.type })))
       : [];
 
     const llFlatEntries: Array<{ name: string; dayId: string; timeLabel?: string }> = [];
@@ -1289,7 +1335,10 @@ export default function PlansPage() {
     function fallbackIdentityKey(name: string): string | null {
       const dlrKey = resolveIdentityKey(name, ALIASES_DLR);
       const wdwKey = resolveIdentityKey(name, ALIASES_WDW);
-      return dlrKey === wdwKey ? dlrKey : null;
+      // Tagged with "attraction:" to match identityKeyFrom()'s output format
+      // (Lightning Lane items are attraction-only, so this tier stays scoped
+      // to that type).
+      return dlrKey === wdwKey ? `attraction:${dlrKey}` : null;
     }
 
     const lightningPlanConflicts: LightningPlanConflict[] = [];
