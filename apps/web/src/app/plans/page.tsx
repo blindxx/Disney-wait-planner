@@ -1163,8 +1163,13 @@ export default function PlansPage() {
       const wdwKey = tryResolveByType(name, "WDW", type);
       // Dining/entertainment canonical keys are resort-agnostic, so both
       // resorts agreeing on the same key is expected, not ambiguous — use
-      // either resort for the (display-only) park label.
-      if (dlrKey && wdwKey && dlrKey === wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
+      // either resort for the (display-only) park label. Attractions are
+      // excluded from this shortcut: a shared cross-resort attraction name
+      // matching both maps must stay ambiguous (prior behavior), not be
+      // forced to DLR.
+      if (type !== "attraction" && dlrKey && wdwKey && dlrKey === wdwKey) {
+        return { compositeKey: `${type}:DLR:${dlrKey}` };
+      }
       if (dlrKey && !wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
       if (wdwKey && !dlrKey) return { compositeKey: `${type}:WDW:${wdwKey}` };
       // Both match (different keys) or neither — ambiguous without context, skip
