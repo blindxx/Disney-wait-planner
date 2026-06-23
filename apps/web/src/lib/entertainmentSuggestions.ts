@@ -161,7 +161,6 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "wwoa": "wonderful world of animation",
   "hollywood studios projection show": "wonderful world of animation",
   "dhs projection show": "wonderful world of animation",
-  "projection show": "wonderful world of animation",
 };
 
 /**
@@ -181,6 +180,7 @@ const ENTERTAINMENT_ALIASES_BY_RESORT: Record<ResortId, Record<string, string>> 
     "halloween parade": "mickeys boo to you halloween parade",
     "halloween fireworks": "disneys not so spooky spectacular",
     "christmas fireworks": "minnies wonderful christmastime fireworks",
+    "projection show": "wonderful world of animation",
   },
 };
 
