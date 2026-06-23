@@ -727,7 +727,7 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
     if (!parkId) {
       // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
       // which feeds attraction duplicate/identity matching elsewhere.
-      const diningKey = resolveDiningKey(item.name);
+      const diningKey = resolveDiningKey(item.name, resort);
       if (diningKey) parkId = diningMap.get(diningKey) ?? null;
     }
     if (!parkId) {
@@ -1096,12 +1096,12 @@ export default function PlansPage() {
     // Phase 9.3 — type-scoped canonical key resolution. Dispatches to the
     // dining/entertainment resolvers (already used elsewhere for park
     // inference) for non-attraction items, reusing tryResolve unchanged for
-    // attractions. Each type's canonical key space is independent (dining
-    // and entertainment keys are global, not resort-scoped), so this only
-    // consults `resort` for attractions and for entertainment's optional
-    // resort-scoped alias overrides.
+    // attractions. `resort` is passed through for dining/entertainment too
+    // so a resolved key is validated as actually belonging to that resort
+    // (see DINING_KEYS_BY_RESORT / ENTERTAINMENT_KEYS_BY_RESORT) — a
+    // WDW-only name like Cinderella's Royal Table must not resolve for DLR.
     function tryResolveByType(name: string, resort: ResortId, type: PlannerItemType): string | null {
-      if (type === "dining") return resolveDiningKey(name);
+      if (type === "dining") return resolveDiningKey(name, resort);
       if (type === "entertainment") return resolveEntertainmentKey(name, resort);
       return tryResolve(name, resort);
     }
@@ -2383,9 +2383,9 @@ export default function PlansPage() {
   // Phase 8.2 — Day plan context inference helper.
   // Runs inference only when importing into an empty day (bootstrap behavior).
   // Marks contextInferredRef=true so the reactive items-watcher does not re-run.
-  function applyImportContextInference(inferenceBasis: PlanItem[]) {
+  function applyImportContextInference(inferenceBasis: PlanItem[]): ResortId | null {
     contextInferredRef.current = true;
-    if (inferenceBasis.length === 0) return;
+    if (inferenceBasis.length === 0) return null;
     const inferred = inferPlansContext(inferenceBasis);
     if (inferred.resort) {
       const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
@@ -2393,7 +2393,9 @@ export default function PlansPage() {
       setSelectedPark(resolvedPark);
       try { localStorage.setItem(resortKeyRef.current, inferred.resort); } catch {}
       try { localStorage.setItem(parkKeyRef.current, resolvedPark); } catch {}
+      return inferred.resort;
     }
+    return null;
   }
 
   // Phase 8.2 — Apply pending day import items to the target day.
@@ -2405,6 +2407,23 @@ export default function PlansPage() {
     wasEmpty: boolean,
     targetDayId: string
   ) {
+    // Inference runs ONLY when importing into an empty day (bootstrap
+    // behavior), and must happen BEFORE type inference below — otherwise
+    // resort-scoped dining/entertainment aliases get classified against the
+    // stale selectedResort instead of the resort this import is bootstrapping
+    // into. Uses placeholder items (name/timeLabel only — type is irrelevant
+    // to inferPlansContext) so resort inference doesn't depend on the type
+    // classification it needs to inform.
+    const placeholderItems: PlanItem[] = importedItems.map((it) => ({
+      id: "",
+      name: it.name,
+      timeLabel: it.timeLabel,
+      dayId: targetDayId,
+      type: "attraction",
+    }));
+    const inferredResort = wasEmpty ? applyImportContextInference(placeholderItems) : null;
+    const typeResort = inferredResort ?? selectedResort;
+
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
     // name-based inference there (keeps dining recognition consistent across
@@ -2419,7 +2438,7 @@ export default function PlansPage() {
         name: it.name,
         timeLabel: it.timeLabel,
         dayId: targetDayId,
-        type: resolveImportedPlannerItemType(rawType, it.name, selectedResort),
+        type: resolveImportedPlannerItemType(rawType, it.name, typeResort),
       };
     });
     setItems((prev) => {
@@ -2427,10 +2446,6 @@ export default function PlansPage() {
       const next = [...withoutTargetDay, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
-    // Inference runs ONLY when importing into an empty day (bootstrap behavior).
-    if (wasEmpty) {
-      applyImportContextInference(newItems);
-    }
     setPendingDayImportItems(null);
     setDayImportError("");
   }

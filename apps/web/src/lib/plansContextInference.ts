@@ -111,7 +111,7 @@ function tryResolve(
   // Stage 3b: dining alias lookup, via diningSuggestions.ts's single source
   // of truth (DINING_ALIASES), so dining shorthand (e.g. "CRT", "Rose and
   // Crown") participates in inference exactly like canonical dining names.
-  const diningKey = resolveDiningKey(name);
+  const diningKey = resolveDiningKey(name, resortId);
   if (diningKey) {
     const diningResult = map.get(diningKey);
     if (diningResult) return diningResult;
