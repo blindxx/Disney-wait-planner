@@ -1233,7 +1233,16 @@ export default function PlansPage() {
       const dlrMap = type === "dining" ? DINING_PARK_DLR : type === "entertainment" ? ENTERTAINMENT_PARK_DLR : RIDE_TO_PARK_DLR;
       const wdwMap = type === "dining" ? DINING_PARK_WDW : type === "entertainment" ? ENTERTAINMENT_PARK_WDW : RIDE_TO_PARK_WDW;
       if (resort === "ANY") {
-        const parkId = (dlrMap.get(canonicalKey) ?? wdwMap.get(canonicalKey)) as ParkId | undefined;
+        const dlrParkId = dlrMap.get(canonicalKey) as ParkId | undefined;
+        const wdwParkId = wdwMap.get(canonicalKey) as ParkId | undefined;
+        if (dlrParkId && wdwParkId) {
+          // Both resorts' maps contain this key with no resort context to
+          // pick one — show both labels rather than defaulting to either.
+          const dlrLabel = PARK_LABELS[dlrParkId] ?? dlrParkId;
+          const wdwLabel = PARK_LABELS[wdwParkId] ?? wdwParkId;
+          return dlrLabel === wdwLabel ? dlrLabel : `${dlrLabel} / ${wdwLabel}`;
+        }
+        const parkId = dlrParkId ?? wdwParkId;
         return parkId ? (PARK_LABELS[parkId] ?? canonicalKey) : canonicalKey;
       }
       const map = resort === "DLR" ? dlrMap : wdwMap;
