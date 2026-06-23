@@ -212,7 +212,16 @@ function resolveImportedPlannerItemType(raw: unknown, name: string, resort: Reso
 // that don't resolve stay "attraction".
 function resolveHydratedPlannerItemType(raw: unknown, name: string): PlannerItemType {
   if (raw === "dining" || raw === "entertainment") return raw;
-  if (resolveEntertainmentKey(name) !== null) return "entertainment";
+  // Try resort-scoped entertainment aliases (e.g. "Halloween Parade") too —
+  // resolveEntertainmentKey(name) alone only checks the resort-unambiguous
+  // alias table and misses entries in ENTERTAINMENT_ALIASES_BY_RESORT.
+  if (
+    resolveEntertainmentKey(name) !== null ||
+    resolveEntertainmentKey(name, "DLR") !== null ||
+    resolveEntertainmentKey(name, "WDW") !== null
+  ) {
+    return "entertainment";
+  }
   if (resolveDiningKey(name) !== null) return "dining";
   return "attraction";
 }
@@ -1181,13 +1190,15 @@ export default function PlansPage() {
       const dlrKey = tryResolveByType(name, "DLR", type);
       const wdwKey = tryResolveByType(name, "WDW", type);
       // Dining/entertainment canonical keys are resort-agnostic, so both
-      // resorts agreeing on the same key is expected, not ambiguous — use
-      // either resort for the (display-only) park label. Attractions are
-      // excluded from this shortcut: a shared cross-resort attraction name
-      // matching both maps must stay ambiguous (prior behavior), not be
-      // forced to DLR.
+      // resorts agreeing on the same key is expected, not ambiguous. Use the
+      // neutral "ANY" resort tag (not a hardcoded DLR/WDW guess) since no
+      // day/resort context actually identifies which resort this is —
+      // parkLabelFromCompositeKey resolves the display label by checking
+      // both resorts' park maps. Attractions are excluded from this
+      // shortcut: a shared cross-resort attraction name matching both maps
+      // must stay ambiguous (prior behavior), not be forced to a resort.
       if (type !== "attraction" && dlrKey && wdwKey && dlrKey === wdwKey) {
-        return { compositeKey: `${type}:DLR:${dlrKey}` };
+        return { compositeKey: `${type}:ANY:${dlrKey}` };
       }
       if (dlrKey && !wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
       if (wdwKey && !dlrKey) return { compositeKey: `${type}:WDW:${wdwKey}` };
@@ -1197,30 +1208,35 @@ export default function PlansPage() {
 
 
     // Split a "type:resort:canonicalKey" composite key into its parts.
-    function splitCompositeKey(compositeKey: string): { type: PlannerItemType; resort: ResortId; canonicalKey: string } | null {
+    // resort is "ANY" when neither day context nor either resort map alone
+    // could identify a single resort (dining/entertainment same-key shortcut).
+    function splitCompositeKey(compositeKey: string): { type: PlannerItemType; resort: ResortId | "ANY"; canonicalKey: string } | null {
       const firstColon = compositeKey.indexOf(":");
       const secondColon = compositeKey.indexOf(":", firstColon + 1);
       if (firstColon === -1 || secondColon === -1) return null;
       return {
         type: compositeKey.slice(0, firstColon) as PlannerItemType,
-        resort: compositeKey.slice(firstColon + 1, secondColon) as ResortId,
+        resort: compositeKey.slice(firstColon + 1, secondColon) as ResortId | "ANY",
         canonicalKey: compositeKey.slice(secondColon + 1),
       };
     }
 
     // Derive a human-readable park label from a composite key
     // ("type:resort:canonical key"). Falls back to resort string if the
-    // canonical key isn't in the matching type's park map.
+    // canonical key isn't in the matching type's park map. When resort is
+    // "ANY" (no real resort context), checks both resorts' park maps since
+    // the canonical key only ever exists in one of them.
     function parkLabelFromCompositeKey(compositeKey: string): string {
       const parts = splitCompositeKey(compositeKey);
       if (!parts) return compositeKey;
       const { type, resort, canonicalKey } = parts;
-      const map =
-        type === "dining"
-          ? (resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW)
-          : type === "entertainment"
-            ? (resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW)
-            : (resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW);
+      const dlrMap = type === "dining" ? DINING_PARK_DLR : type === "entertainment" ? ENTERTAINMENT_PARK_DLR : RIDE_TO_PARK_DLR;
+      const wdwMap = type === "dining" ? DINING_PARK_WDW : type === "entertainment" ? ENTERTAINMENT_PARK_WDW : RIDE_TO_PARK_WDW;
+      if (resort === "ANY") {
+        const parkId = (dlrMap.get(canonicalKey) ?? wdwMap.get(canonicalKey)) as ParkId | undefined;
+        return parkId ? (PARK_LABELS[parkId] ?? canonicalKey) : canonicalKey;
+      }
+      const map = resort === "DLR" ? dlrMap : wdwMap;
       const parkId = map.get(canonicalKey) as ParkId | undefined;
       return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
     }
