@@ -2106,25 +2106,39 @@ export default function PlansPage() {
   // Normalizes Unicode dashes per-line before calling parseLine.
   function processImportText(text: string) {
     const lines = text.split("\n");
-    const newItems: PlanItem[] = [];
+    const parsedLines: { name: string; timeLabel: string }[] = [];
     for (const line of lines) {
       const normalized = line.replace(/[\u2013\u2014]/g, "-");
       const parsed = parseLine(normalized);
       if (parsed) {
-        const importedName = stripEnDashSuffix(parsed.name);
-        newItems.push({
-          id: makeId(),
-          name: importedName,
-          timeLabel: parsed.timeLabel,
-          dayId: activeDayId,
-          type: inferPlannerItemType(importedName, selectedResort),
-        });
+        parsedLines.push({ name: stripEnDashSuffix(parsed.name), timeLabel: parsed.timeLabel });
       }
     }
-    if (newItems.length === 0) {
+    if (parsedLines.length === 0) {
       setImportError("No valid activities found. Check your text and try again.");
       return;
     }
+    // Fix 6 (Phase 8.1.1) / Phase 9.3 follow-up \u2014 run context inference
+    // BEFORE type inference, using placeholder items (name/timeLabel only \u2014
+    // type doesn't affect inferPlansContext), so resort-scoped dining/
+    // entertainment aliases classify against the resort this import
+    // resolves to instead of a possibly-stale selectedResort.
+    const placeholderItems: PlanItem[] = parsedLines.map((p) => ({
+      id: "",
+      name: p.name,
+      timeLabel: p.timeLabel,
+      dayId: activeDayId,
+      type: "attraction",
+    }));
+    const inferredResort = applyImportContextInference(placeholderItems);
+    const typeResort = inferredResort ?? selectedResort;
+    const newItems: PlanItem[] = parsedLines.map((p) => ({
+      id: makeId(),
+      name: p.name,
+      timeLabel: p.timeLabel,
+      dayId: activeDayId,
+      type: inferPlannerItemType(p.name, typeResort),
+    }));
     // Signal the items-watcher that this is a real import — allows inference
     // to bypass session context even when the user manually changed resort/park
     // after a Clear All. Must be set before setItems so the watcher sees it.
@@ -2133,13 +2147,6 @@ export default function PlansPage() {
       const next = [...prev, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
-    // Fix 6 (Phase 8.1.1) — Apply context inference directly from the newly
-    // imported items. The reactive items-watcher only fires when items go from
-    // 0 → N in this page lifecycle; when items already existed at mount the
-    // watcher guard blocks inference. Calling applyImportContextInference here
-    // ensures context is reliably updated after every text/CSV import, matching
-    // the behaviour already in place for JSON restore.
-    applyImportContextInference(newItems);
     setImportText("");
     setMode("view");
   }
@@ -2644,22 +2651,56 @@ export default function PlansPage() {
   function handleRestoreConfirm() {
     if (!restoreConfirmPayload) return;
     const { data } = restoreConfirmPayload;
-    const restoredPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
-      const r = it as Record<string, unknown>;
-      return {
-        id: r.id as string,
-        name: r.name as string,
-        timeLabel: r.timeLabel as string,
-        dayId: normalizeDayId(r.dayId),
-        type: resolveImportedPlannerItemType(r.type, r.name as string, selectedResort),
-      };
-    });
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
     // Phase 8.9 — always land on Day 1 after restore, regardless of what was
     // active in the backup or before the restore was triggered.
     const restoredActiveDayId = "day-1";
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
+
+    // Phase 8.5 — restore dayParks from backup when present; fall back to {} for
+    // older backups. Filter to valid park IDs that belong to restored days only.
+    // Computed before restoredPlans (Phase 9.3 follow-up) so type inference
+    // below can use each day's restored resort instead of selectedResort.
+    const restoredDayParks: Record<string, string> = {};
+    if (data.dayParks) {
+      for (const [k, v] of Object.entries(data.dayParks)) {
+        if (VALID_DAY_ID_RE.test(k) && v in PARK_TO_RESORT && restoredDaysSet.has(k)) {
+          restoredDayParks[k] = v;
+        }
+      }
+    }
+    const dayResortMap = new Map<string, ResortId>();
+    for (const [dayId, parkId] of Object.entries(restoredDayParks)) {
+      const resort = PARK_TO_RESORT[parkId];
+      if (resort) dayResortMap.set(dayId, resort);
+    }
+    // Fallback resort for days with no dayPark override — infer from the
+    // restored items themselves (pure, no side effects on session state).
+    const placeholderPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
+      const r = it as Record<string, unknown>;
+      return {
+        id: r.id as string,
+        name: r.name as string,
+        timeLabel: r.timeLabel as string,
+        dayId: normalizeDayId(r.dayId),
+        type: "attraction",
+      };
+    });
+    const inferredFallbackResort = inferPlansContext(placeholderPlans).resort ?? null;
+
+    const restoredPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
+      const r = it as Record<string, unknown>;
+      const dayId = normalizeDayId(r.dayId);
+      const typeResort = dayResortMap.get(dayId) ?? inferredFallbackResort ?? selectedResort;
+      return {
+        id: r.id as string,
+        name: r.name as string,
+        timeLabel: r.timeLabel as string,
+        dayId,
+        type: resolveImportedPlannerItemType(r.type, r.name as string, typeResort),
+      };
+    });
     const restoredDayMeta: Record<string, DayMeta> =
       data.dayMeta
         ? (Object.fromEntries(
@@ -2698,16 +2739,6 @@ export default function PlansPage() {
     setDeleteConfirmId(null);
     setPendingDayImportItems(null);
     setDayImportError("");
-    // Phase 8.5 — restore dayParks from backup when present; fall back to {} for
-    // older backups. Filter to valid park IDs that belong to restored days only.
-    const restoredDayParks: Record<string, string> = {};
-    if (data.dayParks) {
-      for (const [k, v] of Object.entries(data.dayParks)) {
-        if (VALID_DAY_ID_RE.test(k) && v in PARK_TO_RESORT && restoredDaysSet.has(k)) {
-          restoredDayParks[k] = v;
-        }
-      }
-    }
     setDayParks(restoredDayParks);
     saveDayParks(restoredDayParks, dayParksKeyRef.current);
   }
