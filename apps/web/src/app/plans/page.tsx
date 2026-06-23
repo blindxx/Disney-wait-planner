@@ -103,6 +103,7 @@ type CrossDayDuplicate = {
   parkSections: ParkSection[];
   totalDays: number;         // distinct days across all park sections
   hasTimeConflict: boolean;  // same time appears on multiple days for this attraction
+  itemType: PlannerItemType; // Phase 9.3.3 — for grouped display (Attractions/Dining/Entertainment)
 };
 // Phase 8.7 — lightning vs plan conflict
 type LightningPlanConflict = {
@@ -192,12 +193,6 @@ function parseCSVRow(line: string): string[] {
 const STORAGE_KEY = "dwp.myPlans";
 const SCHEMA_VERSION = 1;
 
-// Phase 9.0 — coerce unknown raw type value to PlannerItemType, defaulting to "attraction".
-function coercePlannerItemType(raw: unknown): PlannerItemType {
-  if (raw === "dining" || raw === "entertainment") return raw;
-  return "attraction";
-}
-
 // Phase 9.3.1 — resolve the imported/restored type for an item, upgrading
 // stale or missing types to dining/entertainment via name-based inference.
 // Backups/exports created before dining/entertainment support stored every
@@ -209,6 +204,19 @@ function resolveImportedPlannerItemType(raw: unknown, name: string, resort: Reso
   return inferPlannerItemType(name, resort);
 }
 
+// Phase 9.3.2 — resolve the hydrated (local/cloud load) type for an item,
+// upgrading stale or missing types to dining/entertainment via the same
+// confident resolvers used elsewhere (resort-agnostic: exact/global alias
+// matches only, no resort-scoped disambiguation needed for hydration).
+// Preserves an explicit dining/entertainment type; unknown custom names
+// that don't resolve stay "attraction".
+function resolveHydratedPlannerItemType(raw: unknown, name: string): PlannerItemType {
+  if (raw === "dining" || raw === "entertainment") return raw;
+  if (resolveEntertainmentKey(name) !== null) return "entertainment";
+  if (resolveDiningKey(name) !== null) return "dining";
+  return "attraction";
+}
+
 // Phase 9.0 — ensure every loaded item has a valid type field.
 function normalizePlanItem(raw: unknown): PlanItem {
   const r = raw as Record<string, unknown>;
@@ -217,7 +225,7 @@ function normalizePlanItem(raw: unknown): PlanItem {
     name: r.name as string,
     timeLabel: r.timeLabel as string,
     dayId: r.dayId as string,
-    type: coercePlannerItemType(r.type),
+    type: resolveHydratedPlannerItemType(r.type, r.name as string),
   };
 }
 
@@ -1307,6 +1315,9 @@ export default function PlansPage() {
             timeTodays.get(timePart)!.add(dayPart);
           }
           const hasTimeConflict = [...timeTodays.values()].some((days) => days.size >= 2);
+          // identityKey is "type:canonicalKey" (Phase 9.3) — extract the type tag for grouped display.
+          const typeColon = identityKey.indexOf(":");
+          const itemType = (typeColon === -1 ? "attraction" : identityKey.slice(0, typeColon)) as PlannerItemType;
           result.push({
             identityKey,
             displayName,
@@ -1315,6 +1326,7 @@ export default function PlansPage() {
               .sort((a, b) => a.parkLabel.localeCompare(b.parkLabel)),
             totalDays: allDays.size,
             hasTimeConflict,
+            itemType,
           });
         }
       }
@@ -3410,6 +3422,13 @@ export default function PlansPage() {
         .cross-day-checks-group-label:first-of-type {
           margin-top: 0;
         }
+        .cross-day-checks-subgroup-label {
+          font-size: 0.7rem;
+          font-weight: 600;
+          color: #92400e;
+          margin: 0.3rem 0 0.1rem;
+          opacity: 0.8;
+        }
         .cross-day-checks-list {
           list-style: none;
           padding: 0;
@@ -4008,37 +4027,51 @@ export default function PlansPage() {
             (c) => c.planDayId === activeDayId
           );
           if (activePlanDups.length === 0 && activeLightningDups.length === 0 && activeConflicts.length === 0) return null;
+          // Phase 9.3.3 — sub-group "Planned on multiple days" by planner item
+          // type so attractions/dining/entertainment duplicates are visually
+          // separated (mirrors Lightning's existing separate section). Render
+          // each sub-group only when it has entries.
+          const planDupsByType: Array<{ label: string; dups: CrossDayDuplicate[] }> = [
+            { label: "Attractions", dups: activePlanDups.filter((d) => d.itemType === "attraction") },
+            { label: "Dining", dups: activePlanDups.filter((d) => d.itemType === "dining") },
+            { label: "Entertainment", dups: activePlanDups.filter((d) => d.itemType === "entertainment") },
+          ].filter((g) => g.dups.length > 0);
           return (
             <div className="cross-day-checks">
               <div className="cross-day-checks-title">Cross-Day Checks</div>
               {activePlanDups.length > 0 && (
                 <>
                   <div className="cross-day-checks-group-label">Planned on multiple days</div>
-                  <ul className="cross-day-checks-list">
-                    {activePlanDups.map((dup) => (
-                      <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
-                        <span className="cross-day-checks-name">
-                          {dup.displayName}
-                          {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
-                        </span>
-                        {dup.parkSections.map((sec) => (
-                          <span key={sec.parkLabel} className="cross-day-checks-park-section">
-                            <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
-                            <span className="cross-day-checks-days">
-                              {sec.dayIds.map((d, i) => (
-                                <span key={d}>
-                                  {i > 0 && ", "}
-                                  {d === activeDayId
-                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
-                                    : dayDisplayLabel(d, dayMeta)}
-                                </span>
-                              ))}
+                  {planDupsByType.map((group) => (
+                    <div key={group.label}>
+                      <div className="cross-day-checks-subgroup-label">{group.label}</div>
+                      <ul className="cross-day-checks-list">
+                        {group.dups.map((dup) => (
+                          <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
+                            <span className="cross-day-checks-name">
+                              {dup.displayName}
+                              {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
                             </span>
-                          </span>
+                            {dup.parkSections.map((sec) => (
+                              <span key={sec.parkLabel} className="cross-day-checks-park-section">
+                                <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
+                                <span className="cross-day-checks-days">
+                                  {sec.dayIds.map((d, i) => (
+                                    <span key={d}>
+                                      {i > 0 && ", "}
+                                      {d === activeDayId
+                                        ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
+                                        : dayDisplayLabel(d, dayMeta)}
+                                    </span>
+                                  ))}
+                                </span>
+                              </span>
+                            ))}
+                          </li>
                         ))}
-                      </li>
-                    ))}
-                  </ul>
+                      </ul>
+                    </div>
+                  ))}
                 </>
               )}
               {activeLightningDups.length > 0 && (

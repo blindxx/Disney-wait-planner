@@ -98,12 +98,14 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
 
   // ---- EPCOT ----
   { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
+  { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
 
   // ---- Hollywood Studios ----
   { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "Beauty and the Beast Live on Stage", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
 
   // ---- Animal Kingdom ----
   { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
@@ -153,6 +155,13 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "pixar nighttime spectacular": "together forever a pixar nighttime spectacular",
   "better together": "better together a pixar pals celebration",
   "pixar pals celebration": "better together a pixar pals celebration",
+  "luminous": "luminous the symphony of us",
+  "symphony of us": "luminous the symphony of us",
+  "luminous symphony": "luminous the symphony of us",
+  "wwoa": "wonderful world of animation",
+  "hollywood studios projection show": "wonderful world of animation",
+  "dhs projection show": "wonderful world of animation",
+  "projection show": "wonderful world of animation",
 };
 
 /**
