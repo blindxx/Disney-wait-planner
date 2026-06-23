@@ -193,6 +193,18 @@ function parseCSVRow(line: string): string[] {
 const STORAGE_KEY = "dwp.myPlans";
 const SCHEMA_VERSION = 1;
 
+// Phase 9.3.4 — strip trailing time-like text (e.g. "9pm", "9:00 PM",
+// "21:00") from a name before type inference only, so old imported items
+// like "Fantasmic 9pm" resolve by their activity name instead of failing
+// to match because the time text rode along. Display names and stored
+// times are never touched — this is used solely as a lookup key.
+function stripTrailingTimeForInference(name: string): string {
+  return name
+    .replace(/\s*\b\d{1,2}(:\d{2})?\s*(am|pm)\b\s*$/i, "")
+    .replace(/\s*\b\d{1,2}:\d{2}\s*$/, "")
+    .trim();
+}
+
 // Phase 9.3.1 — resolve the imported/restored type for an item, upgrading
 // stale or missing types to dining/entertainment via name-based inference.
 // Backups/exports created before dining/entertainment support stored every
@@ -201,7 +213,7 @@ const SCHEMA_VERSION = 1;
 // correctly without ever overwriting an explicit dining/entertainment type.
 function resolveImportedPlannerItemType(raw: unknown, name: string, resort: ResortId): PlannerItemType {
   if (raw === "dining" || raw === "entertainment") return raw;
-  return inferPlannerItemType(name, resort);
+  return inferPlannerItemType(stripTrailingTimeForInference(name), resort);
 }
 
 // Phase 9.3.2 — resolve the hydrated (local/cloud load) type for an item,
@@ -212,17 +224,18 @@ function resolveImportedPlannerItemType(raw: unknown, name: string, resort: Reso
 // that don't resolve stay "attraction".
 function resolveHydratedPlannerItemType(raw: unknown, name: string): PlannerItemType {
   if (raw === "dining" || raw === "entertainment") return raw;
+  const cleanedName = stripTrailingTimeForInference(name);
   // Try resort-scoped entertainment aliases (e.g. "Halloween Parade") too —
   // resolveEntertainmentKey(name) alone only checks the resort-unambiguous
   // alias table and misses entries in ENTERTAINMENT_ALIASES_BY_RESORT.
   if (
-    resolveEntertainmentKey(name) !== null ||
-    resolveEntertainmentKey(name, "DLR") !== null ||
-    resolveEntertainmentKey(name, "WDW") !== null
+    resolveEntertainmentKey(cleanedName) !== null ||
+    resolveEntertainmentKey(cleanedName, "DLR") !== null ||
+    resolveEntertainmentKey(cleanedName, "WDW") !== null
   ) {
     return "entertainment";
   }
-  if (resolveDiningKey(name) !== null) return "dining";
+  if (resolveDiningKey(cleanedName) !== null) return "dining";
   return "attraction";
 }
 
