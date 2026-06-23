@@ -198,6 +198,17 @@ function coercePlannerItemType(raw: unknown): PlannerItemType {
   return "attraction";
 }
 
+// Phase 9.3.1 — resolve the imported/restored type for an item, upgrading
+// stale or missing types to dining/entertainment via name-based inference.
+// Backups/exports created before dining/entertainment support stored every
+// item as type="attraction" (or omitted type entirely); this re-runs the
+// same inference used for newly-added items so old data gets recognized
+// correctly without ever overwriting an explicit dining/entertainment type.
+function resolveImportedPlannerItemType(raw: unknown, name: string, resort: ResortId): PlannerItemType {
+  if (raw === "dining" || raw === "entertainment") return raw;
+  return inferPlannerItemType(name, resort);
+}
+
 // Phase 9.0 — ensure every loaded item has a valid type field.
 function normalizePlanItem(raw: unknown): PlanItem {
   const r = raw as Record<string, unknown>;
@@ -2347,8 +2358,10 @@ export default function PlansPage() {
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
     // name-based inference there (keeps dining recognition consistent across
-    // every import method); an explicit `type` from a JSON day-plan export
-    // is preserved as-is via coercePlannerItemType.
+    // every import method). An explicit dining/entertainment `type` from a
+    // JSON day-plan export is preserved as-is; a missing/unknown/"attraction"
+    // type is re-inferred from the name (Phase 9.3.1) so exports created
+    // before dining/entertainment support get upgraded automatically.
     const newItems: PlanItem[] = importedItems.map((it) => {
       const rawType = (it as { type?: unknown }).type;
       return {
@@ -2356,7 +2369,7 @@ export default function PlansPage() {
         name: it.name,
         timeLabel: it.timeLabel,
         dayId: targetDayId,
-        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name, selectedResort),
+        type: resolveImportedPlannerItemType(rawType, it.name, selectedResort),
       };
     });
     setItems((prev) => {
@@ -2573,7 +2586,7 @@ export default function PlansPage() {
         name: r.name as string,
         timeLabel: r.timeLabel as string,
         dayId: normalizeDayId(r.dayId),
-        type: coercePlannerItemType(r.type),
+        type: resolveImportedPlannerItemType(r.type, r.name as string, selectedResort),
       };
     });
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
