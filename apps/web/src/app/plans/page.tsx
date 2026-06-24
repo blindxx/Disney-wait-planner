@@ -2724,11 +2724,16 @@ export default function PlansPage() {
     // that day's own restored items (pure, no side effects on session
     // state), since a mixed-resort backup with no dayParks data would
     // otherwise get one global resort guess applied to every day.
+    // Phase 9.3 follow-up — strip trailing time text (e.g. "Happily Ever
+    // After 9pm") from the lookup name before inference, same as
+    // import/hydration type resolution, so old backups without dayParks
+    // still resolve a day's resort correctly. Only affects this inference
+    // placeholder's name; restoredPlans below keeps the original name.
     const placeholderPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
       const r = it as Record<string, unknown>;
       return {
         id: r.id as string,
-        name: r.name as string,
+        name: stripTrailingTimeForInference(r.name as string),
         timeLabel: r.timeLabel as string,
         dayId: normalizeDayId(r.dayId),
         type: "attraction",
