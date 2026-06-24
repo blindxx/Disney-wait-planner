@@ -2428,8 +2428,21 @@ export default function PlansPage() {
       dayId: targetDayId,
       type: "attraction",
     }));
-    const inferredResort = wasEmpty ? applyImportContextInference(placeholderItems) : null;
-    const typeResort = inferredResort ?? selectedResort;
+    // Resort used for type inference below. Bootstrap (empty day) runs the
+    // full side-effecting context inference (updates live selectedResort/
+    // park for the session); a confirmed import into a non-empty day must
+    // NOT depend on whatever selectedResort/day is live at confirmation time
+    // (Phase 9.3 follow-up — the user may have switched days/resort while the
+    // confirmation modal was open), so it only uses a pure resort lookup:
+    // the target day's park override, else a pure inference from the
+    // imported items themselves, else selectedResort as a last resort.
+    const targetDayParkResort = dayParks[targetDayId]
+      ? PARK_TO_RESORT[dayParks[targetDayId]]
+      : undefined;
+    const inferredResort = wasEmpty
+      ? applyImportContextInference(placeholderItems)
+      : (inferPlansContext(placeholderItems).resort ?? null);
+    const typeResort = targetDayParkResort ?? inferredResort ?? selectedResort;
 
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
@@ -2675,8 +2688,10 @@ export default function PlansPage() {
       const resort = PARK_TO_RESORT[parkId];
       if (resort) dayResortMap.set(dayId, resort);
     }
-    // Fallback resort for days with no dayPark override — infer from the
-    // restored items themselves (pure, no side effects on session state).
+    // Fallback resort for days with no dayPark override — infer per day from
+    // that day's own restored items (pure, no side effects on session
+    // state), since a mixed-resort backup with no dayParks data would
+    // otherwise get one global resort guess applied to every day.
     const placeholderPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
       const r = it as Record<string, unknown>;
       return {
@@ -2687,12 +2702,22 @@ export default function PlansPage() {
         type: "attraction",
       };
     });
-    const inferredFallbackResort = inferPlansContext(placeholderPlans).resort ?? null;
+    const placeholdersByDay = new Map<string, PlanItem[]>();
+    for (const p of placeholderPlans) {
+      const list = placeholdersByDay.get(p.dayId) ?? [];
+      list.push(p);
+      placeholdersByDay.set(p.dayId, list);
+    }
+    const inferredResortByDay = new Map<string, ResortId | null>();
+    for (const [dayId, dayItems] of placeholdersByDay) {
+      inferredResortByDay.set(dayId, inferPlansContext(dayItems).resort ?? null);
+    }
 
     const restoredPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
       const r = it as Record<string, unknown>;
       const dayId = normalizeDayId(r.dayId);
-      const typeResort = dayResortMap.get(dayId) ?? inferredFallbackResort ?? selectedResort;
+      const typeResort =
+        dayResortMap.get(dayId) ?? inferredResortByDay.get(dayId) ?? selectedResort;
       return {
         id: r.id as string,
         name: r.name as string,
