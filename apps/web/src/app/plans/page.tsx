@@ -2143,6 +2143,20 @@ export default function PlansPage() {
     return "attraction";
   }
 
+  // Phase 9.3 follow-up — resolve a day's real resort context for dining/
+  // entertainment display, same precedence (and same selectedResort
+  // exclusion) as inferManualAddType: explicit park override, else inferred
+  // from that day's actual items, else undefined ("no real context yet").
+  // Used only to decide whether a shared cross-resort name should display
+  // a single park or a combined/ambiguous location.
+  function resolveDayContextResort(dayId: string): ResortId | undefined {
+    const override = dayParks[dayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return overrideResort;
+    const dayItems = items.filter((it) => it.dayId === dayId);
+    return dayItems.length > 0 ? (inferPlansContext(dayItems).resort ?? undefined) : undefined;
+  }
+
   // Shared pipeline for both paste and file import.
   // Normalizes Unicode dashes per-line before calling parseLine.
   function processImportText(text: string) {
@@ -4064,8 +4078,26 @@ export default function PlansPage() {
                         );
                       })()}
                       {item.type === "dining" && (() => {
-                        const diningCanonicalName = getDiningCanonicalName(item.name, selectedResort);
-                        const diningLocation = getDiningLocation(item.name, selectedResort);
+                        // Phase 9.3 follow-up — only resolve against selectedResort
+                        // once a day has real context (override or inferred). On a
+                        // genuinely Auto, contextless day, check both resorts and
+                        // show a combined location when the name exists in both
+                        // (e.g. Oga's Cantina) instead of pinning to whichever
+                        // resort the selector happens to be on.
+                        const dayResort = resolveDayContextResort(item.dayId);
+                        let diningCanonicalName: string | undefined;
+                        let diningLocation: string | undefined;
+                        if (dayResort) {
+                          diningCanonicalName = getDiningCanonicalName(item.name, dayResort);
+                          diningLocation = getDiningLocation(item.name, dayResort);
+                        } else {
+                          const dlrLoc = getDiningLocation(item.name, "DLR");
+                          const wdwLoc = getDiningLocation(item.name, "WDW");
+                          diningCanonicalName =
+                            getDiningCanonicalName(item.name, "DLR") ?? getDiningCanonicalName(item.name, "WDW");
+                          diningLocation =
+                            dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
+                        }
                         if (!diningLocation) return null;
                         return (
                           <>
@@ -4077,10 +4109,27 @@ export default function PlansPage() {
                         );
                       })()}
                       {item.type === "entertainment" && (() => {
-                        const entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, selectedResort);
-                        const entertainmentLocation = getEntertainmentLocation(item.name, selectedResort);
+                        // Same combined/ambiguous-location handling as dining above.
+                        const dayResort = resolveDayContextResort(item.dayId);
+                        let entertainmentCanonicalName: string | undefined;
+                        let entertainmentLocation: string | undefined;
+                        if (dayResort) {
+                          entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, dayResort);
+                          entertainmentLocation = getEntertainmentLocation(item.name, dayResort);
+                        } else {
+                          const dlrLoc = getEntertainmentLocation(item.name, "DLR");
+                          const wdwLoc = getEntertainmentLocation(item.name, "WDW");
+                          entertainmentCanonicalName =
+                            getEntertainmentCanonicalName(item.name, "DLR") ??
+                            getEntertainmentCanonicalName(item.name, "WDW");
+                          entertainmentLocation =
+                            dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
+                        }
                         if (!entertainmentLocation) return null;
-                        const availabilityType = getEntertainmentAvailabilityType(item.name, selectedResort);
+                        const availabilityType = getEntertainmentAvailabilityType(
+                          item.name,
+                          dayResort ?? "DLR"
+                        );
                         const availabilityLabel =
                           availabilityType === "seasonal"
                             ? "Seasonal Event"
