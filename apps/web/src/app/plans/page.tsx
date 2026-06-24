@@ -2118,20 +2118,26 @@ export default function PlansPage() {
   // match), then selectedResort as a last resort. Unknown custom names
   // fall through to "attraction" regardless of resort.
   function inferManualAddType(name: string, dayId: string): PlannerItemType {
+    // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic 9pm")
+    // before lookup, same as import/hydration, so manual entries with a
+    // time typed into the name still resolve. Only affects this lookup;
+    // the caller still stores the original trimmed name.
+    const lookupName = stripTrailingTimeForInference(name);
+
     const override = dayParks[dayId];
     const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
-    if (overrideResort) return inferPlannerItemType(name, overrideResort);
+    if (overrideResort) return inferPlannerItemType(lookupName, overrideResort);
 
     const dayItems = items.filter((it) => it.dayId === dayId);
     const inferredResort = dayItems.length > 0 ? inferPlansContext(dayItems).resort : undefined;
-    if (inferredResort) return inferPlannerItemType(name, inferredResort);
+    if (inferredResort) return inferPlannerItemType(lookupName, inferredResort);
 
-    const dlrType = inferPlannerItemType(name, "DLR");
-    const wdwType = inferPlannerItemType(name, "WDW");
+    const dlrType = inferPlannerItemType(lookupName, "DLR");
+    const wdwType = inferPlannerItemType(lookupName, "WDW");
     if (dlrType !== "attraction") return dlrType;
     if (wdwType !== "attraction") return wdwType;
 
-    return inferPlannerItemType(name, selectedResort);
+    return inferPlannerItemType(lookupName, selectedResort);
   }
 
   // Shared pipeline for both paste and file import.
@@ -2324,6 +2330,20 @@ export default function PlansPage() {
     initialItemCountRef.current = 0; // re-open import-inference eligibility
     try { localStorage.removeItem(resortKeyRef.current); } catch {}
     try { localStorage.removeItem(parkKeyRef.current); } catch {}
+    // Phase 9.3 follow-up — clearing the session-context storage keys above
+    // is not enough on its own: selectedResort/selectedPark are in-memory
+    // React state and were left untouched, so a day left with zero items
+    // (no override, nothing to infer from) kept showing whatever resort/park
+    // was active before Clear All. That stale state then made the next
+    // manual add of a shared cross-resort item (e.g. Oga's Cantina) look
+    // like it belonged to the old park. Reset to settings defaults, same
+    // fallback used at initial mount with no session context.
+    const { defaultResort, defaultPark } = getSettingsDefaults();
+    setSelectedResort(defaultResort);
+    const resetPark = RESORT_PARKS[defaultResort].find((p) => p === defaultPark)
+      ? defaultPark
+      : RESORT_PARKS[defaultResort][0];
+    setSelectedPark(resetPark as ParkId);
     // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
     // hidden day-scoped items survive into the next session (BUG C fix).
     const _lightningKey = buildNamespacedKey(_profileId, "lightning");
