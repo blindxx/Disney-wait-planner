@@ -2098,7 +2098,7 @@ export default function PlansPage() {
                 type:
                   trimmed === editTarget.name
                     ? it.type
-                    : inferManualAddType(trimmed, editTarget.dayId),
+                    : inferManualAddType(trimmed, editTarget.dayId, editTarget.id),
               }
             : it
         );
@@ -2120,7 +2120,7 @@ export default function PlansPage() {
   // "attraction" and a name matching both resorts (e.g. Oga's Cantina)
   // stays correctly classified without being pinned to whichever resort
   // happens to be selected.
-  function inferManualAddType(name: string, dayId: string): PlannerItemType {
+  function inferManualAddType(name: string, dayId: string, excludeItemId?: string): PlannerItemType {
     // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic 9pm")
     // before lookup, same as import/hydration, so manual entries with a
     // time typed into the name still resolve. Only affects this lookup;
@@ -2131,7 +2131,11 @@ export default function PlansPage() {
     const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
     if (overrideResort) return inferPlannerItemType(lookupName, overrideResort);
 
-    const dayItems = items.filter((it) => it.dayId === dayId);
+    // Exclude the item being edited from the context basis — otherwise an
+    // edit that changes a day's only item (and therefore its only resort
+    // signal) would infer from the stale pre-edit name instead of the rest
+    // of the day's actual items.
+    const dayItems = items.filter((it) => it.dayId === dayId && it.id !== excludeItemId);
     const inferredResort = dayItems.length > 0 ? inferPlansContext(dayItems).resort : undefined;
     if (inferredResort) return inferPlannerItemType(lookupName, inferredResort);
 
@@ -4085,16 +4089,21 @@ export default function PlansPage() {
                         // (e.g. Oga's Cantina) instead of pinning to whichever
                         // resort the selector happens to be on.
                         const dayResort = resolveDayContextResort(item.dayId);
+                        // Same cleaned-name lookup used for type inference, so a
+                        // stored name like "fantasmic 10pm" still resolves a
+                        // canonical/location display instead of falling through
+                        // as unknown.
+                        const diningLookupName = stripTrailingTimeForInference(item.name);
                         let diningCanonicalName: string | undefined;
                         let diningLocation: string | undefined;
                         if (dayResort) {
-                          diningCanonicalName = getDiningCanonicalName(item.name, dayResort);
-                          diningLocation = getDiningLocation(item.name, dayResort);
+                          diningCanonicalName = getDiningCanonicalName(diningLookupName, dayResort);
+                          diningLocation = getDiningLocation(diningLookupName, dayResort);
                         } else {
-                          const dlrLoc = getDiningLocation(item.name, "DLR");
-                          const wdwLoc = getDiningLocation(item.name, "WDW");
+                          const dlrLoc = getDiningLocation(diningLookupName, "DLR");
+                          const wdwLoc = getDiningLocation(diningLookupName, "WDW");
                           diningCanonicalName =
-                            getDiningCanonicalName(item.name, "DLR") ?? getDiningCanonicalName(item.name, "WDW");
+                            getDiningCanonicalName(diningLookupName, "DLR") ?? getDiningCanonicalName(diningLookupName, "WDW");
                           diningLocation =
                             dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
                         }
@@ -4111,23 +4120,28 @@ export default function PlansPage() {
                       {item.type === "entertainment" && (() => {
                         // Same combined/ambiguous-location handling as dining above.
                         const dayResort = resolveDayContextResort(item.dayId);
+                        // Same cleaned-name lookup used for type inference, so a
+                        // stored name like "fantasmic 10pm" still resolves a
+                        // canonical/location display instead of falling through
+                        // as unknown.
+                        const entertainmentLookupName = stripTrailingTimeForInference(item.name);
                         let entertainmentCanonicalName: string | undefined;
                         let entertainmentLocation: string | undefined;
                         if (dayResort) {
-                          entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, dayResort);
-                          entertainmentLocation = getEntertainmentLocation(item.name, dayResort);
+                          entertainmentCanonicalName = getEntertainmentCanonicalName(entertainmentLookupName, dayResort);
+                          entertainmentLocation = getEntertainmentLocation(entertainmentLookupName, dayResort);
                         } else {
-                          const dlrLoc = getEntertainmentLocation(item.name, "DLR");
-                          const wdwLoc = getEntertainmentLocation(item.name, "WDW");
+                          const dlrLoc = getEntertainmentLocation(entertainmentLookupName, "DLR");
+                          const wdwLoc = getEntertainmentLocation(entertainmentLookupName, "WDW");
                           entertainmentCanonicalName =
-                            getEntertainmentCanonicalName(item.name, "DLR") ??
-                            getEntertainmentCanonicalName(item.name, "WDW");
+                            getEntertainmentCanonicalName(entertainmentLookupName, "DLR") ??
+                            getEntertainmentCanonicalName(entertainmentLookupName, "WDW");
                           entertainmentLocation =
                             dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
                         }
                         if (!entertainmentLocation) return null;
                         const availabilityType = getEntertainmentAvailabilityType(
-                          item.name,
+                          entertainmentLookupName,
                           dayResort ?? "DLR"
                         );
                         const availabilityLabel =
