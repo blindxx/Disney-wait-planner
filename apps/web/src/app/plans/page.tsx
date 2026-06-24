@@ -2115,8 +2115,11 @@ export default function PlansPage() {
   // previous day). Precedence: target day's park override, then a pure
   // inference from that day's existing items, then a both-resort check
   // (trust either resort if it resolves to a known dining/entertainment
-  // match), then selectedResort as a last resort. Unknown custom names
-  // fall through to "attraction" regardless of resort.
+  // match). selectedResort/selectedPark are never consulted here — on a
+  // genuinely Auto, contextless day, an unmatched custom name stays
+  // "attraction" and a name matching both resorts (e.g. Oga's Cantina)
+  // stays correctly classified without being pinned to whichever resort
+  // happens to be selected.
   function inferManualAddType(name: string, dayId: string): PlannerItemType {
     // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic 9pm")
     // before lookup, same as import/hydration, so manual entries with a
@@ -2137,7 +2140,7 @@ export default function PlansPage() {
     if (dlrType !== "attraction") return dlrType;
     if (wdwType !== "attraction") return wdwType;
 
-    return inferPlannerItemType(lookupName, selectedResort);
+    return "attraction";
   }
 
   // Shared pipeline for both paste and file import.
