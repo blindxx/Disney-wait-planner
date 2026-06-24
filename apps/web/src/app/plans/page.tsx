@@ -103,6 +103,7 @@ type CrossDayDuplicate = {
   parkSections: ParkSection[];
   totalDays: number;         // distinct days across all park sections
   hasTimeConflict: boolean;  // same time appears on multiple days for this attraction
+  itemType: PlannerItemType; // Phase 9.3.3 — for grouped display (Attractions/Dining/Entertainment)
 };
 // Phase 8.7 — lightning vs plan conflict
 type LightningPlanConflict = {
@@ -192,9 +193,49 @@ function parseCSVRow(line: string): string[] {
 const STORAGE_KEY = "dwp.myPlans";
 const SCHEMA_VERSION = 1;
 
-// Phase 9.0 — coerce unknown raw type value to PlannerItemType, defaulting to "attraction".
-function coercePlannerItemType(raw: unknown): PlannerItemType {
+// Phase 9.3.4 — strip trailing time-like text (e.g. "9pm", "9:00 PM",
+// "21:00") from a name before type inference only, so old imported items
+// like "Fantasmic 9pm" resolve by their activity name instead of failing
+// to match because the time text rode along. Display names and stored
+// times are never touched — this is used solely as a lookup key.
+function stripTrailingTimeForInference(name: string): string {
+  return name
+    .replace(/\s*\b\d{1,2}(:\d{2})?\s*(am|pm)\b\s*$/i, "")
+    .replace(/\s*\b\d{1,2}:\d{2}\s*$/, "")
+    .trim();
+}
+
+// Phase 9.3.1 — resolve the imported/restored type for an item, upgrading
+// stale or missing types to dining/entertainment via name-based inference.
+// Backups/exports created before dining/entertainment support stored every
+// item as type="attraction" (or omitted type entirely); this re-runs the
+// same inference used for newly-added items so old data gets recognized
+// correctly without ever overwriting an explicit dining/entertainment type.
+function resolveImportedPlannerItemType(raw: unknown, name: string, resort: ResortId): PlannerItemType {
   if (raw === "dining" || raw === "entertainment") return raw;
+  return inferPlannerItemType(stripTrailingTimeForInference(name), resort);
+}
+
+// Phase 9.3.2 — resolve the hydrated (local/cloud load) type for an item,
+// upgrading stale or missing types to dining/entertainment via the same
+// confident resolvers used elsewhere (resort-agnostic: exact/global alias
+// matches only, no resort-scoped disambiguation needed for hydration).
+// Preserves an explicit dining/entertainment type; unknown custom names
+// that don't resolve stay "attraction".
+function resolveHydratedPlannerItemType(raw: unknown, name: string): PlannerItemType {
+  if (raw === "dining" || raw === "entertainment") return raw;
+  const cleanedName = stripTrailingTimeForInference(name);
+  // Try resort-scoped entertainment aliases (e.g. "Halloween Parade") too —
+  // resolveEntertainmentKey(name) alone only checks the resort-unambiguous
+  // alias table and misses entries in ENTERTAINMENT_ALIASES_BY_RESORT.
+  if (
+    resolveEntertainmentKey(cleanedName) !== null ||
+    resolveEntertainmentKey(cleanedName, "DLR") !== null ||
+    resolveEntertainmentKey(cleanedName, "WDW") !== null
+  ) {
+    return "entertainment";
+  }
+  if (resolveDiningKey(cleanedName) !== null) return "dining";
   return "attraction";
 }
 
@@ -206,7 +247,7 @@ function normalizePlanItem(raw: unknown): PlanItem {
     name: r.name as string,
     timeLabel: r.timeLabel as string,
     dayId: r.dayId as string,
-    type: coercePlannerItemType(r.type),
+    type: resolveHydratedPlannerItemType(r.type, r.name as string),
   };
 }
 
@@ -686,7 +727,7 @@ function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | 
     if (!parkId) {
       // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
       // which feeds attraction duplicate/identity matching elsewhere.
-      const diningKey = resolveDiningKey(item.name);
+      const diningKey = resolveDiningKey(item.name, resort);
       if (diningKey) parkId = diningMap.get(diningKey) ?? null;
     }
     if (!parkId) {
@@ -1052,6 +1093,19 @@ export default function PlansPage() {
       return hit;
     }
 
+    // Phase 9.3 — type-scoped canonical key resolution. Dispatches to the
+    // dining/entertainment resolvers (already used elsewhere for park
+    // inference) for non-attraction items, reusing tryResolve unchanged for
+    // attractions. `resort` is passed through for dining/entertainment too
+    // so a resolved key is validated as actually belonging to that resort
+    // (see DINING_KEYS_BY_RESORT / ENTERTAINMENT_KEYS_BY_RESORT) — a
+    // WDW-only name like Cinderella's Royal Table must not resolve for DLR.
+    function tryResolveByType(name: string, resort: ResortId, type: PlannerItemType): string | null {
+      if (type === "dining") return resolveDiningKey(name, resort);
+      if (type === "entertainment") return resolveEntertainmentKey(name, resort);
+      return tryResolve(name, resort);
+    }
+
     // Read Lightning items from localStorage once so they can supplement resort
     // inference for Lightning-only days (no plan items) below.
     // Grouped by dayId; only valid current days are kept (same filter as the
@@ -1126,37 +1180,92 @@ export default function PlansPage() {
       // Step 6: truly ambiguous — leave unset
     }
 
-    // Resolve a name to a stable composite key (resort:canonicalKey).
+    // Resolve a name to a stable composite key (type:resort:canonicalKey).
     // When the day's resort is known, only that resort's map is tried.
     // When the resort is still unresolvable (unset after all steps above),
     // both maps are tried: exactly one match → use that resort,
     // both match or neither → skip as ambiguous.
-    // The resort-scoped key prevents cross-resort collisions.
-    function resolveAttractionKey(name: string, dayId: string): { compositeKey: string } | null {
+    // The resort-scoped key prevents cross-resort collisions; the leading
+    // type tag (Phase 9.3) prevents cross-type collisions (an attraction and
+    // a dining item can never merge into the same duplicate group even if
+    // their canonical keys happened to coincide).
+    function resolveAttractionKey(
+      name: string,
+      dayId: string,
+      type: PlannerItemType = "attraction"
+    ): { compositeKey: string } | null {
+      // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic
+      // 9pm") before canonical lookup, same as import/hydration type
+      // inference, so legacy stored names with a time baked into the name
+      // still resolve for cross-day duplicate identity. Only affects this
+      // lookup key — entry.name (displayed/stored) is untouched.
+      const lookupName = stripTrailingTimeForInference(name);
       const knownResort = dayResortMap.get(dayId);
       if (knownResort !== undefined) {
-        const k = tryResolve(name, knownResort);
-        return k ? { compositeKey: `${knownResort}:${k}` } : null;
+        const k = tryResolveByType(lookupName, knownResort, type);
+        return k ? { compositeKey: `${type}:${knownResort}:${k}` } : null;
       }
       // Day resort is ambiguous — try both independently
-      const dlrKey = tryResolve(name, "DLR");
-      const wdwKey = tryResolve(name, "WDW");
-      if (dlrKey && !wdwKey) return { compositeKey: `DLR:${dlrKey}` };
-      if (wdwKey && !dlrKey) return { compositeKey: `WDW:${wdwKey}` };
-      // Both match or neither — ambiguous without context, skip
+      const dlrKey = tryResolveByType(lookupName, "DLR", type);
+      const wdwKey = tryResolveByType(lookupName, "WDW", type);
+      // Dining/entertainment canonical keys are resort-agnostic, so both
+      // resorts agreeing on the same key is expected, not ambiguous. Use the
+      // neutral "ANY" resort tag (not a hardcoded DLR/WDW guess) since no
+      // day/resort context actually identifies which resort this is —
+      // parkLabelFromCompositeKey resolves the display label by checking
+      // both resorts' park maps. Attractions are excluded from this
+      // shortcut: a shared cross-resort attraction name matching both maps
+      // must stay ambiguous (prior behavior), not be forced to a resort.
+      if (type !== "attraction" && dlrKey && wdwKey && dlrKey === wdwKey) {
+        return { compositeKey: `${type}:ANY:${dlrKey}` };
+      }
+      if (dlrKey && !wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
+      if (wdwKey && !dlrKey) return { compositeKey: `${type}:WDW:${wdwKey}` };
+      // Both match (different keys) or neither — ambiguous without context, skip
       return null;
     }
 
 
-    // Derive a human-readable park label from a composite key ("DLR:canonical key").
-    // Falls back to resort string if the canonical key isn't in either ride map.
+    // Split a "type:resort:canonicalKey" composite key into its parts.
+    // resort is "ANY" when neither day context nor either resort map alone
+    // could identify a single resort (dining/entertainment same-key shortcut).
+    function splitCompositeKey(compositeKey: string): { type: PlannerItemType; resort: ResortId | "ANY"; canonicalKey: string } | null {
+      const firstColon = compositeKey.indexOf(":");
+      const secondColon = compositeKey.indexOf(":", firstColon + 1);
+      if (firstColon === -1 || secondColon === -1) return null;
+      return {
+        type: compositeKey.slice(0, firstColon) as PlannerItemType,
+        resort: compositeKey.slice(firstColon + 1, secondColon) as ResortId | "ANY",
+        canonicalKey: compositeKey.slice(secondColon + 1),
+      };
+    }
+
+    // Derive a human-readable park label from a composite key
+    // ("type:resort:canonical key"). Falls back to resort string if the
+    // canonical key isn't in the matching type's park map. When resort is
+    // "ANY" (no real resort context), checks both resorts' park maps since
+    // the canonical key only ever exists in one of them.
     function parkLabelFromCompositeKey(compositeKey: string): string {
-      const colon = compositeKey.indexOf(":");
-      if (colon === -1) return compositeKey;
-      const resort = compositeKey.slice(0, colon) as ResortId;
-      const canonicalKey = compositeKey.slice(colon + 1);
-      const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-      const parkId = rideMap.get(canonicalKey) as ParkId | undefined;
+      const parts = splitCompositeKey(compositeKey);
+      if (!parts) return compositeKey;
+      const { type, resort, canonicalKey } = parts;
+      const dlrMap = type === "dining" ? DINING_PARK_DLR : type === "entertainment" ? ENTERTAINMENT_PARK_DLR : RIDE_TO_PARK_DLR;
+      const wdwMap = type === "dining" ? DINING_PARK_WDW : type === "entertainment" ? ENTERTAINMENT_PARK_WDW : RIDE_TO_PARK_WDW;
+      if (resort === "ANY") {
+        const dlrParkId = dlrMap.get(canonicalKey) as ParkId | undefined;
+        const wdwParkId = wdwMap.get(canonicalKey) as ParkId | undefined;
+        if (dlrParkId && wdwParkId) {
+          // Both resorts' maps contain this key with no resort context to
+          // pick one — show both labels rather than defaulting to either.
+          const dlrLabel = PARK_LABELS[dlrParkId] ?? dlrParkId;
+          const wdwLabel = PARK_LABELS[wdwParkId] ?? wdwParkId;
+          return dlrLabel === wdwLabel ? dlrLabel : `${dlrLabel} / ${wdwLabel}`;
+        }
+        const parkId = dlrParkId ?? wdwParkId;
+        return parkId ? (PARK_LABELS[parkId] ?? canonicalKey) : canonicalKey;
+      }
+      const map = resort === "DLR" ? dlrMap : wdwMap;
+      const parkId = map.get(canonicalKey) as ParkId | undefined;
       return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
     }
 
@@ -1166,17 +1275,22 @@ export default function PlansPage() {
       return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : -1;
     }
 
-    // Phase 8.7 — extract canonical identity key (strip "resort:" prefix)
+    // Phase 8.7 — extract canonical identity key (strip "resort:" segment).
+    // Phase 9.3 — keeps the leading "type:" segment so identity keys from
+    // different planner item types can never collide (content-type isolation).
     function identityKeyFrom(compositeKey: string): string {
-      const c = compositeKey.indexOf(":");
-      return c >= 0 ? compositeKey.slice(c + 1) : compositeKey;
+      const firstColon = compositeKey.indexOf(":");
+      const secondColon = compositeKey.indexOf(":", firstColon + 1);
+      if (firstColon === -1) return compositeKey;
+      if (secondColon === -1) return compositeKey.slice(firstColon + 1);
+      return `${compositeKey.slice(0, firstColon)}:${compositeKey.slice(secondColon + 1)}`;
     }
 
     // Phase 8.7 — build duplicates grouped by canonical identity key (not compositeKey).
     // First pass: accumulate dayIds and first-seen times per compositeKey.
     // Second pass: merge compositeKey entries into identity groups for cross-resort grouping.
     function buildDuplicates(
-      entries: Array<{ name: string; dayId: string; timeLabel?: string }>
+      entries: Array<{ name: string; dayId: string; timeLabel?: string; type?: PlannerItemType }>
     ): CrossDayDuplicate[] {
       // timesByDay: all distinct parsed start times per dayId (Set<string> per day).
       // Using a Set per day deduplicates repeated identical entries on the same day
@@ -1185,7 +1299,7 @@ export default function PlansPage() {
       const byComposite = new Map<string, CompositeEntry>();
 
       for (const entry of entries) {
-        const resolved = resolveAttractionKey(entry.name, entry.dayId);
+        const resolved = resolveAttractionKey(entry.name, entry.dayId, entry.type ?? "attraction");
         if (!resolved) continue;
         if (!byComposite.has(resolved.compositeKey)) {
           byComposite.set(resolved.compositeKey, { name: entry.name, dayIds: new Set(), timesByDay: new Map() });
@@ -1245,6 +1359,9 @@ export default function PlansPage() {
             timeTodays.get(timePart)!.add(dayPart);
           }
           const hasTimeConflict = [...timeTodays.values()].some((days) => days.size >= 2);
+          // identityKey is "type:canonicalKey" (Phase 9.3) — extract the type tag for grouped display.
+          const typeColon = identityKey.indexOf(":");
+          const itemType = (typeColon === -1 ? "attraction" : identityKey.slice(0, typeColon)) as PlannerItemType;
           result.push({
             identityKey,
             displayName,
@@ -1253,6 +1370,7 @@ export default function PlansPage() {
               .sort((a, b) => a.parkLabel.localeCompare(b.parkLabel)),
             totalDays: allDays.size,
             hasTimeConflict,
+            itemType,
           });
         }
       }
@@ -1261,7 +1379,7 @@ export default function PlansPage() {
 
     // Cross-day duplicate checks — only when there are 2+ days
     const planDuplicates = runDuplicates
-      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel })))
+      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel, type: it.type })))
       : [];
 
     const llFlatEntries: Array<{ name: string; dayId: string; timeLabel?: string }> = [];
@@ -1289,7 +1407,10 @@ export default function PlansPage() {
     function fallbackIdentityKey(name: string): string | null {
       const dlrKey = resolveIdentityKey(name, ALIASES_DLR);
       const wdwKey = resolveIdentityKey(name, ALIASES_WDW);
-      return dlrKey === wdwKey ? dlrKey : null;
+      // Tagged with "attraction:" to match identityKeyFrom()'s output format
+      // (Lightning Lane items are attraction-only, so this tier stays scoped
+      // to that type).
+      return dlrKey === wdwKey ? `attraction:${dlrKey}` : null;
     }
 
     const lightningPlanConflicts: LightningPlanConflict[] = [];
@@ -1956,7 +2077,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed, selectedResort) }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferManualAddType(trimmed, activeDayId) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1977,7 +2098,7 @@ export default function PlansPage() {
                 type:
                   trimmed === editTarget.name
                     ? it.type
-                    : inferPlannerItemType(trimmed, selectedResort),
+                    : inferManualAddType(trimmed, editTarget.dayId, editTarget.id),
               }
             : it
         );
@@ -1987,29 +2108,96 @@ export default function PlansPage() {
     closeModal();
   }
 
+  // Phase 9.3 follow-up — resolve the resort used for manual add/edit type
+  // inference without trusting the live `selectedResort` state, which can
+  // be stale relative to the day actually being edited (e.g. adding a
+  // WDW-only item while the resort selector still shows DLR from a
+  // previous day). Precedence: target day's park override, then a pure
+  // inference from that day's existing items, then a both-resort check
+  // (trust either resort if it resolves to a known dining/entertainment
+  // match). selectedResort/selectedPark are never consulted here — on a
+  // genuinely Auto, contextless day, an unmatched custom name stays
+  // "attraction" and a name matching both resorts (e.g. Oga's Cantina)
+  // stays correctly classified without being pinned to whichever resort
+  // happens to be selected.
+  function inferManualAddType(name: string, dayId: string, excludeItemId?: string): PlannerItemType {
+    // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic 9pm")
+    // before lookup, same as import/hydration, so manual entries with a
+    // time typed into the name still resolve. Only affects this lookup;
+    // the caller still stores the original trimmed name.
+    const lookupName = stripTrailingTimeForInference(name);
+
+    const override = dayParks[dayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return inferPlannerItemType(lookupName, overrideResort);
+
+    // Exclude the item being edited from the context basis — otherwise an
+    // edit that changes a day's only item (and therefore its only resort
+    // signal) would infer from the stale pre-edit name instead of the rest
+    // of the day's actual items.
+    const dayItems = items.filter((it) => it.dayId === dayId && it.id !== excludeItemId);
+    const inferredResort = dayItems.length > 0 ? inferPlansContext(dayItems).resort : undefined;
+    if (inferredResort) return inferPlannerItemType(lookupName, inferredResort);
+
+    const dlrType = inferPlannerItemType(lookupName, "DLR");
+    const wdwType = inferPlannerItemType(lookupName, "WDW");
+    if (dlrType !== "attraction") return dlrType;
+    if (wdwType !== "attraction") return wdwType;
+
+    return "attraction";
+  }
+
+  // Phase 9.3 follow-up — resolve a day's real resort context for dining/
+  // entertainment display, same precedence (and same selectedResort
+  // exclusion) as inferManualAddType: explicit park override, else inferred
+  // from that day's actual items, else undefined ("no real context yet").
+  // Used only to decide whether a shared cross-resort name should display
+  // a single park or a combined/ambiguous location.
+  function resolveDayContextResort(dayId: string): ResortId | undefined {
+    const override = dayParks[dayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return overrideResort;
+    const dayItems = items.filter((it) => it.dayId === dayId);
+    return dayItems.length > 0 ? (inferPlansContext(dayItems).resort ?? undefined) : undefined;
+  }
+
   // Shared pipeline for both paste and file import.
   // Normalizes Unicode dashes per-line before calling parseLine.
   function processImportText(text: string) {
     const lines = text.split("\n");
-    const newItems: PlanItem[] = [];
+    const parsedLines: { name: string; timeLabel: string }[] = [];
     for (const line of lines) {
       const normalized = line.replace(/[\u2013\u2014]/g, "-");
       const parsed = parseLine(normalized);
       if (parsed) {
-        const importedName = stripEnDashSuffix(parsed.name);
-        newItems.push({
-          id: makeId(),
-          name: importedName,
-          timeLabel: parsed.timeLabel,
-          dayId: activeDayId,
-          type: inferPlannerItemType(importedName, selectedResort),
-        });
+        parsedLines.push({ name: stripEnDashSuffix(parsed.name), timeLabel: parsed.timeLabel });
       }
     }
-    if (newItems.length === 0) {
+    if (parsedLines.length === 0) {
       setImportError("No valid activities found. Check your text and try again.");
       return;
     }
+    // Fix 6 (Phase 8.1.1) / Phase 9.3 follow-up \u2014 run context inference
+    // BEFORE type inference, using placeholder items (name/timeLabel only \u2014
+    // type doesn't affect inferPlansContext), so resort-scoped dining/
+    // entertainment aliases classify against the resort this import
+    // resolves to instead of a possibly-stale selectedResort.
+    const placeholderItems: PlanItem[] = parsedLines.map((p) => ({
+      id: "",
+      name: p.name,
+      timeLabel: p.timeLabel,
+      dayId: activeDayId,
+      type: "attraction",
+    }));
+    const inferredResort = applyImportContextInference(placeholderItems);
+    const typeResort = inferredResort ?? selectedResort;
+    const newItems: PlanItem[] = parsedLines.map((p) => ({
+      id: makeId(),
+      name: p.name,
+      timeLabel: p.timeLabel,
+      dayId: activeDayId,
+      type: inferPlannerItemType(p.name, typeResort),
+    }));
     // Signal the items-watcher that this is a real import — allows inference
     // to bypass session context even when the user manually changed resort/park
     // after a Clear All. Must be set before setItems so the watcher sees it.
@@ -2018,13 +2206,6 @@ export default function PlansPage() {
       const next = [...prev, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
-    // Fix 6 (Phase 8.1.1) — Apply context inference directly from the newly
-    // imported items. The reactive items-watcher only fires when items go from
-    // 0 → N in this page lifecycle; when items already existed at mount the
-    // watcher guard blocks inference. Calling applyImportContextInference here
-    // ensures context is reliably updated after every text/CSV import, matching
-    // the behaviour already in place for JSON restore.
-    applyImportContextInference(newItems);
     setImportText("");
     setMode("view");
   }
@@ -2170,6 +2351,20 @@ export default function PlansPage() {
     initialItemCountRef.current = 0; // re-open import-inference eligibility
     try { localStorage.removeItem(resortKeyRef.current); } catch {}
     try { localStorage.removeItem(parkKeyRef.current); } catch {}
+    // Phase 9.3 follow-up — clearing the session-context storage keys above
+    // is not enough on its own: selectedResort/selectedPark are in-memory
+    // React state and were left untouched, so a day left with zero items
+    // (no override, nothing to infer from) kept showing whatever resort/park
+    // was active before Clear All. That stale state then made the next
+    // manual add of a shared cross-resort item (e.g. Oga's Cantina) look
+    // like it belonged to the old park. Reset to settings defaults, same
+    // fallback used at initial mount with no session context.
+    const { defaultResort, defaultPark } = getSettingsDefaults();
+    setSelectedResort(defaultResort);
+    const resetPark = RESORT_PARKS[defaultResort].find((p) => p === defaultPark)
+      ? defaultPark
+      : RESORT_PARKS[defaultResort][0];
+    setSelectedPark(resetPark as ParkId);
     // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
     // hidden day-scoped items survive into the next session (BUG C fix).
     const _lightningKey = buildNamespacedKey(_profileId, "lightning");
@@ -2268,9 +2463,9 @@ export default function PlansPage() {
   // Phase 8.2 — Day plan context inference helper.
   // Runs inference only when importing into an empty day (bootstrap behavior).
   // Marks contextInferredRef=true so the reactive items-watcher does not re-run.
-  function applyImportContextInference(inferenceBasis: PlanItem[]) {
+  function applyImportContextInference(inferenceBasis: PlanItem[]): ResortId | null {
     contextInferredRef.current = true;
-    if (inferenceBasis.length === 0) return;
+    if (inferenceBasis.length === 0) return null;
     const inferred = inferPlansContext(inferenceBasis);
     if (inferred.resort) {
       const resolvedPark = (inferred.park ?? RESORT_PARKS[inferred.resort][0]) as ParkId;
@@ -2278,7 +2473,9 @@ export default function PlansPage() {
       setSelectedPark(resolvedPark);
       try { localStorage.setItem(resortKeyRef.current, inferred.resort); } catch {}
       try { localStorage.setItem(parkKeyRef.current, resolvedPark); } catch {}
+      return inferred.resort;
     }
+    return null;
   }
 
   // Phase 8.2 — Apply pending day import items to the target day.
@@ -2290,11 +2487,43 @@ export default function PlansPage() {
     wasEmpty: boolean,
     targetDayId: string
   ) {
+    // Inference runs ONLY when importing into an empty day (bootstrap
+    // behavior), and must happen BEFORE type inference below — otherwise
+    // resort-scoped dining/entertainment aliases get classified against the
+    // stale selectedResort instead of the resort this import is bootstrapping
+    // into. Uses placeholder items (name/timeLabel only — type is irrelevant
+    // to inferPlansContext) so resort inference doesn't depend on the type
+    // classification it needs to inform.
+    const placeholderItems: PlanItem[] = importedItems.map((it) => ({
+      id: "",
+      name: it.name,
+      timeLabel: it.timeLabel,
+      dayId: targetDayId,
+      type: "attraction",
+    }));
+    // Resort used for type inference below. Bootstrap (empty day) runs the
+    // full side-effecting context inference (updates live selectedResort/
+    // park for the session); a confirmed import into a non-empty day must
+    // NOT depend on whatever selectedResort/day is live at confirmation time
+    // (Phase 9.3 follow-up — the user may have switched days/resort while the
+    // confirmation modal was open), so it only uses a pure resort lookup:
+    // the target day's park override, else a pure inference from the
+    // imported items themselves, else selectedResort as a last resort.
+    const targetDayParkResort = dayParks[targetDayId]
+      ? PARK_TO_RESORT[dayParks[targetDayId]]
+      : undefined;
+    const inferredResort = wasEmpty
+      ? applyImportContextInference(placeholderItems)
+      : (inferPlansContext(placeholderItems).resort ?? null);
+    const typeResort = targetDayParkResort ?? inferredResort ?? selectedResort;
+
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
     // name-based inference there (keeps dining recognition consistent across
-    // every import method); an explicit `type` from a JSON day-plan export
-    // is preserved as-is via coercePlannerItemType.
+    // every import method). An explicit dining/entertainment `type` from a
+    // JSON day-plan export is preserved as-is; a missing/unknown/"attraction"
+    // type is re-inferred from the name (Phase 9.3.1) so exports created
+    // before dining/entertainment support get upgraded automatically.
     const newItems: PlanItem[] = importedItems.map((it) => {
       const rawType = (it as { type?: unknown }).type;
       return {
@@ -2302,7 +2531,7 @@ export default function PlansPage() {
         name: it.name,
         timeLabel: it.timeLabel,
         dayId: targetDayId,
-        type: rawType !== undefined ? coercePlannerItemType(rawType) : inferPlannerItemType(it.name, selectedResort),
+        type: resolveImportedPlannerItemType(rawType, it.name, typeResort),
       };
     });
     setItems((prev) => {
@@ -2310,10 +2539,6 @@ export default function PlansPage() {
       const next = [...withoutTargetDay, ...newItems];
       return autoSortEnabled ? sortPlanItems(next) : next;
     });
-    // Inference runs ONLY when importing into an empty day (bootstrap behavior).
-    if (wasEmpty) {
-      applyImportContextInference(newItems);
-    }
     setPendingDayImportItems(null);
     setDayImportError("");
   }
@@ -2512,22 +2737,73 @@ export default function PlansPage() {
   function handleRestoreConfirm() {
     if (!restoreConfirmPayload) return;
     const { data } = restoreConfirmPayload;
-    const restoredPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
-      const r = it as Record<string, unknown>;
-      return {
-        id: r.id as string,
-        name: r.name as string,
-        timeLabel: r.timeLabel as string,
-        dayId: normalizeDayId(r.dayId),
-        type: coercePlannerItemType(r.type),
-      };
-    });
     const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
     // Phase 8.9 — always land on Day 1 after restore, regardless of what was
     // active in the backup or before the restore was triggered.
     const restoredActiveDayId = "day-1";
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
+
+    // Phase 8.5 — restore dayParks from backup when present; fall back to {} for
+    // older backups. Filter to valid park IDs that belong to restored days only.
+    // Computed before restoredPlans (Phase 9.3 follow-up) so type inference
+    // below can use each day's restored resort instead of selectedResort.
+    const restoredDayParks: Record<string, string> = {};
+    if (data.dayParks) {
+      for (const [k, v] of Object.entries(data.dayParks)) {
+        if (VALID_DAY_ID_RE.test(k) && v in PARK_TO_RESORT && restoredDaysSet.has(k)) {
+          restoredDayParks[k] = v;
+        }
+      }
+    }
+    const dayResortMap = new Map<string, ResortId>();
+    for (const [dayId, parkId] of Object.entries(restoredDayParks)) {
+      const resort = PARK_TO_RESORT[parkId];
+      if (resort) dayResortMap.set(dayId, resort);
+    }
+    // Fallback resort for days with no dayPark override — infer per day from
+    // that day's own restored items (pure, no side effects on session
+    // state), since a mixed-resort backup with no dayParks data would
+    // otherwise get one global resort guess applied to every day.
+    // Phase 9.3 follow-up — strip trailing time text (e.g. "Happily Ever
+    // After 9pm") from the lookup name before inference, same as
+    // import/hydration type resolution, so old backups without dayParks
+    // still resolve a day's resort correctly. Only affects this inference
+    // placeholder's name; restoredPlans below keeps the original name.
+    const placeholderPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
+      const r = it as Record<string, unknown>;
+      return {
+        id: r.id as string,
+        name: stripTrailingTimeForInference(r.name as string),
+        timeLabel: r.timeLabel as string,
+        dayId: normalizeDayId(r.dayId),
+        type: "attraction",
+      };
+    });
+    const placeholdersByDay = new Map<string, PlanItem[]>();
+    for (const p of placeholderPlans) {
+      const list = placeholdersByDay.get(p.dayId) ?? [];
+      list.push(p);
+      placeholdersByDay.set(p.dayId, list);
+    }
+    const inferredResortByDay = new Map<string, ResortId | null>();
+    for (const [dayId, dayItems] of placeholdersByDay) {
+      inferredResortByDay.set(dayId, inferPlansContext(dayItems).resort ?? null);
+    }
+
+    const restoredPlans: PlanItem[] = (data.plans as unknown[]).map((it) => {
+      const r = it as Record<string, unknown>;
+      const dayId = normalizeDayId(r.dayId);
+      const typeResort =
+        dayResortMap.get(dayId) ?? inferredResortByDay.get(dayId) ?? selectedResort;
+      return {
+        id: r.id as string,
+        name: r.name as string,
+        timeLabel: r.timeLabel as string,
+        dayId,
+        type: resolveImportedPlannerItemType(r.type, r.name as string, typeResort),
+      };
+    });
     const restoredDayMeta: Record<string, DayMeta> =
       data.dayMeta
         ? (Object.fromEntries(
@@ -2566,16 +2842,6 @@ export default function PlansPage() {
     setDeleteConfirmId(null);
     setPendingDayImportItems(null);
     setDayImportError("");
-    // Phase 8.5 — restore dayParks from backup when present; fall back to {} for
-    // older backups. Filter to valid park IDs that belong to restored days only.
-    const restoredDayParks: Record<string, string> = {};
-    if (data.dayParks) {
-      for (const [k, v] of Object.entries(data.dayParks)) {
-        if (VALID_DAY_ID_RE.test(k) && v in PARK_TO_RESORT && restoredDaysSet.has(k)) {
-          restoredDayParks[k] = v;
-        }
-      }
-    }
     setDayParks(restoredDayParks);
     saveDayParks(restoredDayParks, dayParksKeyRef.current);
   }
@@ -3343,6 +3609,13 @@ export default function PlansPage() {
         .cross-day-checks-group-label:first-of-type {
           margin-top: 0;
         }
+        .cross-day-checks-subgroup-label {
+          font-size: 0.7rem;
+          font-weight: 600;
+          color: #92400e;
+          margin: 0.3rem 0 0.1rem;
+          opacity: 0.8;
+        }
         .cross-day-checks-list {
           list-style: none;
           padding: 0;
@@ -3809,8 +4082,31 @@ export default function PlansPage() {
                         );
                       })()}
                       {item.type === "dining" && (() => {
-                        const diningCanonicalName = getDiningCanonicalName(item.name, selectedResort);
-                        const diningLocation = getDiningLocation(item.name, selectedResort);
+                        // Phase 9.3 follow-up — only resolve against selectedResort
+                        // once a day has real context (override or inferred). On a
+                        // genuinely Auto, contextless day, check both resorts and
+                        // show a combined location when the name exists in both
+                        // (e.g. Oga's Cantina) instead of pinning to whichever
+                        // resort the selector happens to be on.
+                        const dayResort = resolveDayContextResort(item.dayId);
+                        // Same cleaned-name lookup used for type inference, so a
+                        // stored name like "fantasmic 10pm" still resolves a
+                        // canonical/location display instead of falling through
+                        // as unknown.
+                        const diningLookupName = stripTrailingTimeForInference(item.name);
+                        let diningCanonicalName: string | undefined;
+                        let diningLocation: string | undefined;
+                        if (dayResort) {
+                          diningCanonicalName = getDiningCanonicalName(diningLookupName, dayResort);
+                          diningLocation = getDiningLocation(diningLookupName, dayResort);
+                        } else {
+                          const dlrLoc = getDiningLocation(diningLookupName, "DLR");
+                          const wdwLoc = getDiningLocation(diningLookupName, "WDW");
+                          diningCanonicalName =
+                            getDiningCanonicalName(diningLookupName, "DLR") ?? getDiningCanonicalName(diningLookupName, "WDW");
+                          diningLocation =
+                            dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
+                        }
                         if (!diningLocation) return null;
                         return (
                           <>
@@ -3822,10 +4118,32 @@ export default function PlansPage() {
                         );
                       })()}
                       {item.type === "entertainment" && (() => {
-                        const entertainmentCanonicalName = getEntertainmentCanonicalName(item.name, selectedResort);
-                        const entertainmentLocation = getEntertainmentLocation(item.name, selectedResort);
+                        // Same combined/ambiguous-location handling as dining above.
+                        const dayResort = resolveDayContextResort(item.dayId);
+                        // Same cleaned-name lookup used for type inference, so a
+                        // stored name like "fantasmic 10pm" still resolves a
+                        // canonical/location display instead of falling through
+                        // as unknown.
+                        const entertainmentLookupName = stripTrailingTimeForInference(item.name);
+                        let entertainmentCanonicalName: string | undefined;
+                        let entertainmentLocation: string | undefined;
+                        if (dayResort) {
+                          entertainmentCanonicalName = getEntertainmentCanonicalName(entertainmentLookupName, dayResort);
+                          entertainmentLocation = getEntertainmentLocation(entertainmentLookupName, dayResort);
+                        } else {
+                          const dlrLoc = getEntertainmentLocation(entertainmentLookupName, "DLR");
+                          const wdwLoc = getEntertainmentLocation(entertainmentLookupName, "WDW");
+                          entertainmentCanonicalName =
+                            getEntertainmentCanonicalName(entertainmentLookupName, "DLR") ??
+                            getEntertainmentCanonicalName(entertainmentLookupName, "WDW");
+                          entertainmentLocation =
+                            dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
+                        }
                         if (!entertainmentLocation) return null;
-                        const availabilityType = getEntertainmentAvailabilityType(item.name, selectedResort);
+                        const availabilityType = getEntertainmentAvailabilityType(
+                          entertainmentLookupName,
+                          dayResort ?? "DLR"
+                        );
                         const availabilityLabel =
                           availabilityType === "seasonal"
                             ? "Seasonal Event"
@@ -3941,37 +4259,51 @@ export default function PlansPage() {
             (c) => c.planDayId === activeDayId
           );
           if (activePlanDups.length === 0 && activeLightningDups.length === 0 && activeConflicts.length === 0) return null;
+          // Phase 9.3.3 — sub-group "Planned on multiple days" by planner item
+          // type so attractions/dining/entertainment duplicates are visually
+          // separated (mirrors Lightning's existing separate section). Render
+          // each sub-group only when it has entries.
+          const planDupsByType: Array<{ label: string; dups: CrossDayDuplicate[] }> = [
+            { label: "Attractions", dups: activePlanDups.filter((d) => d.itemType === "attraction") },
+            { label: "Dining", dups: activePlanDups.filter((d) => d.itemType === "dining") },
+            { label: "Entertainment", dups: activePlanDups.filter((d) => d.itemType === "entertainment") },
+          ].filter((g) => g.dups.length > 0);
           return (
             <div className="cross-day-checks">
               <div className="cross-day-checks-title">Cross-Day Checks</div>
               {activePlanDups.length > 0 && (
                 <>
                   <div className="cross-day-checks-group-label">Planned on multiple days</div>
-                  <ul className="cross-day-checks-list">
-                    {activePlanDups.map((dup) => (
-                      <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
-                        <span className="cross-day-checks-name">
-                          {dup.displayName}
-                          {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
-                        </span>
-                        {dup.parkSections.map((sec) => (
-                          <span key={sec.parkLabel} className="cross-day-checks-park-section">
-                            <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
-                            <span className="cross-day-checks-days">
-                              {sec.dayIds.map((d, i) => (
-                                <span key={d}>
-                                  {i > 0 && ", "}
-                                  {d === activeDayId
-                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
-                                    : dayDisplayLabel(d, dayMeta)}
-                                </span>
-                              ))}
+                  {planDupsByType.map((group) => (
+                    <div key={group.label}>
+                      <div className="cross-day-checks-subgroup-label">{group.label}</div>
+                      <ul className="cross-day-checks-list">
+                        {group.dups.map((dup) => (
+                          <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
+                            <span className="cross-day-checks-name">
+                              {dup.displayName}
+                              {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
                             </span>
-                          </span>
+                            {dup.parkSections.map((sec) => (
+                              <span key={sec.parkLabel} className="cross-day-checks-park-section">
+                                <span className="cross-day-checks-park-label">{sec.parkLabel}</span>
+                                <span className="cross-day-checks-days">
+                                  {sec.dayIds.map((d, i) => (
+                                    <span key={d}>
+                                      {i > 0 && ", "}
+                                      {d === activeDayId
+                                        ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
+                                        : dayDisplayLabel(d, dayMeta)}
+                                    </span>
+                                  ))}
+                                </span>
+                              </span>
+                            ))}
+                          </li>
                         ))}
-                      </li>
-                    ))}
-                  </ul>
+                      </ul>
+                    </div>
+                  ))}
                 </>
               )}
               {activeLightningDups.length > 0 && (

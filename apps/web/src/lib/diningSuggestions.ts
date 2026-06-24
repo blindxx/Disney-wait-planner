@@ -175,6 +175,15 @@ const DINING_KEYS: Set<string> = new Set(
   DINING_PLACES.map((p) => normalizeKey(p.name)),
 );
 
+// Phase 9.3.5 — per-resort canonical key sets, used to validate that a
+// resolved key actually has a location at the requested resort before
+// returning it (e.g. "Cinderella's Royal Table" exists only at WDW, so it
+// must not resolve when resort="DLR" is passed).
+const DINING_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
+  DLR: new Set(DINING_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
+  WDW: new Set(DINING_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
+};
+
 /**
  * Manual alias map for common guest-entered dining shorthand — mirrors the
  * ALIASES_DLR / ALIASES_WDW philosophy in plansMatching.ts (no fuzzy
@@ -226,35 +235,56 @@ function stripDiningSuffix(str: string): string {
  * Stage 2: whole-word containment (≥2 meaningful tokens, unambiguous) —
  * mirrors lookupWait()'s containment stage so minor wording differences
  * (e.g. dropped "Restaurant") still resolve.
+ *
+ * When resort is supplied, the resolved key is validated against
+ * DINING_KEYS_BY_RESORT before being returned — e.g. "Cinderella's Royal
+ * Table" must not resolve for resort="DLR" (and vice versa for DLR-only
+ * locations). Without a resort, validation is skipped, preserving existing
+ * unscoped/ambiguous lookup behavior.
+ *
  * Returns null when nothing resolves.
  */
-export function resolveDiningKey(name: string): string | null {
+export function resolveDiningKey(name: string, resort?: ResortId): string | null {
   const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
-  if (DINING_KEYS.has(key)) return key;
 
-  const aliasTarget = DINING_ALIASES[key];
-  if (aliasTarget && DINING_KEYS.has(aliasTarget)) return aliasTarget;
-
-  const tokens = tokenize(key);
-  if (tokens.length < 2) return null;
-  let hit: string | null = null;
-  let matchCount = 0;
-  for (const diningKey of DINING_KEYS) {
-    if (containsWholeWordSequence(diningKey, tokens)) {
-      matchCount++;
-      if (matchCount > 1) return null;
-      hit = diningKey;
+  let candidate: string | null = null;
+  if (DINING_KEYS.has(key)) {
+    candidate = key;
+  } else {
+    const aliasTarget = DINING_ALIASES[key];
+    if (aliasTarget && DINING_KEYS.has(aliasTarget)) {
+      candidate = aliasTarget;
+    } else {
+      const tokens = tokenize(key);
+      if (tokens.length >= 2) {
+        let hit: string | null = null;
+        let matchCount = 0;
+        for (const diningKey of DINING_KEYS) {
+          if (containsWholeWordSequence(diningKey, tokens)) {
+            matchCount++;
+            if (matchCount > 1) {
+              hit = null;
+              break;
+            }
+            hit = diningKey;
+          }
+        }
+        if (matchCount === 1) candidate = hit;
+      }
     }
   }
-  return matchCount === 1 ? hit : null;
+
+  if (!candidate) return null;
+  if (resort && !DINING_KEYS_BY_RESORT[resort].has(candidate)) return null;
+  return candidate;
 }
 
 /**
  * True when the given activity name matches a known dining location
  * (exact, alias, or containment — see resolveDiningKey).
  */
-export function isDiningName(name: string): boolean {
-  return resolveDiningKey(name) !== null;
+export function isDiningName(name: string, resort?: ResortId): boolean {
+  return resolveDiningKey(name, resort) !== null;
 }
 
 /**
@@ -268,7 +298,7 @@ export function isDiningName(name: string): boolean {
  */
 export function inferPlannerItemType(name: string, resort: ResortId): PlannerItemType {
   if (isEntertainmentName(name, resort)) return "entertainment";
-  return isDiningName(name) ? "dining" : "attraction";
+  return isDiningName(name, resort) ? "dining" : "attraction";
 }
 
 /**

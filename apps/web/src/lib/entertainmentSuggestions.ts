@@ -98,21 +98,38 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
 
   // ---- EPCOT ----
   { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
+  { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
 
   // ---- Hollywood Studios ----
   { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "Beauty and the Beast Live on Stage", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
 
   // ---- Animal Kingdom ----
   { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
   { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
+
+  // ---- Galaxy's Edge experiences (DLR + WDW) ----
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
+  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
 ];
 
 const ENTERTAINMENT_KEYS: Set<string> = new Set(
   ENTERTAINMENT_PLACES.map((p) => normalizeKey(p.name)),
 );
+
+// Phase 9.3.5 — per-resort canonical key sets, used to validate that a
+// resolved key actually has an offering at the requested resort before
+// returning it (e.g. "Happily Ever After" exists only at WDW, so it must
+// not resolve when resort="DLR" is passed).
+const ENTERTAINMENT_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
+  DLR: new Set(ENTERTAINMENT_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
+  WDW: new Set(ENTERTAINMENT_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
+};
 
 /**
  * Manual alias map for common guest-entered entertainment shorthand that is
@@ -153,6 +170,28 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "pixar nighttime spectacular": "together forever a pixar nighttime spectacular",
   "better together": "better together a pixar pals celebration",
   "pixar pals celebration": "better together a pixar pals celebration",
+  "luminous": "luminous the symphony of us",
+  "symphony of us": "luminous the symphony of us",
+  "luminous symphony": "luminous the symphony of us",
+  "wwoa": "wonderful world of animation",
+  "hollywood studios projection show": "wonderful world of animation",
+  "dhs projection show": "wonderful world of animation",
+  "savis": "savis workshop handbuilt lightsabers",
+  "savi's": "savis workshop handbuilt lightsabers",
+  "savi workshop": "savis workshop handbuilt lightsabers",
+  "savis workshop": "savis workshop handbuilt lightsabers",
+  "savi's workshop": "savis workshop handbuilt lightsabers",
+  "savi lightsaber": "savis workshop handbuilt lightsabers",
+  "lightsaber build": "savis workshop handbuilt lightsabers",
+  "build lightsaber": "savis workshop handbuilt lightsabers",
+  "handbuilt lightsabers": "savis workshop handbuilt lightsabers",
+  "lightsaber experience": "savis workshop handbuilt lightsabers",
+  "savi experience": "savis workshop handbuilt lightsabers",
+  "build a droid": "droid depot",
+  "droid build": "droid depot",
+  "build droid": "droid depot",
+  "custom droid": "droid depot",
+  "astromech droid": "droid depot",
 };
 
 /**
@@ -172,6 +211,7 @@ const ENTERTAINMENT_ALIASES_BY_RESORT: Record<ResortId, Record<string, string>> 
     "halloween parade": "mickeys boo to you halloween parade",
     "halloween fireworks": "disneys not so spooky spectacular",
     "christmas fireworks": "minnies wonderful christmastime fireworks",
+    "projection show": "wonderful world of animation",
   },
 };
 
@@ -195,6 +235,13 @@ function stripEntertainmentSuffix(str: string): string {
  * Stage 3: alias lookup — resort-unambiguous aliases first, then (only when
  *          resort is supplied) the resort-scoped alias overrides.
  *
+ * When resort is supplied, the resolved key is validated against
+ * ENTERTAINMENT_KEYS_BY_RESORT before being returned — e.g. "Happily Ever
+ * After" or "Cinderella's Royal Table"-style WDW-only names must not resolve
+ * for resort="DLR" (and vice versa). Without a resort, validation is skipped
+ * and any resort-unambiguous match resolves, preserving existing ambiguous
+ * lookup behavior.
+ *
  * Deliberately no whole-word containment stage (unlike resolveDiningKey) —
  * see the module doc comment for why: it would let attraction shorthand
  * like "Indiana Jones" or "Finding Nemo" resolve as entertainment.
@@ -202,17 +249,23 @@ function stripEntertainmentSuffix(str: string): string {
  */
 export function resolveEntertainmentKey(name: string, resort?: ResortId): string | null {
   const key = normalizeKey(stripAnnotations(stripEntertainmentSuffix(name)));
-  if (ENTERTAINMENT_KEYS.has(key)) return key;
 
-  const aliasTarget = ENTERTAINMENT_ALIASES[key];
-  if (aliasTarget && ENTERTAINMENT_KEYS.has(aliasTarget)) return aliasTarget;
-
-  if (resort) {
-    const resortAliasTarget = ENTERTAINMENT_ALIASES_BY_RESORT[resort][key];
-    if (resortAliasTarget && ENTERTAINMENT_KEYS.has(resortAliasTarget)) return resortAliasTarget;
+  let candidate: string | null = null;
+  if (ENTERTAINMENT_KEYS.has(key)) {
+    candidate = key;
+  } else {
+    const aliasTarget = ENTERTAINMENT_ALIASES[key];
+    if (aliasTarget && ENTERTAINMENT_KEYS.has(aliasTarget)) {
+      candidate = aliasTarget;
+    } else if (resort) {
+      const resortAliasTarget = ENTERTAINMENT_ALIASES_BY_RESORT[resort][key];
+      if (resortAliasTarget && ENTERTAINMENT_KEYS.has(resortAliasTarget)) candidate = resortAliasTarget;
+    }
   }
 
-  return null;
+  if (!candidate) return null;
+  if (resort && !ENTERTAINMENT_KEYS_BY_RESORT[resort].has(candidate)) return null;
+  return candidate;
 }
 
 /**
