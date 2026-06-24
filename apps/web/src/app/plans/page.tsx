@@ -1194,14 +1194,20 @@ export default function PlansPage() {
       dayId: string,
       type: PlannerItemType = "attraction"
     ): { compositeKey: string } | null {
+      // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic
+      // 9pm") before canonical lookup, same as import/hydration type
+      // inference, so legacy stored names with a time baked into the name
+      // still resolve for cross-day duplicate identity. Only affects this
+      // lookup key — entry.name (displayed/stored) is untouched.
+      const lookupName = stripTrailingTimeForInference(name);
       const knownResort = dayResortMap.get(dayId);
       if (knownResort !== undefined) {
-        const k = tryResolveByType(name, knownResort, type);
+        const k = tryResolveByType(lookupName, knownResort, type);
         return k ? { compositeKey: `${type}:${knownResort}:${k}` } : null;
       }
       // Day resort is ambiguous — try both independently
-      const dlrKey = tryResolveByType(name, "DLR", type);
-      const wdwKey = tryResolveByType(name, "WDW", type);
+      const dlrKey = tryResolveByType(lookupName, "DLR", type);
+      const wdwKey = tryResolveByType(lookupName, "WDW", type);
       // Dining/entertainment canonical keys are resort-agnostic, so both
       // resorts agreeing on the same key is expected, not ambiguous. Use the
       // neutral "ANY" resort tag (not a hardcoded DLR/WDW guess) since no
@@ -2071,7 +2077,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferPlannerItemType(trimmed, selectedResort) }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferManualAddType(trimmed, activeDayId) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -2092,7 +2098,7 @@ export default function PlansPage() {
                 type:
                   trimmed === editTarget.name
                     ? it.type
-                    : inferPlannerItemType(trimmed, selectedResort),
+                    : inferManualAddType(trimmed, editTarget.dayId),
               }
             : it
         );
@@ -2100,6 +2106,32 @@ export default function PlansPage() {
       });
     }
     closeModal();
+  }
+
+  // Phase 9.3 follow-up — resolve the resort used for manual add/edit type
+  // inference without trusting the live `selectedResort` state, which can
+  // be stale relative to the day actually being edited (e.g. adding a
+  // WDW-only item while the resort selector still shows DLR from a
+  // previous day). Precedence: target day's park override, then a pure
+  // inference from that day's existing items, then a both-resort check
+  // (trust either resort if it resolves to a known dining/entertainment
+  // match), then selectedResort as a last resort. Unknown custom names
+  // fall through to "attraction" regardless of resort.
+  function inferManualAddType(name: string, dayId: string): PlannerItemType {
+    const override = dayParks[dayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return inferPlannerItemType(name, overrideResort);
+
+    const dayItems = items.filter((it) => it.dayId === dayId);
+    const inferredResort = dayItems.length > 0 ? inferPlansContext(dayItems).resort : undefined;
+    if (inferredResort) return inferPlannerItemType(name, inferredResort);
+
+    const dlrType = inferPlannerItemType(name, "DLR");
+    const wdwType = inferPlannerItemType(name, "WDW");
+    if (dlrType !== "attraction") return dlrType;
+    if (wdwType !== "attraction") return wdwType;
+
+    return inferPlannerItemType(name, selectedResort);
   }
 
   // Shared pipeline for both paste and file import.
