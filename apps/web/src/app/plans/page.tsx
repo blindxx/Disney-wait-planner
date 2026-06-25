@@ -42,6 +42,7 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
+import { computeCrossDayChecks } from "@/lib/crossDayChecks";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
@@ -1062,55 +1063,8 @@ export default function PlansPage() {
   // same attraction. Lightning items are read from localStorage since the plans
   // page does not hold lightning state; re-reads whenever `items` changes.
   const crossDayChecks = useMemo(() => {
-    const empty = { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[], lightningPlanConflicts: [] as LightningPlanConflict[] };
-    if (!initialized) return empty;
-    // Cross-day duplicate checks require at least two days; lightning/plan conflicts
-    // run on any initialized state including single-day itineraries.
-    const runDuplicates = days.length >= 2;
+    if (!initialized) return { planDuplicates: [] as CrossDayDuplicate[], lightningDuplicates: [] as CrossDayDuplicate[], lightningPlanConflicts: [] as LightningPlanConflict[] };
 
-    // Run the full 3-stage pipeline (mirrors lookupWait) against one resort's
-    // ride-park map.  Returns the canonical ride-map key on success, null otherwise.
-    // Defined first so the dayResortMap loop can use it for the consistency check.
-    function tryResolve(name: string, resort: ResortId): string | null {
-      const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
-      const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-      // Stage 1 + 3: exact / alias
-      // Deliberately attraction-only (rideMap never contains dining data) so
-      // dining items can never resolve here and contaminate duplicate /
-      // identity matching below.
-      const key = resolveIdentityKey(name, aliases);
-      if (rideMap.has(key)) return key;
-      // Stage 2: whole-word containment (≥2 tokens, unambiguous)
-      const tokens = tokenize(key);
-      if (tokens.length < 2) return null;
-      let hit: string | null = null;
-      for (const attrKey of rideMap.keys()) {
-        if (containsWholeWordSequence(attrKey, tokens)) {
-          if (hit !== null) return null; // ambiguous
-          hit = attrKey;
-        }
-      }
-      return hit;
-    }
-
-    // Phase 9.3 — type-scoped canonical key resolution. Dispatches to the
-    // dining/entertainment resolvers (already used elsewhere for park
-    // inference) for non-attraction items, reusing tryResolve unchanged for
-    // attractions. `resort` is passed through for dining/entertainment too
-    // so a resolved key is validated as actually belonging to that resort
-    // (see DINING_KEYS_BY_RESORT / ENTERTAINMENT_KEYS_BY_RESORT) — a
-    // WDW-only name like Cinderella's Royal Table must not resolve for DLR.
-    function tryResolveByType(name: string, resort: ResortId, type: PlannerItemType): string | null {
-      if (type === "dining") return resolveDiningKey(name, resort);
-      if (type === "entertainment") return resolveEntertainmentKey(name, resort);
-      return tryResolve(name, resort);
-    }
-
-    // Read Lightning items from localStorage once so they can supplement resort
-    // inference for Lightning-only days (no plan items) below.
-    // Grouped by dayId; only valid current days are kept (same filter as the
-    // duplicate scan). Errors silently produce an empty map.
-    // Phase 8.7 — also capture startTime/endTime for lightning/plan conflict detection.
     type LLItem = { name: string; startTime: string; endTime: string };
     const llItemsByDay = new Map<string, Array<LLItem>>();
     const _validDayIdsForInference = new Set(days);
@@ -1128,357 +1082,7 @@ export default function PlansPage() {
       }
     } catch { /* localStorage errors — leave llItemsByDay empty */ }
 
-    // Apply the two inference steps (unambiguous scoring + park-consistency) to
-    // a list of named items and return a ResortId or undefined.
-    function inferResortFromItems(namedItems: { name: string }[]): ResortId | undefined {
-      if (namedItems.length === 0) return undefined;
-      // Step A: inferPlansContext (unambiguous + frequency scoring)
-      const inf = inferPlansContext(
-        namedItems.map((it) => ({ id: "", name: it.name, timeLabel: "" }))
-      );
-      if (inf.resort) return inf.resort;
-      // Step B: park-consistency tiebreaker
-      const dlrP = new Set<string>();
-      const wdwP = new Set<string>();
-      for (const it of namedItems) {
-        const dk = tryResolve(it.name, "DLR");
-        if (dk) { const p = RIDE_TO_PARK_DLR.get(dk); if (p) dlrP.add(p); }
-        const wk = tryResolve(it.name, "WDW");
-        if (wk) { const p = RIDE_TO_PARK_WDW.get(wk); if (p) wdwP.add(p); }
-      }
-      if (dlrP.size === 1 && wdwP.size !== 1) return "DLR";
-      if (wdwP.size === 1 && dlrP.size !== 1) return "WDW";
-      return undefined;
-    }
-
-    // Derive the resort for each day using only that day's own context.
-    // Deliberately avoids selectedResort/activeDayId so results are stable
-    // regardless of which day is currently active.
-    //
-    //   1. Explicit dayParks override → derive resort from its park.
-    //   2+3. Plan items: inferPlansContext (unambiguous scoring) then
-    //        park-consistency tiebreaker.
-    //   4+5. Lightning items (same two steps) — covers Lightning-only days that
-    //        have no plan entries.
-    //   6. Truly ambiguous → leave unset; resolveAttractionKey skips those items.
-    const dayResortMap = new Map<string, ResortId>();
-    for (const dayId of days) {
-      const override = dayParks[dayId];
-      if (override && override in PARK_TO_RESORT) {
-        dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
-        continue;
-      }
-
-      // Steps 2+3: plan items
-      const planResort = inferResortFromItems(items.filter((it) => it.dayId === dayId));
-      if (planResort) { dayResortMap.set(dayId, planResort); continue; }
-
-      // Steps 4+5: Lightning items (fallback for Lightning-only days)
-      const llResort = inferResortFromItems(llItemsByDay.get(dayId) ?? []);
-      if (llResort) { dayResortMap.set(dayId, llResort); continue; }
-
-      // Step 6: truly ambiguous — leave unset
-    }
-
-    // Resolve a name to a stable composite key (type:resort:canonicalKey).
-    // When the day's resort is known, only that resort's map is tried.
-    // When the resort is still unresolvable (unset after all steps above),
-    // both maps are tried: exactly one match → use that resort,
-    // both match or neither → skip as ambiguous.
-    // The resort-scoped key prevents cross-resort collisions; the leading
-    // type tag (Phase 9.3) prevents cross-type collisions (an attraction and
-    // a dining item can never merge into the same duplicate group even if
-    // their canonical keys happened to coincide).
-    function resolveAttractionKey(
-      name: string,
-      dayId: string,
-      type: PlannerItemType = "attraction"
-    ): { compositeKey: string } | null {
-      // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic
-      // 9pm") before canonical lookup, same as import/hydration type
-      // inference, so legacy stored names with a time baked into the name
-      // still resolve for cross-day duplicate identity. Only affects this
-      // lookup key — entry.name (displayed/stored) is untouched.
-      const lookupName = stripTrailingTimeForInference(name);
-      const knownResort = dayResortMap.get(dayId);
-      if (knownResort !== undefined) {
-        const k = tryResolveByType(lookupName, knownResort, type);
-        return k ? { compositeKey: `${type}:${knownResort}:${k}` } : null;
-      }
-      // Day resort is ambiguous — try both independently
-      const dlrKey = tryResolveByType(lookupName, "DLR", type);
-      const wdwKey = tryResolveByType(lookupName, "WDW", type);
-      // Dining/entertainment canonical keys are resort-agnostic, so both
-      // resorts agreeing on the same key is expected, not ambiguous. Use the
-      // neutral "ANY" resort tag (not a hardcoded DLR/WDW guess) since no
-      // day/resort context actually identifies which resort this is —
-      // parkLabelFromCompositeKey resolves the display label by checking
-      // both resorts' park maps. Attractions are excluded from this
-      // shortcut: a shared cross-resort attraction name matching both maps
-      // must stay ambiguous (prior behavior), not be forced to a resort.
-      if (type !== "attraction" && dlrKey && wdwKey && dlrKey === wdwKey) {
-        return { compositeKey: `${type}:ANY:${dlrKey}` };
-      }
-      if (dlrKey && !wdwKey) return { compositeKey: `${type}:DLR:${dlrKey}` };
-      if (wdwKey && !dlrKey) return { compositeKey: `${type}:WDW:${wdwKey}` };
-      // Both match (different keys) or neither — ambiguous without context, skip
-      return null;
-    }
-
-
-    // Split a "type:resort:canonicalKey" composite key into its parts.
-    // resort is "ANY" when neither day context nor either resort map alone
-    // could identify a single resort (dining/entertainment same-key shortcut).
-    function splitCompositeKey(compositeKey: string): { type: PlannerItemType; resort: ResortId | "ANY"; canonicalKey: string } | null {
-      const firstColon = compositeKey.indexOf(":");
-      const secondColon = compositeKey.indexOf(":", firstColon + 1);
-      if (firstColon === -1 || secondColon === -1) return null;
-      return {
-        type: compositeKey.slice(0, firstColon) as PlannerItemType,
-        resort: compositeKey.slice(firstColon + 1, secondColon) as ResortId | "ANY",
-        canonicalKey: compositeKey.slice(secondColon + 1),
-      };
-    }
-
-    // Derive a human-readable park label from a composite key
-    // ("type:resort:canonical key"). Falls back to resort string if the
-    // canonical key isn't in the matching type's park map. When resort is
-    // "ANY" (no real resort context), checks both resorts' park maps since
-    // the canonical key only ever exists in one of them.
-    function parkLabelFromCompositeKey(compositeKey: string): string {
-      const parts = splitCompositeKey(compositeKey);
-      if (!parts) return compositeKey;
-      const { type, resort, canonicalKey } = parts;
-      const dlrMap = type === "dining" ? DINING_PARK_DLR : type === "entertainment" ? ENTERTAINMENT_PARK_DLR : RIDE_TO_PARK_DLR;
-      const wdwMap = type === "dining" ? DINING_PARK_WDW : type === "entertainment" ? ENTERTAINMENT_PARK_WDW : RIDE_TO_PARK_WDW;
-      if (resort === "ANY") {
-        const dlrParkId = dlrMap.get(canonicalKey) as ParkId | undefined;
-        const wdwParkId = wdwMap.get(canonicalKey) as ParkId | undefined;
-        if (dlrParkId && wdwParkId) {
-          // Both resorts' maps contain this key with no resort context to
-          // pick one — show both labels rather than defaulting to either.
-          const dlrLabel = PARK_LABELS[dlrParkId] ?? dlrParkId;
-          const wdwLabel = PARK_LABELS[wdwParkId] ?? wdwParkId;
-          return dlrLabel === wdwLabel ? dlrLabel : `${dlrLabel} / ${wdwLabel}`;
-        }
-        const parkId = dlrParkId ?? wdwParkId;
-        return parkId ? (PARK_LABELS[parkId] ?? canonicalKey) : canonicalKey;
-      }
-      const map = resort === "DLR" ? dlrMap : wdwMap;
-      const parkId = map.get(canonicalKey) as ParkId | undefined;
-      return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
-    }
-
-    // Phase 8.7 — local toMin helper (mirrors timeConflicts.ts, scoped here)
-    function toMin(t: string): number {
-      const m = t.match(/^(\d{1,2}):(\d{2})$/);
-      return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : -1;
-    }
-
-    // Phase 8.7 — extract canonical identity key (strip "resort:" segment).
-    // Phase 9.3 — keeps the leading "type:" segment so identity keys from
-    // different planner item types can never collide (content-type isolation).
-    function identityKeyFrom(compositeKey: string): string {
-      const firstColon = compositeKey.indexOf(":");
-      const secondColon = compositeKey.indexOf(":", firstColon + 1);
-      if (firstColon === -1) return compositeKey;
-      if (secondColon === -1) return compositeKey.slice(firstColon + 1);
-      return `${compositeKey.slice(0, firstColon)}:${compositeKey.slice(secondColon + 1)}`;
-    }
-
-    // Phase 8.7 — build duplicates grouped by canonical identity key (not compositeKey).
-    // First pass: accumulate dayIds and first-seen times per compositeKey.
-    // Second pass: merge compositeKey entries into identity groups for cross-resort grouping.
-    function buildDuplicates(
-      entries: Array<{ name: string; dayId: string; timeLabel?: string; type?: PlannerItemType }>
-    ): CrossDayDuplicate[] {
-      // timesByDay: all distinct parsed start times per dayId (Set<string> per day).
-      // Using a Set per day deduplicates repeated identical entries on the same day
-      // and allows collecting all times before cross-day comparison.
-      type CompositeEntry = { name: string; dayIds: Set<string>; timesByDay: Map<string, Set<string>> };
-      const byComposite = new Map<string, CompositeEntry>();
-
-      for (const entry of entries) {
-        const resolved = resolveAttractionKey(entry.name, entry.dayId, entry.type ?? "attraction");
-        if (!resolved) continue;
-        if (!byComposite.has(resolved.compositeKey)) {
-          byComposite.set(resolved.compositeKey, { name: entry.name, dayIds: new Set(), timesByDay: new Map() });
-        }
-        const ce = byComposite.get(resolved.compositeKey)!;
-        ce.dayIds.add(entry.dayId);
-        if (entry.timeLabel) {
-          const rm = entry.timeLabel.match(/^(\d{1,2}:\d{2})/);
-          if (rm) {
-            if (!ce.timesByDay.has(entry.dayId)) ce.timesByDay.set(entry.dayId, new Set());
-            ce.timesByDay.get(entry.dayId)!.add(rm[1]);
-          }
-        }
-      }
-
-      // Second pass: group by identity key
-      type IdentityEntry = { displayName: string; sections: Map<string, CompositeEntry> };
-      const byIdentity = new Map<string, IdentityEntry>();
-      for (const [compositeKey, ce] of byComposite) {
-        const iKey = identityKeyFrom(compositeKey);
-        if (!byIdentity.has(iKey)) {
-          byIdentity.set(iKey, { displayName: ce.name, sections: new Map() });
-        }
-        byIdentity.get(iKey)!.sections.set(compositeKey, ce);
-      }
-
-      const result: CrossDayDuplicate[] = [];
-      for (const [identityKey, { displayName, sections }] of byIdentity) {
-        const allDays = new Set<string>();
-        const parkSections: ParkSection[] = [];
-        const allTimes: string[] = [];
-
-        for (const [compositeKey, ce] of sections) {
-          for (const d of ce.dayIds) allDays.add(d);
-          // Collect (dayId, time) pairs; one entry per distinct (day, time) combination.
-          // The same time on the same day counts once regardless of how many items share it.
-          for (const [dayId, times] of ce.timesByDay) {
-            for (const t of times) allTimes.push(`${dayId}:${t}`);
-          }
-          parkSections.push({
-            parkLabel: parkLabelFromCompositeKey(compositeKey),
-            dayIds: [...ce.dayIds].sort(daySort),
-          });
-        }
-
-        if (allDays.size > 1) {
-          // Time conflict: the same start time appears on 2+ distinct days for this attraction.
-          // allTimes entries are "dayId:time" — extract just the time parts and check whether
-          // any time value occurs for more than one distinct day.
-          const timeTodays = new Map<string, Set<string>>();
-          for (const token of allTimes) {
-            // token format: "day-N:H:MM" — dayId contains no colon; split at first colon
-            const firstColon = token.indexOf(":");
-            const dayPart = token.slice(0, firstColon);   // "day-1"
-            const timePart = token.slice(firstColon + 1); // "10:00"
-            if (!timeTodays.has(timePart)) timeTodays.set(timePart, new Set());
-            timeTodays.get(timePart)!.add(dayPart);
-          }
-          const hasTimeConflict = [...timeTodays.values()].some((days) => days.size >= 2);
-          // identityKey is "type:canonicalKey" (Phase 9.3) — extract the type tag for grouped display.
-          const typeColon = identityKey.indexOf(":");
-          const itemType = (typeColon === -1 ? "attraction" : identityKey.slice(0, typeColon)) as PlannerItemType;
-          result.push({
-            identityKey,
-            displayName,
-            parkSections: parkSections
-              .filter((s) => s.dayIds.length > 0)
-              .sort((a, b) => a.parkLabel.localeCompare(b.parkLabel)),
-            totalDays: allDays.size,
-            hasTimeConflict,
-            itemType,
-          });
-        }
-      }
-      return result;
-    }
-
-    // Cross-day duplicate checks — only when there are 2+ days
-    const planDuplicates = runDuplicates
-      ? buildDuplicates(items.map((it) => ({ name: it.name, dayId: it.dayId, timeLabel: it.timeLabel, type: it.type })))
-      : [];
-
-    const llFlatEntries: Array<{ name: string; dayId: string; timeLabel?: string }> = [];
-    for (const [llDayId, llDayItems] of llItemsByDay) {
-      for (const it of llDayItems) {
-        llFlatEntries.push({
-          name: it.name,
-          dayId: llDayId,
-          timeLabel: it.startTime ? (it.endTime ? `${it.startTime}-${it.endTime}` : it.startTime) : undefined,
-        });
-      }
-    }
-    const lightningDuplicates = runDuplicates ? buildDuplicates(llFlatEntries) : [];
-
-    // Phase 8.7 — Lightning vs Plan conflict detection (informational, same day only).
-    // Detects when a plan item and a lightning item refer to the same attraction on the
-    // same day with overlapping or identical times — warns about potential double-booking.
-    //
-    // Identity matching uses two tiers:
-    //   1. Strict: resolveAttractionKey (resort-scoped composite key)
-    //   2. Same-day fallback: used only here when strict returns null (attraction is
-    //      ambiguous across DLR/WDW maps). Computes resolveIdentityKey under both alias
-    //      maps and allows a match only when both maps agree on the same normalized key,
-    //      preventing resort-divergent aliases (e.g. Soarin') from creating false positives.
-    function fallbackIdentityKey(name: string): string | null {
-      const dlrKey = resolveIdentityKey(name, ALIASES_DLR);
-      const wdwKey = resolveIdentityKey(name, ALIASES_WDW);
-      // Tagged with "attraction:" to match identityKeyFrom()'s output format
-      // (Lightning Lane items are attraction-only, so this tier stays scoped
-      // to that type).
-      return dlrKey === wdwKey ? `attraction:${dlrKey}` : null;
-    }
-
-    const lightningPlanConflicts: LightningPlanConflict[] = [];
-    const seenConflicts = new Set<string>();
-
-    for (const item of items) {
-      if (!item.timeLabel) continue;
-      // Parse plan time
-      let planStartMin = -1;
-      let planEndMin: number | null = null;
-      const rangeM = item.timeLabel.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
-      if (rangeM) {
-        planStartMin = toMin(rangeM[1]);
-        planEndMin = toMin(rangeM[2]);
-      } else if (/^\d{1,2}:\d{2}$/.test(item.timeLabel)) {
-        planStartMin = toMin(item.timeLabel);
-      }
-      if (planStartMin < 0) continue;
-
-      const planResolved = resolveAttractionKey(item.name, item.dayId);
-      const planIdentity = planResolved
-        ? identityKeyFrom(planResolved.compositeKey)
-        : fallbackIdentityKey(item.name);
-      if (!planIdentity) continue;
-
-      for (const llIt of llItemsByDay.get(item.dayId) ?? []) {
-        if (!llIt.startTime) continue;
-        const llResolved = resolveAttractionKey(llIt.name, item.dayId);
-        const llIdentity = llResolved
-          ? identityKeyFrom(llResolved.compositeKey)
-          : fallbackIdentityKey(llIt.name);
-        if (!llIdentity || llIdentity !== planIdentity) continue;
-
-        const llStartMin = toMin(llIt.startTime);
-        if (llStartMin < 0) continue;
-        const llEndMin = llIt.endTime ? toMin(llIt.endTime) : null;
-
-        // Overlap test
-        let hasOverlap = false;
-        if (planEndMin !== null && planEndMin > planStartMin && llEndMin !== null && llEndMin > llStartMin) {
-          hasOverlap = planStartMin < llEndMin && llStartMin < planEndMin;
-        } else if (planEndMin === null && llEndMin !== null && llEndMin > llStartMin) {
-          hasOverlap = planStartMin >= llStartMin && planStartMin < llEndMin;
-        } else if (planEndMin !== null && planEndMin > planStartMin && llEndMin === null) {
-          hasOverlap = llStartMin >= planStartMin && llStartMin < planEndMin;
-        } else {
-          hasOverlap = planStartMin === llStartMin;
-        }
-        if (!hasOverlap) continue;
-
-        const conflictKey = `${item.id}:${llIt.name}:${item.dayId}`;
-        if (seenConflicts.has(conflictKey)) continue;
-        seenConflicts.add(conflictKey);
-
-        const llTimeLabel = llIt.endTime
-          ? `${formatTimeLabel(llIt.startTime)}–${formatTimeLabel(llIt.endTime)}`
-          : formatTimeLabel(llIt.startTime);
-        lightningPlanConflicts.push({
-          id: conflictKey,
-          attractionName: item.name,
-          planDayId: item.dayId,
-          planTime: item.timeLabel,
-          lightningTime: llTimeLabel,
-        });
-      }
-    }
-
-    return { planDuplicates, lightningDuplicates, lightningPlanConflicts };
+    return computeCrossDayChecks(items, llItemsByDay, days, dayParks);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized, items, days, dayParks, lightningVersion]);
 
@@ -3602,7 +3206,7 @@ export default function PlansPage() {
           font-size: 0.75rem;
           font-weight: 600;
           color: #78350f;
-          margin: 0.6rem 0 0.2rem;
+          margin: 0.9rem 0 0.2rem;
           text-transform: uppercase;
           letter-spacing: 0.04em;
         }
@@ -3610,11 +3214,11 @@ export default function PlansPage() {
           margin-top: 0;
         }
         .cross-day-checks-subgroup-label {
-          font-size: 0.7rem;
+          font-size: 0.8rem;
           font-weight: 600;
-          color: #92400e;
-          margin: 0.3rem 0 0.1rem;
-          opacity: 0.8;
+          color: #78350f;
+          margin: 0.6rem 0 0.1rem;
+          opacity: 0.85;
         }
         .cross-day-checks-list {
           list-style: none;
@@ -4282,7 +3886,7 @@ export default function PlansPage() {
                           <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
                             <span className="cross-day-checks-name">
                               {dup.displayName}
-                              {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
+                              {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · Same time</span>}
                             </span>
                             {dup.parkSections.map((sec) => (
                               <span key={sec.parkLabel} className="cross-day-checks-park-section">
@@ -4335,7 +3939,7 @@ export default function PlansPage() {
               )}
               {activeConflicts.length > 0 && (
                 <>
-                  <div className="cross-day-checks-group-label">Lightning conflicts</div>
+                  <div className="cross-day-checks-group-label">Lightning Lane conflicts</div>
                   <ul className="cross-day-checks-list">
                     {activeConflicts.map((c) => (
                       <li key={c.id} className="cross-day-checks-item">
