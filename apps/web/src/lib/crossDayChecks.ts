@@ -4,6 +4,7 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { formatTimeLabel } from "@/lib/timeUtils";
+import { detectTimeConflicts } from "@/lib/timeConflicts";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -244,11 +245,6 @@ export function computeCrossDayChecks(
     return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
   }
 
-  function toMin(t: string): number {
-    const m = t.match(/^(\d{1,2}):(\d{2})$/);
-    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : -1;
-  }
-
   function identityKeyFrom(compositeKey: string): string {
     const firstColon = compositeKey.indexOf(":");
     const secondColon = compositeKey.indexOf(":", firstColon + 1);
@@ -361,16 +357,16 @@ export function computeCrossDayChecks(
 
   for (const item of items) {
     if (!item.timeLabel) continue;
-    let planStartMin = -1;
-    let planEndMin: number | null = null;
+    let planStart: string | undefined;
+    let planEnd: string | undefined;
     const rangeM = item.timeLabel.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
     if (rangeM) {
-      planStartMin = toMin(rangeM[1]);
-      planEndMin = toMin(rangeM[2]);
+      planStart = rangeM[1];
+      planEnd = rangeM[2];
     } else if (/^\d{1,2}:\d{2}$/.test(item.timeLabel)) {
-      planStartMin = toMin(item.timeLabel);
+      planStart = item.timeLabel;
     }
-    if (planStartMin < 0) continue;
+    if (!planStart) continue;
 
     const planResolved = resolveAttractionKey(item.name, item.dayId);
     const planIdentity = planResolved
@@ -386,21 +382,11 @@ export function computeCrossDayChecks(
         : fallbackIdentityKey(llIt.name);
       if (!llIdentity || llIdentity !== planIdentity) continue;
 
-      const llStartMin = toMin(llIt.startTime);
-      if (llStartMin < 0) continue;
-      const llEndMin = llIt.endTime ? toMin(llIt.endTime) : null;
-
-      let hasOverlap = false;
-      if (planEndMin !== null && planEndMin > planStartMin && llEndMin !== null && llEndMin > llStartMin) {
-        hasOverlap = planStartMin < llEndMin && llStartMin < planEndMin;
-      } else if (planEndMin === null && llEndMin !== null && llEndMin > llStartMin) {
-        hasOverlap = planStartMin >= llStartMin && planStartMin < llEndMin;
-      } else if (planEndMin !== null && planEndMin > planStartMin && llEndMin === null) {
-        hasOverlap = llStartMin >= planStartMin && llStartMin < planEndMin;
-      } else {
-        hasOverlap = planStartMin === llStartMin;
-      }
-      if (!hasOverlap) continue;
+      const { overlaps } = detectTimeConflicts([
+        { id: "plan", start: planStart, end: planEnd },
+        { id: "ll", start: llIt.startTime, end: llIt.endTime || undefined },
+      ]);
+      if (overlaps.length === 0) continue;
 
       const conflictKey = `${item.id}:${llIt.name}:${item.dayId}`;
       if (seenConflicts.has(conflictKey)) continue;

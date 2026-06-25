@@ -26,8 +26,9 @@ export type ConflictResult = {
  * Rules:
  * - Items without a valid start time are ignored.
  * - Invalid range: end exists and end <= start → id added to invalidRanges.
- * - Overlap: startA < endB AND startB < endA (standard interval overlap test).
- * - Items without an end time are treated as non-overlapping (no bounded range).
+ * - Range vs range: startA < endB AND startB < endA (standard interval overlap test).
+ * - Point vs range: the point falls within [start, end) of the range.
+ * - Point vs point: conflict when the two start times are equal.
  * - Overlap pairs are unique, ordered by index in the input array (i < j).
  */
 export function detectTimeConflicts(
@@ -47,9 +48,10 @@ export function detectTimeConflicts(
     if (item.end) {
       const e = toMinutes(item.end);
       if (e >= 0) {
-        endMin = e;
         if (e <= startMin) {
           invalidRanges.push(item.id);
+        } else {
+          endMin = e;
         }
       }
     }
@@ -57,19 +59,27 @@ export function detectTimeConflicts(
     parsed.push({ id: item.id, startMin, endMin });
   }
 
-  // Filter to valid items only — invalid ranges (end <= start) must not pollute
-  // the overlap calculation and cause false positives on unrelated valid items.
-  const validItems = parsed.filter(
-    (p) => p.endMin !== null && p.endMin > p.startMin
-  );
+  for (let i = 0; i < parsed.length; i++) {
+    for (let j = i + 1; j < parsed.length; j++) {
+      const a = parsed[i];
+      const b = parsed[j];
 
-  // Overlap check — only between valid items (both have a bounded, valid end time)
-  for (let i = 0; i < validItems.length; i++) {
-    for (let j = i + 1; j < validItems.length; j++) {
-      const a = validItems[i];
-      const b = validItems[j];
-      // endMin is guaranteed non-null and > startMin by the filter above
-      if (a.startMin < b.endMin! && b.startMin < a.endMin!) {
+      let hasOverlap: boolean;
+      if (a.endMin !== null && b.endMin !== null) {
+        // Range vs range.
+        hasOverlap = a.startMin < b.endMin && b.startMin < a.endMin;
+      } else if (a.endMin !== null) {
+        // Range vs point.
+        hasOverlap = b.startMin >= a.startMin && b.startMin < a.endMin;
+      } else if (b.endMin !== null) {
+        // Point vs range.
+        hasOverlap = a.startMin >= b.startMin && a.startMin < b.endMin;
+      } else {
+        // Point vs point.
+        hasOverlap = a.startMin === b.startMin;
+      }
+
+      if (hasOverlap) {
         overlaps.push({ a: a.id, b: b.id });
       }
     }
