@@ -942,9 +942,11 @@ export default function LightningPage() {
               fontSize: "0.85rem",
               fontWeight: 600,
               padding: "0.4rem 0.75rem",
-              cursor: "pointer",
+              cursor: displayedItems.length === 0 ? "not-allowed" : "pointer",
               whiteSpace: "nowrap",
+              opacity: displayedItems.length === 0 ? 0.3 : 1,
             }}
+            disabled={displayedItems.length === 0}
             onClick={() => setClearDayLightningTarget(safeActiveDayId)}
             title="Clear Lightning selections from this day only. Plans are preserved."
           >
