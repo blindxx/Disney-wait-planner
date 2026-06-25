@@ -25,7 +25,8 @@ export type ConflictResult = {
  *
  * Rules:
  * - Items without a valid start time are ignored.
- * - Invalid range: end exists and end <= start → id added to invalidRanges.
+ * - Invalid range: end exists and end <= start → id added to invalidRanges,
+ *   and the item is excluded from overlap detection entirely.
  * - Range vs range: startA < endB AND startB < endA (standard interval overlap test).
  * - Point vs range: the point falls within [start, end) of the range.
  * - Point vs point: conflict when the two start times are equal.
@@ -37,7 +38,7 @@ export function detectTimeConflicts(
   const invalidRanges: string[] = [];
   const overlaps: Array<{ a: string; b: string }> = [];
 
-  type Parsed = { id: string; startMin: number; endMin: number | null };
+  type Parsed = { id: string; startMin: number; endMin: number | null; invalid: boolean };
   const parsed: Parsed[] = [];
 
   for (const item of items) {
@@ -45,24 +46,30 @@ export function detectTimeConflicts(
     if (startMin < 0) continue; // skip items without a valid start time
 
     let endMin: number | null = null;
+    let invalid = false;
     if (item.end) {
       const e = toMinutes(item.end);
       if (e >= 0) {
         if (e <= startMin) {
           invalidRanges.push(item.id);
+          invalid = true;
         } else {
           endMin = e;
         }
       }
     }
 
-    parsed.push({ id: item.id, startMin, endMin });
+    parsed.push({ id: item.id, startMin, endMin, invalid });
   }
 
-  for (let i = 0; i < parsed.length; i++) {
-    for (let j = i + 1; j < parsed.length; j++) {
-      const a = parsed[i];
-      const b = parsed[j];
+  // Items with an invalid range (end <= start) are reported above but must not
+  // participate in overlap detection — they are neither a valid range nor a point.
+  const validForOverlap = parsed.filter((p) => !p.invalid);
+
+  for (let i = 0; i < validForOverlap.length; i++) {
+    for (let j = i + 1; j < validForOverlap.length; j++) {
+      const a = validForOverlap[i];
+      const b = validForOverlap[j];
 
       let hasOverlap: boolean;
       if (a.endMin !== null && b.endMin !== null) {
