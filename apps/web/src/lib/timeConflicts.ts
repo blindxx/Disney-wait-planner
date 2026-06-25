@@ -25,9 +25,11 @@ export type ConflictResult = {
  *
  * Rules:
  * - Items without a valid start time are ignored.
- * - Invalid range: end exists and end <= start → id added to invalidRanges.
- * - Overlap: startA < endB AND startB < endA (standard interval overlap test).
- * - Items without an end time are treated as non-overlapping (no bounded range).
+ * - Invalid range: end exists and end <= start → id added to invalidRanges,
+ *   and the item is excluded from overlap detection entirely.
+ * - Range vs range: startA < endB AND startB < endA (standard interval overlap test).
+ * - Point vs range: the point falls within [start, end) of the range.
+ * - Point vs point: conflict when the two start times are equal.
  * - Overlap pairs are unique, ordered by index in the input array (i < j).
  */
 export function detectTimeConflicts(
@@ -36,7 +38,7 @@ export function detectTimeConflicts(
   const invalidRanges: string[] = [];
   const overlaps: Array<{ a: string; b: string }> = [];
 
-  type Parsed = { id: string; startMin: number; endMin: number | null };
+  type Parsed = { id: string; startMin: number; endMin: number | null; invalid: boolean };
   const parsed: Parsed[] = [];
 
   for (const item of items) {
@@ -44,32 +46,47 @@ export function detectTimeConflicts(
     if (startMin < 0) continue; // skip items without a valid start time
 
     let endMin: number | null = null;
+    let invalid = false;
     if (item.end) {
       const e = toMinutes(item.end);
       if (e >= 0) {
-        endMin = e;
         if (e <= startMin) {
           invalidRanges.push(item.id);
+          invalid = true;
+        } else {
+          endMin = e;
         }
       }
     }
 
-    parsed.push({ id: item.id, startMin, endMin });
+    parsed.push({ id: item.id, startMin, endMin, invalid });
   }
 
-  // Filter to valid items only — invalid ranges (end <= start) must not pollute
-  // the overlap calculation and cause false positives on unrelated valid items.
-  const validItems = parsed.filter(
-    (p) => p.endMin !== null && p.endMin > p.startMin
-  );
+  // Items with an invalid range (end <= start) are reported above but must not
+  // participate in overlap detection — they are neither a valid range nor a point.
+  const validForOverlap = parsed.filter((p) => !p.invalid);
 
-  // Overlap check — only between valid items (both have a bounded, valid end time)
-  for (let i = 0; i < validItems.length; i++) {
-    for (let j = i + 1; j < validItems.length; j++) {
-      const a = validItems[i];
-      const b = validItems[j];
-      // endMin is guaranteed non-null and > startMin by the filter above
-      if (a.startMin < b.endMin! && b.startMin < a.endMin!) {
+  for (let i = 0; i < validForOverlap.length; i++) {
+    for (let j = i + 1; j < validForOverlap.length; j++) {
+      const a = validForOverlap[i];
+      const b = validForOverlap[j];
+
+      let hasOverlap: boolean;
+      if (a.endMin !== null && b.endMin !== null) {
+        // Range vs range.
+        hasOverlap = a.startMin < b.endMin && b.startMin < a.endMin;
+      } else if (a.endMin !== null) {
+        // Range vs point.
+        hasOverlap = b.startMin >= a.startMin && b.startMin < a.endMin;
+      } else if (b.endMin !== null) {
+        // Point vs range.
+        hasOverlap = a.startMin >= b.startMin && a.startMin < b.endMin;
+      } else {
+        // Point vs point.
+        hasOverlap = a.startMin === b.startMin;
+      }
+
+      if (hasOverlap) {
         overlaps.push({ a: a.id, b: b.id });
       }
     }
