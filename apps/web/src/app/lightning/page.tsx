@@ -867,8 +867,12 @@ export default function LightningPage() {
   // item lacking a valid end time from overlap consideration, which is what
   // previously caused point-time-plan-vs-Lightning-window conflicts to be missed.
   const crossDayChecks = useMemo(() => {
+    // Codex P2 — ignore Lightning entries whose dayId no longer exists in
+    // knownDays (e.g. a deleted planner day) before building the by-day map.
+    const knownDaySet = new Set(knownDays);
     const llItemsByDay = new Map<string, Array<{ name: string; startTime: string; endTime: string }>>();
     for (const it of items) {
+      if (!knownDaySet.has(it.dayId)) continue;
       const bucket = llItemsByDay.get(it.dayId) ?? [];
       bucket.push({ name: it.name, startTime: it.startTime, endTime: it.endTime });
       llItemsByDay.set(it.dayId, bucket);
@@ -1168,7 +1172,7 @@ export default function LightningPage() {
             borderRadius: 8,
           }}
         >
-          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.2rem" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "0.4rem", marginBottom: "0.2rem" }}>
             Lightning Lane on Multiple Days
           </div>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
@@ -1220,7 +1224,7 @@ export default function LightningPage() {
             borderRadius: 8,
           }}
         >
-          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.2rem" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "0.4rem", marginBottom: "0.2rem" }}>
             Lightning Lane conflicts
           </div>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>

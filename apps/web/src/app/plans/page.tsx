@@ -3206,7 +3206,7 @@ export default function PlansPage() {
           font-size: 0.75rem;
           font-weight: 600;
           color: #78350f;
-          margin: 0.6rem 0 0.2rem;
+          margin: 0.9rem 0 0.2rem;
           text-transform: uppercase;
           letter-spacing: 0.04em;
         }
@@ -3214,10 +3214,10 @@ export default function PlansPage() {
           margin-top: 0;
         }
         .cross-day-checks-subgroup-label {
-          font-size: 0.7rem;
+          font-size: 0.8rem;
           font-weight: 600;
           color: #92400e;
-          margin: 0.3rem 0 0.1rem;
+          margin: 0.6rem 0 0.1rem;
           opacity: 0.8;
         }
         .cross-day-checks-list {
