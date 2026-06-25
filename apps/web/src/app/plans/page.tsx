@@ -3216,9 +3216,9 @@ export default function PlansPage() {
         .cross-day-checks-subgroup-label {
           font-size: 0.8rem;
           font-weight: 600;
-          color: #92400e;
+          color: #78350f;
           margin: 0.6rem 0 0.1rem;
-          opacity: 0.8;
+          opacity: 0.85;
         }
         .cross-day-checks-list {
           list-style: none;

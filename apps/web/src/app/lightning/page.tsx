@@ -1045,9 +1045,9 @@ export default function LightningPage() {
 
   return (
     <div style={{ maxWidth: 560, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "1rem" }}>
+      <div className="lightning-header">
         <h1 className="title" style={{ margin: 0 }}>Lightning Lane</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <div className="lightning-header-actions">
           {activeProfileName && (
             <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
           )}
@@ -1072,6 +1072,29 @@ export default function LightningPage() {
           </button>
         </div>
       </div>
+      <style jsx>{`
+        .lightning-header {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          margin-bottom: 1rem;
+        }
+        .lightning-header-actions {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+        }
+        @media (max-width: 480px) {
+          .lightning-header {
+            flex-direction: column;
+            align-items: stretch;
+            gap: 0.5rem;
+          }
+          .lightning-header-actions {
+            flex-wrap: wrap;
+          }
+        }
+      `}</style>
 
       {/* Phase 8.9.2 — Clear Day Lightning confirmation (target captured at click time) */}
       {clearDayLightningTarget !== null && (
