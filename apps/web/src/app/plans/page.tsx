@@ -4282,7 +4282,7 @@ export default function PlansPage() {
                           <li key={dup.identityKey} className="cross-day-checks-item" style={{ flexDirection: "column", alignItems: "flex-start", gap: "0.1rem" }}>
                             <span className="cross-day-checks-name">
                               {dup.displayName}
-                              {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · same time</span>}
+                              {dup.hasTimeConflict && <span className="cross-day-checks-time-flag"> · Same time</span>}
                             </span>
                             {dup.parkSections.map((sec) => (
                               <span key={sec.parkLabel} className="cross-day-checks-park-section">

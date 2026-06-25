@@ -6,6 +6,7 @@ import {
   parse24hToken,
   parseMilToken,
   formatSingleTime,
+  formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import { inferPlansContext } from "@/lib/plansContextInference";
@@ -199,11 +200,13 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
 }
 
 /**
- * Load plan item names for the active day from the profile's plans storage key.
- * Only name + dayId are needed — no other fields are read.
+ * Load plan items for the active day from the profile's plans storage key.
+ * Only name + dayId + timeLabel are needed — no other fields are read.
+ * timeLabel is read (not just name) so the active-day Lightning conflict
+ * section can compare plan times against Lightning times.
  * Handles both v0 (raw array) and v1 ({version,items}) schemas.
  */
-function loadPlanItemsForDay(plansKey: string, dayId: string): { name: string }[] {
+function loadPlanItemsForDay(plansKey: string, dayId: string): { name: string; timeLabel?: string }[] {
   try {
     const raw = localStorage.getItem(plansKey);
     if (!raw) return [];
@@ -223,13 +226,13 @@ function loadPlanItemsForDay(plansKey: string, dayId: string): { name: string }[
     }
     return items
       .filter(
-        (it): it is { name: string; dayId?: string } =>
+        (it): it is { name: string; dayId?: string; timeLabel?: string } =>
           typeof it === "object" &&
           it !== null &&
           typeof (it as Record<string, unknown>).name === "string"
       )
       .filter((it) => (it.dayId ?? "day-1") === dayId)
-      .map((it) => ({ name: it.name }));
+      .map((it) => ({ name: it.name, timeLabel: it.timeLabel }));
   } catch {
     return [];
   }
@@ -384,7 +387,8 @@ export default function LightningPage() {
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   // Stable ref to the active profile id — used by sync effects.
   const activeProfileIdRef = useRef("default");
-  // Phase 8.3 — per-profile activeDayId key (read-only; Plans page owns writes).
+  // Phase 8.3 — per-profile activeDayId key. Phase 9.4 — the day picker on this
+  // page now also writes this key (handleSelectDay), shared with My Plans.
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   // Phase 8.3 — active day for filtering; read from localStorage on mount.
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
@@ -401,7 +405,7 @@ export default function LightningPage() {
   // Phase 8.8 — plan items for the active day, read from profile plans storage
   // so Lightning can infer the auto park the same way My Plans does.
   const plansKeyRef = useRef("dwp:default:plans");
-  const [planDayItems, setPlanDayItems] = useState<{ name: string }[]>([]);
+  const [planDayItems, setPlanDayItems] = useState<{ name: string; timeLabel?: string }[]>([]);
   // Stable ref used inside storage event handler to get current safeActiveDayId
   // without adding it to the effect dependency array.
   const safeActiveDayIdRef = useRef("day-1");
@@ -797,6 +801,55 @@ export default function LightningPage() {
     };
   }, [displayedItems, editingId, editingStart, editingEnd]);
 
+  // Phase 9.4 — Lightning vs Plan conflicts for the active day, surfaced here so
+  // they're visible without switching to My Plans. Identity matching reuses the
+  // same canonical-name resolution (lookupWait + aliases) already used above for
+  // mismatch warnings; overlap detection reuses the shared detectTimeConflicts
+  // engine. Cross-day duplicate warnings are intentionally not duplicated here —
+  // only same-day plan/Lightning time conflicts are shown.
+  const activeDayLightningConflicts = useMemo(() => {
+    const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+    const conflicts: Array<{ id: string; attractionName: string; planTime: string; lightningTime: string }> = [];
+    const seen = new Set<string>();
+    for (const plan of planDayItems) {
+      if (!plan.timeLabel) continue;
+      const rangeM = plan.timeLabel.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+      const planStart = rangeM ? rangeM[1] : /^\d{1,2}:\d{2}$/.test(plan.timeLabel) ? plan.timeLabel : null;
+      if (!planStart) continue;
+      const planEnd = rangeM ? rangeM[2] : undefined;
+      const planWait = lookupWait(plan.name, mismatchWaitMap, aliases);
+      const planIdentity = planWait ? normalizeKey(planWait.canonicalName) : normalizeKey(plan.name);
+
+      for (const llIt of displayedItems) {
+        if (!llIt.startTime) continue;
+        const llWait = lookupWait(llIt.name, mismatchWaitMap, aliases);
+        const llIdentity = llWait ? normalizeKey(llWait.canonicalName) : normalizeKey(llIt.name);
+        if (llIdentity !== planIdentity) continue;
+
+        const { overlaps } = detectTimeConflicts([
+          { id: "plan", start: planStart, end: planEnd },
+          { id: "ll", start: llIt.startTime, end: llIt.endTime || undefined },
+        ]);
+        if (overlaps.length === 0) continue;
+
+        const conflictKey = `${plan.name}:${llIt.id}`;
+        if (seen.has(conflictKey)) continue;
+        seen.add(conflictKey);
+
+        const llTimeLabel = llIt.endTime
+          ? `${formatTimeLabel(llIt.startTime)}–${formatTimeLabel(llIt.endTime)}`
+          : formatTimeLabel(llIt.startTime);
+        conflicts.push({
+          id: conflictKey,
+          attractionName: plan.name,
+          planTime: formatTimeLabel(planStart) + (planEnd ? `–${formatTimeLabel(planEnd)}` : ""),
+          lightningTime: llTimeLabel,
+        });
+      }
+    }
+    return conflicts;
+  }, [planDayItems, displayedItems, mismatchResort, mismatchWaitMap]);
+
   function handleStartEdit(item: LightningItem) {
     setEditingId(item.id);
     setEditingName(item.name);
@@ -889,6 +942,18 @@ export default function LightningPage() {
     setItems((prev) => prev.filter((item) => item.id !== id));
   }
 
+  // Phase 9.4 — Day picker write path. Writes the same per-profile activeDayId
+  // key that My Plans owns, so switching days here stays in sync with My Plans
+  // (same-tab writes don't fire 'storage', so planDayItems is refreshed inline).
+  function handleSelectDay(dayId: string) {
+    const normalized = normalizeDayId(dayId);
+    try {
+      localStorage.setItem(activeDayKeyRef.current, normalized);
+    } catch {}
+    setActiveDayId(normalized);
+    setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, normalized));
+  }
+
   // Phase 8.9.2 — removes all Lightning entries for the captured target day only.
   // Uses setItems() so the existing persist + scheduleSync effects fire normally.
   function handleClearDayLightning() {
@@ -976,6 +1041,37 @@ export default function LightningPage() {
         </div>
       )}
 
+      {/* Phase 9.4 — Day Picker, shared with My Plans via the same active-day
+          storage key. Switching days here updates the same per-profile
+          activeDayId used by My Plans, so both pages stay in sync. */}
+      {loaded && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", marginBottom: "0.75rem" }}>
+          {knownDays.map((dayId) => {
+            const isActive = safeActiveDayId === dayId;
+            return (
+              <button
+                key={dayId}
+                aria-pressed={isActive}
+                onClick={() => handleSelectDay(dayId)}
+                style={{
+                  background: isActive ? "#1e3a5f" : "#f9fafb",
+                  color: isActive ? "#fff" : "#374151",
+                  border: `1px solid ${isActive ? "#1e3a5f" : "#d1d5db"}`,
+                  borderRadius: 8,
+                  fontSize: "0.85rem",
+                  fontWeight: 600,
+                  padding: "0.4rem 0.75rem",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {dayContextLabel(dayId, dayMeta)}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* ── Phase 8.8: Active Day Context Banner ── */}
       {loaded && (
         <div
@@ -1006,9 +1102,44 @@ export default function LightningPage() {
               </div>
             )}
           </div>
-          <div style={{ fontSize: "0.72rem", color: "#93c5fd", textAlign: "right", lineHeight: 1.4 }}>
-            Set active day<br />in My Plans
+        </div>
+      )}
+
+      {/* Phase 9.4 — Lightning Lane conflicts for the active day. Mirrors the
+          "Lightning Lane conflicts" section on My Plans; hidden when empty.
+          Cross-day duplicate warnings intentionally are not duplicated here. */}
+      {loaded && activeDayLightningConflicts.length > 0 && (
+        <div
+          style={{
+            marginBottom: "1rem",
+            padding: "0.75rem 1rem",
+            background: "#fffbeb",
+            border: "1px solid #fcd34d",
+            borderRadius: 8,
+          }}
+        >
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "0.2rem" }}>
+            Lightning Lane conflicts
           </div>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {activeDayLightningConflicts.map((c, i) => (
+              <li
+                key={c.id}
+                style={{
+                  fontSize: "0.8rem",
+                  color: "#92400e",
+                  padding: "0.25rem 0",
+                  borderTop: i === 0 ? "none" : "1px solid #fde68a",
+                }}
+              >
+                <span style={{ fontWeight: 500 }}>{c.attractionName}</span>
+                <span style={{ color: "#b45309" }}>
+                  {" "}
+                  — Plan {c.planTime} · Lightning {c.lightningTime}
+                </span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
