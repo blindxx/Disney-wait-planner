@@ -591,7 +591,20 @@ export default function LightningPage() {
               // Same-tab writes do not fire a storage event, so refresh planDayItems
               // explicitly now that cloud plan data is in localStorage.
               setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
-              setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
+              const allPlans = loadAllPlanItems(profileKeysForPull.plans);
+              setAllPlanItems(allPlans);
+              // Merge plan-only dayIds into knownDays (same pattern as the
+              // Lightning cloudItems merge above) so a fresh profile that
+              // hydrates cloud plans on Lightning first still shows those
+              // days in the day picker and duplicate checks.
+              if (allPlans.length > 0) {
+                const planDayIds = [...new Set(allPlans.map((it) => it.dayId))];
+                setKnownDays((prev) => {
+                  const prevSet = new Set(prev);
+                  const hasNew = planDayIds.some((id) => !prevSet.has(id));
+                  return hasNew ? [...new Set([...prev, ...planDayIds])] : prev;
+                });
+              }
             } catch {
               hydrationSucceeded = false;
             }
