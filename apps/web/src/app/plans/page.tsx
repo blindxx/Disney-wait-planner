@@ -1666,9 +1666,11 @@ export default function PlansPage() {
     setFormTime(formatTimeLabel(item.timeLabel));
     setFormError("");
     setFormTimeError("");
-    // Phase 9.6 — preload the item's current type so an already-custom entry
-    // keeps its selected type pre-filled if the selector is shown.
-    setFormCustomType(item.type);
+    // Phase 9.6 — preload type for the custom selector: preserve it for
+    // existing unknown/custom items so their type survives a time-only edit;
+    // reset to "attraction" for known items so renaming them to an unknown
+    // custom name doesn't accidentally inherit a dining/entertainment type.
+    setFormCustomType(isManualEntryKnown(item.name, item.dayId, item.id) ? "attraction" : item.type);
     setEditTarget(item);
     setMode("edit");
   }
