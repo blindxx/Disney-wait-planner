@@ -50,6 +50,7 @@ import {
   getDiningLocation,
   getDiningCanonicalName,
   resolveDiningKey,
+  isDiningName,
   DINING_PLACES,
 } from "@/lib/diningSuggestions";
 import {
@@ -58,6 +59,7 @@ import {
   getEntertainmentCanonicalName,
   getEntertainmentAvailabilityType,
   resolveEntertainmentKey,
+  isEntertainmentName,
   ENTERTAINMENT_PLACES,
 } from "@/lib/entertainmentSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
@@ -645,6 +647,45 @@ for (const _e of ENTERTAINMENT_PLACES) {
 }
 
 /**
+ * Phase 9.6 — true when name resolves to a known attraction in the given
+ * resort's ride list (exact/alias/containment), mirroring tryResolve() in
+ * crossDayChecks.ts. Used (alongside isDiningName/isEntertainmentName) to
+ * detect whether a manually-entered activity is "known" — i.e. whether the
+ * custom type selector should be hidden in favor of automatic inference.
+ */
+function isKnownAttractionName(name: string, resort: ResortId): boolean {
+  const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+  const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+  const key = resolveIdentityKey(name, aliases);
+  if (rideMap.has(key)) return true;
+  const tokens = tokenize(key);
+  if (tokens.length < 2) return false;
+  let hit = false;
+  let matchCount = 0;
+  for (const attrKey of rideMap.keys()) {
+    if (containsWholeWordSequence(attrKey, tokens)) {
+      matchCount++;
+      if (matchCount > 1) return false;
+      hit = true;
+    }
+  }
+  return hit;
+}
+
+/**
+ * Phase 9.6 — true when name matches any known attraction, dining, or
+ * entertainment item in the given resort. False means the activity is a
+ * custom/unknown entry, eligible for the manual type selector.
+ */
+function isKnownPlannerName(name: string, resort: ResortId): boolean {
+  return (
+    isEntertainmentName(name, resort) ||
+    isDiningName(name, resort) ||
+    isKnownAttractionName(name, resort)
+  );
+}
+
+/**
  * Read and validate resort from localStorage.
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
@@ -879,6 +920,9 @@ export default function PlansPage() {
   const [formTime, setFormTime] = useState("");
   const [formError, setFormError] = useState("");
   const [formTimeError, setFormTimeError] = useState("");
+  // Phase 9.6 — manual type selection for unknown/custom entries only;
+  // ignored (and selector hidden) when the name matches a known item.
+  const [formCustomType, setFormCustomType] = useState<PlannerItemType>("attraction");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
@@ -1610,6 +1654,7 @@ export default function PlansPage() {
     setFormTime("");
     setFormError("");
     setFormTimeError("");
+    setFormCustomType("attraction");
     setEditTarget(null);
     setMode("add");
   }
@@ -1621,6 +1666,9 @@ export default function PlansPage() {
     setFormTime(formatTimeLabel(item.timeLabel));
     setFormError("");
     setFormTimeError("");
+    // Phase 9.6 — preload the item's current type so an already-custom entry
+    // keeps its selected type pre-filled if the selector is shown.
+    setFormCustomType(item.type);
     setEditTarget(item);
     setMode("edit");
   }
@@ -1681,7 +1729,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferManualAddType(trimmed, activeDayId) }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: resolveManualEntryType(trimmed, activeDayId, formCustomType) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1694,15 +1742,18 @@ export default function PlansPage() {
                 timeLabel: timeWindow,
                 // Recompute type only when the name changed — preserves any
                 // existing type when just the time window is edited. When
-                // the name does change, always recompute from the new name
-                // (inferPlannerItemType checks entertainment, then dining,
-                // then falls back to attraction) so editing an entertainment
-                // item into a known attraction correctly downgrades it
-                // instead of being pinned to "entertainment" forever.
+                // the name does change, always recompute (known names use
+                // automatic inference; unknown names use the selected
+                // custom type) so editing an entertainment item into a
+                // known attraction correctly downgrades it instead of being
+                // pinned to "entertainment" forever. Phase 9.6 — when the
+                // name is unchanged but still unknown, still honor the
+                // custom type selector so an existing custom item's type
+                // can be edited without touching its name.
                 type:
                   trimmed === editTarget.name
-                    ? it.type
-                    : inferManualAddType(trimmed, editTarget.dayId, editTarget.id),
+                    ? (isManualEntryKnown(trimmed, editTarget.dayId, editTarget.id) ? it.type : formCustomType)
+                    : resolveManualEntryType(trimmed, editTarget.dayId, formCustomType, editTarget.id),
               }
             : it
         );
@@ -1724,6 +1775,19 @@ export default function PlansPage() {
   // "attraction" and a name matching both resorts (e.g. Oga's Cantina)
   // stays correctly classified without being pinned to whichever resort
   // happens to be selected.
+  // Phase 9.3 follow-up — resolve the resort context for a day, used by both
+  // type inference and (Phase 9.6) known-name detection. Precedence: day's
+  // park override, then a pure inference from that day's existing items
+  // (excluding the item being edited so its own stale name doesn't bias the
+  // result), else undefined (caller checks both resorts).
+  function resolveManualEntryResort(dayId: string, excludeItemId?: string): ResortId | undefined {
+    const override = dayParks[dayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return overrideResort;
+    const dayItems = items.filter((it) => it.dayId === dayId && it.id !== excludeItemId);
+    return dayItems.length > 0 ? (inferPlansContext(dayItems).resort ?? undefined) : undefined;
+  }
+
   function inferManualAddType(name: string, dayId: string, excludeItemId?: string): PlannerItemType {
     // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic 9pm")
     // before lookup, same as import/hydration, so manual entries with a
@@ -1731,17 +1795,8 @@ export default function PlansPage() {
     // the caller still stores the original trimmed name.
     const lookupName = stripTrailingTimeForInference(name);
 
-    const override = dayParks[dayId];
-    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
-    if (overrideResort) return inferPlannerItemType(lookupName, overrideResort);
-
-    // Exclude the item being edited from the context basis — otherwise an
-    // edit that changes a day's only item (and therefore its only resort
-    // signal) would infer from the stale pre-edit name instead of the rest
-    // of the day's actual items.
-    const dayItems = items.filter((it) => it.dayId === dayId && it.id !== excludeItemId);
-    const inferredResort = dayItems.length > 0 ? inferPlansContext(dayItems).resort : undefined;
-    if (inferredResort) return inferPlannerItemType(lookupName, inferredResort);
+    const resort = resolveManualEntryResort(dayId, excludeItemId);
+    if (resort) return inferPlannerItemType(lookupName, resort);
 
     const dlrType = inferPlannerItemType(lookupName, "DLR");
     const wdwType = inferPlannerItemType(lookupName, "WDW");
@@ -1749,6 +1804,33 @@ export default function PlansPage() {
     if (wdwType !== "attraction") return wdwType;
 
     return "attraction";
+  }
+
+  // Phase 9.6 — true when the manually-entered name matches a known
+  // attraction/dining/entertainment item, using the same resort-resolution
+  // precedence as inferManualAddType. Unknown names are eligible for the
+  // manual custom-type selector.
+  function isManualEntryKnown(name: string, dayId: string, excludeItemId?: string): boolean {
+    const lookupName = stripTrailingTimeForInference(name);
+    const resort = resolveManualEntryResort(dayId, excludeItemId);
+    if (resort) return isKnownPlannerName(lookupName, resort);
+    return isKnownPlannerName(lookupName, "DLR") || isKnownPlannerName(lookupName, "WDW");
+  }
+
+  // Phase 9.6 — resolve the type to store for a manually entered/edited
+  // name: known names always use automatic inference (selector hidden,
+  // unchanged behavior); unknown names use the user's selected custom type
+  // (defaults to "attraction").
+  function resolveManualEntryType(
+    name: string,
+    dayId: string,
+    customType: PlannerItemType,
+    excludeItemId?: string
+  ): PlannerItemType {
+    if (isManualEntryKnown(name, dayId, excludeItemId)) {
+      return inferManualAddType(name, dayId, excludeItemId);
+    }
+    return customType;
   }
 
   // Phase 9.3 follow-up — resolve a day's real resort context for dining/
@@ -4270,6 +4352,41 @@ export default function PlansPage() {
                     />
                     {formError && <p className="form-error">{formError}</p>}
                   </div>
+
+                  {(() => {
+                    // Phase 9.6 — show the manual type selector only for
+                    // names that don't match a known attraction/dining/
+                    // entertainment item. Known items keep automatic
+                    // inference and never show the selector.
+                    const trimmedName = stripEnDashSuffix(formName.trim());
+                    if (!trimmedName) return null;
+                    const formDayId = mode === "edit" && editTarget ? editTarget.dayId : activeDayId;
+                    const formExcludeId = mode === "edit" && editTarget ? editTarget.id : undefined;
+                    if (isManualEntryKnown(trimmedName, formDayId, formExcludeId)) return null;
+                    return (
+                      <div className="form-field">
+                        <label className="form-label" htmlFor="plan-custom-type">
+                          Activity type{" "}
+                          <span style={{ color: "#9ca3af", fontWeight: 400 }}>
+                            (optional)
+                          </span>
+                        </label>
+                        <select
+                          id="plan-custom-type"
+                          className="form-input"
+                          value={formCustomType}
+                          onChange={(e) => setFormCustomType(e.target.value as PlannerItemType)}
+                        >
+                          <option value="attraction">Attraction</option>
+                          <option value="dining">Dining</option>
+                          <option value="entertainment">Entertainment</option>
+                        </select>
+                        <p className="form-hint">
+                          We didn&rsquo;t recognize this activity. Choose a type for icons and conflict checks.
+                        </p>
+                      </div>
+                    );
+                  })()}
 
                   <div className="form-field">
                     <label className="form-label" htmlFor="plan-time">
