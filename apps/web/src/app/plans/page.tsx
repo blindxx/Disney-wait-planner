@@ -26,6 +26,7 @@ import {
   parseDayPlanImportPayload,
   parsePlannerBackupFile,
   type DayExportItem,
+  type DayPlanImportResult,
   type LightningBackupItem,
   type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
@@ -933,6 +934,7 @@ export default function PlansPage() {
     items: DayExportItem[];
     targetDayId: string;
     existingCount: number;
+    autoParkFallback?: string; // Phase 9.6 polish — forwarded from export payload
   } | null>(null);
   const [dayImportError, setDayImportError] = useState("");
   // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
@@ -2075,7 +2077,12 @@ export default function PlansPage() {
   // Phase 8.2 — Export active day plans only (day-plan-export format).
   function handleExportDay() {
     const activeDayPlans = items.filter((it) => it.dayId === activeDayId);
-    const payload = buildDayPlanExportPayload(activeDayPlans);
+    // Phase 9.6 polish — for Auto days (no manual park override), snapshot the
+    // current effective park so custom-only days can restore park context on
+    // import. Omitted for manual-park days (their override lives in dayParks,
+    // not in the day-plan payload).
+    const autoParkFallback = dayParks[activeDayId] ? undefined : resolveDayPark(activeDayId);
+    const payload = buildDayPlanExportPayload(activeDayPlans, autoParkFallback);
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2170,10 +2177,14 @@ export default function PlansPage() {
   // targetDayId is the day selected at file-pick time (fix D — never drifts).
   // Imported items receive fresh local IDs to prevent collisions (fix E).
   // Called after user confirmation (non-empty day) or immediately (empty day).
+  // autoParkFallback (Phase 9.6 polish) — park ID snapshotted at export time
+  // for Auto days; applied only for empty-day bootstrap when inference yields
+  // nothing, so custom-only days recover their effective park after import.
   function applyDayImport(
     importedItems: DayExportItem[],
     wasEmpty: boolean,
-    targetDayId: string
+    targetDayId: string,
+    autoParkFallback?: string
   ) {
     // Inference runs ONLY when importing into an empty day (bootstrap
     // behavior), and must happen BEFORE type inference below — otherwise
@@ -2203,7 +2214,25 @@ export default function PlansPage() {
     const inferredResort = wasEmpty
       ? applyImportContextInference(placeholderItems)
       : (inferPlansContext(placeholderItems).resort ?? null);
-    const typeResort = targetDayParkResort ?? inferredResort ?? selectedResort;
+
+    // Phase 9.6 polish — when bootstrapping an empty day and inference
+    // produced no resort (all-custom items), fall back to the park that
+    // was snapshotted at export time. This restores the effective Auto
+    // park for custom-only days without setting a manual park override.
+    // dayParks is not modified; the day remains in Auto mode.
+    // Normal inference from any known item added later will take precedence
+    // (resolveDayPark step 2 > selectedPark step 3).
+    let effectiveResort = targetDayParkResort ?? inferredResort ?? null;
+    if (wasEmpty && !effectiveResort && autoParkFallback && autoParkFallback in PARK_TO_RESORT) {
+      const fallbackResort = PARK_TO_RESORT[autoParkFallback] as ResortId;
+      const fallbackParkId = autoParkFallback as ParkId;
+      setSelectedResort(fallbackResort);
+      setSelectedPark(fallbackParkId);
+      try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
+      try { localStorage.setItem(parkKeyRef.current, fallbackParkId); } catch {}
+      effectiveResort = fallbackResort;
+    }
+    const typeResort = effectiveResort ?? selectedResort;
 
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
@@ -2304,7 +2333,7 @@ export default function PlansPage() {
     reader.onload = (ev) => {
       if (requestId !== dayImportRequestRef.current) return; // stale
       const text = (ev.target?.result as string) ?? "";
-      let parsedItems: DayExportItem[] | null = null;
+      let parsedResult: DayPlanImportResult | null = null;
       let errorMsg = "";
 
       if (fileName.endsWith(".json")) {
@@ -2317,11 +2346,11 @@ export default function PlansPage() {
             errorMsg =
               "This file is a full planner backup. Use Backup / Restore to load it.";
           } else if (t === "day-plan-export") {
-            const dayItems = parseDayPlanImportPayload(rawJson);
-            if (dayItems === null) {
+            const result = parseDayPlanImportPayload(rawJson);
+            if (result === null) {
               errorMsg = "Invalid day plan export: the file structure or fields are not valid.";
             } else {
-              parsedItems = dayItems;
+              parsedResult = result;
             }
           } else {
             errorMsg =
@@ -2336,7 +2365,7 @@ export default function PlansPage() {
           errorMsg =
             "No valid activities found. Check your CSV file and try again.";
         } else {
-          parsedItems = csvItems;
+          parsedResult = { items: csvItems };
         }
       } else {
         // .txt and other text extensions
@@ -2345,15 +2374,16 @@ export default function PlansPage() {
           errorMsg =
             "No valid activities found. Check your text file and try again.";
         } else {
-          parsedItems = txtItems;
+          parsedResult = { items: txtItems };
         }
       }
 
-      if (errorMsg || parsedItems === null) {
+      if (errorMsg || parsedResult === null) {
         setDayImportError(errorMsg || "Import failed.");
         return;
       }
 
+      const { items: parsedItems, autoParkFallback: importFallback } = parsedResult;
       setDayImportError("");
       // Re-check emptiness using current items state (itemsRef) to avoid stale closure.
       // targetDayId was captured at selection time and is not re-read here.
@@ -2361,13 +2391,14 @@ export default function PlansPage() {
       const wasEmpty = currentTargetDayItems.length === 0;
       if (wasEmpty) {
         // Empty day — apply immediately, no confirmation needed.
-        applyDayImport(parsedItems, true, targetDayId);
+        applyDayImport(parsedItems, true, targetDayId, importFallback);
       } else {
         // Non-empty day — store pending state; show confirmation.
         setPendingDayImportItems({
           items: parsedItems,
           targetDayId,
           existingCount: currentTargetDayItems.length,
+          autoParkFallback: importFallback,
         });
       }
     };
@@ -3709,7 +3740,8 @@ export default function PlansPage() {
                   applyDayImport(
                     pendingDayImportItems.items,
                     false,
-                    pendingDayImportItems.targetDayId
+                    pendingDayImportItems.targetDayId,
+                    pendingDayImportItems.autoParkFallback
                   )
                 }
               >
