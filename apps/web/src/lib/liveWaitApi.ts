@@ -372,9 +372,12 @@ const ALIASES_DLR = new Map<string, string>([
   // "it's a small world" (Disneyland) — mock name has surrounding typographic quotes;
   // Queue-Times omits them. Both sides normalized, value retains the literal " chars.
   ["it's a small world",                         "\"it's a small world\""],
-  // Soarin' Over California (DCA) — Phase 8.5: "Across America" limited-time name
-  ["soarin' across america",                     "soarin' over california"],
-  ["soarin across america",                      "soarin' over california"],
+  // Soarin' Across America (DCA) — canonical as of July 2026.
+  // Queue-Times may still return old names; alias them all to the new canonical.
+  ["soarin' over california",                    "soarin' across america"],
+  ["soarin over california",                     "soarin' across america"],
+  ["soarin' around the world",                   "soarin' across america"],
+  ["soarin around the world",                    "soarin' across america"],
 ]);
 
 /**

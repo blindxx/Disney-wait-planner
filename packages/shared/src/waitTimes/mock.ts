@@ -379,7 +379,7 @@ const DCA_RIDES: RideDef[] = [
   },
   {
     id: "dca-soarin",
-    name: "Soarin\u2019 Over California",
+    name: "Soarin\u2019 Across America",
     land: "Grizzly Peak",
     waitMins: 40,
   },
