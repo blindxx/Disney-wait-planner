@@ -1649,6 +1649,8 @@ export default function PlansPage() {
     delete nextDayParks[dayId];
     setDayParks(nextDayParks);
     saveDayParks(nextDayParks, _dayParksKey);
+    // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
+    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[dayId]; return next; });
     // Active day reset guard — result must always be a valid existing day ID.
     if (activeDayId === dayId) {
       // Removed day was active: prefer the previous day; else first remaining.
@@ -1673,6 +1675,9 @@ export default function PlansPage() {
     const target = clearDayTargetId;
     if (!target) return;
     setItems((prev) => prev.filter((it) => it.dayId !== target));
+    // Phase 9.6 fix 2 — clearing a day's items removes its park context,
+    // so drop any stale auto fallback for it too.
+    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[target]; return next; });
     setClearDayTargetId(null);
   }
 
@@ -2276,6 +2281,11 @@ export default function PlansPage() {
       setSelectedPark(fallbackParkId);
       try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
       try { localStorage.setItem(parkKeyRef.current, fallbackParkId); } catch {}
+      // Phase 9.6 fix 1 — also store in dayAutoFallbacks so the park survives
+      // a day switch (the day-switching effect reads dayAutoFallbacks when
+      // inference fails; without this, returning to the imported day after
+      // visiting another day would inherit that day's global selectedPark).
+      setDayAutoFallbacks((prev) => ({ ...prev, [targetDayId]: fallbackParkId }));
       effectiveResort = fallbackResort;
     }
     const typeResort = effectiveResort ?? selectedResort;
