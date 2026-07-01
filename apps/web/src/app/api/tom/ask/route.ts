@@ -4,10 +4,13 @@
  * Server-side proxy that forwards questions to the Tom Railway service.
  * Keeps TOM_API_URL / TOM_API_KEY server-only so the browser never sees them.
  *
- * Gated by a shared caller token (DWP_TOM_PROXY_KEY) so this route can't be
- * used to burn the Tom API key from outside this app — Tom Q&A has no
- * account/session concept, so NextAuth's user session isn't applicable here.
- * Callers must send: x-dwp-tom-proxy-key: <DWP_TOM_PROXY_KEY>
+ * DWP_TOM_PROXY_KEY is optional and only used for manual/admin test calls
+ * (e.g. curl) via the x-dwp-tom-proxy-key header — normal browser requests
+ * never send this header and are not required to. It is never sent by, or
+ * documented for, browser/frontend code.
+ *
+ * TODO before public UI: add real abuse protection such as IP/device rate
+ * limiting; do not put shared secrets in browser code.
  *
  * Request body:
  *   { question: string, session_id?: string, user_id?: string, park?: string, date?: string }
@@ -43,14 +46,14 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 export async function POST(request: NextRequest) {
-  const proxyKey = process.env.DWP_TOM_PROXY_KEY;
-  if (!proxyKey) {
-    return errorResponse("Tom proxy is not configured", 500);
-  }
-
+  // Optional gate for manual/admin test calls only — normal browser requests
+  // omit this header and skip straight to the validation below.
   const callerKey = request.headers.get("x-dwp-tom-proxy-key");
-  if (!callerKey || !safeEqual(callerKey, proxyKey)) {
-    return errorResponse("Unauthorized", 401);
+  if (callerKey !== null) {
+    const proxyKey = process.env.DWP_TOM_PROXY_KEY;
+    if (!proxyKey || !safeEqual(callerKey, proxyKey)) {
+      return errorResponse("Unauthorized", 401);
+    }
   }
 
   let body: AskRequestBody;
