@@ -99,6 +99,14 @@ export type PlannerBackupPayload = {
     /** Phase 8.5 — Per-day manual park overrides. Optional for back-compat with older
      *  backups. Keys are canonical day IDs; values are park ID strings. */
     dayParks?: Record<string, string>;
+    /**
+     * Phase 9.6 backup gap fix — effective park snapshot for Auto days whose
+     * items cannot re-infer a park (e.g. all-custom entries). Keys are canonical
+     * day IDs for Auto days only; values are park ID strings. Absent for older
+     * backups (back-compat: treated as no fallback). Days that have a manual
+     * override in dayParks are never included here.
+     */
+    dayAutoFallbacks?: Record<string, string>;
   };
 };
 
@@ -111,6 +119,8 @@ export function buildPlannerBackupPayload(state: {
   lightning?: LightningBackupItem[];
   /** Phase 8.5 — Per-day manual park overrides to preserve in backup. */
   dayParks?: Record<string, string>;
+  /** Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days. */
+  dayAutoFallbacks?: Record<string, string>;
 }): PlannerBackupPayload {
   return {
     version: 1,
@@ -128,6 +138,10 @@ export function buildPlannerBackupPayload(state: {
       // Include dayParks only when non-empty; omit for cleaner old-compat payloads.
       ...(state.dayParks && Object.keys(state.dayParks).length > 0
         ? { dayParks: state.dayParks }
+        : {}),
+      // Include dayAutoFallbacks only when non-empty.
+      ...(state.dayAutoFallbacks && Object.keys(state.dayAutoFallbacks).length > 0
+        ? { dayAutoFallbacks: state.dayAutoFallbacks }
         : {}),
     },
   };
@@ -274,6 +288,23 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
     }
   }
 
+  // dayAutoFallbacks is optional (back-compat) — same structural validation as dayParks.
+  if ("dayAutoFallbacks" in d && d.dayAutoFallbacks !== undefined) {
+    if (
+      typeof d.dayAutoFallbacks !== "object" ||
+      d.dayAutoFallbacks === null ||
+      Array.isArray(d.dayAutoFallbacks)
+    ) {
+      throw new Error("Invalid backup: dayAutoFallbacks must be a plain object when present.");
+    }
+    for (const [key, val] of Object.entries(d.dayAutoFallbacks as Record<string, unknown>)) {
+      if (!VALID_DAY_ID_RE.test(key)) continue;
+      if (typeof val !== "string") {
+        throw new Error(`Invalid backup: dayAutoFallbacks["${key}"] must be a string.`);
+      }
+    }
+  }
+
   // lightning is optional (back-compat) — when present, validate item shapes.
   if ("lightning" in d && d.lightning !== undefined) {
     if (!Array.isArray(d.lightning)) {
@@ -335,11 +366,32 @@ export type DayPlanExportPayload = {
   type: "day-plan-export";
   exportedAt: string;
   items: DayExportItem[];
+  /**
+   * Phase 9.6 polish — effective park ID snapshotted at export time for
+   * Auto days whose items cannot re-infer a park (e.g. all-custom entries).
+   * Absent for manual-park days (park is stored in dayParks, not here).
+   * On import, used only as a fallback when normal inference yields nothing;
+   * inference from known item names always wins over this value.
+   */
+  autoParkFallback?: string;
 };
 
-/** Build the day plan export payload from active-day items only. dayId is stripped. */
+/** Result returned by day-plan import parsers. */
+export type DayPlanImportResult = {
+  items: DayExportItem[];
+  /** Forwarded from the payload when present; consumers use it as last-resort park context. */
+  autoParkFallback?: string;
+};
+
+/**
+ * Build the day plan export payload from active-day items only. dayId is stripped.
+ * autoParkFallback should be provided (as the current effective ParkId) when the
+ * day is in Auto mode, so custom-only days can restore their park context after
+ * import. Omit for manually-pinned park days.
+ */
 export function buildDayPlanExportPayload(
-  activeDayPlans: PlanItem[]
+  activeDayPlans: PlanItem[],
+  autoParkFallback?: string
 ): DayPlanExportPayload {
   return {
     version: 1,
@@ -351,15 +403,16 @@ export function buildDayPlanExportPayload(
       timeLabel,
       ...(type && type !== "attraction" ? { type } : {}),
     })),
+    ...(autoParkFallback ? { autoParkFallback } : {}),
   };
 }
 
 /**
  * Validate a parsed JSON value against the day-plan-export schema.
- * Returns the validated item array on success.
+ * Returns a DayPlanImportResult (items + optional autoParkFallback) on success.
  * Throws a descriptive Error on any validation failure.
  */
-export function validateDayPlanImportPayload(raw: unknown): DayExportItem[] {
+export function validateDayPlanImportPayload(raw: unknown): DayPlanImportResult {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error("Invalid day plan: expected a JSON object.");
   }
@@ -399,16 +452,25 @@ export function validateDayPlanImportPayload(raw: unknown): DayExportItem[] {
       );
     }
   }
-  return obj.items as DayExportItem[];
+
+  // Phase 9.6 polish — autoParkFallback is optional; accept only string values,
+  // ignore anything else silently (forward-compat tolerance for unknown payload keys).
+  const autoParkFallback =
+    typeof obj.autoParkFallback === "string" ? obj.autoParkFallback : undefined;
+
+  return {
+    items: obj.items as DayExportItem[],
+    ...(autoParkFallback ? { autoParkFallback } : {}),
+  };
 }
 
 /**
- * Safe parse: returns validated DayExportItem[] or null.
+ * Safe parse: returns DayPlanImportResult or null.
  * Never throws.
  */
 export function parseDayPlanImportPayload(
   raw: unknown
-): DayExportItem[] | null {
+): DayPlanImportResult | null {
   try {
     return validateDayPlanImportPayload(raw);
   } catch {
@@ -419,9 +481,9 @@ export function parseDayPlanImportPayload(
 /**
  * Parse raw file text from an uploaded day plan .json file.
  * Enforces size guard, JSON validity, and payload schema.
- * Returns validated items or null. Never throws.
+ * Returns DayPlanImportResult or null. Never throws.
  */
-export function parseDayPlanImportFile(text: string): DayExportItem[] | null {
+export function parseDayPlanImportFile(text: string): DayPlanImportResult | null {
   try {
     const byteLength = new TextEncoder().encode(text).length;
     if (byteLength > MAX_IMPORT_BYTES) return null;

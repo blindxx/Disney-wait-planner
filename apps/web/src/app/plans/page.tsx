@@ -26,6 +26,7 @@ import {
   parseDayPlanImportPayload,
   parsePlannerBackupFile,
   type DayExportItem,
+  type DayPlanImportResult,
   type LightningBackupItem,
   type PlannerBackupPayload,
 } from "@/lib/plansTransfer";
@@ -50,6 +51,7 @@ import {
   getDiningLocation,
   getDiningCanonicalName,
   resolveDiningKey,
+  isDiningName,
   DINING_PLACES,
 } from "@/lib/diningSuggestions";
 import {
@@ -58,6 +60,7 @@ import {
   getEntertainmentCanonicalName,
   getEntertainmentAvailabilityType,
   resolveEntertainmentKey,
+  isEntertainmentName,
   ENTERTAINMENT_PLACES,
 } from "@/lib/entertainmentSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
@@ -645,6 +648,45 @@ for (const _e of ENTERTAINMENT_PLACES) {
 }
 
 /**
+ * Phase 9.6 — true when name resolves to a known attraction in the given
+ * resort's ride list (exact/alias/containment), mirroring tryResolve() in
+ * crossDayChecks.ts. Used (alongside isDiningName/isEntertainmentName) to
+ * detect whether a manually-entered activity is "known" — i.e. whether the
+ * custom type selector should be hidden in favor of automatic inference.
+ */
+function isKnownAttractionName(name: string, resort: ResortId): boolean {
+  const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+  const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+  const key = resolveIdentityKey(name, aliases);
+  if (rideMap.has(key)) return true;
+  const tokens = tokenize(key);
+  if (tokens.length < 2) return false;
+  let hit = false;
+  let matchCount = 0;
+  for (const attrKey of rideMap.keys()) {
+    if (containsWholeWordSequence(attrKey, tokens)) {
+      matchCount++;
+      if (matchCount > 1) return false;
+      hit = true;
+    }
+  }
+  return hit;
+}
+
+/**
+ * Phase 9.6 — true when name matches any known attraction, dining, or
+ * entertainment item in the given resort. False means the activity is a
+ * custom/unknown entry, eligible for the manual type selector.
+ */
+function isKnownPlannerName(name: string, resort: ResortId): boolean {
+  return (
+    isEntertainmentName(name, resort) ||
+    isDiningName(name, resort) ||
+    isKnownAttractionName(name, resort)
+  );
+}
+
+/**
  * Read and validate resort from localStorage.
  * Falls back to Settings default resort (which itself falls back to "DLR").
  * Only uses settings default when no page-specific stored value exists.
@@ -859,6 +901,12 @@ export default function PlansPage() {
   // Phase 8.4 — per-day park overrides and per-profile storage key
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
+  // Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days,
+  // populated at restore time. Not persisted to localStorage; survives for the
+  // current session after restore. resolveDayPark checks this between item
+  // inference (step 2) and the global selectedPark fallback (step 3), and the
+  // day-switching effect uses it when inference yields nothing.
+  const [dayAutoFallbacks, setDayAutoFallbacks] = useState<Record<string, string>>({});
   // Phase 8.1 — day control UI state
   // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
   const [removeConfirmDayId, setRemoveConfirmDayId] = useState<string | null>(null);
@@ -879,6 +927,9 @@ export default function PlansPage() {
   const [formTime, setFormTime] = useState("");
   const [formError, setFormError] = useState("");
   const [formTimeError, setFormTimeError] = useState("");
+  // Phase 9.6 — manual type selection for unknown/custom entries only;
+  // ignored (and selector hidden) when the name matches a known item.
+  const [formCustomType, setFormCustomType] = useState<PlannerItemType>("attraction");
   const [importText, setImportText] = useState("");
   const [importError, setImportError] = useState("");
 
@@ -889,6 +940,7 @@ export default function PlansPage() {
     items: DayExportItem[];
     targetDayId: string;
     existingCount: number;
+    autoParkFallback?: string; // Phase 9.6 polish — forwarded from export payload
   } | null>(null);
   const [dayImportError, setDayImportError] = useState("");
   // Stale-request guard for day JSON import (same pattern as jsonImportRequestRef)
@@ -1417,11 +1469,24 @@ export default function PlansPage() {
         try { localStorage.setItem(resortKeyRef.current, inferredResort); } catch {}
         setSelectedPark(inferredPark);
         try { localStorage.setItem(parkKeyRef.current, inferredPark); } catch {}
+      } else {
+        // Inference failed — no known items in this day. Apply per-day auto
+        // fallback from backup restore (Phase 9.6 backup gap fix) so custom-only
+        // days show their own effective park instead of inheriting the previous
+        // day's global selectedPark. Validated with hasOwnProperty.
+        const autoFallback = dayAutoFallbacks[activeDayId];
+        if (autoFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, autoFallback)) {
+          const fallbackResort = PARK_TO_RESORT[autoFallback] as ResortId;
+          setSelectedResort(fallbackResort);
+          try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
+          setSelectedPark(autoFallback as ParkId);
+          try { localStorage.setItem(parkKeyRef.current, autoFallback); } catch {}
+        }
+        // else: no fallback — resort/park unchanged.
       }
-      // Inference failed — no known attractions in this day; resort/park unchanged.
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDayId, dayParks, items, initialized, ready]);
+  }, [activeDayId, dayParks, dayAutoFallbacks, items, initialized, ready]);
 
   // Phase 8.0 — create the next sequential day and switch to it.
   // Computes directly from current rendered days state; no functional updater
@@ -1449,7 +1514,8 @@ export default function PlansPage() {
   }
 
   // Phase 8.4 — resolve the effective park for a given day.
-  // Priority: (1) explicit override, (2) inferred from day's items, (3) global selectedPark.
+  // Priority: (1) explicit override, (2) inferred from day's items,
+  //           (2.5) per-day auto fallback, (3) global selectedPark.
   // Always returns a valid ParkId for the current resort. Never throws.
   function resolveDayPark(dayId: string): ParkId {
     // 1. Explicit override — validate it belongs to the active resort
@@ -1461,6 +1527,12 @@ export default function PlansPage() {
     const dayItems = items.filter((it) => it.dayId === dayId);
     const inferred = inferDayPark(dayItems, selectedResort);
     if (inferred) return inferred;
+    // 2.5. Phase 9.6 backup gap fix — per-day auto fallback restored from backup.
+    // Validated with hasOwnProperty to reject prototype-inherited keys.
+    const autoFallback = dayAutoFallbacks[dayId];
+    if (autoFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, autoFallback)) {
+      return autoFallback as ParkId;
+    }
     // 3. Fallback to global selectedPark or first park of resort
     return (selectedPark ?? RESORT_PARKS[selectedResort][0]) as ParkId;
   }
@@ -1577,6 +1649,8 @@ export default function PlansPage() {
     delete nextDayParks[dayId];
     setDayParks(nextDayParks);
     saveDayParks(nextDayParks, _dayParksKey);
+    // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
+    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[dayId]; return next; });
     // Active day reset guard — result must always be a valid existing day ID.
     if (activeDayId === dayId) {
       // Removed day was active: prefer the previous day; else first remaining.
@@ -1601,6 +1675,9 @@ export default function PlansPage() {
     const target = clearDayTargetId;
     if (!target) return;
     setItems((prev) => prev.filter((it) => it.dayId !== target));
+    // Phase 9.6 fix 2 — clearing a day's items removes its park context,
+    // so drop any stale auto fallback for it too.
+    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[target]; return next; });
     setClearDayTargetId(null);
   }
 
@@ -1610,6 +1687,7 @@ export default function PlansPage() {
     setFormTime("");
     setFormError("");
     setFormTimeError("");
+    setFormCustomType("attraction");
     setEditTarget(null);
     setMode("add");
   }
@@ -1621,6 +1699,11 @@ export default function PlansPage() {
     setFormTime(formatTimeLabel(item.timeLabel));
     setFormError("");
     setFormTimeError("");
+    // Phase 9.6 — preload type for the custom selector: preserve it for
+    // existing unknown/custom items so their type survives a time-only edit;
+    // reset to "attraction" for known items so renaming them to an unknown
+    // custom name doesn't accidentally inherit a dining/entertainment type.
+    setFormCustomType(isManualEntryKnown(item.name, item.dayId, item.id) ? "attraction" : item.type);
     setEditTarget(item);
     setMode("edit");
   }
@@ -1681,7 +1764,7 @@ export default function PlansPage() {
 
     if (mode === "add") {
       setItems((prev) => {
-        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: inferManualAddType(trimmed, activeDayId) }];
+        const next = [...prev, { id: makeId(), name: trimmed, timeLabel: timeWindow, dayId: activeDayId, type: resolveManualEntryType(trimmed, activeDayId, formCustomType) }];
         return autoSortEnabled ? sortPlanItems(next) : next;
       });
     } else if (mode === "edit" && editTarget) {
@@ -1694,15 +1777,18 @@ export default function PlansPage() {
                 timeLabel: timeWindow,
                 // Recompute type only when the name changed — preserves any
                 // existing type when just the time window is edited. When
-                // the name does change, always recompute from the new name
-                // (inferPlannerItemType checks entertainment, then dining,
-                // then falls back to attraction) so editing an entertainment
-                // item into a known attraction correctly downgrades it
-                // instead of being pinned to "entertainment" forever.
+                // the name does change, always recompute (known names use
+                // automatic inference; unknown names use the selected
+                // custom type) so editing an entertainment item into a
+                // known attraction correctly downgrades it instead of being
+                // pinned to "entertainment" forever. Phase 9.6 — when the
+                // name is unchanged but still unknown, still honor the
+                // custom type selector so an existing custom item's type
+                // can be edited without touching its name.
                 type:
                   trimmed === editTarget.name
-                    ? it.type
-                    : inferManualAddType(trimmed, editTarget.dayId, editTarget.id),
+                    ? (isManualEntryKnown(trimmed, editTarget.dayId, editTarget.id) ? it.type : formCustomType)
+                    : resolveManualEntryType(trimmed, editTarget.dayId, formCustomType, editTarget.id),
               }
             : it
         );
@@ -1724,6 +1810,19 @@ export default function PlansPage() {
   // "attraction" and a name matching both resorts (e.g. Oga's Cantina)
   // stays correctly classified without being pinned to whichever resort
   // happens to be selected.
+  // Phase 9.3 follow-up — resolve the resort context for a day, used by both
+  // type inference and (Phase 9.6) known-name detection. Precedence: day's
+  // park override, then a pure inference from that day's existing items
+  // (excluding the item being edited so its own stale name doesn't bias the
+  // result), else undefined (caller checks both resorts).
+  function resolveManualEntryResort(dayId: string, excludeItemId?: string): ResortId | undefined {
+    const override = dayParks[dayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return overrideResort;
+    const dayItems = items.filter((it) => it.dayId === dayId && it.id !== excludeItemId);
+    return dayItems.length > 0 ? (inferPlansContext(dayItems).resort ?? undefined) : undefined;
+  }
+
   function inferManualAddType(name: string, dayId: string, excludeItemId?: string): PlannerItemType {
     // Phase 9.3 follow-up — strip trailing time text (e.g. "Fantasmic 9pm")
     // before lookup, same as import/hydration, so manual entries with a
@@ -1731,17 +1830,8 @@ export default function PlansPage() {
     // the caller still stores the original trimmed name.
     const lookupName = stripTrailingTimeForInference(name);
 
-    const override = dayParks[dayId];
-    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
-    if (overrideResort) return inferPlannerItemType(lookupName, overrideResort);
-
-    // Exclude the item being edited from the context basis — otherwise an
-    // edit that changes a day's only item (and therefore its only resort
-    // signal) would infer from the stale pre-edit name instead of the rest
-    // of the day's actual items.
-    const dayItems = items.filter((it) => it.dayId === dayId && it.id !== excludeItemId);
-    const inferredResort = dayItems.length > 0 ? inferPlansContext(dayItems).resort : undefined;
-    if (inferredResort) return inferPlannerItemType(lookupName, inferredResort);
+    const resort = resolveManualEntryResort(dayId, excludeItemId);
+    if (resort) return inferPlannerItemType(lookupName, resort);
 
     const dlrType = inferPlannerItemType(lookupName, "DLR");
     const wdwType = inferPlannerItemType(lookupName, "WDW");
@@ -1749,6 +1839,33 @@ export default function PlansPage() {
     if (wdwType !== "attraction") return wdwType;
 
     return "attraction";
+  }
+
+  // Phase 9.6 — true when the manually-entered name matches a known
+  // attraction/dining/entertainment item, using the same resort-resolution
+  // precedence as inferManualAddType. Unknown names are eligible for the
+  // manual custom-type selector.
+  function isManualEntryKnown(name: string, dayId: string, excludeItemId?: string): boolean {
+    const lookupName = stripTrailingTimeForInference(name);
+    const resort = resolveManualEntryResort(dayId, excludeItemId);
+    if (resort) return isKnownPlannerName(lookupName, resort);
+    return isKnownPlannerName(lookupName, "DLR") || isKnownPlannerName(lookupName, "WDW");
+  }
+
+  // Phase 9.6 — resolve the type to store for a manually entered/edited
+  // name: known names always use automatic inference (selector hidden,
+  // unchanged behavior); unknown names use the user's selected custom type
+  // (defaults to "attraction").
+  function resolveManualEntryType(
+    name: string,
+    dayId: string,
+    customType: PlannerItemType,
+    excludeItemId?: string
+  ): PlannerItemType {
+    if (isManualEntryKnown(name, dayId, excludeItemId)) {
+      return inferManualAddType(name, dayId, excludeItemId);
+    }
+    return customType;
   }
 
   // Phase 9.3 follow-up — resolve a day's real resort context for dining/
@@ -1945,6 +2062,8 @@ export default function PlansPage() {
     dayParksKeyRef.current = _dayParksKey;
     setDayParks({});
     saveDayParks({}, _dayParksKey);
+    // Phase 9.6 backup gap fix — Clear All also resets per-day auto fallbacks.
+    setDayAutoFallbacks({});
     // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
     // fresh, so both the inference gate and the stored session context must be
     // cleared. Without this, a subsequent import is blocked on two levels:
@@ -1991,7 +2110,12 @@ export default function PlansPage() {
   // Phase 8.2 — Export active day plans only (day-plan-export format).
   function handleExportDay() {
     const activeDayPlans = items.filter((it) => it.dayId === activeDayId);
-    const payload = buildDayPlanExportPayload(activeDayPlans);
+    // Phase 9.6 polish — for Auto days (no manual park override), snapshot the
+    // current effective park so custom-only days can restore park context on
+    // import. Omitted for manual-park days (their override lives in dayParks,
+    // not in the day-plan payload).
+    const autoParkFallback = dayParks[activeDayId] ? undefined : resolveDayPark(activeDayId);
+    const payload = buildDayPlanExportPayload(activeDayPlans, autoParkFallback);
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -2024,6 +2148,15 @@ export default function PlansPage() {
         }
       }
     } catch {}
+    // Phase 9.6 backup gap fix — snapshot effective park for every Auto day so
+    // custom-only days can restore their park context. resolveDayPark already
+    // applies the full priority chain (inference → dayAutoFallbacks → selectedPark).
+    const backupDayAutoFallbacks: Record<string, string> = {};
+    for (const dayId of days) {
+      if (!dayParks[dayId]) {
+        backupDayAutoFallbacks[dayId] = resolveDayPark(dayId);
+      }
+    }
     const payload = buildPlannerBackupPayload({
       days,
       plans: items,
@@ -2031,6 +2164,7 @@ export default function PlansPage() {
       dayMeta,
       lightning: lightningItems,
       dayParks,
+      dayAutoFallbacks: backupDayAutoFallbacks,
     });
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -2045,6 +2179,13 @@ export default function PlansPage() {
 
   // Phase 8.9.1 — Export plans-only backup (no Lightning).
   function handleExportPlansBackup() {
+    // Phase 9.6 backup gap fix — same dayAutoFallbacks snapshot as full backup.
+    const backupDayAutoFallbacks: Record<string, string> = {};
+    for (const dayId of days) {
+      if (!dayParks[dayId]) {
+        backupDayAutoFallbacks[dayId] = resolveDayPark(dayId);
+      }
+    }
     const payload = buildPlannerBackupPayload({
       days,
       plans: items,
@@ -2052,6 +2193,7 @@ export default function PlansPage() {
       dayMeta,
       lightning: [],
       dayParks,
+      dayAutoFallbacks: backupDayAutoFallbacks,
     });
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -2086,10 +2228,14 @@ export default function PlansPage() {
   // targetDayId is the day selected at file-pick time (fix D — never drifts).
   // Imported items receive fresh local IDs to prevent collisions (fix E).
   // Called after user confirmation (non-empty day) or immediately (empty day).
+  // autoParkFallback (Phase 9.6 polish) — park ID snapshotted at export time
+  // for Auto days; applied only for empty-day bootstrap when inference yields
+  // nothing, so custom-only days recover their effective park after import.
   function applyDayImport(
     importedItems: DayExportItem[],
     wasEmpty: boolean,
-    targetDayId: string
+    targetDayId: string,
+    autoParkFallback?: string
   ) {
     // Inference runs ONLY when importing into an empty day (bootstrap
     // behavior), and must happen BEFORE type inference below — otherwise
@@ -2119,7 +2265,30 @@ export default function PlansPage() {
     const inferredResort = wasEmpty
       ? applyImportContextInference(placeholderItems)
       : (inferPlansContext(placeholderItems).resort ?? null);
-    const typeResort = targetDayParkResort ?? inferredResort ?? selectedResort;
+
+    // Phase 9.6 polish — when bootstrapping an empty day and inference
+    // produced no resort (all-custom items), fall back to the park that
+    // was snapshotted at export time. This restores the effective Auto
+    // park for custom-only days without setting a manual park override.
+    // dayParks is not modified; the day remains in Auto mode.
+    // Normal inference from any known item added later will take precedence
+    // (resolveDayPark step 2 > selectedPark step 3).
+    let effectiveResort = targetDayParkResort ?? inferredResort ?? null;
+    if (wasEmpty && !effectiveResort && autoParkFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, autoParkFallback)) {
+      const fallbackResort = PARK_TO_RESORT[autoParkFallback] as ResortId;
+      const fallbackParkId = autoParkFallback as ParkId;
+      setSelectedResort(fallbackResort);
+      setSelectedPark(fallbackParkId);
+      try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
+      try { localStorage.setItem(parkKeyRef.current, fallbackParkId); } catch {}
+      // Phase 9.6 fix 1 — also store in dayAutoFallbacks so the park survives
+      // a day switch (the day-switching effect reads dayAutoFallbacks when
+      // inference fails; without this, returning to the imported day after
+      // visiting another day would inherit that day's global selectedPark).
+      setDayAutoFallbacks((prev) => ({ ...prev, [targetDayId]: fallbackParkId }));
+      effectiveResort = fallbackResort;
+    }
+    const typeResort = effectiveResort ?? selectedResort;
 
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
@@ -2220,7 +2389,7 @@ export default function PlansPage() {
     reader.onload = (ev) => {
       if (requestId !== dayImportRequestRef.current) return; // stale
       const text = (ev.target?.result as string) ?? "";
-      let parsedItems: DayExportItem[] | null = null;
+      let parsedResult: DayPlanImportResult | null = null;
       let errorMsg = "";
 
       if (fileName.endsWith(".json")) {
@@ -2233,11 +2402,11 @@ export default function PlansPage() {
             errorMsg =
               "This file is a full planner backup. Use Backup / Restore to load it.";
           } else if (t === "day-plan-export") {
-            const dayItems = parseDayPlanImportPayload(rawJson);
-            if (dayItems === null) {
+            const result = parseDayPlanImportPayload(rawJson);
+            if (result === null) {
               errorMsg = "Invalid day plan export: the file structure or fields are not valid.";
             } else {
-              parsedItems = dayItems;
+              parsedResult = result;
             }
           } else {
             errorMsg =
@@ -2252,7 +2421,7 @@ export default function PlansPage() {
           errorMsg =
             "No valid activities found. Check your CSV file and try again.";
         } else {
-          parsedItems = csvItems;
+          parsedResult = { items: csvItems };
         }
       } else {
         // .txt and other text extensions
@@ -2261,15 +2430,16 @@ export default function PlansPage() {
           errorMsg =
             "No valid activities found. Check your text file and try again.";
         } else {
-          parsedItems = txtItems;
+          parsedResult = { items: txtItems };
         }
       }
 
-      if (errorMsg || parsedItems === null) {
+      if (errorMsg || parsedResult === null) {
         setDayImportError(errorMsg || "Import failed.");
         return;
       }
 
+      const { items: parsedItems, autoParkFallback: importFallback } = parsedResult;
       setDayImportError("");
       // Re-check emptiness using current items state (itemsRef) to avoid stale closure.
       // targetDayId was captured at selection time and is not re-read here.
@@ -2277,13 +2447,14 @@ export default function PlansPage() {
       const wasEmpty = currentTargetDayItems.length === 0;
       if (wasEmpty) {
         // Empty day — apply immediately, no confirmation needed.
-        applyDayImport(parsedItems, true, targetDayId);
+        applyDayImport(parsedItems, true, targetDayId, importFallback);
       } else {
         // Non-empty day — store pending state; show confirmation.
         setPendingDayImportItems({
           items: parsedItems,
           targetDayId,
           existingCount: currentTargetDayItems.length,
+          autoParkFallback: importFallback,
         });
       }
     };
@@ -2448,6 +2619,26 @@ export default function PlansPage() {
     setDayImportError("");
     setDayParks(restoredDayParks);
     saveDayParks(restoredDayParks, dayParksKeyRef.current);
+
+    // Phase 9.6 backup gap fix — restore per-day auto fallbacks for Auto days.
+    // Only accept days that: (a) are in the restored set, (b) are NOT in
+    // restoredDayParks (Auto only), (c) carry a valid own-property park ID.
+    // dayAutoFallbacks is session-only state; not persisted to localStorage.
+    const restoredAutoFallbacks: Record<string, string> = {};
+    if (data.dayAutoFallbacks) {
+      for (const [k, v] of Object.entries(data.dayAutoFallbacks as Record<string, unknown>)) {
+        if (
+          VALID_DAY_ID_RE.test(k) &&
+          restoredDaysSet.has(k) &&
+          !restoredDayParks[k] &&
+          typeof v === "string" &&
+          Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, v)
+        ) {
+          restoredAutoFallbacks[k] = v;
+        }
+      }
+    }
+    setDayAutoFallbacks(restoredAutoFallbacks);
   }
 
   return (
@@ -3625,7 +3816,8 @@ export default function PlansPage() {
                   applyDayImport(
                     pendingDayImportItems.items,
                     false,
-                    pendingDayImportItems.targetDayId
+                    pendingDayImportItems.targetDayId,
+                    pendingDayImportItems.autoParkFallback
                   )
                 }
               >
@@ -4270,6 +4462,41 @@ export default function PlansPage() {
                     />
                     {formError && <p className="form-error">{formError}</p>}
                   </div>
+
+                  {(() => {
+                    // Phase 9.6 — show the manual type selector only for
+                    // names that don't match a known attraction/dining/
+                    // entertainment item. Known items keep automatic
+                    // inference and never show the selector.
+                    const trimmedName = stripEnDashSuffix(formName.trim());
+                    if (!trimmedName) return null;
+                    const formDayId = mode === "edit" && editTarget ? editTarget.dayId : activeDayId;
+                    const formExcludeId = mode === "edit" && editTarget ? editTarget.id : undefined;
+                    if (isManualEntryKnown(trimmedName, formDayId, formExcludeId)) return null;
+                    return (
+                      <div className="form-field">
+                        <label className="form-label" htmlFor="plan-custom-type">
+                          Activity type{" "}
+                          <span style={{ color: "#9ca3af", fontWeight: 400 }}>
+                            (optional)
+                          </span>
+                        </label>
+                        <select
+                          id="plan-custom-type"
+                          className="form-input"
+                          value={formCustomType}
+                          onChange={(e) => setFormCustomType(e.target.value as PlannerItemType)}
+                        >
+                          <option value="attraction">Attraction</option>
+                          <option value="dining">Dining</option>
+                          <option value="entertainment">Entertainment</option>
+                        </select>
+                        <p className="form-hint">
+                          We didn&rsquo;t recognize this activity. Choose a type for icons and conflict checks.
+                        </p>
+                      </div>
+                    );
+                  })()}
 
                   <div className="form-field">
                     <label className="form-label" htmlFor="plan-time">
