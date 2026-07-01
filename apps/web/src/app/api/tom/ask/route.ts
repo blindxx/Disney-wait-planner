@@ -4,6 +4,11 @@
  * Server-side proxy that forwards questions to the Tom Railway service.
  * Keeps TOM_API_URL / TOM_API_KEY server-only so the browser never sees them.
  *
+ * Gated by a shared caller token (DWP_TOM_PROXY_KEY) so this route can't be
+ * used to burn the Tom API key from outside this app — Tom Q&A has no
+ * account/session concept, so NextAuth's user session isn't applicable here.
+ * Callers must send: x-dwp-tom-proxy-key: <DWP_TOM_PROXY_KEY>
+ *
  * Request body:
  *   { question: string, session_id?: string, user_id?: string, park?: string, date?: string }
  *
@@ -11,6 +16,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +36,23 @@ function asNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
+function safeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
+}
+
 export async function POST(request: NextRequest) {
+  const proxyKey = process.env.DWP_TOM_PROXY_KEY;
+  if (!proxyKey) {
+    return errorResponse("Tom proxy is not configured", 500);
+  }
+
+  const callerKey = request.headers.get("x-dwp-tom-proxy-key");
+  if (!callerKey || !safeEqual(callerKey, proxyKey)) {
+    return errorResponse("Unauthorized", 401);
+  }
+
   let body: AskRequestBody;
   try {
     body = await request.json();
