@@ -99,6 +99,14 @@ export type PlannerBackupPayload = {
     /** Phase 8.5 — Per-day manual park overrides. Optional for back-compat with older
      *  backups. Keys are canonical day IDs; values are park ID strings. */
     dayParks?: Record<string, string>;
+    /**
+     * Phase 9.6 backup gap fix — effective park snapshot for Auto days whose
+     * items cannot re-infer a park (e.g. all-custom entries). Keys are canonical
+     * day IDs for Auto days only; values are park ID strings. Absent for older
+     * backups (back-compat: treated as no fallback). Days that have a manual
+     * override in dayParks are never included here.
+     */
+    dayAutoFallbacks?: Record<string, string>;
   };
 };
 
@@ -111,6 +119,8 @@ export function buildPlannerBackupPayload(state: {
   lightning?: LightningBackupItem[];
   /** Phase 8.5 — Per-day manual park overrides to preserve in backup. */
   dayParks?: Record<string, string>;
+  /** Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days. */
+  dayAutoFallbacks?: Record<string, string>;
 }): PlannerBackupPayload {
   return {
     version: 1,
@@ -128,6 +138,10 @@ export function buildPlannerBackupPayload(state: {
       // Include dayParks only when non-empty; omit for cleaner old-compat payloads.
       ...(state.dayParks && Object.keys(state.dayParks).length > 0
         ? { dayParks: state.dayParks }
+        : {}),
+      // Include dayAutoFallbacks only when non-empty.
+      ...(state.dayAutoFallbacks && Object.keys(state.dayAutoFallbacks).length > 0
+        ? { dayAutoFallbacks: state.dayAutoFallbacks }
         : {}),
     },
   };
@@ -270,6 +284,23 @@ export function validatePlannerBackupPayload(raw: unknown): PlannerBackupPayload
       if (!VALID_DAY_ID_RE.test(key)) continue; // tolerate extra keys — restore filters them
       if (typeof val !== "string") {
         throw new Error(`Invalid backup: dayParks["${key}"] must be a string.`);
+      }
+    }
+  }
+
+  // dayAutoFallbacks is optional (back-compat) — same structural validation as dayParks.
+  if ("dayAutoFallbacks" in d && d.dayAutoFallbacks !== undefined) {
+    if (
+      typeof d.dayAutoFallbacks !== "object" ||
+      d.dayAutoFallbacks === null ||
+      Array.isArray(d.dayAutoFallbacks)
+    ) {
+      throw new Error("Invalid backup: dayAutoFallbacks must be a plain object when present.");
+    }
+    for (const [key, val] of Object.entries(d.dayAutoFallbacks as Record<string, unknown>)) {
+      if (!VALID_DAY_ID_RE.test(key)) continue;
+      if (typeof val !== "string") {
+        throw new Error(`Invalid backup: dayAutoFallbacks["${key}"] must be a string.`);
       }
     }
   }
