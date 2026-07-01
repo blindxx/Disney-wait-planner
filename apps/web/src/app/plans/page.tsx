@@ -2223,7 +2223,7 @@ export default function PlansPage() {
     // Normal inference from any known item added later will take precedence
     // (resolveDayPark step 2 > selectedPark step 3).
     let effectiveResort = targetDayParkResort ?? inferredResort ?? null;
-    if (wasEmpty && !effectiveResort && autoParkFallback && autoParkFallback in PARK_TO_RESORT) {
+    if (wasEmpty && !effectiveResort && autoParkFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, autoParkFallback)) {
       const fallbackResort = PARK_TO_RESORT[autoParkFallback] as ResortId;
       const fallbackParkId = autoParkFallback as ParkId;
       setSelectedResort(fallbackResort);
