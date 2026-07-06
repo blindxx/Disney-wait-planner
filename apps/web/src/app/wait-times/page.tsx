@@ -1102,7 +1102,7 @@ export default function WaitTimesPage() {
                           order: 2,
                         }}
                       >
-                        {formatClosureDateRangeForDisplay(entry.dateRange)}
+                        {formatClosureDateRangeForDisplay(entry.dateRange, entry.reopeningLabel)}
                       </div>
                     )}
                     {timing === "UPCOMING" && (

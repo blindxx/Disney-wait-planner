@@ -34,6 +34,14 @@ export type ClosureEntry = {
    * Undefined = indefinite closure (always ACTIVE).
    */
   dateRange?: string;
+  /**
+   * Optional override for the open-ended ("TBD") end-date label, e.g.
+   * "Reopening TBD" for a closure that is expected to reopen eventually.
+   * Only used when dateRange has no known end date (or is undefined).
+   * Omit for indefinite/permanent closures — the formatter defaults to
+   * a neutral "TBD" in that case.
+   */
+  reopeningLabel?: string;
 };
 
 // ============================================
@@ -114,25 +122,33 @@ function formatIsoDate(iso: string): string {
 
 /**
  * Convert an ISO dateRange to a human-readable display label.
+ * Open-ended ("TBD") end dates default to a neutral "TBD" label. Pass
+ * `openEndedLabel` (from ClosureEntry.reopeningLabel) to override that
+ * label for a specific closure — e.g. "Reopening TBD" for a closure
+ * known to be temporary. Closures with no expected reopening (permanent
+ * removals) should omit reopeningLabel and keep the neutral default.
  *
  * Examples:
- *   undefined                        → "TBD"
- *   "2026-02-17 - TBD"               → "Feb 17, 2026 – TBD"
- *   "2026-02-23 - 2026-02-26"        → "Feb 23, 2026 – Feb 26, 2026"
+ *   undefined                                    → "TBD"
+ *   "2026-02-17 - TBD"                            → "Feb 17, 2026 – TBD"
+ *   "2026-02-17 - TBD", "Reopening TBD"           → "Feb 17, 2026 – Reopening TBD"
+ *   "2026-02-23 - 2026-02-26"                     → "Feb 23, 2026 – Feb 26, 2026"
  *
  * Never throws — returns the raw string (or "TBD") on any parse failure.
  */
 export function formatClosureDateRangeForDisplay(
   dateRange: string | undefined,
+  openEndedLabel?: string,
 ): string {
-  if (!dateRange) return "TBD";
+  const label = openEndedLabel ?? "TBD";
+  if (!dateRange) return label;
   try {
     const { start, end } = parseClosureDateRange(dateRange);
     const startLabel = formatIsoDate(start);
-    const endLabel = end === null ? "TBD" : formatIsoDate(end);
+    const endLabel = end === null ? label : formatIsoDate(end);
     return `${startLabel} \u2013 ${endLabel}`;
   } catch {
-    return dateRange || "TBD";
+    return dateRange || label;
   }
 }
 
@@ -202,6 +218,16 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "mk",
       land: "Tomorrowland",
       dateRange: "2025-08-04 - 2026-04-08",
+    },
+  ],
+  [
+    "mk:walt disney's carousel of progress",
+    {
+      name: "Walt Disney\u2019s Carousel of Progress",
+      parkId: "mk",
+      land: "Tomorrowland",
+      dateRange: "2026-07-06 - TBD",
+      reopeningLabel: "Reopening TBD",
     },
   ],
   // ---- WDW: Hollywood Studios ----

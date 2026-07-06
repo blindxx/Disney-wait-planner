@@ -573,6 +573,17 @@ const MK_RIDES: RideDef[] = [
     land: "Tomorrowland",
     waitMins: 20,
   },
+  {
+    id: "mk-carousel-of-progress",
+    name: "Walt Disney\u2019s Carousel of Progress",
+    land: "Tomorrowland",
+    // Planned closure beginning 2026-07-06, expected back in 2027 \u2014 see
+    // PLANNED_CLOSURES in plannedClosures.ts. Mirrored here so the raw
+    // mock fallback (used when live data is unavailable) doesn't show
+    // this as an open 5-minute attraction while the closure is active.
+    status: "CLOSED",
+    waitMins: null,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -780,7 +791,7 @@ const AK_RIDES: RideDef[] = [
  *
  * DLR — Disneyland Park:               35 rides
  * DLR — Disney California Adventure:   19 rides
- * WDW — Magic Kingdom:                 22 rides
+ * WDW — Magic Kingdom:                 23 rides
  * WDW — EPCOT:                         10 rides
  * WDW — Hollywood Studios:              9 rides
  * WDW — Animal Kingdom:                 6 rides
