@@ -13,6 +13,7 @@ const navLinks = [
   { href: "/plans", label: "My Plans" },
   { href: "/wait-times", label: "Wait Times" },
   { href: "/lightning", label: "Lightning" },
+  { href: "/tom", label: "Ask Tom" },
   { href: "/settings", label: "Settings" },
 ];
 
