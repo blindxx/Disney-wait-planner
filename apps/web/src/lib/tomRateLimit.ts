@@ -81,18 +81,36 @@ export function checkTomRateLimit(ip: string, sessionId?: string): RateLimitResu
   return ipResult;
 }
 
-export function getClientIp(headers: Headers): string {
-  const forwardedFor = headers.get("x-forwarded-for");
-  if (forwardedFor) {
-    const first = forwardedFor.split(",")[0]?.trim();
+interface TrustedIpRequest {
+  ip?: string;
+  headers: Headers;
+}
+
+/**
+ * Resolves a client IP for rate-limiting purposes from deployment-trusted
+ * sources only. Deliberately does NOT read a raw client-suppliable
+ * "x-forwarded-for" (or "x-real-ip" / "cf-connecting-ip") off the request,
+ * since without a known trusted reverse proxy in front of this deployment a
+ * caller can set those headers itself and rotate the value to mint fresh
+ * IP buckets, defeating the limiter.
+ *
+ * Trust order:
+ *  1. `request.ip` — populated by the Next.js/Vercel runtime from the
+ *     actual connection, not from a client-controlled header.
+ *  2. `x-vercel-forwarded-for` — Vercel's own forwarded-IP header, set by
+ *     Vercel's edge network for requests it terminates directly.
+ *  3. "unknown" — no trusted source available (e.g. local dev, or a
+ *     platform/proxy setup that isn't Vercel-verified). All such requests
+ *     share one bucket, so the limiter still applies.
+ */
+export function getTrustedClientIp(request: TrustedIpRequest): string {
+  if (request.ip) return request.ip;
+
+  const vercelForwardedFor = request.headers.get("x-vercel-forwarded-for");
+  if (vercelForwardedFor) {
+    const first = vercelForwardedFor.split(",")[0]?.trim();
     if (first) return first;
   }
-
-  const realIp = headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
-
-  const cfConnectingIp = headers.get("cf-connecting-ip");
-  if (cfConnectingIp) return cfConnectingIp.trim();
 
   return "unknown";
 }
