@@ -114,25 +114,28 @@ function formatIsoDate(iso: string): string {
 
 /**
  * Convert an ISO dateRange to a human-readable display label.
+ * Open-ended ("TBD") end dates are shown as "Reopening TBD" so the UI
+ * communicates the attraction will reopen eventually, without implying
+ * a known reopening date.
  *
  * Examples:
- *   undefined                        → "TBD"
- *   "2026-02-17 - TBD"               → "Feb 17, 2026 – TBD"
+ *   undefined                        → "Reopening TBD"
+ *   "2026-02-17 - TBD"               → "Feb 17, 2026 – Reopening TBD"
  *   "2026-02-23 - 2026-02-26"        → "Feb 23, 2026 – Feb 26, 2026"
  *
- * Never throws — returns the raw string (or "TBD") on any parse failure.
+ * Never throws — returns the raw string (or "Reopening TBD") on any parse failure.
  */
 export function formatClosureDateRangeForDisplay(
   dateRange: string | undefined,
 ): string {
-  if (!dateRange) return "TBD";
+  if (!dateRange) return "Reopening TBD";
   try {
     const { start, end } = parseClosureDateRange(dateRange);
     const startLabel = formatIsoDate(start);
-    const endLabel = end === null ? "TBD" : formatIsoDate(end);
+    const endLabel = end === null ? "Reopening TBD" : formatIsoDate(end);
     return `${startLabel} \u2013 ${endLabel}`;
   } catch {
-    return dateRange || "TBD";
+    return dateRange || "Reopening TBD";
   }
 }
 
