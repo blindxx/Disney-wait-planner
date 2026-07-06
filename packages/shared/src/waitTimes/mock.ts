@@ -573,6 +573,12 @@ const MK_RIDES: RideDef[] = [
     land: "Tomorrowland",
     waitMins: 20,
   },
+  {
+    id: "mk-carousel-of-progress",
+    name: "Walt Disney\u2019s Carousel of Progress",
+    land: "Tomorrowland",
+    waitMins: 5,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -780,7 +786,7 @@ const AK_RIDES: RideDef[] = [
  *
  * DLR — Disneyland Park:               35 rides
  * DLR — Disney California Adventure:   19 rides
- * WDW — Magic Kingdom:                 22 rides
+ * WDW — Magic Kingdom:                 23 rides
  * WDW — EPCOT:                         10 rides
  * WDW — Hollywood Studios:              9 rides
  * WDW — Animal Kingdom:                 6 rides

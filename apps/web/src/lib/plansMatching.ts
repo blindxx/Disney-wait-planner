@@ -317,6 +317,12 @@ export const ALIASES_WDW: Record<string, string> = {
   "aladdin":                     "magic carpets of aladdin",
   "magic carpet":                "magic carpets of aladdin",
   "magic carpets":               "magic carpets of aladdin",
+
+  // ---- Walt Disney's Carousel of Progress (MK Tomorrowland) ----
+  // "cop" is a single token — stage-2 can't reach it without an alias.
+  "cop":                              "walt disneys carousel of progress",
+  "carousel of progress":             "walt disneys carousel of progress",
+  "walt disneys carousel of progress": "walt disneys carousel of progress",
 };
 
 // ---------------------------------------------------------------------------
@@ -485,4 +491,8 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "7 dwarfs",              resort: "WDW", expectedKey: "seven dwarfs mine train" },
   { input: "aladdin",               resort: "WDW", expectedKey: "magic carpets of aladdin" },
   { input: "magic carpet",          resort: "WDW", expectedKey: "magic carpets of aladdin" },
+  // --- Walt Disney's Carousel of Progress (MK Tomorrowland) ---
+  { input: "cop",                          resort: "WDW", expectedKey: "walt disneys carousel of progress" },
+  { input: "Carousel of Progress",         resort: "WDW", expectedKey: "walt disneys carousel of progress" },
+  { input: "Walt Disney's Carousel of Progress", resort: "WDW", expectedKey: "walt disneys carousel of progress" },
 ];
