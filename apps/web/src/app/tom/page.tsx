@@ -73,6 +73,34 @@ function sourceHref(source: TomSource): string | undefined {
   return isSafeHttpUrl(source.url) ? source.url : undefined;
 }
 
+/** Normalizes one raw upstream source into a TomSource, or undefined if it isn't usable. */
+function normalizeSource(raw: unknown): TomSource | undefined {
+  if (typeof raw === "string") return raw;
+
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const candidate = raw as Record<string, unknown>;
+    const title = typeof candidate.title === "string" ? candidate.title : undefined;
+    const url = typeof candidate.url === "string" ? candidate.url : undefined;
+    const name = typeof candidate.name === "string" ? candidate.name : undefined;
+    if (title !== undefined || url !== undefined || name !== undefined) {
+      return { title, url, name };
+    }
+  }
+
+  return undefined;
+}
+
+/** Filters raw upstream sources down to only well-formed entries; invalid elements are dropped. */
+function normalizeSources(raw: unknown): TomSource[] {
+  if (!Array.isArray(raw)) return [];
+  const result: TomSource[] = [];
+  for (const item of raw) {
+    const normalized = normalizeSource(item);
+    if (normalized !== undefined) result.push(normalized);
+  }
+  return result;
+}
+
 const CHAT_CSS = `
   .tom-page {
     max-width: 700px;
@@ -248,7 +276,7 @@ export default function TomChatPage() {
         return;
       }
 
-      const sources: TomSource[] = Array.isArray(data?.sources) ? data.sources : [];
+      const sources = normalizeSources(data?.sources);
       setMessages((prev) => [
         ...prev,
         {
