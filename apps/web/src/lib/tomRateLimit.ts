@@ -1,7 +1,10 @@
 /**
  * Minimal in-memory rate limiter for POST /api/tom/ask.
  *
- * Fixed-window counter keyed by client IP (+ session_id when provided).
+ * Fixed-window counters keyed by client IP, and separately by IP+session_id.
+ * An IP-only bucket is always enforced so rotating session_id values on
+ * every request cannot create unlimited fresh buckets to bypass the limit;
+ * the IP+session bucket adds a tighter per-conversation cap on top of it.
  * Intentionally process-local: no Redis/DB/external service. On serverless
  * platforms with multiple instances this limits per-instance, not globally,
  * which is an accepted tradeoff for "basic abuse protection" at this phase.
@@ -54,6 +57,28 @@ export function checkRateLimit(key: string): RateLimitResult {
 
   entry.count += 1;
   return { allowed: true, remaining: MAX_REQUESTS_PER_WINDOW - entry.count };
+}
+
+/**
+ * Always checks the IP-only bucket first (the abuse cap that rotating
+ * session_id values cannot escape). If a session_id is present, the
+ * IP+session bucket is also checked; the request is rejected if either
+ * bucket has exceeded its limit.
+ */
+export function checkTomRateLimit(ip: string, sessionId?: string): RateLimitResult {
+  const ipResult = checkRateLimit(buildRateLimitKey(ip));
+  if (!ipResult.allowed) {
+    return ipResult;
+  }
+
+  if (sessionId) {
+    const sessionResult = checkRateLimit(buildRateLimitKey(ip, sessionId));
+    if (!sessionResult.allowed) {
+      return sessionResult;
+    }
+  }
+
+  return ipResult;
 }
 
 export function getClientIp(headers: Headers): string {

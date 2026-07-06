@@ -9,8 +9,10 @@
  * never send this header and are not required to. It is never sent by, or
  * documented for, browser/frontend code.
  *
- * Basic abuse protection: fixed-window rate limiting keyed by client IP
- * (+ session_id when provided). See lib/tomRateLimit.ts.
+ * Basic abuse protection: fixed-window rate limiting keyed by client IP,
+ * always enforced, plus an IP+session_id bucket when session_id is
+ * provided (so rotating session_id values cannot bypass the IP cap).
+ * See lib/tomRateLimit.ts.
  *
  * Request body:
  *   { question: string, session_id?: string, user_id?: string, park?: string, date?: string }
@@ -20,7 +22,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { buildRateLimitKey, checkRateLimit, getClientIp } from "@/lib/tomRateLimit";
+import { checkTomRateLimit, getClientIp } from "@/lib/tomRateLimit";
 
 export const dynamic = "force-dynamic";
 
@@ -66,8 +68,7 @@ export async function POST(request: NextRequest) {
 
   const rateLimitSessionId = asNonEmptyString(body.session_id);
   const clientIp = getClientIp(request.headers);
-  const rateLimitKey = buildRateLimitKey(clientIp, rateLimitSessionId);
-  if (!checkRateLimit(rateLimitKey).allowed) {
+  if (!checkTomRateLimit(clientIp, rateLimitSessionId).allowed) {
     console.warn("[tom/ask] rate limit exceeded", { ip: clientIp, hasSession: Boolean(rateLimitSessionId) });
     return errorResponse("Too many requests. Please try again soon.", 429);
   }
