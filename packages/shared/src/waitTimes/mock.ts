@@ -577,7 +577,12 @@ const MK_RIDES: RideDef[] = [
     id: "mk-carousel-of-progress",
     name: "Walt Disney\u2019s Carousel of Progress",
     land: "Tomorrowland",
-    waitMins: 5,
+    // Planned closure beginning 2026-07-06, expected back in 2027 \u2014 see
+    // PLANNED_CLOSURES in plannedClosures.ts. Mirrored here so the raw
+    // mock fallback (used when live data is unavailable) doesn't show
+    // this as an open 5-minute attraction while the closure is active.
+    status: "CLOSED",
+    waitMins: null,
   },
 ];
 

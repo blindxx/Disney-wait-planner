@@ -204,6 +204,15 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       dateRange: "2025-08-04 - 2026-04-08",
     },
   ],
+  [
+    "mk:walt disney's carousel of progress",
+    {
+      name: "Walt Disney\u2019s Carousel of Progress",
+      parkId: "mk",
+      land: "Tomorrowland",
+      dateRange: "2026-07-06 - TBD",
+    },
+  ],
   // ---- WDW: Hollywood Studios ----
   [
     "hs:rock 'n' roller coaster starring the muppets",
