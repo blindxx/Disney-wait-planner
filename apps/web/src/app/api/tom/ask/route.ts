@@ -9,8 +9,8 @@
  * never send this header and are not required to. It is never sent by, or
  * documented for, browser/frontend code.
  *
- * TODO before public UI: add real abuse protection such as IP/device rate
- * limiting; do not put shared secrets in browser code.
+ * Basic abuse protection: fixed-window rate limiting keyed by client IP
+ * (+ session_id when provided). See lib/tomRateLimit.ts.
  *
  * Request body:
  *   { question: string, session_id?: string, user_id?: string, park?: string, date?: string }
@@ -20,6 +20,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
+import { buildRateLimitKey, checkRateLimit, getClientIp } from "@/lib/tomRateLimit";
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +64,14 @@ export async function POST(request: NextRequest) {
     return errorResponse("Invalid request body", 400);
   }
 
+  const rateLimitSessionId = asNonEmptyString(body.session_id);
+  const clientIp = getClientIp(request.headers);
+  const rateLimitKey = buildRateLimitKey(clientIp, rateLimitSessionId);
+  if (!checkRateLimit(rateLimitKey).allowed) {
+    console.warn("[tom/ask] rate limit exceeded", { ip: clientIp, hasSession: Boolean(rateLimitSessionId) });
+    return errorResponse("Too many requests. Please try again soon.", 429);
+  }
+
   const question = typeof body.question === "string" ? body.question.trim() : "";
   if (!question) {
     return errorResponse("Missing question", 400);
@@ -75,7 +84,7 @@ export async function POST(request: NextRequest) {
   }
 
   const context: Record<string, string> = { source: "disney-wait-planner" };
-  const sessionId = asNonEmptyString(body.session_id);
+  const sessionId = rateLimitSessionId;
   const userId = asNonEmptyString(body.user_id);
   const park = asNonEmptyString(body.park);
   const date = asNonEmptyString(body.date);
@@ -96,10 +105,12 @@ export async function POST(request: NextRequest) {
       cache: "no-store",
     });
   } catch {
+    console.warn("[tom/ask] failed to reach Tom upstream");
     return errorResponse("Failed to reach Tom", 500);
   }
 
   if (!upstream.ok) {
+    console.warn("[tom/ask] Tom upstream returned non-OK status", { status: upstream.status });
     return errorResponse("Tom request failed", 500);
   }
 
