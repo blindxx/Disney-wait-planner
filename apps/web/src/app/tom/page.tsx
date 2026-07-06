@@ -57,9 +57,20 @@ function sourceLabel(source: TomSource): string {
   return source.title || source.name || source.url || "Source";
 }
 
+/** Only http:/https: URLs are safe to render as clickable links (blocks javascript:, data:, etc). */
+function isSafeHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string" || !value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function sourceHref(source: TomSource): string | undefined {
   if (typeof source === "string") return undefined;
-  return source.url;
+  return isSafeHttpUrl(source.url) ? source.url : undefined;
 }
 
 const CHAT_CSS = `
