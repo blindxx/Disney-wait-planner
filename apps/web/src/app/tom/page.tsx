@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Tom Chat Page — Phase 10.2
+ * Tom Chat Page — Phase 10.3
  *
  * Minimal mobile-first chat UI for the Tom assistant.
  * Talks only to POST /api/tom/ask (this app's own proxy route) — never
@@ -10,15 +10,25 @@
  * is limited to { question, session_id, source }.
  *
  * localStorage keys:
- *   dwp.tom.sessionId — anonymous session id, generated once and reused
- *   for every message (including across reloads) so Tom can maintain
- *   conversation context server-side.
+ *   dwp.tomChat.v1 — local-only conversation cache: { messages, sessionId,
+ *   updatedAt }. Restored on mount if updatedAt is within CHAT_TTL_MS,
+ *   otherwise treated as expired and discarded. The same sessionId is
+ *   reused for every message (including across reloads) so Tom can
+ *   maintain conversation context server-side. Never synced to a backend.
+ *   dwp.tom.sessionId — pre-10.3 session id. Only ever read, as a one-time
+ *   fallback when dwp.tomChat.v1 is missing/malformed, so upgrading users
+ *   keep their existing Tom server-side follow-up context instead of
+ *   silently starting a new session. Nothing writes to this key anymore.
  */
 
 import { useEffect, useRef, useState } from "react";
 
-const SESSION_STORAGE_KEY = "dwp.tom.sessionId";
+const CHAT_STORAGE_KEY = "dwp.tomChat.v1";
+const LEGACY_SESSION_STORAGE_KEY = "dwp.tom.sessionId";
+const CHAT_TTL_MS = 24 * 60 * 60 * 1000;
 const TOM_SOURCE = "disney-wait-planner";
+const TOM_AVATAR_SRC = "/images/tom-avatar.png";
+const DISCORD_INVITE_URL = "https://discord.gg/tMhXGHEgt";
 
 const HELPER_TEXT =
   "Ask about Disney attractions, dining, entertainment, wait times, park updates, and Disney news.";
@@ -49,23 +59,89 @@ interface ChatMessage {
   sources?: TomSource[];
 }
 
+interface StoredChatState {
+  messages: ChatMessage[];
+  sessionId: string;
+  updatedAt: number;
+}
+
 function generateId(): string {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-/** Reads (or creates + persists) the anonymous session id used to group this browser's messages. */
-function getOrCreateSessionId(): string {
+/** Validates one persisted message, dropping anything malformed rather than failing the whole restore. */
+function normalizeStoredMessage(raw: unknown): ChatMessage | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const candidate = raw as Record<string, unknown>;
+  const role = candidate.role;
+  const text = candidate.text;
+  if ((role !== "user" && role !== "tom") || typeof text !== "string") return undefined;
+  const id = typeof candidate.id === "string" && candidate.id ? candidate.id : generateId();
+  const sources = normalizeSources(candidate.sources);
+  return { id, role, text, sources: sources.length > 0 ? sources : undefined };
+}
+
+function normalizeStoredMessages(raw: unknown): ChatMessage[] {
+  if (!Array.isArray(raw)) return [];
+  const result: ChatMessage[] = [];
+  for (const item of raw) {
+    const normalized = normalizeStoredMessage(item);
+    if (normalized) result.push(normalized);
+  }
+  return result;
+}
+
+/** Reads the pre-10.3 session id, if any — used only as a migration fallback below. */
+function loadLegacySessionId(): string | null {
   try {
-    const existing = localStorage.getItem(SESSION_STORAGE_KEY);
-    if (existing) return existing;
-    const created = generateId();
-    localStorage.setItem(SESSION_STORAGE_KEY, created);
-    return created;
+    const legacy = localStorage.getItem(LEGACY_SESSION_STORAGE_KEY);
+    return legacy && legacy.trim() ? legacy : null;
   } catch {
-    // localStorage unavailable (private browsing, etc.) — fall back to a
-    // per-request id rather than failing the chat entirely.
-    return generateId();
+    return null;
+  }
+}
+
+/** messages: [] paired with a migrated legacy session id, or null if there's nothing to migrate. */
+function migrateFromLegacySession(): { messages: ChatMessage[]; sessionId: string } | null {
+  const legacySessionId = loadLegacySessionId();
+  return legacySessionId ? { messages: [], sessionId: legacySessionId } : null;
+}
+
+/**
+ * Restores the locally persisted chat if present and younger than CHAT_TTL_MS.
+ * If dwp.tomChat.v1 is missing or malformed (as opposed to present-but-expired),
+ * falls back to the pre-10.3 dwp.tom.sessionId so upgrading users keep their
+ * existing Tom server-side follow-up context instead of silently starting a
+ * new session. A present-but-expired entry still expires normally — no
+ * migration kicks in for that case.
+ */
+function loadStoredChat(): { messages: ChatMessage[]; sessionId: string } | null {
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return migrateFromLegacySession();
+
+    const parsed = JSON.parse(raw) as Partial<StoredChatState> | null;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.sessionId !== "string" || !parsed.sessionId) {
+      return migrateFromLegacySession();
+    }
+
+    if (typeof parsed.updatedAt !== "number" || Date.now() - parsed.updatedAt > CHAT_TTL_MS) {
+      return null;
+    }
+
+    return { messages: normalizeStoredMessages(parsed.messages), sessionId: parsed.sessionId };
+  } catch {
+    return migrateFromLegacySession();
+  }
+}
+
+function saveStoredChat(state: StoredChatState): void {
+  try {
+    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // localStorage unavailable (private browsing, quota, etc.) — chat still
+    // works for the current tab, it just won't persist across reloads.
   }
 }
 
@@ -202,13 +278,41 @@ const CHAT_CSS = `
   .tom-title-row {
     display: flex;
     align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .tom-title-left {
+    display: flex;
+    align-items: center;
     gap: 6px;
+  }
+  .tom-avatar-icon {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
   }
   .tom-title {
     font-size: 20px;
     font-weight: 700;
     color: #111827;
     margin: 0;
+  }
+  .tom-new-chat-btn {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1px solid #d1d5db;
+    background-color: #fff;
+    color: #1e3a5f;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tom-new-chat-btn:hover {
+    background-color: #f3f4f6;
   }
   .tom-helper {
     margin: 4px 0 0;
@@ -265,6 +369,17 @@ const CHAT_CSS = `
     display: block;
   }
 
+  .tom-discord-hint {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(249, 250, 251, 0.2);
+    color: #d1d5db;
+  }
+  .tom-discord-link {
+    color: #93c5fd;
+    text-decoration: underline;
+  }
+
   .tom-messages {
     flex: 1 1 auto;
     /* Without this, a flex item will not shrink below its content height, so
@@ -282,12 +397,22 @@ const CHAT_CSS = `
 
   .tom-bubble-row {
     display: flex;
+    align-items: flex-end;
   }
   .tom-bubble-row.user {
     justify-content: flex-end;
   }
   .tom-bubble-row.tom {
     justify-content: flex-start;
+  }
+
+  .tom-avatar-msg {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    margin-right: 8px;
   }
 
   .tom-bubble {
@@ -425,6 +550,14 @@ const CHAT_CSS = `
     font-weight: 600;
     margin-bottom: 4px;
   }
+  .tom-avatar-empty {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
+    margin: 0 auto 12px;
+  }
 
   .tom-examples {
     display: flex;
@@ -467,10 +600,30 @@ const CHAT_CSS = `
       gap: 10px;
     }
     .tom-info-tooltip {
-      width: 220px;
+      /* Centering under the (narrow) info button, rather than growing from
+         its left edge, keeps the tooltip clear of both screen edges
+         regardless of how far right the button sits in the header. */
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(280px, 90vw);
+      max-width: min(280px, 90vw);
     }
     .tom-empty {
       margin: 0;
+      padding: 16px 20px 24px;
+    }
+    .tom-avatar-empty {
+      width: 44px;
+      height: 44px;
+    }
+    .tom-avatar-msg {
+      width: 24px;
+      height: 24px;
+      margin-right: 6px;
+    }
+    .tom-new-chat-btn {
+      padding: 5px 10px;
+      font-size: 11px;
     }
     .tom-examples {
       flex-direction: column;
@@ -492,6 +645,8 @@ const CHAT_CSS = `
 
 export default function TomChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [sessionId, setSessionId] = useState<string>(() => generateId());
+  const [hydrated, setHydrated] = useState(false);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -500,6 +655,31 @@ export default function TomChatPage() {
 
   const messagesRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  // Mirrors `sessionId` for synchronous reads inside async callbacks, so an
+  // in-flight request started before "New Chat" can detect it's now stale.
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  // Restore a persisted conversation (if any, and not older than 24h) once on
+  // mount — this runs client-only so it never causes an SSR hydration mismatch.
+  useEffect(() => {
+    const stored = loadStoredChat();
+    if (stored) {
+      setMessages(stored.messages);
+      setSessionId(stored.sessionId);
+    }
+    setHydrated(true);
+  }, []);
+
+  // Persist after every change, once the initial restore above has run —
+  // guarding on `hydrated` stops this from clobbering storage with the
+  // pre-restore empty state.
+  useEffect(() => {
+    if (!hydrated) return;
+    saveStoredChat({ messages, sessionId, updatedAt: Date.now() });
+  }, [messages, sessionId, hydrated]);
 
   function handleMessagesScroll() {
     const el = messagesRef.current;
@@ -541,6 +721,12 @@ export default function TomChatPage() {
 
   /** Returns true on success so the caller can decide whether to restore the input. */
   async function sendQuestion(question: string): Promise<boolean> {
+    // Captured at request start: if "New Chat" swaps in a new session before
+    // this resolves, sessionIdRef.current will no longer match and the
+    // response below is discarded instead of landing in the new conversation.
+    const requestSessionId = sessionId;
+    const isStale = () => sessionIdRef.current !== requestSessionId;
+
     setLoading(true);
     setError(null);
 
@@ -550,10 +736,12 @@ export default function TomChatPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question,
-          session_id: getOrCreateSessionId(),
+          session_id: requestSessionId,
           source: TOM_SOURCE,
         }),
       });
+
+      if (isStale()) return true;
 
       if (res.status === 429) {
         setError("Tom is getting a lot of questions right now. Please wait a moment and try again.");
@@ -566,6 +754,8 @@ export default function TomChatPage() {
       }
 
       const data = await res.json();
+      if (isStale()) return true;
+
       const answer = typeof data?.answer === "string" ? data.answer : "";
       if (!answer) {
         setError("Something went wrong. Please try again.");
@@ -584,19 +774,21 @@ export default function TomChatPage() {
       ]);
       return true;
     } catch {
-      setError("Something went wrong. Please try again.");
+      if (!isStale()) setError("Something went wrong. Please try again.");
       return false;
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }
 
   function submitQuestion(question: string) {
+    const requestSessionId = sessionId;
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
-      // Keep the failed question in the input box so it can be retried or edited.
-      if (!ok) setInput(question);
+      // Keep the failed question in the input box so it can be retried or
+      // edited — but only if the conversation wasn't reset in the meantime.
+      if (!ok && sessionIdRef.current === requestSessionId) setInput(question);
     });
   }
 
@@ -612,28 +804,62 @@ export default function TomChatPage() {
     submitQuestion(question);
   }
 
+  /** Clears the conversation, starts a fresh session id, and replaces the persisted chat. */
+  function handleNewChat() {
+    const newSessionId = generateId();
+    // Update the ref synchronously, before any state-setter-triggered
+    // re-render/effect runs — a fetch already in flight can resolve on the
+    // microtask queue before React flushes effects, so the ref update can't
+    // wait on the `sessionIdRef.current = sessionId` sync effect below.
+    sessionIdRef.current = newSessionId;
+    setMessages([]);
+    setSessionId(newSessionId);
+    setInput("");
+    setError(null);
+    setLoading(false);
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }
+
   return (
     <>
       <style>{CHAT_CSS}</style>
       <div className="tom-page">
         <div className="tom-header">
           <div className="tom-title-row">
-            <h1 className="tom-title">Ask Tom</h1>
-            <div className={`tom-info-wrap${infoOpen ? " show" : ""}`}>
-              <button
-                type="button"
-                className="tom-info-btn"
-                aria-label="About Tom"
-                aria-expanded={infoOpen}
-                onClick={() => setInfoOpen((v) => !v)}
-                onBlur={() => setInfoOpen(false)}
-              >
-                i
-              </button>
-              <div className="tom-info-tooltip" role="tooltip">
-                {INFO_TEXT}
+            <div className="tom-title-left">
+              <img className="tom-avatar-icon" src={TOM_AVATAR_SRC} alt="" aria-hidden="true" />
+              <h1 className="tom-title">Ask Tom</h1>
+              <div className={`tom-info-wrap${infoOpen ? " show" : ""}`}>
+                <button
+                  type="button"
+                  className="tom-info-btn"
+                  aria-label="About Tom"
+                  aria-expanded={infoOpen}
+                  onClick={() => setInfoOpen((v) => !v)}
+                  onBlur={() => setInfoOpen(false)}
+                >
+                  i
+                </button>
+                <div className="tom-info-tooltip" role="tooltip">
+                  {INFO_TEXT}
+                  <div className="tom-discord-hint">
+                    Want a longer chat history or prefer Discord?{" "}
+                    <a
+                      href={DISCORD_INVITE_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="tom-discord-link"
+                    >
+                      Chat with Tom on Discord.
+                    </a>
+                  </div>
+                </div>
               </div>
             </div>
+            <button type="button" className="tom-new-chat-btn" onClick={handleNewChat}>
+              New Chat
+            </button>
           </div>
           <p className="tom-helper">{HELPER_TEXT}</p>
         </div>
@@ -641,6 +867,7 @@ export default function TomChatPage() {
         <div className="tom-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.length === 0 && !loading && (
             <div className="tom-empty">
+              <img className="tom-avatar-empty" src={TOM_AVATAR_SRC} alt="Tom Morrow" />
               <div className="tom-empty-title">Ask Tom anything about your Disney trip</div>
               <div>
                 Ask Tom about Disney parks, wait times, attractions, and the latest Disney,
@@ -665,12 +892,15 @@ export default function TomChatPage() {
           {messages.map((message) => (
             <div key={message.id}>
               <div className={`tom-bubble-row ${message.role}`}>
+                {message.role === "tom" && (
+                  <img className="tom-avatar-msg" src={TOM_AVATAR_SRC} alt="" aria-hidden="true" />
+                )}
                 <div className={`tom-bubble ${message.role}`}>
                   {message.role === "tom" ? linkifyText(message.text) : message.text}
                 </div>
               </div>
               {message.sources && message.sources.length > 0 && (
-                <div className="tom-sources" style={{ marginLeft: message.role === "tom" ? "2px" : "auto", textAlign: message.role === "tom" ? "left" : "right" }}>
+                <div className="tom-sources" style={{ marginLeft: message.role === "tom" ? "38px" : "auto", textAlign: message.role === "tom" ? "left" : "right" }}>
                   <span className="tom-sources-label">Sources</span>
                   <ul>
                     {message.sources.map((source, i) => {
