@@ -568,10 +568,17 @@ const CHAT_CSS = `
       gap: 10px;
     }
     .tom-info-tooltip {
-      width: 220px;
+      /* Centering under the (narrow) info button, rather than growing from
+         its left edge, keeps the tooltip clear of both screen edges
+         regardless of how far right the button sits in the header. */
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(280px, 90vw);
+      max-width: min(280px, 90vw);
     }
     .tom-empty {
       margin: 0;
+      padding: 16px 20px 24px;
     }
     .tom-avatar-empty {
       width: 44px;
