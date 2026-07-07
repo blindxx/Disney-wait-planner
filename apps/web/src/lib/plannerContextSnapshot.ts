@@ -15,6 +15,7 @@
 import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profileStorage";
 import { normalizeKey } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
+import { detectTimeConflicts } from "./timeConflicts";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
 const MAX_ITEMS = 200;
@@ -193,10 +194,13 @@ function findRepeats(plans: PlannerContextSnapshotItem[]): PlannerContextSnapsho
 }
 
 /**
- * Lightweight same-day / same-name plan+Lightning pairing, used as a
- * conflict signal. Intentionally simple — does not recompute wait times,
- * park inference, or time-overlap math the way the Plans page's own
- * cross-day duplicate detection does.
+ * Same-day / same-name plan + Lightning pairs whose time ranges actually
+ * overlap. Same day + same name alone is not a conflict — the Plans page
+ * only surfaces a Lightning/plan conflict once detectTimeConflicts (the
+ * same interval-overlap engine used by crossDayChecks.ts) confirms a real
+ * overlap, so this mirrors that requirement rather than introducing a
+ * separate, looser definition of "conflict". Items with no usable time on
+ * either side never produce a conflict.
  */
 function findConflicts(
   plans: PlannerContextSnapshotItem[],
@@ -209,15 +213,26 @@ function findConflicts(
   const conflicts: PlannerContextSnapshotConflict[] = [];
   for (const p of plans) {
     const match = lightningByDayAndKey.get(`${p.dayId}::${normalizeKey(p.name)}`);
-    if (match) {
-      conflicts.push({
-        dayId: p.dayId,
-        name: p.name,
-        planTime: p.time,
-        lightningStart: match.startTime,
-        lightningEnd: match.endTime,
-      });
-    }
+    if (!match || !match.startTime) continue;
+
+    const rangeMatch = p.time.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
+    const planStart = rangeMatch ? rangeMatch[1] : /^\d{1,2}:\d{2}$/.test(p.time) ? p.time : undefined;
+    if (!planStart) continue; // no usable plan time — never a conflict
+    const planEnd = rangeMatch ? rangeMatch[2] : undefined;
+
+    const { overlaps } = detectTimeConflicts([
+      { id: "plan", start: planStart, end: planEnd },
+      { id: "lightning", start: match.startTime, end: match.endTime || undefined },
+    ]);
+    if (overlaps.length === 0) continue;
+
+    conflicts.push({
+      dayId: p.dayId,
+      name: p.name,
+      planTime: p.time,
+      lightningStart: match.startTime,
+      lightningEnd: match.endTime,
+    });
   }
   return conflicts;
 }
