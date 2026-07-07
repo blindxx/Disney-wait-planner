@@ -28,6 +28,15 @@ const INFO_TEXT =
 /** How close (px) to the bottom of the scroll container still counts as "at the bottom" for auto-scroll. */
 const NEAR_BOTTOM_THRESHOLD = 80;
 
+/** Example prompts shown before the first message, spanning a few of Tom's capabilities. */
+const STARTER_PROMPTS = [
+  "What's new at Walt Disney World?",
+  "What's new at Disneyland?",
+  "What's the latest Star Wars news?",
+  "What's the latest Marvel news?",
+  "Tell me about Savi's Workshop.",
+];
+
 type ChatRole = "user" | "tom";
 
 /** A source returned by Tom — shape is upstream-defined, so we render defensively. */
@@ -151,6 +160,7 @@ function normalizeSources(raw: unknown): TomSource[] {
 
 const CHAT_CSS = `
   .tom-page {
+    position: relative;
     max-width: 700px;
     margin: 0 auto;
     padding: 16px;
@@ -158,6 +168,28 @@ const CHAT_CSS = `
     flex-direction: column;
     height: calc(100vh - 96px);
     min-height: 480px;
+  }
+
+  .tom-jump-btn {
+    position: absolute;
+    right: 20px;
+    bottom: 78px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: none;
+    background-color: #1e3a5f;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  }
+  .tom-jump-btn:hover {
+    background-color: #16324f;
   }
 
   .tom-header {
@@ -385,6 +417,31 @@ const CHAT_CSS = `
     margin-bottom: 4px;
   }
 
+  .tom-examples {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 18px;
+  }
+  .tom-example-chip {
+    padding: 8px 14px;
+    border-radius: 999px;
+    border: 1px solid #d1d5db;
+    background-color: #fff;
+    color: #1e3a5f;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .tom-example-chip:hover {
+    background-color: #f3f4f6;
+  }
+  .tom-example-chip:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
   @media (max-width: 480px) {
     .tom-page {
       padding: 12px;
@@ -404,6 +461,17 @@ const CHAT_CSS = `
     .tom-info-tooltip {
       width: 220px;
     }
+    .tom-examples {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .tom-example-chip {
+      text-align: center;
+    }
+    .tom-jump-btn {
+      right: 14px;
+      bottom: 72px;
+    }
   }
 `;
 
@@ -413,6 +481,7 @@ export default function TomChatPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   const messagesRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -421,7 +490,17 @@ export default function TomChatPage() {
     const el = messagesRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    isNearBottomRef.current = distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
+    const nearBottom = distanceFromBottom < NEAR_BOTTOM_THRESHOLD;
+    isNearBottomRef.current = nearBottom;
+    setShowJumpToLatest(!nearBottom);
+  }
+
+  function scrollToLatest() {
+    const el = messagesRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
   }
 
   // Auto-scroll to the newest message, but only if the user was already
@@ -486,17 +565,25 @@ export default function TomChatPage() {
     }
   }
 
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const question = input.trim();
-    if (!question || loading) return;
-
+  function submitQuestion(question: string) {
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
       // Keep the failed question in the input box so it can be retried or edited.
       if (!ok) setInput(question);
     });
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const question = input.trim();
+    if (!question || loading) return;
+    submitQuestion(question);
+  }
+
+  function handleStarterPrompt(question: string) {
+    if (loading) return;
+    submitQuestion(question);
   }
 
   return (
@@ -529,7 +616,23 @@ export default function TomChatPage() {
           {messages.length === 0 && !loading && (
             <div className="tom-empty">
               <div className="tom-empty-title">Ask Tom anything about your Disney trip</div>
-              <div>Attractions, dining, entertainment, wait times, park updates, and more.</div>
+              <div>
+                Ask Tom about Disney parks, wait times, attractions, and the latest Disney,
+                Marvel, and Star Wars news.
+              </div>
+              <div className="tom-examples" role="group" aria-label="Example questions">
+                {STARTER_PROMPTS.map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    className="tom-example-chip"
+                    onClick={() => handleStarterPrompt(prompt)}
+                    disabled={loading}
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -574,6 +677,17 @@ export default function TomChatPage() {
             </div>
           )}
         </div>
+
+        {messages.length > 0 && showJumpToLatest && (
+          <button
+            type="button"
+            className="tom-jump-btn"
+            onClick={scrollToLatest}
+            aria-label="Jump to latest message"
+          >
+            ↓ New messages
+          </button>
+        )}
 
         {error && <div className="tom-error">{error}</div>}
 
