@@ -12,10 +12,14 @@
  * raw backup payloads. Item counts are capped to keep the payload compact.
  */
 
+import type { ResortId } from "@disney-wait-planner/shared";
 import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profileStorage";
-import { normalizeKey } from "./plansMatching";
+import { normalizeKey, ALIASES_DLR, ALIASES_WDW } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
+import { resolveIdentityKey } from "./crossDayChecks";
+import { resolveDiningKey } from "./diningSuggestions";
+import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
 const MAX_ITEMS = 200;
@@ -151,15 +155,76 @@ function readItemsDataset(key: string): unknown[] {
   return [];
 }
 
+// Phase 9.3.4 (mirrored) — strip trailing time-like text (e.g. "9pm", "9:00 PM")
+// from a name before type/identity inference only, so old imported items like
+// "Fantasmic 9pm" resolve by their activity name. Never touches display names
+// or stored times. Duplicated from the same pattern in plans/page.tsx and
+// crossDayChecks.ts (neither exports it) rather than importing a page module.
+function stripTrailingTimeForInference(name: string): string {
+  return name
+    .replace(/\s*\b\d{1,2}(:\d{2})?\s*(am|pm)\b\s*$/i, "")
+    .replace(/\s*\b\d{1,2}:\d{2}\s*$/, "")
+    .trim();
+}
+
+/**
+ * Resolves the effective item type the same way My Plans hydration does
+ * (resolveHydratedPlannerItemType in plans/page.tsx): an explicit
+ * dining/entertainment type is trusted as-is, but a missing or stale
+ * "attraction" type (e.g. from a pre-Phase-9 backup) is re-classified using
+ * the same dining/entertainment name resolvers, so legacy/restored items are
+ * still reported to Tom under their real type instead of defaulting wrong.
+ */
+function resolveItemType(raw: unknown, name: string): SnapshotItemType {
+  if (raw === "dining" || raw === "entertainment") return raw;
+  const cleaned = stripTrailingTimeForInference(name);
+  if (
+    resolveEntertainmentKey(cleaned) !== null ||
+    resolveEntertainmentKey(cleaned, "DLR") !== null ||
+    resolveEntertainmentKey(cleaned, "WDW") !== null
+  ) {
+    return "entertainment";
+  }
+  if (resolveDiningKey(cleaned) !== null) return "dining";
+  return "attraction";
+}
+
+/**
+ * Canonical alias-resolved identity key for a planner item, mirroring the
+ * identity resolution crossDayChecks.ts uses for cross-day duplicate
+ * detection (resolveIdentityKey / resolveDiningKey / resolveEntertainmentKey)
+ * so aliases like "ROTR" and "Rise of the Resistance" are treated as the same
+ * item rather than only matching on exact normalized name. Falls back to a
+ * plain normalized name when no alias/canonical match is found, which
+ * behaves the same as a normalizeKey-only match for unrecognized names.
+ */
+function resolveCanonicalIdentity(name: string, type: SnapshotItemType, resortHint: ResortId | undefined): string {
+  const cleaned = stripTrailingTimeForInference(name);
+
+  if (type === "dining") {
+    const key = resolveDiningKey(cleaned, resortHint);
+    if (key) return `dining:${key}`;
+  } else if (type === "entertainment") {
+    const key = resolveEntertainmentKey(cleaned, resortHint);
+    if (key) return `entertainment:${key}`;
+  } else {
+    const dlrKey = resolveIdentityKey(cleaned, ALIASES_DLR);
+    const wdwKey = resolveIdentityKey(cleaned, ALIASES_WDW);
+    if (dlrKey === wdwKey) return `attraction:${dlrKey}`;
+    if (resortHint === "DLR") return `attraction:${dlrKey}`;
+    if (resortHint === "WDW") return `attraction:${wdwKey}`;
+  }
+  return `${type}:${normalizeKey(cleaned)}`;
+}
+
 function toPlanItem(raw: unknown): PlannerContextSnapshotItem | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   if (typeof r.name !== "string" || !r.name.trim()) return null;
-  const type: SnapshotItemType = r.type === "dining" || r.type === "entertainment" ? r.type : "attraction";
   return {
     dayId: typeof r.dayId === "string" && r.dayId ? r.dayId : "day-1",
     name: truncate(r.name, MAX_NAME_LEN),
-    type,
+    type: resolveItemType(r.type, r.name),
     time: typeof r.timeLabel === "string" ? r.timeLabel : "",
   };
 }
@@ -176,12 +241,18 @@ function toLightningItem(raw: unknown): PlannerContextSnapshotLightningItem | nu
   };
 }
 
-/** Items whose normalized name appears on 2+ distinct days. */
-function findRepeats(plans: PlannerContextSnapshotItem[]): PlannerContextSnapshotRepeat[] {
+/**
+ * Items whose canonical (alias-resolved) identity appears on 2+ distinct
+ * days — e.g. "ROTR" on Day 1 and "Rise of the Resistance" on Day 3 count
+ * as the same repeat, matching how crossDayChecks.ts identifies duplicates.
+ */
+function findRepeats(
+  plans: PlannerContextSnapshotItem[],
+  resortHint: ResortId | undefined
+): PlannerContextSnapshotRepeat[] {
   const byKey = new Map<string, { name: string; dayIds: Set<string> }>();
   for (const p of plans) {
-    const key = normalizeKey(p.name);
-    if (!key) continue;
+    const key = resolveCanonicalIdentity(p.name, p.type, resortHint);
     const entry = byKey.get(key) ?? { name: p.name, dayIds: new Set<string>() };
     entry.dayIds.add(p.dayId);
     byKey.set(key, entry);
@@ -194,26 +265,34 @@ function findRepeats(plans: PlannerContextSnapshotItem[]): PlannerContextSnapsho
 }
 
 /**
- * Same-day / same-name plan + Lightning pairs whose time ranges actually
- * overlap. Same day + same name alone is not a conflict — the Plans page
- * only surfaces a Lightning/plan conflict once detectTimeConflicts (the
- * same interval-overlap engine used by crossDayChecks.ts) confirms a real
- * overlap, so this mirrors that requirement rather than introducing a
+ * Same-day / same-attraction plan + Lightning pairs whose time ranges
+ * actually overlap. Same day + same identity alone is not a conflict — the
+ * Plans page only surfaces a Lightning/plan conflict once detectTimeConflicts
+ * (the same interval-overlap engine used by crossDayChecks.ts) confirms a
+ * real overlap, so this mirrors that requirement rather than introducing a
  * separate, looser definition of "conflict". Items with no usable time on
  * either side never produce a conflict.
  *
- * Every same-day/same-name Lightning selection is checked (not just one) —
- * a day can have more than one Lightning selection for the same attraction
- * (e.g. after a return-time change), and an earlier one can overlap a plan
- * even when the latest one doesn't.
+ * Identity is alias-resolved (e.g. "ROTR" vs "Rise of the Resistance") via
+ * resolveCanonicalIdentity, matching crossDayChecks.ts's identity resolution
+ * for this same check. Both sides are always resolved as "attraction" —
+ * Lightning Lane only ever applies to attractions, and crossDayChecks.ts's
+ * own Lightning/plan conflict check resolves the plan side the same way
+ * regardless of the plan item's own type.
+ *
+ * Every same-day/same-identity Lightning selection is checked (not just
+ * one) — a day can have more than one Lightning selection for the same
+ * attraction (e.g. after a return-time change), and an earlier one can
+ * overlap a plan even when the latest one doesn't.
  */
 function findConflicts(
   plans: PlannerContextSnapshotItem[],
-  lightning: PlannerContextSnapshotLightningItem[]
+  lightning: PlannerContextSnapshotLightningItem[],
+  resortHint: ResortId | undefined
 ): PlannerContextSnapshotConflict[] {
   const lightningByDayAndKey = new Map<string, PlannerContextSnapshotLightningItem[]>();
   for (const l of lightning) {
-    const key = `${l.dayId}::${normalizeKey(l.name)}`;
+    const key = `${l.dayId}::${resolveCanonicalIdentity(l.name, "attraction", resortHint)}`;
     const bucket = lightningByDayAndKey.get(key);
     if (bucket) bucket.push(l);
     else lightningByDayAndKey.set(key, [l]);
@@ -221,7 +300,9 @@ function findConflicts(
 
   const conflicts: PlannerContextSnapshotConflict[] = [];
   for (const p of plans) {
-    const candidates = lightningByDayAndKey.get(`${p.dayId}::${normalizeKey(p.name)}`);
+    const candidates = lightningByDayAndKey.get(
+      `${p.dayId}::${resolveCanonicalIdentity(p.name, "attraction", resortHint)}`
+    );
     if (!candidates || candidates.length === 0) continue;
 
     const rangeMatch = p.time.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
@@ -330,6 +411,11 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     const inferred = inferPlansContext(
       plans.map((p) => ({ id: `${p.dayId}:${p.name}`, name: p.name, timeLabel: p.time }))
     );
+    // A single profile-wide resort guess (not per-day, unlike crossDayChecks.ts's
+    // dayResortMap) used only to disambiguate attraction aliases that resolve
+    // differently per resort — keeps identity resolution compact.
+    const resortHint: ResortId | undefined =
+      storedResort === "DLR" || storedResort === "WDW" ? storedResort : inferred.resort;
 
     const days_: PlannerContextSnapshotDay[] = days.map((id) => ({
       id,
@@ -345,8 +431,8 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
       days: days_,
       plans,
       lightning,
-      repeats: findRepeats(plans),
-      conflicts: findConflicts(plans, lightning),
+      repeats: findRepeats(plans, resortHint),
+      conflicts: findConflicts(plans, lightning, resortHint),
       ...(itemCapTruncated ? { meta: { truncated: true } } : {}),
     };
 
