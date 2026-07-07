@@ -201,38 +201,51 @@ function findRepeats(plans: PlannerContextSnapshotItem[]): PlannerContextSnapsho
  * overlap, so this mirrors that requirement rather than introducing a
  * separate, looser definition of "conflict". Items with no usable time on
  * either side never produce a conflict.
+ *
+ * Every same-day/same-name Lightning selection is checked (not just one) —
+ * a day can have more than one Lightning selection for the same attraction
+ * (e.g. after a return-time change), and an earlier one can overlap a plan
+ * even when the latest one doesn't.
  */
 function findConflicts(
   plans: PlannerContextSnapshotItem[],
   lightning: PlannerContextSnapshotLightningItem[]
 ): PlannerContextSnapshotConflict[] {
-  const lightningByDayAndKey = new Map<string, PlannerContextSnapshotLightningItem>();
+  const lightningByDayAndKey = new Map<string, PlannerContextSnapshotLightningItem[]>();
   for (const l of lightning) {
-    lightningByDayAndKey.set(`${l.dayId}::${normalizeKey(l.name)}`, l);
+    const key = `${l.dayId}::${normalizeKey(l.name)}`;
+    const bucket = lightningByDayAndKey.get(key);
+    if (bucket) bucket.push(l);
+    else lightningByDayAndKey.set(key, [l]);
   }
+
   const conflicts: PlannerContextSnapshotConflict[] = [];
   for (const p of plans) {
-    const match = lightningByDayAndKey.get(`${p.dayId}::${normalizeKey(p.name)}`);
-    if (!match || !match.startTime) continue;
+    const candidates = lightningByDayAndKey.get(`${p.dayId}::${normalizeKey(p.name)}`);
+    if (!candidates || candidates.length === 0) continue;
 
     const rangeMatch = p.time.match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$/);
     const planStart = rangeMatch ? rangeMatch[1] : /^\d{1,2}:\d{2}$/.test(p.time) ? p.time : undefined;
     if (!planStart) continue; // no usable plan time — never a conflict
     const planEnd = rangeMatch ? rangeMatch[2] : undefined;
 
-    const { overlaps } = detectTimeConflicts([
-      { id: "plan", start: planStart, end: planEnd },
-      { id: "lightning", start: match.startTime, end: match.endTime || undefined },
-    ]);
-    if (overlaps.length === 0) continue;
+    for (const candidate of candidates) {
+      if (!candidate.startTime) continue;
 
-    conflicts.push({
-      dayId: p.dayId,
-      name: p.name,
-      planTime: p.time,
-      lightningStart: match.startTime,
-      lightningEnd: match.endTime,
-    });
+      const { overlaps } = detectTimeConflicts([
+        { id: "plan", start: planStart, end: planEnd },
+        { id: "lightning", start: candidate.startTime, end: candidate.endTime || undefined },
+      ]);
+      if (overlaps.length === 0) continue;
+
+      conflicts.push({
+        dayId: p.dayId,
+        name: p.name,
+        planTime: p.time,
+        lightningStart: candidate.startTime,
+        lightningEnd: candidate.endTime,
+      });
+    }
   }
   return conflicts;
 }
