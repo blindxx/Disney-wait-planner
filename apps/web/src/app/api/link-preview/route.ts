@@ -17,6 +17,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { promises as dns } from "node:dns";
+import { checkRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,9 @@ const USER_AGENT = "Mozilla/5.0 (compatible; DisneyWaitPlannerBot/1.0; +link-pre
 // Redirects followed after the initial request — each hop is revalidated,
 // so this also bounds how many requests one preview lookup can trigger.
 const MAX_REDIRECT_HOPS = 5;
+// Namespaces this route's rate-limit buckets from POST /api/tom/ask's,
+// which share the same underlying in-memory counter map.
+const RATE_LIMIT_KEY_PREFIX = "link-preview:";
 
 interface LinkMetadata {
   title: string | null;
@@ -339,6 +343,12 @@ async function readCappedHtml(response: Response): Promise<string> {
 }
 
 export async function GET(request: NextRequest) {
+  const clientIp = getTrustedClientIp(request);
+  if (!checkRateLimit(`${RATE_LIMIT_KEY_PREFIX}${clientIp}`).allowed) {
+    console.warn("[link-preview] rate limit exceeded", { ip: clientIp });
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
   const rawUrl = request.nextUrl.searchParams.get("url");
   if (!isSafeHttpUrl(rawUrl)) {
     return NextResponse.json(emptyMetadata());
@@ -378,7 +388,12 @@ export async function GET(request: NextRequest) {
       extractMeta(html, "property", "og:description") || extractMeta(html, "name", "description");
     const rawImage = extractMeta(html, "property", "og:image");
     const resolvedImage = rawImage ? resolveUrl(finalUrl, rawImage) : undefined;
-    const image = resolvedImage && isSafeHttpUrl(resolvedImage) ? resolvedImage : undefined;
+    // Same guard as page URLs (scheme + SSRF host check + DNS-resolved
+    // address validation) — an og:image is just as capable of pointing at
+    // an internal/private address as the page URL itself, and it's the
+    // viewer's browser that ends up requesting whatever URL we hand back.
+    const image =
+      resolvedImage && (await isSafePublicUrl(resolvedImage, controller.signal)) ? resolvedImage : undefined;
     const siteName = extractMeta(html, "property", "og:site_name") || new URL(finalUrl).hostname;
 
     return NextResponse.json({

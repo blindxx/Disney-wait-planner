@@ -271,8 +271,14 @@ function fetchLinkPreview(url: string): Promise<LinkPreviewResult> {
   return promise;
 }
 
-/** Fetches previews for each URL in a Tom message and renders a card for any that resolve to metadata. */
-function LinkPreviewCards({ urls }: { urls: string[] }) {
+/**
+ * Fetches previews for each URL in a Tom message and renders a card for any
+ * that resolve to metadata. Cards arrive asynchronously, one at a time,
+ * after the message itself has already rendered — onCardsChange lets the
+ * parent re-pin scroll to bottom (only if the user was already there) once
+ * the DOM has actually grown to include a new card.
+ */
+function LinkPreviewCards({ urls, onCardsChange }: { urls: string[]; onCardsChange: () => void }) {
   const [previews, setPreviews] = useState<Record<string, LinkPreviewResult>>({});
 
   useEffect(() => {
@@ -296,6 +302,15 @@ function LinkPreviewCards({ urls }: { urls: string[] }) {
   const cards = urls
     .map((url) => previews[url])
     .filter((card): card is LinkPreviewData => Boolean(card));
+
+  // Fires after React has committed the DOM update for a newly-appeared
+  // card (useEffect runs post-paint), so the parent's scrollHeight read is
+  // accurate. Re-fires each time the visible card count changes.
+  const cardCount = cards.length;
+  useEffect(() => {
+    if (cardCount > 0) onCardsChange();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardCount]);
 
   if (cards.length === 0) return null;
 
@@ -889,6 +904,24 @@ export default function TomChatPage() {
     setShowJumpToLatest(false);
   }
 
+  /**
+   * Called after a preview card's DOM has actually been inserted (see
+   * LinkPreviewCards' onCardsChange). A preview card renders asynchronously,
+   * well after the message it belongs to, so it isn't covered by the
+   * messages/loading auto-scroll effect below — without this, a card
+   * appearing while the user is pinned to the bottom would silently grow
+   * the scrollable content out from under them and make the jump-to-latest
+   * button appear as if they'd scrolled away, even though they hadn't.
+   */
+  function handlePreviewCardsChange() {
+    const el = messagesRef.current;
+    if (!el) return;
+    if (isNearBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    handleMessagesScroll();
+  }
+
   // Recompute near-bottom state on layout/size changes (not just scroll) so the
   // jump button stays correct through mobile toolbar show/hide and keyboard
   // open/close, which resize the container without firing a scroll event.
@@ -1091,7 +1124,7 @@ export default function TomChatPage() {
                 </div>
               </div>
               {message.role === "tom" && (
-                <LinkPreviewCards urls={extractSafeUrls(message.text)} />
+                <LinkPreviewCards urls={extractSafeUrls(message.text)} onCardsChange={handlePreviewCardsChange} />
               )}
               {message.sources && message.sources.length > 0 && (
                 <div className="tom-sources" style={{ marginLeft: message.role === "tom" ? "38px" : "auto", textAlign: message.role === "tom" ? "left" : "right" }}>
