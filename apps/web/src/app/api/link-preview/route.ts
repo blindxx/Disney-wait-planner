@@ -50,22 +50,110 @@ function isSafeHttpUrl(value: string | null | undefined): value is string {
   }
 }
 
+/** Loopback/private/link-local IPv4 ranges — matched by dotted-quad prefix. */
+function isBlockedIPv4(ipv4: string): boolean {
+  if (ipv4 === "0.0.0.0") return true;
+  if (/^127\./.test(ipv4)) return true;
+  if (/^10\./.test(ipv4)) return true;
+  if (/^192\.168\./.test(ipv4)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ipv4)) return true;
+  if (/^169\.254\./.test(ipv4)) return true;
+  return false;
+}
+
+function ipv4OctetsToHextets(ipv4: string): [number, number] | null {
+  const octets = ipv4.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return [(octets[0] << 8) | octets[1], (octets[2] << 8) | octets[3]];
+}
+
 /**
- * Basic SSRF guard against loopback/private/link-local hosts. Tom's response
- * text isn't fully trusted (it's LLM output that can be steered by user
- * input), so this route shouldn't be usable to probe internal network
- * addresses even though it's not taking raw user input directly.
+ * Expands an IPv6 literal (no brackets, "::" compression allowed, optional
+ * trailing dotted-quad IPv4 tail) into its 8 constituent 16-bit hextets, or
+ * null if it isn't parseable. Used to check numeric address ranges — regex
+ * prefix-matching the way isBlockedIPv4 does isn't reliable for IPv6 since
+ * "::" can compress any run of zero groups anywhere in the address.
+ */
+function expandIPv6Groups(address: string): number[] | null {
+  if (!address.includes(":")) return null;
+
+  const parsePart = (part: string): number[] | null => {
+    if (part === "") return [];
+    const rawGroups = part.split(":");
+    const groups: number[] = [];
+    for (let i = 0; i < rawGroups.length; i++) {
+      const g = rawGroups[i];
+      if (g.includes(".")) {
+        if (i !== rawGroups.length - 1) return null;
+        const mapped = ipv4OctetsToHextets(g);
+        if (!mapped) return null;
+        groups.push(mapped[0], mapped[1]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+        groups.push(parseInt(g, 16));
+      }
+    }
+    return groups;
+  };
+
+  const compressedParts = address.split("::");
+  if (compressedParts.length > 2) return null;
+
+  if (compressedParts.length === 1) {
+    const groups = parsePart(compressedParts[0]);
+    return groups && groups.length === 8 ? groups : null;
+  }
+
+  const head = parsePart(compressedParts[0]);
+  const tail = parsePart(compressedParts[1]);
+  if (!head || !tail) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  return [...head, ...new Array(missing).fill(0), ...tail];
+}
+
+/**
+ * Blocks loopback (::1), link-local (fe80::/10), unique-local/private
+ * (fc00::/7), multicast (ff00::/8), the unspecified address (::), and
+ * IPv4-mapped/-compatible addresses (e.g. ::ffff:127.0.0.1) whose embedded
+ * IPv4 address is itself blocked. An address that fails to parse is
+ * blocked rather than let through, since "unrecognized" shouldn't mean
+ * "assumed safe" for an SSRF guard.
+ */
+function isBlockedIPv6(address: string): boolean {
+  const groups = expandIPv6Groups(address);
+  if (!groups) return true;
+
+  const isZero = (g: number) => g === 0;
+
+  if (groups.slice(0, 7).every(isZero) && groups[7] === 1) return true; // ::1
+  if (groups.every(isZero)) return true; // ::
+  if ((groups[0] & 0xffc0) === 0xfe80) return true; // fe80::/10
+  if ((groups[0] & 0xfe00) === 0xfc00) return true; // fc00::/7
+  if ((groups[0] & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+
+  // ::ffff:a.b.c.d (IPv4-mapped) and the deprecated ::a.b.c.d
+  // (IPv4-compatible) both carry an IPv4 address in the low 32 bits.
+  if (groups.slice(0, 5).every(isZero) && (groups[5] === 0xffff || groups[5] === 0)) {
+    const ipv4 = `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`;
+    if (isBlockedIPv4(ipv4)) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Basic SSRF guard against loopback/private/link-local hosts, for both IPv4
+ * and IPv6. Tom's response text isn't fully trusted (it's LLM output that
+ * can be steered by user input), so this route shouldn't be usable to probe
+ * internal network addresses even though it's not taking raw user input
+ * directly.
  */
 function isBlockedHost(hostname: string): boolean {
   const lower = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (lower === "localhost" || lower.endsWith(".localhost")) return true;
-  if (lower === "0.0.0.0" || lower === "::1" || lower === "::") return true;
-  if (/^127\./.test(lower)) return true;
-  if (/^10\./.test(lower)) return true;
-  if (/^192\.168\./.test(lower)) return true;
-  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(lower)) return true;
-  if (/^169\.254\./.test(lower)) return true;
-  return false;
+  if (lower.includes(":")) return isBlockedIPv6(lower);
+  return isBlockedIPv4(lower);
 }
 
 function decodeEntities(value: string): string {
