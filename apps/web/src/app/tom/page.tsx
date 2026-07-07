@@ -1,13 +1,16 @@
 "use client";
 
 /**
- * Tom Chat Page — Phase 10.3
+ * Tom Chat Page — Phase 10.3, planner-aware context added in Phase 10.4
  *
  * Minimal mobile-first chat UI for the Tom assistant.
  * Talks only to POST /api/tom/ask (this app's own proxy route) — never
- * calls the Tom Railway service directly and never sends planner data,
- * Lightning, profiles, conflicts, or recommendations. Every request body
- * is limited to { question, session_id, source }.
+ * calls the Tom Railway service directly. Request body is
+ * { question, session_id, source, planner_context? } — planner_context is a
+ * compact, read-only snapshot (see lib/plannerContextSnapshot.ts) built
+ * fresh from the active profile's local planner data at send time, and is
+ * omitted entirely when there is nothing to send (no plans, no Lightning).
+ * Tom never writes back to planner storage — it only answers questions.
  *
  * localStorage keys:
  *   dwp.tomChat.v1 — local-only conversation cache: { messages, sessionId,
@@ -22,6 +25,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
 
 const CHAT_STORAGE_KEY = "dwp.tomChat.v1";
 const LEGACY_SESSION_STORAGE_KEY = "dwp.tom.sessionId";
@@ -33,7 +37,7 @@ const DISCORD_INVITE_URL = "https://discord.gg/tMhXGHEgt";
 const HELPER_TEXT =
   "Ask about Disney attractions, dining, entertainment, wait times, park updates, and Disney news.";
 const INFO_TEXT =
-  "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news.";
+  "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news. Tom can also answer read-only questions about your local planner, like what you have planned, dining, entertainment, Lightning selections, conflicts, and repeats.";
 
 /** How close (px) to the bottom of the scroll container still counts as "at the bottom" for auto-scroll. */
 const NEAR_BOTTOM_THRESHOLD = 80;
@@ -961,6 +965,10 @@ export default function TomChatPage() {
     setError(null);
 
     try {
+      // Built fresh per request (not cached) so it reflects the latest local
+      // planner edits; undefined when there's nothing useful to send.
+      const plannerContext = buildPlannerContextSnapshot();
+
       const res = await fetch("/api/tom/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -968,6 +976,7 @@ export default function TomChatPage() {
           question,
           session_id: requestSessionId,
           source: TOM_SOURCE,
+          ...(plannerContext ? { planner_context: plannerContext } : {}),
         }),
       });
 

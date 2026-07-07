@@ -16,7 +16,15 @@
  * trusted for this purpose. See lib/tomRateLimit.ts.
  *
  * Request body:
- *   { question: string, session_id?: string, user_id?: string, park?: string, date?: string }
+ *   { question: string, session_id?: string, user_id?: string, park?: string,
+ *     date?: string, planner_context?: object }
+ *
+ * planner_context (Phase 10.4) is an optional, compact, read-only summary of
+ * the caller's local Disney Wait Planner data (days, plans, Lightning
+ * selections) — see lib/plannerContextSnapshot.ts on the client. It is
+ * forwarded to Tom under context.planner for read-only Q&A only; this route
+ * never uses it to write/modify planner data and applies a size cap so an
+ * oversized or malformed value is safely dropped rather than forwarded.
  *
  * Upstream: POST ${TOM_API_URL}/api/ask
  */
@@ -27,12 +35,17 @@ import { checkTomRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
 export const dynamic = "force-dynamic";
 
+// Compact snapshots are well under this; guards against a malformed/oversized
+// client payload reaching the upstream request.
+const MAX_PLANNER_CONTEXT_BYTES = 30_000;
+
 interface AskRequestBody {
   question?: unknown;
   session_id?: unknown;
   user_id?: unknown;
   park?: unknown;
   date?: unknown;
+  planner_context?: unknown;
 }
 
 function errorResponse(message: string, status: number) {
@@ -41,6 +54,24 @@ function errorResponse(message: string, status: number) {
 
 function asNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * Defensively validates the optional client-supplied planner context: must be
+ * a plain JSON object under the size cap. Returns a deep JSON-cloned copy
+ * (strips functions/prototype weirdness) or undefined if the value is
+ * missing, malformed, or too large — malformed context is dropped silently
+ * rather than failing the request, since the question can still be answered.
+ */
+function sanitizePlannerContext(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized.length > MAX_PLANNER_CONTEXT_BYTES) return undefined;
+    return JSON.parse(serialized) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeEqual(a: string, b: string): boolean {
@@ -85,7 +116,7 @@ export async function POST(request: NextRequest) {
     return errorResponse("Tom is not configured", 500);
   }
 
-  const context: Record<string, string> = { source: "disney-wait-planner" };
+  const context: Record<string, unknown> = { source: "disney-wait-planner" };
   const sessionId = rateLimitSessionId;
   const userId = asNonEmptyString(body.user_id);
   const park = asNonEmptyString(body.park);
@@ -94,6 +125,9 @@ export async function POST(request: NextRequest) {
   if (userId) context.user_id = userId;
   if (park) context.park = park;
   if (date) context.date = date;
+
+  const plannerContext = sanitizePlannerContext(body.planner_context);
+  if (plannerContext) context.planner = plannerContext;
 
   let upstream: Response;
   try {
