@@ -201,6 +201,141 @@ function linkifyText(text: string): React.ReactNode[] {
   return parts;
 }
 
+/** Unique, in-order safe http(s) URLs found in Tom's response text — the candidates for preview cards. */
+function extractSafeUrls(text: string): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  let match: RegExpExecArray | null;
+  URL_PATTERN.lastIndex = 0;
+  while ((match = URL_PATTERN.exec(text)) !== null) {
+    const { url } = splitTrailingPunctuation(match[0]);
+    if (isSafeHttpUrl(url) && !seen.has(url)) {
+      seen.add(url);
+      result.push(url);
+    }
+  }
+  return result;
+}
+
+/** Metadata for one link preview card — mirrors the /api/link-preview response shape. */
+interface LinkPreviewData {
+  url: string;
+  title?: string;
+  description?: string;
+  image?: string;
+  siteName?: string;
+}
+
+type LinkPreviewResult = LinkPreviewData | null;
+
+/**
+ * Module-level cache (not component state) so previews survive across
+ * messages and "New Chat" resets for the lifetime of the tab, avoiding
+ * repeated duplicate fetches of the same URL in a chat session. `null`
+ * means "fetched, no usable preview" (renders as a plain link, not retried).
+ */
+const linkPreviewCache = new Map<string, LinkPreviewResult>();
+const linkPreviewInFlight = new Map<string, Promise<LinkPreviewResult>>();
+
+function toPreviewData(url: string, raw: unknown): LinkPreviewResult {
+  if (!raw || typeof raw !== "object") return null;
+  const candidate = raw as Record<string, unknown>;
+  const title = typeof candidate.title === "string" && candidate.title ? candidate.title : undefined;
+  const description =
+    typeof candidate.description === "string" && candidate.description ? candidate.description : undefined;
+  const image = isSafeHttpUrl(candidate.image) ? candidate.image : undefined;
+  const siteName = typeof candidate.siteName === "string" && candidate.siteName ? candidate.siteName : undefined;
+  if (!title && !description && !image) return null;
+  return { url, title, description, image, siteName };
+}
+
+/** Fetches (and caches) preview metadata for one URL; failures resolve to null rather than throwing. */
+function fetchLinkPreview(url: string): Promise<LinkPreviewResult> {
+  const cached = linkPreviewCache.get(url);
+  if (cached !== undefined) return Promise.resolve(cached);
+
+  const inFlight = linkPreviewInFlight.get(url);
+  if (inFlight) return inFlight;
+
+  const promise = fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => toPreviewData(url, data))
+    .catch(() => null)
+    .then((result) => {
+      linkPreviewCache.set(url, result);
+      linkPreviewInFlight.delete(url);
+      return result;
+    });
+
+  linkPreviewInFlight.set(url, promise);
+  return promise;
+}
+
+/**
+ * Fetches previews for each URL in a Tom message and renders a card for any
+ * that resolve to metadata. Cards arrive asynchronously, one at a time,
+ * after the message itself has already rendered — onCardsChange lets the
+ * parent re-pin scroll to bottom (only if the user was already there) once
+ * the DOM has actually grown to include a new card.
+ */
+function LinkPreviewCards({ urls, onCardsChange }: { urls: string[]; onCardsChange: () => void }) {
+  const [previews, setPreviews] = useState<Record<string, LinkPreviewResult>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    urls.forEach((url) => {
+      const cached = linkPreviewCache.get(url);
+      if (cached !== undefined) {
+        setPreviews((prev) => (url in prev ? prev : { ...prev, [url]: cached }));
+        return;
+      }
+      fetchLinkPreview(url).then((result) => {
+        if (!cancelled) setPreviews((prev) => ({ ...prev, [url]: result }));
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urls.join("\n")]);
+
+  const cards = urls
+    .map((url) => previews[url])
+    .filter((card): card is LinkPreviewData => Boolean(card));
+
+  // Fires after React has committed the DOM update for a newly-appeared
+  // card (useEffect runs post-paint), so the parent's scrollHeight read is
+  // accurate. Re-fires each time the visible card count changes.
+  const cardCount = cards.length;
+  useEffect(() => {
+    if (cardCount > 0) onCardsChange();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardCount]);
+
+  if (cards.length === 0) return null;
+
+  return (
+    <div className="tom-previews">
+      {cards.map((card) => (
+        <a
+          key={card.url}
+          className="tom-preview-card"
+          href={card.url}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          {card.image && <img className="tom-preview-image" src={card.image} alt="" />}
+          <div className="tom-preview-body">
+            {card.siteName && <div className="tom-preview-site">{card.siteName}</div>}
+            {card.title && <div className="tom-preview-title">{card.title}</div>}
+            {card.description && <div className="tom-preview-desc">{card.description}</div>}
+          </div>
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function sourceHref(source: TomSource): string | undefined {
   if (typeof source === "string") return undefined;
   return isSafeHttpUrl(source.url) ? source.url : undefined;
@@ -444,6 +579,76 @@ const CHAT_CSS = `
     color: #cfe0f5;
   }
 
+  .tom-previews {
+    max-width: 85%;
+    margin-top: 6px;
+    margin-left: 38px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .tom-preview-card {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+    background-color: #fff;
+    text-decoration: none;
+    color: inherit;
+  }
+  .tom-preview-card:hover {
+    border-color: #cbd5e1;
+  }
+  .tom-preview-image {
+    width: 100%;
+    max-width: 100%;
+    /* Fixed (not max-) height reserves the box the instant the <img> is
+       inserted, before the image itself has loaded — otherwise the box
+       grows once the image decodes and its intrinsic size is known,
+       shifting content below it out from under a user pinned to the
+       bottom a second time, after the card-insertion scroll fix already
+       ran. */
+    height: 160px;
+    object-fit: cover;
+    display: block;
+    background-color: #f3f4f6;
+  }
+  .tom-preview-body {
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .tom-preview-site {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #6b7280;
+  }
+  .tom-preview-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #111827;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .tom-preview-desc {
+    font-size: 12px;
+    line-height: 1.35;
+    color: #6b7280;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
   .tom-sources {
     max-width: 85%;
     margin-top: 6px;
@@ -596,6 +801,13 @@ const CHAT_CSS = `
     .tom-sources {
       max-width: 90%;
     }
+    .tom-previews {
+      max-width: 90%;
+      margin-left: 30px;
+    }
+    .tom-preview-image {
+      height: 120px;
+    }
     .tom-messages {
       gap: 10px;
     }
@@ -696,6 +908,24 @@ export default function TomChatPage() {
     el.scrollTop = el.scrollHeight;
     isNearBottomRef.current = true;
     setShowJumpToLatest(false);
+  }
+
+  /**
+   * Called after a preview card's DOM has actually been inserted (see
+   * LinkPreviewCards' onCardsChange). A preview card renders asynchronously,
+   * well after the message it belongs to, so it isn't covered by the
+   * messages/loading auto-scroll effect below — without this, a card
+   * appearing while the user is pinned to the bottom would silently grow
+   * the scrollable content out from under them and make the jump-to-latest
+   * button appear as if they'd scrolled away, even though they hadn't.
+   */
+  function handlePreviewCardsChange() {
+    const el = messagesRef.current;
+    if (!el) return;
+    if (isNearBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    handleMessagesScroll();
   }
 
   // Recompute near-bottom state on layout/size changes (not just scroll) so the
@@ -899,6 +1129,9 @@ export default function TomChatPage() {
                   {message.role === "tom" ? linkifyText(message.text) : message.text}
                 </div>
               </div>
+              {message.role === "tom" && (
+                <LinkPreviewCards urls={extractSafeUrls(message.text)} onCardsChange={handlePreviewCardsChange} />
+              )}
               {message.sources && message.sources.length > 0 && (
                 <div className="tom-sources" style={{ marginLeft: message.role === "tom" ? "38px" : "auto", textAlign: message.role === "tom" ? "left" : "right" }}>
                   <span className="tom-sources-label">Sources</span>
