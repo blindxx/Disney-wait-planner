@@ -767,8 +767,14 @@ export default function TomChatPage() {
 
   /** Clears the conversation, starts a fresh session id, and replaces the persisted chat. */
   function handleNewChat() {
+    const newSessionId = generateId();
+    // Update the ref synchronously, before any state-setter-triggered
+    // re-render/effect runs — a fetch already in flight can resolve on the
+    // microtask queue before React flushes effects, so the ref update can't
+    // wait on the `sessionIdRef.current = sessionId` sync effect below.
+    sessionIdRef.current = newSessionId;
     setMessages([]);
-    setSessionId(generateId());
+    setSessionId(newSessionId);
     setInput("");
     setError(null);
     setLoading(false);
