@@ -12,13 +12,22 @@
  * raw backup payloads. Item counts are capped to keep the payload compact.
  */
 
-import { getActiveProfile, buildNamespacedKey } from "./profileStorage";
+import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profileStorage";
 import { normalizeKey } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
 const MAX_ITEMS = 200;
 const MAX_NAME_LEN = 120;
+
+/**
+ * Client-side byte budget, kept safely under the server's hard cap
+ * (MAX_PLANNER_CONTEXT_BYTES in api/tom/ask/route.ts) so the proxy almost
+ * never has to drop planner_context outright — large planners are truncated
+ * here instead of being dropped wholesale. Measured the same way the server
+ * measures it (JSON.stringify(...).length) so the two stay comparable.
+ */
+const MAX_SNAPSHOT_BYTES = 29_000;
 
 type SnapshotItemType = "attraction" | "dining" | "entertainment";
 
@@ -62,6 +71,8 @@ export type PlannerContextSnapshot = {
   lightning: PlannerContextSnapshotLightningItem[];
   repeats: PlannerContextSnapshotRepeat[];
   conflicts: PlannerContextSnapshotConflict[];
+  /** Present (and true) only when some data was left out to fit the byte budget. */
+  meta?: { truncated: true };
 };
 
 function truncate(value: string, max: number): string {
@@ -211,6 +222,46 @@ function findConflicts(
   return conflicts;
 }
 
+function jsonSize(value: unknown): number {
+  return JSON.stringify(value).length;
+}
+
+/** Keeps at most the first half of an array (rounded up), or [] once down to 1 element. */
+function halve<T>(arr: T[]): T[] {
+  return arr.length <= 1 ? [] : arr.slice(0, Math.ceil(arr.length / 2));
+}
+
+/**
+ * Trims a snapshot to fit within MAX_SNAPSHOT_BYTES, preferring a partial
+ * snapshot over dropping planner_context entirely (the server otherwise
+ * drops anything over its own cap). Cuts in order of least- to
+ * most-important: conflicts, repeats, Lightning items, plan items, then
+ * (as a last resort) days — profile/resort/park are never cut.
+ */
+function fitToByteBudget(snapshot: PlannerContextSnapshot): PlannerContextSnapshot {
+  if (jsonSize(snapshot) <= MAX_SNAPSHOT_BYTES) return snapshot;
+
+  const trimmed: PlannerContextSnapshot = { ...snapshot, meta: { truncated: true } };
+
+  trimmed.conflicts = [];
+  if (jsonSize(trimmed) <= MAX_SNAPSHOT_BYTES) return trimmed;
+
+  trimmed.repeats = [];
+  if (jsonSize(trimmed) <= MAX_SNAPSHOT_BYTES) return trimmed;
+
+  while (trimmed.lightning.length > 0 && jsonSize(trimmed) > MAX_SNAPSHOT_BYTES) {
+    trimmed.lightning = halve(trimmed.lightning);
+  }
+  while (trimmed.plans.length > 0 && jsonSize(trimmed) > MAX_SNAPSHOT_BYTES) {
+    trimmed.plans = halve(trimmed.plans);
+  }
+  while (trimmed.days.length > 0 && jsonSize(trimmed) > MAX_SNAPSHOT_BYTES) {
+    trimmed.days = halve(trimmed.days);
+  }
+
+  return trimmed;
+}
+
 /**
  * Builds a compact, read-only planner context snapshot for the active
  * profile, or undefined when there's nothing useful to send (no plans and
@@ -220,19 +271,29 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
   if (typeof window === "undefined") return undefined;
 
   try {
+    // Ensures the Default profile + active profile id are initialized and
+    // legacy dwp.myPlans / dwp.lightning.v1 data is migrated into the
+    // namespaced dwp:{id}:plans / dwp:{id}:lightning keys before we read
+    // them below. Idempotent — safe to call on every snapshot build.
+    bootstrapProfiles();
+
     const profile = getActiveProfile();
     const days = readDays(profile.id);
     const dayMeta = readDayMeta(profile.id);
     const dayParks = readDayParks(profile.id);
 
-    const plans = readItemsDataset(buildNamespacedKey(profile.id, "plans"))
+    const parsedPlans = readItemsDataset(buildNamespacedKey(profile.id, "plans"))
       .map(toPlanItem)
-      .filter((x): x is PlannerContextSnapshotItem => x !== null)
-      .slice(0, MAX_ITEMS);
-    const lightning = readItemsDataset(buildNamespacedKey(profile.id, "lightning"))
+      .filter((x): x is PlannerContextSnapshotItem => x !== null);
+    const parsedLightning = readItemsDataset(buildNamespacedKey(profile.id, "lightning"))
       .map(toLightningItem)
-      .filter((x): x is PlannerContextSnapshotLightningItem => x !== null)
-      .slice(0, MAX_ITEMS);
+      .filter((x): x is PlannerContextSnapshotLightningItem => x !== null);
+
+    const plans = parsedPlans.slice(0, MAX_ITEMS);
+    const lightning = parsedLightning.slice(0, MAX_ITEMS);
+    // MAX_ITEMS itself already dropped some items — flag it below even if
+    // the resulting payload turns out to be within the byte budget.
+    const itemCapTruncated = plans.length < parsedPlans.length || lightning.length < parsedLightning.length;
 
     if (plans.length === 0 && lightning.length === 0) return undefined;
 
@@ -249,7 +310,7 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
       park: dayParks[id],
     }));
 
-    return {
+    const snapshot: PlannerContextSnapshot = {
       profile: { id: profile.id, name: profile.name },
       resort: storedResort ?? inferred.resort,
       park: storedPark ?? inferred.park,
@@ -258,7 +319,10 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
       lightning,
       repeats: findRepeats(plans),
       conflicts: findConflicts(plans, lightning),
+      ...(itemCapTruncated ? { meta: { truncated: true } } : {}),
     };
+
+    return fitToByteBudget(snapshot);
   } catch {
     return undefined;
   }
