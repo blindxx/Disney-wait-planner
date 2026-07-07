@@ -16,6 +16,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { promises as dns } from "node:dns";
 
 export const dynamic = "force-dynamic";
 
@@ -197,14 +198,81 @@ function resolveUrl(base: string, maybeRelative: string): string | undefined {
 }
 
 /**
- * Combines the scheme check with the SSRF host guard. Used both for the
- * originally requested URL and for every redirect target, since a public
- * URL can 3xx to a private/loopback/link-local address and automatic
- * redirect-following would otherwise bypass isBlockedHost entirely.
+ * Rejects when signal fires instead of after a fixed delay, so a slow DNS
+ * lookup shares the same overall deadline as the fetch it's gating rather
+ * than adding its own separate timeout budget on top (which, across a
+ * multi-hop redirect chain, could push total latency well past
+ * FETCH_TIMEOUT_MS even though no single step was individually slow).
  */
-function isSafePublicUrl(value: string | null | undefined): value is string {
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new Error("aborted"));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new Error("aborted"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * Resolves hostname to every IP address the OS resolver returns and checks
+ * each one against the IPv4/IPv6 block lists. A hostname string that looks
+ * public can still be pointed at a private/loopback/internal address by DNS
+ * (rebinding, split-horizon/internal DNS, attacker-controlled records), so
+ * isBlockedHost's string-based check on the hostname alone isn't sufficient
+ * — every resolved address has to be validated too. Fails closed: resolution
+ * errors, empty results, or any single blocked address reject the whole
+ * hostname, even if other resolved addresses are public.
+ *
+ * Note: this validates the addresses returned by a lookup done here, not
+ * the address the subsequent fetch() itself connects to — fetch resolves
+ * DNS again internally. That leaves a narrow rebinding window between the
+ * two lookups; closing it fully would require pinning the connection to a
+ * specific resolved IP, which needs a custom dispatcher/agent and is out of
+ * scope for this fix (no new libraries/infra). This still blocks the common
+ * case the guard exists for: a hostname whose DNS records point at an
+ * internal address.
+ */
+async function isHostnameSafe(hostname: string, signal: AbortSignal): Promise<boolean> {
+  if (isBlockedHost(hostname)) return false;
+
+  let records: { address: string; family: number }[];
+  try {
+    records = await raceWithSignal(dns.lookup(hostname, { all: true }), signal);
+  } catch {
+    return false;
+  }
+
+  if (records.length === 0) return false;
+
+  for (const record of records) {
+    if (!record || typeof record.address !== "string") return false;
+    const address = record.address.toLowerCase();
+    const blocked = record.family === 6 ? isBlockedIPv6(address) : isBlockedIPv4(address);
+    if (blocked) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Combines the scheme check, the SSRF host guard, and DNS-resolved address
+ * validation. Used both for the originally requested URL and for every
+ * redirect target, since a public URL/hostname can 3xx (or simply resolve)
+ * to a private/loopback/link-local address and skipping this on redirects
+ * would bypass the guard entirely.
+ */
+async function isSafePublicUrl(value: string | null | undefined, signal: AbortSignal): Promise<boolean> {
   if (!isSafeHttpUrl(value)) return false;
-  return !isBlockedHost(new URL(value).hostname);
+  return isHostnameSafe(new URL(value).hostname, signal);
 }
 
 /**
@@ -239,7 +307,7 @@ async function fetchFollowingSafeRedirects(startUrl: URL, signal: AbortSignal): 
 
     const location = response.headers.get("location");
     const nextUrlString = location ? resolveUrl(currentUrl.toString(), location) : undefined;
-    if (!isSafePublicUrl(nextUrlString)) {
+    if (!nextUrlString || !(await isSafePublicUrl(nextUrlString, signal))) {
       return null;
     }
     currentUrl = new URL(nextUrlString);
@@ -272,16 +340,19 @@ async function readCappedHtml(response: Response): Promise<string> {
 
 export async function GET(request: NextRequest) {
   const rawUrl = request.nextUrl.searchParams.get("url");
-  if (!isSafePublicUrl(rawUrl)) {
+  if (!isSafeHttpUrl(rawUrl)) {
     return NextResponse.json(emptyMetadata());
   }
-
-  const target = new URL(rawUrl);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
+    if (!(await isSafePublicUrl(rawUrl, controller.signal))) {
+      return NextResponse.json(emptyMetadata());
+    }
+
+    const target = new URL(rawUrl);
     const upstream = await fetchFollowingSafeRedirects(target, controller.signal);
 
     if (!upstream || !upstream.ok) {
