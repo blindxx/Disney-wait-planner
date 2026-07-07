@@ -15,11 +15,16 @@
  *   otherwise treated as expired and discarded. The same sessionId is
  *   reused for every message (including across reloads) so Tom can
  *   maintain conversation context server-side. Never synced to a backend.
+ *   dwp.tom.sessionId — pre-10.3 session id. Only ever read, as a one-time
+ *   fallback when dwp.tomChat.v1 is missing/malformed, so upgrading users
+ *   keep their existing Tom server-side follow-up context instead of
+ *   silently starting a new session. Nothing writes to this key anymore.
  */
 
 import { useEffect, useRef, useState } from "react";
 
 const CHAT_STORAGE_KEY = "dwp.tomChat.v1";
+const LEGACY_SESSION_STORAGE_KEY = "dwp.tom.sessionId";
 const CHAT_TTL_MS = 24 * 60 * 60 * 1000;
 const TOM_SOURCE = "disney-wait-planner";
 const TOM_AVATAR_SRC = "/images/tom-avatar.png";
@@ -87,20 +92,47 @@ function normalizeStoredMessages(raw: unknown): ChatMessage[] {
   return result;
 }
 
-/** Restores the locally persisted chat if present and younger than CHAT_TTL_MS; otherwise null. */
+/** Reads the pre-10.3 session id, if any — used only as a migration fallback below. */
+function loadLegacySessionId(): string | null {
+  try {
+    const legacy = localStorage.getItem(LEGACY_SESSION_STORAGE_KEY);
+    return legacy && legacy.trim() ? legacy : null;
+  } catch {
+    return null;
+  }
+}
+
+/** messages: [] paired with a migrated legacy session id, or null if there's nothing to migrate. */
+function migrateFromLegacySession(): { messages: ChatMessage[]; sessionId: string } | null {
+  const legacySessionId = loadLegacySessionId();
+  return legacySessionId ? { messages: [], sessionId: legacySessionId } : null;
+}
+
+/**
+ * Restores the locally persisted chat if present and younger than CHAT_TTL_MS.
+ * If dwp.tomChat.v1 is missing or malformed (as opposed to present-but-expired),
+ * falls back to the pre-10.3 dwp.tom.sessionId so upgrading users keep their
+ * existing Tom server-side follow-up context instead of silently starting a
+ * new session. A present-but-expired entry still expires normally — no
+ * migration kicks in for that case.
+ */
 function loadStoredChat(): { messages: ChatMessage[]; sessionId: string } | null {
   try {
     const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!raw) return null;
+    if (!raw) return migrateFromLegacySession();
+
     const parsed = JSON.parse(raw) as Partial<StoredChatState> | null;
-    if (!parsed || typeof parsed !== "object") return null;
-    if (typeof parsed.sessionId !== "string" || !parsed.sessionId) return null;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.sessionId !== "string" || !parsed.sessionId) {
+      return migrateFromLegacySession();
+    }
+
     if (typeof parsed.updatedAt !== "number" || Date.now() - parsed.updatedAt > CHAT_TTL_MS) {
       return null;
     }
+
     return { messages: normalizeStoredMessages(parsed.messages), sessionId: parsed.sessionId };
   } catch {
-    return null;
+    return migrateFromLegacySession();
   }
 }
 
