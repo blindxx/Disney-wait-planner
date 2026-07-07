@@ -410,6 +410,7 @@ const CHAT_CSS = `
     font-size: 14px;
     padding: 40px 20px;
     line-height: 1.5;
+    margin: auto 0;
   }
   .tom-empty-title {
     color: #374151;
@@ -461,6 +462,9 @@ const CHAT_CSS = `
     .tom-info-tooltip {
       width: 220px;
     }
+    .tom-empty {
+      margin: 0;
+    }
     .tom-examples {
       flex-direction: column;
       align-items: stretch;
@@ -469,8 +473,12 @@ const CHAT_CSS = `
       text-align: center;
     }
     .tom-jump-btn {
-      right: 14px;
+      left: 50%;
+      right: auto;
       bottom: 72px;
+      transform: translateX(-50%);
+      max-width: calc(100% - 28px);
+      white-space: nowrap;
     }
   }
 `;
