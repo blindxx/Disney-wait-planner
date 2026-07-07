@@ -1128,6 +1128,15 @@ export default function TomChatPage() {
 
   /** Clears the conversation, starts a fresh session id, and replaces the persisted chat. */
   function handleNewChat() {
+    // Must run first: if the active profile changed since this chat was
+    // last synced (e.g. switched on Settings in another tab while /tom
+    // stayed mounted), this brings activeProfileIdRef up to date so the
+    // reset below clears/saves the *current* profile's chat — otherwise the
+    // persistence effect would save this new empty chat under the previous
+    // profile, and the next send would reload the current profile's old
+    // (un-cleared) session/history, silently undoing "New Chat".
+    syncActiveProfile();
+
     const newSessionId = generateId();
     // Update the ref synchronously, before any state-setter-triggered
     // re-render/effect runs — a fetch already in flight can resolve on the
