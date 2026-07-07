@@ -13,21 +13,32 @@
  * Tom never writes back to planner storage — it only answers questions.
  *
  * localStorage keys:
- *   dwp.tomChat.v1 — local-only conversation cache: { messages, sessionId,
- *   updatedAt }. Restored on mount if updatedAt is within CHAT_TTL_MS,
- *   otherwise treated as expired and discarded. The same sessionId is
- *   reused for every message (including across reloads) so Tom can
- *   maintain conversation context server-side. Never synced to a backend.
+ *   dwp:{profileId}:tomChat — local-only conversation cache for the given
+ *   local planner profile: { messages, sessionId, updatedAt }. Scoped per
+ *   profile (Phase 10.4) so switching planner profiles never pairs one
+ *   profile's session_id/history with another profile's planner_context.
+ *   Restored on mount if updatedAt is within CHAT_TTL_MS, otherwise treated
+ *   as expired and discarded. The same sessionId is reused for every message
+ *   (including across reloads) so Tom can maintain conversation context
+ *   server-side. Never synced to a backend.
+ *   dwp.tomChat.v1 — pre-10.4 global (not profile-scoped) conversation
+ *   cache. Only ever read, as a one-time fallback for the "default" profile
+ *   when it has no dwp:default:tomChat entry yet, so upgrading users keep
+ *   their existing conversation instead of silently starting a new one.
+ *   Nothing writes to this key anymore.
  *   dwp.tom.sessionId — pre-10.3 session id. Only ever read, as a one-time
- *   fallback when dwp.tomChat.v1 is missing/malformed, so upgrading users
- *   keep their existing Tom server-side follow-up context instead of
- *   silently starting a new session. Nothing writes to this key anymore.
+ *   fallback for the "default" profile when both of the above are
+ *   missing/malformed, so upgrading users keep their existing Tom
+ *   server-side follow-up context instead of silently starting a new
+ *   session. Nothing writes to this key anymore.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
+import { bootstrapProfiles, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 
-const CHAT_STORAGE_KEY = "dwp.tomChat.v1";
+/** Pre-10.4 global (non-profile-scoped) chat cache — read-only migration fallback for the "default" profile. */
+const LEGACY_CHAT_STORAGE_KEY = "dwp.tomChat.v1";
 const LEGACY_SESSION_STORAGE_KEY = "dwp.tom.sessionId";
 const CHAT_TTL_MS = 24 * 60 * 60 * 1000;
 const TOM_SOURCE = "disney-wait-planner";
@@ -106,28 +117,50 @@ function loadLegacySessionId(): string | null {
   }
 }
 
-/** messages: [] paired with a migrated legacy session id, or null if there's nothing to migrate. */
-function migrateFromLegacySession(): { messages: ChatMessage[]; sessionId: string } | null {
+/** Namespaced per-profile Tom chat storage key: "dwp:{profileId}:tomChat". */
+function chatStorageKeyForProfile(profileId: string): string {
+  return buildNamespacedKey(profileId, "tomChat");
+}
+
+/**
+ * messages: [] paired with a migrated legacy session id, or null if there's
+ * nothing to migrate. The pre-10.3/10.4 legacy keys predate planner profiles
+ * entirely and only ever applied to the implicit single user, which maps to
+ * the "default" profile — non-default profiles never had legacy data to
+ * migrate, so they always start fresh (no mixing with another profile's
+ * old session).
+ */
+function migrateFromLegacySession(profileId: string): { messages: ChatMessage[]; sessionId: string } | null {
+  if (profileId !== "default") return null;
   const legacySessionId = loadLegacySessionId();
   return legacySessionId ? { messages: [], sessionId: legacySessionId } : null;
 }
 
 /**
- * Restores the locally persisted chat if present and younger than CHAT_TTL_MS.
- * If dwp.tomChat.v1 is missing or malformed (as opposed to present-but-expired),
- * falls back to the pre-10.3 dwp.tom.sessionId so upgrading users keep their
- * existing Tom server-side follow-up context instead of silently starting a
- * new session. A present-but-expired entry still expires normally — no
- * migration kicks in for that case.
+ * Restores the given profile's locally persisted chat if present and younger
+ * than CHAT_TTL_MS. If dwp:{profileId}:tomChat is missing or malformed (as
+ * opposed to present-but-expired):
+ *   - for the "default" profile, falls back to the pre-10.4 global
+ *     dwp.tomChat.v1 key, then the pre-10.3 dwp.tom.sessionId, so upgrading
+ *     users keep their existing Tom server-side follow-up context instead of
+ *     silently starting a new session;
+ *   - for any other profile, there is nothing to fall back to — a
+ *     newly-created profile always starts a fresh session, never another
+ *     profile's.
+ * A present-but-expired entry still expires normally — no migration kicks in
+ * for that case.
  */
-function loadStoredChat(): { messages: ChatMessage[]; sessionId: string } | null {
+function loadStoredChat(profileId: string): { messages: ChatMessage[]; sessionId: string } | null {
   try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!raw) return migrateFromLegacySession();
+    let raw = localStorage.getItem(chatStorageKeyForProfile(profileId));
+    if (!raw && profileId === "default") {
+      raw = localStorage.getItem(LEGACY_CHAT_STORAGE_KEY);
+    }
+    if (!raw) return migrateFromLegacySession(profileId);
 
     const parsed = JSON.parse(raw) as Partial<StoredChatState> | null;
     if (!parsed || typeof parsed !== "object" || typeof parsed.sessionId !== "string" || !parsed.sessionId) {
-      return migrateFromLegacySession();
+      return migrateFromLegacySession(profileId);
     }
 
     if (typeof parsed.updatedAt !== "number" || Date.now() - parsed.updatedAt > CHAT_TTL_MS) {
@@ -136,13 +169,13 @@ function loadStoredChat(): { messages: ChatMessage[]; sessionId: string } | null
 
     return { messages: normalizeStoredMessages(parsed.messages), sessionId: parsed.sessionId };
   } catch {
-    return migrateFromLegacySession();
+    return migrateFromLegacySession(profileId);
   }
 }
 
-function saveStoredChat(state: StoredChatState): void {
+function saveStoredChat(state: StoredChatState, profileId: string): void {
   try {
-    localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(chatStorageKeyForProfile(profileId), JSON.stringify(state));
   } catch {
     // localStorage unavailable (private browsing, quota, etc.) — chat still
     // works for the current tab, it just won't persist across reloads.
@@ -878,10 +911,19 @@ export default function TomChatPage() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  // The active local planner profile this chat's messages/sessionId belong
+  // to. Kept in a ref (not state) so syncActiveProfile() below can compare
+  // against it and update it synchronously, before any state-setter-driven
+  // re-render — the same pattern handleNewChat uses for sessionIdRef.
+  const activeProfileIdRef = useRef("default");
+
   // Restore a persisted conversation (if any, and not older than 24h) once on
   // mount — this runs client-only so it never causes an SSR hydration mismatch.
   useEffect(() => {
-    const stored = loadStoredChat();
+    bootstrapProfiles();
+    const currentProfileId = getActiveProfileId();
+    activeProfileIdRef.current = currentProfileId;
+    const stored = loadStoredChat(currentProfileId);
     if (stored) {
       setMessages(stored.messages);
       setSessionId(stored.sessionId);
@@ -894,8 +936,39 @@ export default function TomChatPage() {
   // pre-restore empty state.
   useEffect(() => {
     if (!hydrated) return;
-    saveStoredChat({ messages, sessionId, updatedAt: Date.now() });
+    saveStoredChat({ messages, sessionId, updatedAt: Date.now() }, activeProfileIdRef.current);
   }, [messages, sessionId, hydrated]);
+
+  /**
+   * Detects whether the active local planner profile changed since this
+   * chat was last synced — e.g. the user switched profiles on the Settings
+   * page in another tab, or (should Next.js ever keep this page mounted
+   * across such a change) without a full remount. If so, swaps in that
+   * profile's own cached Tom chat (or starts a fresh session) before
+   * anything is sent, so planner_context always pairs with a
+   * session_id/history that belongs to the same profile — never a stale
+   * profile's session. Called at the start of submitQuestion, before the
+   * new user message is appended or planner_context is built.
+   */
+  function syncActiveProfile(): void {
+    const currentProfileId = getActiveProfileId();
+    if (currentProfileId === activeProfileIdRef.current) return;
+
+    activeProfileIdRef.current = currentProfileId;
+    const stored = loadStoredChat(currentProfileId);
+    const newSessionId = stored?.sessionId ?? generateId();
+    // Updated synchronously, before the setSessionId below triggers a
+    // re-render — sendQuestion/submitQuestion read sessionIdRef.current
+    // (not the `sessionId` state closure) precisely so this takes effect
+    // immediately within the same event handler.
+    sessionIdRef.current = newSessionId;
+    setMessages(stored?.messages ?? []);
+    setSessionId(newSessionId);
+    setInput("");
+    setError(null);
+    isNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }
 
   function handleMessagesScroll() {
     const el = messagesRef.current;
@@ -955,10 +1028,15 @@ export default function TomChatPage() {
 
   /** Returns true on success so the caller can decide whether to restore the input. */
   async function sendQuestion(question: string): Promise<boolean> {
-    // Captured at request start: if "New Chat" swaps in a new session before
-    // this resolves, sessionIdRef.current will no longer match and the
-    // response below is discarded instead of landing in the new conversation.
-    const requestSessionId = sessionId;
+    // Read from the ref (not the `sessionId` state closure): submitQuestion
+    // may have just called syncActiveProfile(), which updates sessionIdRef
+    // synchronously but whose setSessionId() state update hasn't rendered
+    // yet — the ref is the only value guaranteed current at this point.
+    // Also captured at request start so that if "New Chat" swaps in a new
+    // session before this resolves, sessionIdRef.current will no longer
+    // match and the response below is discarded instead of landing in the
+    // new conversation.
+    const requestSessionId = sessionIdRef.current;
     const isStale = () => sessionIdRef.current !== requestSessionId;
 
     setLoading(true);
@@ -1021,7 +1099,12 @@ export default function TomChatPage() {
   }
 
   function submitQuestion(question: string) {
-    const requestSessionId = sessionId;
+    // Must run before anything below reads/uses the active profile or
+    // session — ensures this message (and the planner_context sendQuestion
+    // builds for it) is never appended to, or sent under, a different
+    // profile's chat history/session.
+    syncActiveProfile();
+    const requestSessionId = sessionIdRef.current;
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
