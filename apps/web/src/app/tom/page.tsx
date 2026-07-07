@@ -603,7 +603,13 @@ const CHAT_CSS = `
   .tom-preview-image {
     width: 100%;
     max-width: 100%;
-    max-height: 160px;
+    /* Fixed (not max-) height reserves the box the instant the <img> is
+       inserted, before the image itself has loaded — otherwise the box
+       grows once the image decodes and its intrinsic size is known,
+       shifting content below it out from under a user pinned to the
+       bottom a second time, after the card-insertion scroll fix already
+       ran. */
+    height: 160px;
     object-fit: cover;
     display: block;
     background-color: #f3f4f6;
@@ -800,7 +806,7 @@ const CHAT_CSS = `
       margin-left: 30px;
     }
     .tom-preview-image {
-      max-height: 120px;
+      height: 120px;
     }
     .tom-messages {
       gap: 10px;
