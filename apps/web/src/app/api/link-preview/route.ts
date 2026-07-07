@@ -24,6 +24,9 @@ const FETCH_TIMEOUT_MS = 3000;
 // page we read before giving up.
 const MAX_BODY_BYTES = 200_000;
 const USER_AGENT = "Mozilla/5.0 (compatible; DisneyWaitPlannerBot/1.0; +link-preview)";
+// Redirects followed after the initial request — each hop is revalidated,
+// so this also bounds how many requests one preview lookup can trigger.
+const MAX_REDIRECT_HOPS = 5;
 
 interface LinkMetadata {
   title: string | null;
@@ -37,7 +40,7 @@ function emptyMetadata(): LinkMetadata {
 }
 
 /** Only http:/https: URLs are safe to preview (blocks javascript:, data:, file:, chrome:, about:, etc). */
-function isSafeHttpUrl(value: string | null): value is string {
+function isSafeHttpUrl(value: string | null | undefined): value is string {
   if (!value) return false;
   try {
     const parsed = new URL(value);
@@ -105,6 +108,58 @@ function resolveUrl(base: string, maybeRelative: string): string | undefined {
   }
 }
 
+/**
+ * Combines the scheme check with the SSRF host guard. Used both for the
+ * originally requested URL and for every redirect target, since a public
+ * URL can 3xx to a private/loopback/link-local address and automatic
+ * redirect-following would otherwise bypass isBlockedHost entirely.
+ */
+function isSafePublicUrl(value: string | null | undefined): value is string {
+  if (!isSafeHttpUrl(value)) return false;
+  return !isBlockedHost(new URL(value).hostname);
+}
+
+/**
+ * Fetches startUrl with redirect: "manual" and follows redirects by hand,
+ * re-validating each Location target (safe scheme + not private/loopback)
+ * before requesting it, and resolving relative Location headers against the
+ * current URL. Stops and returns null if a redirect target is unsafe, its
+ * Location header is missing/unparseable, or the hop limit is exceeded.
+ */
+async function fetchFollowingSafeRedirects(startUrl: URL, signal: AbortSignal): Promise<Response | null> {
+  let currentUrl = startUrl;
+
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    const response = await fetch(currentUrl.toString(), {
+      signal,
+      redirect: "manual",
+      headers: {
+        "User-Agent": USER_AGENT,
+        Accept: "text/html,application/xhtml+xml",
+      },
+      cache: "no-store",
+    });
+
+    if (response.status < 300 || response.status >= 400) {
+      return response;
+    }
+
+    // Another redirect, but we're out of hops — refuse rather than follow.
+    if (hop === MAX_REDIRECT_HOPS) {
+      return null;
+    }
+
+    const location = response.headers.get("location");
+    const nextUrlString = location ? resolveUrl(currentUrl.toString(), location) : undefined;
+    if (!isSafePublicUrl(nextUrlString)) {
+      return null;
+    }
+    currentUrl = new URL(nextUrlString);
+  }
+
+  return null;
+}
+
 /** Reads the response body up to MAX_BODY_BYTES, stopping early once </head> is seen. */
 async function readCappedHtml(response: Response): Promise<string> {
   const reader = response.body?.getReader();
@@ -129,30 +184,19 @@ async function readCappedHtml(response: Response): Promise<string> {
 
 export async function GET(request: NextRequest) {
   const rawUrl = request.nextUrl.searchParams.get("url");
-  if (!isSafeHttpUrl(rawUrl)) {
+  if (!isSafePublicUrl(rawUrl)) {
     return NextResponse.json(emptyMetadata());
   }
 
   const target = new URL(rawUrl);
-  if (isBlockedHost(target.hostname)) {
-    return NextResponse.json(emptyMetadata());
-  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
-    const upstream = await fetch(target.toString(), {
-      signal: controller.signal,
-      redirect: "follow",
-      headers: {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html,application/xhtml+xml",
-      },
-      cache: "no-store",
-    });
+    const upstream = await fetchFollowingSafeRedirects(target, controller.signal);
 
-    if (!upstream.ok) {
+    if (!upstream || !upstream.ok) {
       return NextResponse.json(emptyMetadata());
     }
 
@@ -166,13 +210,17 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(emptyMetadata());
     }
 
+    // Resolve relative URLs (e.g. og:image) against the final, post-redirect
+    // page URL rather than the originally requested one.
+    const finalUrl = upstream.url || target.toString();
+
     const title = extractMeta(html, "property", "og:title") || extractTitleTag(html);
     const description =
       extractMeta(html, "property", "og:description") || extractMeta(html, "name", "description");
     const rawImage = extractMeta(html, "property", "og:image");
-    const resolvedImage = rawImage ? resolveUrl(target.toString(), rawImage) : undefined;
+    const resolvedImage = rawImage ? resolveUrl(finalUrl, rawImage) : undefined;
     const image = resolvedImage && isSafeHttpUrl(resolvedImage) ? resolvedImage : undefined;
-    const siteName = extractMeta(html, "property", "og:site_name") || target.hostname;
+    const siteName = extractMeta(html, "property", "og:site_name") || new URL(finalUrl).hostname;
 
     return NextResponse.json({
       title: title || null,
