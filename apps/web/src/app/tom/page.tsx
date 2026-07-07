@@ -162,11 +162,15 @@ const CHAT_CSS = `
   .tom-page {
     position: relative;
     max-width: 700px;
-    margin: 0 auto;
+    /* Cancel the shared .main wrapper 2rem top/bottom padding (see
+       globals.css) — otherwise it stacks with the viewport-based height
+       below and pushes the input row below the fold on mobile. */
+    margin: -2rem auto;
     padding: 16px;
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 96px);
+    height: calc(100vh - 50px);
+    height: calc(100dvh - 50px);
     min-height: 480px;
   }
 
@@ -263,6 +267,10 @@ const CHAT_CSS = `
 
   .tom-messages {
     flex: 1 1 auto;
+    /* Without this, a flex item will not shrink below its content height, so
+       the message list cannot become the scrollable region — the whole page
+       scrolls instead, burying the input row below the fold on mobile. */
+    min-height: 0;
     overflow-y: auto;
     overflow-anchor: none;
     scroll-behavior: smooth;
@@ -446,7 +454,6 @@ const CHAT_CSS = `
   @media (max-width: 480px) {
     .tom-page {
       padding: 12px;
-      height: calc(100vh - 80px);
     }
     .tom-bubble {
       max-width: 90%;
@@ -510,6 +517,17 @@ export default function TomChatPage() {
     isNearBottomRef.current = true;
     setShowJumpToLatest(false);
   }
+
+  // Recompute near-bottom state on layout/size changes (not just scroll) so the
+  // jump button stays correct through mobile toolbar show/hide and keyboard
+  // open/close, which resize the container without firing a scroll event.
+  useEffect(() => {
+    const el = messagesRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => handleMessagesScroll());
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Auto-scroll to the newest message, but only if the user was already
   // near the bottom — someone scrolled up to re-read history shouldn't get
