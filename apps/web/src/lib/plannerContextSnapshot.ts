@@ -14,10 +14,10 @@
 
 import type { ResortId } from "@disney-wait-planner/shared";
 import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profileStorage";
-import { normalizeKey, ALIASES_DLR, ALIASES_WDW } from "./plansMatching";
+import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
-import { resolveIdentityKey } from "./crossDayChecks";
+import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 
@@ -190,13 +190,45 @@ function resolveItemType(raw: unknown, name: string): SnapshotItemType {
 }
 
 /**
+ * Attraction-only alias + containment resolution, mirroring crossDayChecks.ts's
+ * private tryResolve(): exact alias match first (via resolveIdentityKey), then
+ * whole-word token containment against the same shared attraction→park maps
+ * the Plans/Lightning pages use (RIDE_TO_PARK_DLR/WDW), so e.g. "Millennium
+ * Falcon" matches "Millennium Falcon: Smugglers Run" the same way the planner
+ * UI's duplicate/conflict detection does. Returns null (ambiguous or no
+ * match) rather than guessing when more than one attraction contains the
+ * token sequence.
+ */
+function tryResolveAttraction(name: string, resort: ResortId): string | null {
+  const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+  const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+  const key = resolveIdentityKey(name, aliases);
+  if (rideMap.has(key)) return key;
+  const tokens = tokenize(key);
+  if (tokens.length < 2) return null;
+  let hit: string | null = null;
+  for (const attrKey of rideMap.keys()) {
+    if (containsWholeWordSequence(attrKey, tokens)) {
+      if (hit !== null) return null;
+      hit = attrKey;
+    }
+  }
+  return hit;
+}
+
+/**
  * Canonical alias-resolved identity key for a planner item, mirroring the
  * identity resolution crossDayChecks.ts uses for cross-day duplicate
- * detection (resolveIdentityKey / resolveDiningKey / resolveEntertainmentKey)
+ * detection (tryResolveAttraction / resolveDiningKey / resolveEntertainmentKey)
  * so aliases like "ROTR" and "Rise of the Resistance" are treated as the same
- * item rather than only matching on exact normalized name. Falls back to a
- * plain normalized name when no alias/canonical match is found, which
- * behaves the same as a normalizeKey-only match for unrecognized names.
+ * item rather than only matching on exact normalized name, and containment
+ * matches (e.g. "Millennium Falcon" inside "Millennium Falcon: Smugglers
+ * Run") are recognized too. resortHint should be the specific day's resort
+ * when known (see buildDayResortMap) — attraction aliases can resolve
+ * differently per resort, so a day-specific hint is tried before falling
+ * back to the ambiguous dual-resort check below. Falls back to a plain
+ * normalized name when no alias/canonical match is found, which behaves the
+ * same as a normalizeKey-only match for unrecognized/custom names.
  */
 function resolveCanonicalIdentity(name: string, type: SnapshotItemType, resortHint: ResortId | undefined): string {
   const cleaned = stripTrailingTimeForInference(name);
@@ -207,14 +239,78 @@ function resolveCanonicalIdentity(name: string, type: SnapshotItemType, resortHi
   } else if (type === "entertainment") {
     const key = resolveEntertainmentKey(cleaned, resortHint);
     if (key) return `entertainment:${key}`;
+  } else if (resortHint) {
+    const key = tryResolveAttraction(cleaned, resortHint);
+    if (key) return `attraction:${key}`;
   } else {
-    const dlrKey = resolveIdentityKey(cleaned, ALIASES_DLR);
-    const wdwKey = resolveIdentityKey(cleaned, ALIASES_WDW);
-    if (dlrKey === wdwKey) return `attraction:${dlrKey}`;
-    if (resortHint === "DLR") return `attraction:${dlrKey}`;
-    if (resortHint === "WDW") return `attraction:${wdwKey}`;
+    const dlrKey = tryResolveAttraction(cleaned, "DLR");
+    const wdwKey = tryResolveAttraction(cleaned, "WDW");
+    if (dlrKey && wdwKey && dlrKey === wdwKey) return `attraction:${dlrKey}`;
+    if (dlrKey && !wdwKey) return `attraction:${dlrKey}`;
+    if (wdwKey && !dlrKey) return `attraction:${wdwKey}`;
   }
   return `${type}:${normalizeKey(cleaned)}`;
+}
+
+/**
+ * Infers a resort from a set of item names alone (no day context) — mirrors
+ * crossDayChecks.ts's private inferResortFromItems(): prefer inferPlansContext's
+ * two-stage scoring, then fall back to counting which resort's attraction map
+ * recognizes exactly one park across the names.
+ */
+function inferResortForNames(names: string[]): ResortId | undefined {
+  if (names.length === 0) return undefined;
+  const inferred = inferPlansContext(names.map((name) => ({ id: "", name, timeLabel: "" })));
+  if (inferred.resort) return inferred.resort;
+
+  const dlrParks = new Set<string>();
+  const wdwParks = new Set<string>();
+  for (const name of names) {
+    const dlrKey = tryResolveAttraction(name, "DLR");
+    if (dlrKey) {
+      const p = RIDE_TO_PARK_DLR.get(dlrKey);
+      if (p) dlrParks.add(p);
+    }
+    const wdwKey = tryResolveAttraction(name, "WDW");
+    if (wdwKey) {
+      const p = RIDE_TO_PARK_WDW.get(wdwKey);
+      if (p) wdwParks.add(p);
+    }
+  }
+  if (dlrParks.size === 1 && wdwParks.size !== 1) return "DLR";
+  if (wdwParks.size === 1 && dlrParks.size !== 1) return "WDW";
+  return undefined;
+}
+
+/**
+ * Per-day resort map, mirroring crossDayChecks.ts's dayResortMap construction:
+ * a manual dayParks override wins, otherwise the resort is inferred from that
+ * day's own plan items, then its own Lightning items. Days with no signal at
+ * all are simply absent from the map — callers fall back to the profile-wide
+ * resort hint in that case.
+ */
+function buildDayResortMap(
+  plans: PlannerContextSnapshotItem[],
+  lightning: PlannerContextSnapshotLightningItem[],
+  days: string[],
+  dayParks: Record<string, string>
+): Map<string, ResortId> {
+  const map = new Map<string, ResortId>();
+  for (const dayId of days) {
+    const override = dayParks[dayId];
+    if (override && override in PARK_TO_RESORT) {
+      map.set(dayId, PARK_TO_RESORT[override] as ResortId);
+      continue;
+    }
+    const planResort = inferResortForNames(plans.filter((p) => p.dayId === dayId).map((p) => p.name));
+    if (planResort) {
+      map.set(dayId, planResort);
+      continue;
+    }
+    const llResort = inferResortForNames(lightning.filter((l) => l.dayId === dayId).map((l) => l.name));
+    if (llResort) map.set(dayId, llResort);
+  }
+  return map;
 }
 
 function toPlanItem(raw: unknown): PlannerContextSnapshotItem | null {
@@ -245,13 +341,19 @@ function toLightningItem(raw: unknown): PlannerContextSnapshotLightningItem | nu
  * Items whose canonical (alias-resolved) identity appears on 2+ distinct
  * days — e.g. "ROTR" on Day 1 and "Rise of the Resistance" on Day 3 count
  * as the same repeat, matching how crossDayChecks.ts identifies duplicates.
+ * Each item resolves using its own day's resort hint (dayResortMap) when
+ * known, falling back to the profile-wide resort hint otherwise — mirrors
+ * crossDayChecks.ts's day-aware resolution so a DCA-day "Guardians" isn't
+ * resolved against a WDW profile-wide hint.
  */
 function findRepeats(
   plans: PlannerContextSnapshotItem[],
-  resortHint: ResortId | undefined
+  dayResortMap: Map<string, ResortId>,
+  profileResortHint: ResortId | undefined
 ): PlannerContextSnapshotRepeat[] {
   const byKey = new Map<string, { name: string; dayIds: Set<string> }>();
   for (const p of plans) {
+    const resortHint = dayResortMap.get(p.dayId) ?? profileResortHint;
     const key = resolveCanonicalIdentity(p.name, p.type, resortHint);
     const entry = byKey.get(key) ?? { name: p.name, dayIds: new Set<string>() };
     entry.dayIds.add(p.dayId);
@@ -284,14 +386,21 @@ function findRepeats(
  * one) — a day can have more than one Lightning selection for the same
  * attraction (e.g. after a return-time change), and an earlier one can
  * overlap a plan even when the latest one doesn't.
+ *
+ * Identity resolution uses each day's own resort hint (dayResortMap) when
+ * known, falling back to the profile-wide hint — a plan and Lightning
+ * selection are always compared for the same dayId, so one resort lookup
+ * per day covers both sides of the pair.
  */
 function findConflicts(
   plans: PlannerContextSnapshotItem[],
   lightning: PlannerContextSnapshotLightningItem[],
-  resortHint: ResortId | undefined
+  dayResortMap: Map<string, ResortId>,
+  profileResortHint: ResortId | undefined
 ): PlannerContextSnapshotConflict[] {
   const lightningByDayAndKey = new Map<string, PlannerContextSnapshotLightningItem[]>();
   for (const l of lightning) {
+    const resortHint = dayResortMap.get(l.dayId) ?? profileResortHint;
     const key = `${l.dayId}::${resolveCanonicalIdentity(l.name, "attraction", resortHint)}`;
     const bucket = lightningByDayAndKey.get(key);
     if (bucket) bucket.push(l);
@@ -300,6 +409,7 @@ function findConflicts(
 
   const conflicts: PlannerContextSnapshotConflict[] = [];
   for (const p of plans) {
+    const resortHint = dayResortMap.get(p.dayId) ?? profileResortHint;
     const candidates = lightningByDayAndKey.get(
       `${p.dayId}::${resolveCanonicalIdentity(p.name, "attraction", resortHint)}`
     );
@@ -411,11 +521,14 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     const inferred = inferPlansContext(
       plans.map((p) => ({ id: `${p.dayId}:${p.name}`, name: p.name, timeLabel: p.time }))
     );
-    // A single profile-wide resort guess (not per-day, unlike crossDayChecks.ts's
-    // dayResortMap) used only to disambiguate attraction aliases that resolve
-    // differently per resort — keeps identity resolution compact.
-    const resortHint: ResortId | undefined =
+    // Profile-wide resort guess, used only as a fallback for days that have
+    // no day-specific resort signal of their own (see buildDayResortMap).
+    const profileResortHint: ResortId | undefined =
       storedResort === "DLR" || storedResort === "WDW" ? storedResort : inferred.resort;
+    // Per-day resort map (manual override, then that day's own plan/Lightning
+    // items) — mirrors crossDayChecks.ts's dayResortMap so a DCA day isn't
+    // resolved against a WDW profile-wide hint (or vice versa).
+    const dayResortMap = buildDayResortMap(plans, lightning, days, dayParks);
 
     const days_: PlannerContextSnapshotDay[] = days.map((id) => ({
       id,
@@ -431,8 +544,8 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
       days: days_,
       plans,
       lightning,
-      repeats: findRepeats(plans, resortHint),
-      conflicts: findConflicts(plans, lightning, resortHint),
+      repeats: findRepeats(plans, dayResortMap, profileResortHint),
+      conflicts: findConflicts(plans, lightning, dayResortMap, profileResortHint),
       ...(itemCapTruncated ? { meta: { truncated: true } } : {}),
     };
 
