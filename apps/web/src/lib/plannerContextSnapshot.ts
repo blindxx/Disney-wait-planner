@@ -68,7 +68,6 @@ export type PlannerContextSnapshotConflict = {
 };
 
 export type PlannerContextSnapshot = {
-  profile: { id: string; name: string };
   resort?: string;
   park?: string;
   days: PlannerContextSnapshotDay[];
@@ -568,7 +567,6 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     }));
 
     const snapshot: PlannerContextSnapshot = {
-      profile: { id: profile.id, name: profile.name },
       resort: storedResort ?? inferred.resort,
       park: storedPark ?? inferred.park,
       days: days_,
