@@ -17,7 +17,7 @@ import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profi
 import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
-import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT } from "./crossDayChecks";
+import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, daySort } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 
@@ -229,8 +229,17 @@ function tryResolveAttraction(name: string, resort: ResortId): string | null {
  * back to the ambiguous dual-resort check below. Falls back to a plain
  * normalized name when no alias/canonical match is found, which behaves the
  * same as a normalizeKey-only match for unrecognized/custom names.
+ *
+ * dayId is only used to scope the "ambiguous, no resort hint" attraction
+ * case below — it never affects dining/entertainment or resort-known
+ * attraction resolution.
  */
-function resolveCanonicalIdentity(name: string, type: SnapshotItemType, resortHint: ResortId | undefined): string {
+function resolveCanonicalIdentity(
+  name: string,
+  type: SnapshotItemType,
+  resortHint: ResortId | undefined,
+  dayId: string
+): string {
   const cleaned = stripTrailingTimeForInference(name);
 
   if (type === "dining") {
@@ -245,9 +254,18 @@ function resolveCanonicalIdentity(name: string, type: SnapshotItemType, resortHi
   } else {
     const dlrKey = tryResolveAttraction(cleaned, "DLR");
     const wdwKey = tryResolveAttraction(cleaned, "WDW");
-    if (dlrKey && wdwKey && dlrKey === wdwKey) return `attraction:${dlrKey}`;
-    if (dlrKey && !wdwKey) return `attraction:${dlrKey}`;
-    if (wdwKey && !dlrKey) return `attraction:${wdwKey}`;
+    // Mirrors crossDayChecks.ts's resolveAttractionKey: for attractions
+    // specifically (unlike dining/entertainment), when BOTH resorts
+    // recognize the name and there's no day/profile resort hint to
+    // disambiguate, the planner UI treats it as unresolved rather than
+    // merging — even when dlrKey === wdwKey, since that can still mean two
+    // different rides that happen to share a name (e.g. "Space Mountain"
+    // at both Disneyland and Magic Kingdom), not one shared attraction.
+    // Scoped to this item's own day so it can't falsely repeat-match the
+    // same ambiguous name recorded on a different, equally unresolved day.
+    if (dlrKey && wdwKey) return `attraction:ambiguous:${dayId}:${normalizeKey(cleaned)}`;
+    if (dlrKey) return `attraction:${dlrKey}`;
+    if (wdwKey) return `attraction:${wdwKey}`;
   }
   return `${type}:${normalizeKey(cleaned)}`;
 }
@@ -354,7 +372,7 @@ function findRepeats(
   const byKey = new Map<string, { name: string; dayIds: Set<string> }>();
   for (const p of plans) {
     const resortHint = dayResortMap.get(p.dayId) ?? profileResortHint;
-    const key = resolveCanonicalIdentity(p.name, p.type, resortHint);
+    const key = resolveCanonicalIdentity(p.name, p.type, resortHint, p.dayId);
     const entry = byKey.get(key) ?? { name: p.name, dayIds: new Set<string>() };
     entry.dayIds.add(p.dayId);
     byKey.set(key, entry);
@@ -401,7 +419,7 @@ function findConflicts(
   const lightningByDayAndKey = new Map<string, PlannerContextSnapshotLightningItem[]>();
   for (const l of lightning) {
     const resortHint = dayResortMap.get(l.dayId) ?? profileResortHint;
-    const key = `${l.dayId}::${resolveCanonicalIdentity(l.name, "attraction", resortHint)}`;
+    const key = `${l.dayId}::${resolveCanonicalIdentity(l.name, "attraction", resortHint, l.dayId)}`;
     const bucket = lightningByDayAndKey.get(key);
     if (bucket) bucket.push(l);
     else lightningByDayAndKey.set(key, [l]);
@@ -411,7 +429,7 @@ function findConflicts(
   for (const p of plans) {
     const resortHint = dayResortMap.get(p.dayId) ?? profileResortHint;
     const candidates = lightningByDayAndKey.get(
-      `${p.dayId}::${resolveCanonicalIdentity(p.name, "attraction", resortHint)}`
+      `${p.dayId}::${resolveCanonicalIdentity(p.name, "attraction", resortHint, p.dayId)}`
     );
     if (!candidates || candidates.length === 0) continue;
 
@@ -525,12 +543,24 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     // no day-specific resort signal of their own (see buildDayResortMap).
     const profileResortHint: ResortId | undefined =
       storedResort === "DLR" || storedResort === "WDW" ? storedResort : inferred.resort;
+
+    // Self-heal the day list the same way My Plans does on load (Phase
+    // 8.0.1): merge dayIds actually present in plans/Lightning into the
+    // stored days list, so a stale/missing dwp:{profile}:days (e.g. after a
+    // restore or cloud sync that didn't touch it) can't leave items whose
+    // dayId has no matching `days` entry. Read-only — unlike My Plans, this
+    // never writes the merged list back to storage.
+    const itemDayIds = [...plans.map((p) => p.dayId), ...lightning.map((l) => l.dayId)];
+    const mergedDayIds = [...new Set(["day-1", ...days, ...itemDayIds])].sort(daySort);
+
     // Per-day resort map (manual override, then that day's own plan/Lightning
     // items) — mirrors crossDayChecks.ts's dayResortMap so a DCA day isn't
-    // resolved against a WDW profile-wide hint (or vice versa).
-    const dayResortMap = buildDayResortMap(plans, lightning, days, dayParks);
+    // resolved against a WDW profile-wide hint (or vice versa). Built from
+    // the self-healed day list so fallback days get their own resort
+    // inference too, not just the profile-wide hint.
+    const dayResortMap = buildDayResortMap(plans, lightning, mergedDayIds, dayParks);
 
-    const days_: PlannerContextSnapshotDay[] = days.map((id) => ({
+    const days_: PlannerContextSnapshotDay[] = mergedDayIds.map((id) => ({
       id,
       label: dayMeta[id]?.label || dayLabelFromId(id),
       date: dayMeta[id]?.date,
