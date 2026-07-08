@@ -23,14 +23,14 @@ Focus especially on:
 
 Important files frequently involved in state transitions:
 
-apps/web/src/app/plans/page.tsx
-apps/web/src/app/wait-times/page.tsx
-apps/web/src/app/tom/page.tsx
-apps/web/src/app/api/tom/ask/route.ts
-apps/web/src/app/api/link-preview/route.ts
-apps/web/src/lib/syncHelper.ts
-apps/web/src/lib/liveWaitApi.ts
-apps/web/src/app/api/sync/plans/route.ts
+- apps/web/src/app/plans/page.tsx
+- apps/web/src/app/wait-times/page.tsx
+- apps/web/src/app/tom/page.tsx
+- apps/web/src/app/api/tom/ask/route.ts
+- apps/web/src/app/api/link-preview/route.ts
+- apps/web/src/lib/syncHelper.ts
+- apps/web/src/lib/liveWaitApi.ts
+- apps/web/src/app/api/sync/plans/route.ts
 
 Ignore style-only feedback unless it affects correctness.
 
