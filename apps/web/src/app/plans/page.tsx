@@ -43,7 +43,7 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, inferDayPark } from "@/lib/crossDayChecks";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
@@ -52,7 +52,6 @@ import {
   getDiningCanonicalName,
   resolveDiningKey,
   isDiningName,
-  DINING_PLACES,
 } from "@/lib/diningSuggestions";
 import {
   getEntertainmentSuggestions,
@@ -61,7 +60,6 @@ import {
   getEntertainmentAvailabilityType,
   resolveEntertainmentKey,
   isEntertainmentName,
-  ENTERTAINMENT_PLACES,
 } from "@/lib/entertainmentSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
@@ -604,47 +602,16 @@ const DAY_PARK_SHORT: Record<string, string> = {
 /**
  * Normalized attraction name → parkId lookup maps, built once at module load
  * from mock data. Used by crossDayChecks (duplicate detection, identity
- * matching, park labels) and by inferDayPark for attraction-based park
- * frequency counting. Attraction-only — deliberately NOT seeded with dining
- * data, so dining never participates in attraction duplicate/identity
- * matching (see DINING_PARK_DLR/WDW below for the dining-only equivalent
- * used purely for park inference).
+ * matching, park labels). Attraction-only — deliberately NOT seeded with
+ * dining data, so dining never participates in attraction duplicate/identity
+ * matching (crossDayChecks.ts's inferDayPark keeps its own isolated
+ * dining/entertainment park maps for park inference).
  */
 const RIDE_TO_PARK_DLR = new Map<string, string>();
 const RIDE_TO_PARK_WDW = new Map<string, string>();
 for (const _inf of mockAttractionWaits) {
   if (_inf.resortId === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_inf.name), _inf.parkId);
   else if (_inf.resortId === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_inf.name), _inf.parkId);
-}
-
-/**
- * Normalized dining name → parkId lookup maps, built once at module load
- * from DINING_PLACES. Used ONLY by inferDayPark for park inference — never
- * consumed by duplicate detection or attraction identity matching, keeping
- * dining fully isolated from those attraction-oriented pipelines. Dining
- * entries with no single-park identity (resort hotels, Downtown Disney,
- * Disney Springs) are omitted, same as in plansContextInference.ts.
- */
-const DINING_PARK_DLR = new Map<string, string>();
-const DINING_PARK_WDW = new Map<string, string>();
-for (const _d of DINING_PLACES) {
-  if (!_d.parkId) continue;
-  if (_d.resort === "DLR") DINING_PARK_DLR.set(normalizeKey(_d.name), _d.parkId);
-  else if (_d.resort === "WDW") DINING_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
-}
-
-/**
- * Normalized entertainment name → parkId lookup maps, built once at module
- * load from ENTERTAINMENT_PLACES. Mirrors DINING_PARK_DLR/WDW — used ONLY by
- * inferDayPark for park inference, kept isolated from attraction duplicate/
- * identity matching.
- */
-const ENTERTAINMENT_PARK_DLR = new Map<string, string>();
-const ENTERTAINMENT_PARK_WDW = new Map<string, string>();
-for (const _e of ENTERTAINMENT_PLACES) {
-  if (!_e.parkId) continue;
-  if (_e.resort === "DLR") ENTERTAINMENT_PARK_DLR.set(normalizeKey(_e.name), _e.parkId);
-  else if (_e.resort === "WDW") ENTERTAINMENT_PARK_WDW.set(normalizeKey(_e.name), _e.parkId);
 }
 
 /**
@@ -739,57 +706,8 @@ function readSessionContext(
 const DISPLAY_CANONICAL_RIDE_NAME = true;
 
 // ===== PHASE 8.4 — HELPERS =====
-
-/**
- * Infer the most-frequented park for a set of plan items within a resort.
- *
- * Algorithm:
- *   1. Normalize each item name via stripAnnotations + normalizeKey.
- *   2. Exact match against RIDE_TO_PARK_{resort} map.
- *   3. Alias lookup (Stage 3 of the plansMatching pipeline).
- *   4. Count park hits, return the park with the highest count.
- *   5. Tie → null (caller falls back to selectedPark).
- *   6. No matches → null.
- *
- * Pure and deterministic: no randomness, no side effects.
- */
-function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | null {
-  if (dayItems.length === 0) return null;
-  const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-  const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
-  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
-  const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
-  const parkCount = new Map<string, number>();
-  for (const item of dayItems) {
-    const key = normalizeKey(stripAnnotations(item.name));
-    let parkId = map.get(key) ?? null;
-    if (!parkId) {
-      const aliasTarget = aliases[key] ?? (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
-      if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
-    }
-    if (!parkId) {
-      // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
-      // which feeds attraction duplicate/identity matching elsewhere.
-      const diningKey = resolveDiningKey(item.name, resort);
-      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
-    }
-    if (!parkId) {
-      // Entertainment lookup uses its own isolated map, mirroring dining.
-      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
-      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
-    }
-    if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
-  }
-  if (parkCount.size === 0) return null;
-  let maxCount = 0;
-  let winner: string | null = null;
-  let tied = false;
-  for (const [p, c] of parkCount.entries()) {
-    if (c > maxCount) { maxCount = c; winner = p; tied = false; }
-    else if (c === maxCount) { tied = true; }
-  }
-  return (!tied && winner) ? (winner as ParkId) : null;
-}
+// inferDayPark moved to lib/crossDayChecks.ts (Phase 10.4.1) so it has a
+// single, shared implementation instead of a page-local duplicate.
 
 /** Load per-day park overrides from profile-scoped localStorage. */
 function loadDayParks(key: string): Record<string, string> {
