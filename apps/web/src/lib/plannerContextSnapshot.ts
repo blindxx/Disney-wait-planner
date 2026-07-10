@@ -17,7 +17,7 @@ import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profi
 import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
-import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, daySort } from "./crossDayChecks";
+import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, daySort, inferDayPark } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 
@@ -75,6 +75,18 @@ export type PlannerContextSnapshot = {
   lightning: PlannerContextSnapshotLightningItem[];
   repeats: PlannerContextSnapshotRepeat[];
   conflicts: PlannerContextSnapshotConflict[];
+  /**
+   * Phase 10.4.1 — DWP's own authoritative Auto-day park context for days
+   * that have no explicit/manual park (see days[].park for those): item-name
+   * inference (crossDayChecks.ts's inferDayPark) first, falling back to a
+   * restored backup-export-time fallback for custom-only days when
+   * inference finds nothing — the same two Auto-mode sources My Plans'
+   * resolveDayPark itself checks, in the same order. Keyed by canonical day
+   * id → canonical park id. Days with a manual park, or with neither source
+   * resolving a park, are simply absent — never present in both this map
+   * and days[].park for the same day.
+   */
+  dayAutoFallbacks: Record<string, string>;
   /** Present (and true) only when some data was left out to fit the byte budget. */
   meta?: { truncated: true };
 };
@@ -140,6 +152,24 @@ function readDayParks(profileId: string): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [dayId, park] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof park === "string" && park.trim()) result[dayId] = park;
+  }
+  return result;
+}
+
+/**
+ * Phase 10.4.1 — DWP's own restored Auto-day fallbacks (My Plans' Phase 9.6
+ * backup-gap-fix state: the effective park snapshotted at backup-export time
+ * for custom-only Auto days, restored on backup import and now persisted to
+ * profile-scoped localStorage so it outlives the /plans page session — see
+ * dayAutoFallbacksKeyRef in plans/page.tsx). Same validation shape as
+ * readDayParks: only valid park id values are accepted.
+ */
+function readRestoredDayAutoFallbacks(profileId: string): Record<string, string> {
+  const parsed = readJson(buildNamespacedKey(profileId, "dayAutoFallbacks"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const result: Record<string, string> = {};
+  for (const [dayId, park] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof park === "string" && park in PARK_TO_RESORT) result[dayId] = park;
   }
   return result;
 }
@@ -330,6 +360,48 @@ function buildDayResortMap(
   return map;
 }
 
+/**
+ * Auto-day park fallback for every day that has no explicit/manual park
+ * (dayParks[dayId] absent). Mirrors My Plans' resolveDayPark priority chain
+ * for its two Auto-mode steps, reusing both of its authoritative sources
+ * rather than a second, weaker item-name inference:
+ *   1. crossDayChecks.ts's inferDayPark over this day's plan items (mirrors
+ *      resolveDayPark step 2) — takes priority when it resolves a park.
+ *   2. DWP's own restored Auto fallback (mirrors resolveDayPark step 2.5):
+ *      the effective park snapshotted at backup-export time for custom-only
+ *      days, restored on backup import and persisted to localStorage (see
+ *      readRestoredDayAutoFallbacks) — used only when step 1 finds nothing.
+ * Days where neither source resolves a park are simply absent — callers
+ * fall back further down their own priority chain (item-level park fields,
+ * name inference, or the profile-wide resort/park fields already on the
+ * snapshot). resolveDayPark's step 3 (global selectedPark) is deliberately
+ * NOT reused here — that generic fallback is Tom's own responsibility
+ * (consumer contract tier 5), not a DWP-specific signal.
+ */
+function buildDayAutoFallbacks(
+  plans: PlannerContextSnapshotItem[],
+  days: string[],
+  dayParks: Record<string, string>,
+  dayResortMap: Map<string, ResortId>,
+  profileResortHint: ResortId | undefined,
+  restoredAutoFallbacks: Record<string, string>
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const dayId of days) {
+    if (dayParks[dayId]) continue; // manual override — never duplicated here
+    const resortHint = dayResortMap.get(dayId) ?? profileResortHint;
+    const dayPlanItems = plans.filter((p) => p.dayId === dayId).map((p) => ({ name: p.name }));
+    const inferredPark = resortHint ? inferDayPark(dayPlanItems, resortHint) : null;
+    if (inferredPark) {
+      result[dayId] = inferredPark;
+      continue;
+    }
+    const restored = restoredAutoFallbacks[dayId];
+    if (restored) result[dayId] = restored;
+  }
+  return result;
+}
+
 function toPlanItem(raw: unknown): PlannerContextSnapshotItem | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -467,12 +539,22 @@ function halve<T>(arr: T[]): T[] {
   return arr.length <= 1 ? [] : arr.slice(0, Math.ceil(arr.length / 2));
 }
 
+/** Same as halve(), but for a day-id-keyed record instead of an array. */
+function halveRecord(rec: Record<string, string>): Record<string, string> {
+  const entries = Object.entries(rec);
+  if (entries.length <= 1) return {};
+  return Object.fromEntries(entries.slice(0, Math.ceil(entries.length / 2)));
+}
+
 /**
  * Trims a snapshot to fit within MAX_SNAPSHOT_BYTES, preferring a partial
  * snapshot over dropping planner_context entirely (the server otherwise
  * drops anything over its own cap). Cuts in order of least- to
- * most-important: conflicts, repeats, Lightning items, plan items, then
- * (as a last resort) days — profile/resort/park are never cut.
+ * most-important: conflicts, repeats, dayAutoFallbacks, Lightning items,
+ * plan items, then (as a last resort) days — profile/resort/park are never
+ * cut. dayAutoFallbacks is cut after conflicts/repeats (both derived,
+ * secondary signals) but before the core plans/lightning/days data, so it's
+ * preserved whenever the budget allows.
  */
 function fitToByteBudget(snapshot: PlannerContextSnapshot): PlannerContextSnapshot {
   if (jsonSize(snapshot) <= MAX_SNAPSHOT_BYTES) return snapshot;
@@ -485,6 +567,11 @@ function fitToByteBudget(snapshot: PlannerContextSnapshot): PlannerContextSnapsh
   trimmed.repeats = [];
   if (jsonSize(trimmed) <= MAX_SNAPSHOT_BYTES) return trimmed;
 
+  while (Object.keys(trimmed.dayAutoFallbacks).length > 0 && jsonSize(trimmed) > MAX_SNAPSHOT_BYTES) {
+    trimmed.dayAutoFallbacks = halveRecord(trimmed.dayAutoFallbacks);
+  }
+  if (jsonSize(trimmed) <= MAX_SNAPSHOT_BYTES) return trimmed;
+
   while (trimmed.lightning.length > 0 && jsonSize(trimmed) > MAX_SNAPSHOT_BYTES) {
     trimmed.lightning = halve(trimmed.lightning);
   }
@@ -493,6 +580,11 @@ function fitToByteBudget(snapshot: PlannerContextSnapshot): PlannerContextSnapsh
   }
   while (trimmed.days.length > 0 && jsonSize(trimmed) > MAX_SNAPSHOT_BYTES) {
     trimmed.days = halve(trimmed.days);
+    // Keep dayAutoFallbacks consistent with the surviving day list.
+    const remaining = new Set(trimmed.days.map((d) => d.id));
+    trimmed.dayAutoFallbacks = Object.fromEntries(
+      Object.entries(trimmed.dayAutoFallbacks).filter(([dayId]) => remaining.has(dayId))
+    );
   }
 
   return trimmed;
@@ -517,6 +609,7 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     const days = readDays(profile.id);
     const dayMeta = readDayMeta(profile.id);
     const dayParks = readDayParks(profile.id);
+    const restoredAutoFallbacks = readRestoredDayAutoFallbacks(profile.id);
 
     const parsedPlans = readItemsDataset(buildNamespacedKey(profile.id, "plans"))
       .map(toPlanItem)
@@ -574,6 +667,7 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
       lightning,
       repeats: findRepeats(plans, dayResortMap, profileResortHint),
       conflicts: findConflicts(plans, lightning, dayResortMap, profileResortHint),
+      dayAutoFallbacks: buildDayAutoFallbacks(plans, mergedDayIds, dayParks, dayResortMap, profileResortHint, restoredAutoFallbacks),
       ...(itemCapTruncated ? { meta: { truncated: true } } : {}),
     };
 

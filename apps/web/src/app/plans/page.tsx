@@ -43,7 +43,7 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, inferDayPark } from "@/lib/crossDayChecks";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
@@ -52,7 +52,6 @@ import {
   getDiningCanonicalName,
   resolveDiningKey,
   isDiningName,
-  DINING_PLACES,
 } from "@/lib/diningSuggestions";
 import {
   getEntertainmentSuggestions,
@@ -61,7 +60,6 @@ import {
   getEntertainmentAvailabilityType,
   resolveEntertainmentKey,
   isEntertainmentName,
-  ENTERTAINMENT_PLACES,
 } from "@/lib/entertainmentSuggestions";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
@@ -604,47 +602,16 @@ const DAY_PARK_SHORT: Record<string, string> = {
 /**
  * Normalized attraction name → parkId lookup maps, built once at module load
  * from mock data. Used by crossDayChecks (duplicate detection, identity
- * matching, park labels) and by inferDayPark for attraction-based park
- * frequency counting. Attraction-only — deliberately NOT seeded with dining
- * data, so dining never participates in attraction duplicate/identity
- * matching (see DINING_PARK_DLR/WDW below for the dining-only equivalent
- * used purely for park inference).
+ * matching, park labels). Attraction-only — deliberately NOT seeded with
+ * dining data, so dining never participates in attraction duplicate/identity
+ * matching (crossDayChecks.ts's inferDayPark keeps its own isolated
+ * dining/entertainment park maps for park inference).
  */
 const RIDE_TO_PARK_DLR = new Map<string, string>();
 const RIDE_TO_PARK_WDW = new Map<string, string>();
 for (const _inf of mockAttractionWaits) {
   if (_inf.resortId === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_inf.name), _inf.parkId);
   else if (_inf.resortId === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_inf.name), _inf.parkId);
-}
-
-/**
- * Normalized dining name → parkId lookup maps, built once at module load
- * from DINING_PLACES. Used ONLY by inferDayPark for park inference — never
- * consumed by duplicate detection or attraction identity matching, keeping
- * dining fully isolated from those attraction-oriented pipelines. Dining
- * entries with no single-park identity (resort hotels, Downtown Disney,
- * Disney Springs) are omitted, same as in plansContextInference.ts.
- */
-const DINING_PARK_DLR = new Map<string, string>();
-const DINING_PARK_WDW = new Map<string, string>();
-for (const _d of DINING_PLACES) {
-  if (!_d.parkId) continue;
-  if (_d.resort === "DLR") DINING_PARK_DLR.set(normalizeKey(_d.name), _d.parkId);
-  else if (_d.resort === "WDW") DINING_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
-}
-
-/**
- * Normalized entertainment name → parkId lookup maps, built once at module
- * load from ENTERTAINMENT_PLACES. Mirrors DINING_PARK_DLR/WDW — used ONLY by
- * inferDayPark for park inference, kept isolated from attraction duplicate/
- * identity matching.
- */
-const ENTERTAINMENT_PARK_DLR = new Map<string, string>();
-const ENTERTAINMENT_PARK_WDW = new Map<string, string>();
-for (const _e of ENTERTAINMENT_PLACES) {
-  if (!_e.parkId) continue;
-  if (_e.resort === "DLR") ENTERTAINMENT_PARK_DLR.set(normalizeKey(_e.name), _e.parkId);
-  else if (_e.resort === "WDW") ENTERTAINMENT_PARK_WDW.set(normalizeKey(_e.name), _e.parkId);
 }
 
 /**
@@ -739,57 +706,8 @@ function readSessionContext(
 const DISPLAY_CANONICAL_RIDE_NAME = true;
 
 // ===== PHASE 8.4 — HELPERS =====
-
-/**
- * Infer the most-frequented park for a set of plan items within a resort.
- *
- * Algorithm:
- *   1. Normalize each item name via stripAnnotations + normalizeKey.
- *   2. Exact match against RIDE_TO_PARK_{resort} map.
- *   3. Alias lookup (Stage 3 of the plansMatching pipeline).
- *   4. Count park hits, return the park with the highest count.
- *   5. Tie → null (caller falls back to selectedPark).
- *   6. No matches → null.
- *
- * Pure and deterministic: no randomness, no side effects.
- */
-function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | null {
-  if (dayItems.length === 0) return null;
-  const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-  const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
-  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
-  const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
-  const parkCount = new Map<string, number>();
-  for (const item of dayItems) {
-    const key = normalizeKey(stripAnnotations(item.name));
-    let parkId = map.get(key) ?? null;
-    if (!parkId) {
-      const aliasTarget = aliases[key] ?? (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
-      if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
-    }
-    if (!parkId) {
-      // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
-      // which feeds attraction duplicate/identity matching elsewhere.
-      const diningKey = resolveDiningKey(item.name, resort);
-      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
-    }
-    if (!parkId) {
-      // Entertainment lookup uses its own isolated map, mirroring dining.
-      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
-      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
-    }
-    if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
-  }
-  if (parkCount.size === 0) return null;
-  let maxCount = 0;
-  let winner: string | null = null;
-  let tied = false;
-  for (const [p, c] of parkCount.entries()) {
-    if (c > maxCount) { maxCount = c; winner = p; tied = false; }
-    else if (c === maxCount) { tied = true; }
-  }
-  return (!tied && winner) ? (winner as ParkId) : null;
-}
+// inferDayPark moved to lib/crossDayChecks.ts (Phase 10.4.1) so it has a
+// single, shared implementation instead of a page-local duplicate.
 
 /** Load per-day park overrides from profile-scoped localStorage. */
 function loadDayParks(key: string): Record<string, string> {
@@ -814,6 +732,35 @@ function loadDayParks(key: string): Record<string, string> {
 /** Persist per-day park overrides to profile-scoped localStorage. */
 function saveDayParks(parks: Record<string, string>, key: string): void {
   try { localStorage.setItem(key, JSON.stringify(parks)); } catch {}
+}
+
+/**
+ * Load per-day Auto fallbacks (Phase 10.4.1) from profile-scoped localStorage.
+ * Same validation shape as loadDayParks: only valid day IDs with known park
+ * values are accepted, so corrupt/foreign data can never leak into
+ * resolveDayPark or planner_context.
+ */
+function loadDayAutoFallbacks(key: string): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+        result[k] = v;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist per-day Auto fallbacks (Phase 10.4.1) to profile-scoped localStorage. */
+function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): void {
+  try { localStorage.setItem(key, JSON.stringify(fallbacks)); } catch {}
 }
 
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
@@ -902,10 +849,15 @@ export default function PlansPage() {
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
   // Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days,
-  // populated at restore time. Not persisted to localStorage; survives for the
-  // current session after restore. resolveDayPark checks this between item
-  // inference (step 2) and the global selectedPark fallback (step 3), and the
-  // day-switching effect uses it when inference yields nothing.
+  // populated at restore time (and at empty-day import bootstrap time).
+  // resolveDayPark checks this between item inference (step 2) and the global
+  // selectedPark fallback (step 3), and the day-switching effect uses it when
+  // inference yields nothing.
+  // Phase 10.4.1 — now also persisted to profile-scoped localStorage (mirrors
+  // dayParks) so it survives page reloads/new sessions and so
+  // plannerContextSnapshot.ts (a separate, localStorage-only reader) can
+  // expose it to Tom as planner_context.dayAutoFallbacks.
+  const dayAutoFallbacksKeyRef = useRef("dwp:default:dayAutoFallbacks");
   const [dayAutoFallbacks, setDayAutoFallbacks] = useState<Record<string, string>>({});
   // Phase 8.1 — day control UI state
   // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
@@ -1164,6 +1116,8 @@ export default function PlansPage() {
     dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
     // Phase 8.4 — set per-profile day parks key
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
+    // Phase 10.4.1 — set per-profile day Auto fallbacks key
+    dayAutoFallbacksKeyRef.current = buildNamespacedKey(currentProfileId, "dayAutoFallbacks");
     // Retarget the module-level sync to this profile; cancels any pending work
     // from a prior profile (safe no-op on first mount).
     setSyncProfileId(currentProfileId);
@@ -1207,6 +1161,8 @@ export default function PlansPage() {
     setDayMeta(loadDayMeta(dayMetaKeyRef.current));
     // Phase 8.4 — load per-day park overrides
     setDayParks(loadDayParks(dayParksKeyRef.current));
+    // Phase 10.4.1 — load persisted per-day Auto fallbacks (survives reloads)
+    setDayAutoFallbacks(loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current));
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
 
@@ -1650,7 +1606,12 @@ export default function PlansPage() {
     setDayParks(nextDayParks);
     saveDayParks(nextDayParks, _dayParksKey);
     // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
-    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[dayId]; return next; });
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
+    const nextAutoFallbacks = { ...dayAutoFallbacks };
+    delete nextAutoFallbacks[dayId];
+    setDayAutoFallbacks(nextAutoFallbacks);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
     // Active day reset guard — result must always be a valid existing day ID.
     if (activeDayId === dayId) {
       // Removed day was active: prefer the previous day; else first remaining.
@@ -1677,7 +1638,16 @@ export default function PlansPage() {
     setItems((prev) => prev.filter((it) => it.dayId !== target));
     // Phase 9.6 fix 2 — clearing a day's items removes its park context,
     // so drop any stale auto fallback for it too.
-    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[target]; return next; });
+    // Phase 10.4.1 — also persist the removal (matches Remove Day / Clear
+    // All); without this, the cleared fallback survived in localStorage and
+    // could resurface after a reload or in a planner_context snapshot.
+    const _profileId = getActiveProfileId();
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
+    const nextAutoFallbacks = { ...dayAutoFallbacks };
+    delete nextAutoFallbacks[target];
+    setDayAutoFallbacks(nextAutoFallbacks);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
     setClearDayTargetId(null);
   }
 
@@ -2063,7 +2033,10 @@ export default function PlansPage() {
     setDayParks({});
     saveDayParks({}, _dayParksKey);
     // Phase 9.6 backup gap fix — Clear All also resets per-day auto fallbacks.
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     setDayAutoFallbacks({});
+    saveDayAutoFallbacks({}, _dayAutoFallbacksKey);
     // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
     // fresh, so both the inference gate and the stored session context must be
     // cleared. Without this, a subsequent import is blocked on two levels:
@@ -2285,7 +2258,10 @@ export default function PlansPage() {
       // a day switch (the day-switching effect reads dayAutoFallbacks when
       // inference fails; without this, returning to the imported day after
       // visiting another day would inherit that day's global selectedPark).
-      setDayAutoFallbacks((prev) => ({ ...prev, [targetDayId]: fallbackParkId }));
+      // Phase 10.4.1 — also persisted (mirrors the restore-flow write above).
+      const nextAutoFallbacks = { ...dayAutoFallbacks, [targetDayId]: fallbackParkId };
+      setDayAutoFallbacks(nextAutoFallbacks);
+      saveDayAutoFallbacks(nextAutoFallbacks, dayAutoFallbacksKeyRef.current);
       effectiveResort = fallbackResort;
     }
     const typeResort = effectiveResort ?? selectedResort;
@@ -2623,7 +2599,10 @@ export default function PlansPage() {
     // Phase 9.6 backup gap fix — restore per-day auto fallbacks for Auto days.
     // Only accept days that: (a) are in the restored set, (b) are NOT in
     // restoredDayParks (Auto only), (c) carry a valid own-property park ID.
-    // dayAutoFallbacks is session-only state; not persisted to localStorage.
+    // Phase 10.4.1 — also persisted to profile-scoped localStorage (mirrors
+    // restoredDayParks just above) so this authoritative Auto-day state
+    // survives beyond the current session and is readable by
+    // plannerContextSnapshot.ts for Tom.
     const restoredAutoFallbacks: Record<string, string> = {};
     if (data.dayAutoFallbacks) {
       for (const [k, v] of Object.entries(data.dayAutoFallbacks as Record<string, unknown>)) {
@@ -2639,6 +2618,8 @@ export default function PlansPage() {
       }
     }
     setDayAutoFallbacks(restoredAutoFallbacks);
+    dayAutoFallbacksKeyRef.current = buildNamespacedKey(activeProfileIdRef.current, "dayAutoFallbacks");
+    saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current);
   }
 
   return (

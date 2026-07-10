@@ -124,6 +124,62 @@ for (const _e of ENTERTAINMENT_PLACES) {
 }
 
 /**
+ * Infer the most-frequented park for a set of plan items within a resort.
+ * Extracted from the My Plans page (Phase 10.4.1) so other consumers (e.g.
+ * Tom's planner_context builder) can reuse the exact same Auto-day park
+ * inference used by My Plans' resolveDayPark, instead of a second, weaker
+ * one.
+ *
+ * Algorithm:
+ *   1. Normalize each item name via stripAnnotations + normalizeKey.
+ *   2. Exact match against RIDE_TO_PARK_{resort} map.
+ *   3. Alias lookup (Stage 3 of the plansMatching pipeline).
+ *   4. Fall back to dining/entertainment name resolution + their own park maps.
+ *   5. Count park hits, return the park with the highest count.
+ *   6. Tie → null (caller falls back to selectedPark).
+ *   7. No matches → null.
+ *
+ * Pure and deterministic: no randomness, no side effects.
+ */
+export function inferDayPark(dayItems: { name: string }[], resort: ResortId): ParkId | null {
+  if (dayItems.length === 0) return null;
+  const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
+  const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
+  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
+  const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
+  const parkCount = new Map<string, number>();
+  for (const item of dayItems) {
+    const key = normalizeKey(stripAnnotations(item.name));
+    let parkId = map.get(key) ?? null;
+    if (!parkId) {
+      const aliasTarget = aliases[key] ?? (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
+      if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
+    }
+    if (!parkId) {
+      // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
+      // which feeds attraction duplicate/identity matching elsewhere.
+      const diningKey = resolveDiningKey(item.name, resort);
+      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
+    }
+    if (!parkId) {
+      // Entertainment lookup uses its own isolated map, mirroring dining.
+      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
+      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
+    }
+    if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
+  }
+  if (parkCount.size === 0) return null;
+  let maxCount = 0;
+  let winner: string | null = null;
+  let tied = false;
+  for (const [p, c] of parkCount.entries()) {
+    if (c > maxCount) { maxCount = c; winner = p; tied = false; }
+    else if (c === maxCount) { tied = true; }
+  }
+  return (!tied && winner) ? (winner as ParkId) : null;
+}
+
+/**
  * Shared cross-day duplicate / Lightning-vs-Plan conflict detection engine.
  * Extracted verbatim (no behavior change) from the My Plans page so both
  * My Plans and the Lightning page reuse identical semantics.
