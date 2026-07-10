@@ -1638,7 +1638,16 @@ export default function PlansPage() {
     setItems((prev) => prev.filter((it) => it.dayId !== target));
     // Phase 9.6 fix 2 — clearing a day's items removes its park context,
     // so drop any stale auto fallback for it too.
-    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[target]; return next; });
+    // Phase 10.4.1 — also persist the removal (matches Remove Day / Clear
+    // All); without this, the cleared fallback survived in localStorage and
+    // could resurface after a reload or in a planner_context snapshot.
+    const _profileId = getActiveProfileId();
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
+    const nextAutoFallbacks = { ...dayAutoFallbacks };
+    delete nextAutoFallbacks[target];
+    setDayAutoFallbacks(nextAutoFallbacks);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
     setClearDayTargetId(null);
   }
 
