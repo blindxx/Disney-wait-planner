@@ -734,6 +734,35 @@ function saveDayParks(parks: Record<string, string>, key: string): void {
   try { localStorage.setItem(key, JSON.stringify(parks)); } catch {}
 }
 
+/**
+ * Load per-day Auto fallbacks (Phase 10.4.1) from profile-scoped localStorage.
+ * Same validation shape as loadDayParks: only valid day IDs with known park
+ * values are accepted, so corrupt/foreign data can never leak into
+ * resolveDayPark or planner_context.
+ */
+function loadDayAutoFallbacks(key: string): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const result: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+        result[k] = v;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist per-day Auto fallbacks (Phase 10.4.1) to profile-scoped localStorage. */
+function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): void {
+  try { localStorage.setItem(key, JSON.stringify(fallbacks)); } catch {}
+}
+
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
 
 /**
@@ -820,10 +849,15 @@ export default function PlansPage() {
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
   // Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days,
-  // populated at restore time. Not persisted to localStorage; survives for the
-  // current session after restore. resolveDayPark checks this between item
-  // inference (step 2) and the global selectedPark fallback (step 3), and the
-  // day-switching effect uses it when inference yields nothing.
+  // populated at restore time (and at empty-day import bootstrap time).
+  // resolveDayPark checks this between item inference (step 2) and the global
+  // selectedPark fallback (step 3), and the day-switching effect uses it when
+  // inference yields nothing.
+  // Phase 10.4.1 — now also persisted to profile-scoped localStorage (mirrors
+  // dayParks) so it survives page reloads/new sessions and so
+  // plannerContextSnapshot.ts (a separate, localStorage-only reader) can
+  // expose it to Tom as planner_context.dayAutoFallbacks.
+  const dayAutoFallbacksKeyRef = useRef("dwp:default:dayAutoFallbacks");
   const [dayAutoFallbacks, setDayAutoFallbacks] = useState<Record<string, string>>({});
   // Phase 8.1 — day control UI state
   // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
@@ -1082,6 +1116,8 @@ export default function PlansPage() {
     dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
     // Phase 8.4 — set per-profile day parks key
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
+    // Phase 10.4.1 — set per-profile day Auto fallbacks key
+    dayAutoFallbacksKeyRef.current = buildNamespacedKey(currentProfileId, "dayAutoFallbacks");
     // Retarget the module-level sync to this profile; cancels any pending work
     // from a prior profile (safe no-op on first mount).
     setSyncProfileId(currentProfileId);
@@ -1125,6 +1161,8 @@ export default function PlansPage() {
     setDayMeta(loadDayMeta(dayMetaKeyRef.current));
     // Phase 8.4 — load per-day park overrides
     setDayParks(loadDayParks(dayParksKeyRef.current));
+    // Phase 10.4.1 — load persisted per-day Auto fallbacks (survives reloads)
+    setDayAutoFallbacks(loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current));
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
 
@@ -1568,7 +1606,12 @@ export default function PlansPage() {
     setDayParks(nextDayParks);
     saveDayParks(nextDayParks, _dayParksKey);
     // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
-    setDayAutoFallbacks((prev) => { const next = { ...prev }; delete next[dayId]; return next; });
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
+    const nextAutoFallbacks = { ...dayAutoFallbacks };
+    delete nextAutoFallbacks[dayId];
+    setDayAutoFallbacks(nextAutoFallbacks);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
     // Active day reset guard — result must always be a valid existing day ID.
     if (activeDayId === dayId) {
       // Removed day was active: prefer the previous day; else first remaining.
@@ -1981,7 +2024,10 @@ export default function PlansPage() {
     setDayParks({});
     saveDayParks({}, _dayParksKey);
     // Phase 9.6 backup gap fix — Clear All also resets per-day auto fallbacks.
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     setDayAutoFallbacks({});
+    saveDayAutoFallbacks({}, _dayAutoFallbacksKey);
     // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
     // fresh, so both the inference gate and the stored session context must be
     // cleared. Without this, a subsequent import is blocked on two levels:
@@ -2203,7 +2249,10 @@ export default function PlansPage() {
       // a day switch (the day-switching effect reads dayAutoFallbacks when
       // inference fails; without this, returning to the imported day after
       // visiting another day would inherit that day's global selectedPark).
-      setDayAutoFallbacks((prev) => ({ ...prev, [targetDayId]: fallbackParkId }));
+      // Phase 10.4.1 — also persisted (mirrors the restore-flow write above).
+      const nextAutoFallbacks = { ...dayAutoFallbacks, [targetDayId]: fallbackParkId };
+      setDayAutoFallbacks(nextAutoFallbacks);
+      saveDayAutoFallbacks(nextAutoFallbacks, dayAutoFallbacksKeyRef.current);
       effectiveResort = fallbackResort;
     }
     const typeResort = effectiveResort ?? selectedResort;
@@ -2541,7 +2590,10 @@ export default function PlansPage() {
     // Phase 9.6 backup gap fix — restore per-day auto fallbacks for Auto days.
     // Only accept days that: (a) are in the restored set, (b) are NOT in
     // restoredDayParks (Auto only), (c) carry a valid own-property park ID.
-    // dayAutoFallbacks is session-only state; not persisted to localStorage.
+    // Phase 10.4.1 — also persisted to profile-scoped localStorage (mirrors
+    // restoredDayParks just above) so this authoritative Auto-day state
+    // survives beyond the current session and is readable by
+    // plannerContextSnapshot.ts for Tom.
     const restoredAutoFallbacks: Record<string, string> = {};
     if (data.dayAutoFallbacks) {
       for (const [k, v] of Object.entries(data.dayAutoFallbacks as Record<string, unknown>)) {
@@ -2557,6 +2609,8 @@ export default function PlansPage() {
       }
     }
     setDayAutoFallbacks(restoredAutoFallbacks);
+    dayAutoFallbacksKeyRef.current = buildNamespacedKey(activeProfileIdRef.current, "dayAutoFallbacks");
+    saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current);
   }
 
   return (
