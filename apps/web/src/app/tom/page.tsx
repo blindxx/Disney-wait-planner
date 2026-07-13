@@ -1092,6 +1092,7 @@ export default function TomChatPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
   const helpModalRef = useRef<HTMLDivElement>(null);
+  const helpCloseRef = useRef<HTMLButtonElement>(null);
   // Mirrors `sessionId` for synchronous reads inside async callbacks, so an
   // in-flight request started before "New Chat" can detect it's now stale.
   const sessionIdRef = useRef(sessionId);
@@ -1358,12 +1359,14 @@ export default function TomChatPage() {
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
-  // While Help is open: focus the dialog, trap Tab within it, close on
-  // Escape, and lock background scroll (mainly for the mobile sheet layout).
+  // While Help is open: focus the close button (a real tabbable control, so
+  // an immediate Shift+Tab is caught by the trap below instead of escaping
+  // to whatever sits behind the overlay), trap Tab within the dialog, close
+  // on Escape, and lock background scroll (mainly for the mobile sheet layout).
   useEffect(() => {
     if (!helpOpen) return;
 
-    helpModalRef.current?.focus();
+    helpCloseRef.current?.focus();
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
 
@@ -1571,7 +1574,13 @@ export default function TomChatPage() {
                 <h2 id="tom-help-title" className="tom-help-title">
                   Help &amp; Examples
                 </h2>
-                <button type="button" className="tom-help-close" aria-label="Close help" onClick={closeHelp}>
+                <button
+                  type="button"
+                  className="tom-help-close"
+                  aria-label="Close help"
+                  ref={helpCloseRef}
+                  onClick={closeHelp}
+                >
                   ×
                 </button>
               </div>
