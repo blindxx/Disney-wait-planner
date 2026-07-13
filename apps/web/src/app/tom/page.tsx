@@ -46,9 +46,9 @@ const TOM_AVATAR_SRC = "/images/tom-avatar.png";
 const DISCORD_INVITE_URL = "https://discord.gg/tMhXGHEgt";
 
 const HELPER_TEXT =
-  "Ask about Disney attractions, dining, entertainment, wait times, park updates, and Disney news.";
+  "Ask about your Disney trip, including your planner, or explore Disney attractions, dining, wait times, park updates, and news.";
 const INFO_TEXT =
-  "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news. Tom can also answer read-only questions about your local planner, like what you have planned, dining, entertainment, Lightning selections, conflicts, and repeats.";
+  "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news. Tom can also answer questions about your local planner, including your plans, Lightning selections, conflicts, and more. Select Help above for examples and the full list of supported features.";
 
 /** How close (px) to the bottom of the scroll container still counts as "at the bottom" for auto-scroll. */
 const NEAR_BOTTOM_THRESHOLD = 80;
@@ -59,7 +59,39 @@ const STARTER_PROMPTS = [
   "What's new at Disneyland?",
   "What's the latest Star Wars news?",
   "What's the latest Marvel news?",
+  "What do I have planned today?",
+];
+
+/** Example prompts shown in the Help modal — Disney-information capabilities. */
+const HELP_DISNEY_EXAMPLES = [
+  "What's new at Magic Kingdom?",
+  "EPCOT updates",
+  "What's new at Galaxy's Edge?",
+  "Tell me about TRON.",
+  "Wait for Rise of the Resistance",
+  "Disney Parks Blog news",
   "Tell me about Savi's Workshop.",
+];
+
+/** Example prompts shown in the Help modal — read-only local planner questions. */
+const HELP_PLANNER_EXAMPLES = [
+  "What do I have planned today?",
+  "What are my plans for Day 2?",
+  "What park am I visiting on Day 3?",
+  "What day is Magic Kingdom?",
+  "What dining do I have?",
+  "What entertainment do I have?",
+  "What Lightning selections do I have?",
+  "Do I have any conflicts?",
+  "What am I repeating?",
+];
+
+/** Example prompts shown in the Help modal — follow-up questions within a conversation. */
+const HELP_FOLLOWUP_EXAMPLES = [
+  "Tell me more about number 2.",
+  "What about dining there?",
+  "Any other news?",
+  "Show me the next one.",
 ];
 
 type ChatRole = "user" | "tom";
@@ -472,6 +504,12 @@ const CHAT_CSS = `
     color: #111827;
     margin: 0;
   }
+  .tom-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
   .tom-new-chat-btn {
     flex-shrink: 0;
     padding: 6px 14px;
@@ -826,6 +864,113 @@ const CHAT_CSS = `
     cursor: not-allowed;
   }
 
+  .tom-help-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background-color: rgba(17, 24, 39, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .tom-help-modal {
+    width: 100%;
+    max-width: 560px;
+    max-height: 85vh;
+    max-height: 85dvh;
+    overflow-y: auto;
+    background-color: #fff;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+  }
+  .tom-help-modal:focus-visible {
+    outline: none;
+  }
+  .tom-help-header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 16px 18px;
+    border-bottom: 1px solid #e5e7eb;
+    background-color: #fff;
+    border-radius: 12px 12px 0 0;
+  }
+  .tom-help-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .tom-help-title {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+    color: #111827;
+  }
+  .tom-help-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #6b7280;
+  }
+  .tom-help-close {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid #d1d5db;
+    background-color: #fff;
+    color: #374151;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .tom-help-close:hover {
+    background-color: #f3f4f6;
+  }
+  .tom-help-close:focus-visible {
+    outline: 2px solid #1e3a5f;
+    outline-offset: 2px;
+  }
+  .tom-help-body {
+    padding: 16px 18px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .tom-help-section h3 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #111827;
+  }
+  .tom-help-section p {
+    margin: 0 0 6px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #374151;
+  }
+  .tom-help-section ul {
+    margin: 0;
+    padding-left: 18px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #374151;
+  }
+  .tom-help-examples {
+    justify-content: flex-start;
+    margin-top: 0;
+  }
+
   @media (max-width: 480px) {
     .tom-page {
       padding: 12px;
@@ -881,6 +1026,16 @@ const CHAT_CSS = `
     .tom-example-chip {
       text-align: center;
     }
+    .tom-help-backdrop {
+      padding: 0;
+      align-items: flex-end;
+    }
+    .tom-help-modal {
+      max-width: 100%;
+      max-height: 90vh;
+      max-height: 90dvh;
+      border-radius: 12px 12px 0 0;
+    }
     .tom-jump-btn {
       left: 50%;
       right: auto;
@@ -892,6 +1047,35 @@ const CHAT_CSS = `
   }
 `;
 
+/** A group of clickable example-prompt chips inside the Help modal — reuses the same chip styling as the empty-state starter prompts. */
+function HelpExampleChips({
+  label,
+  items,
+  onSelect,
+  disabled,
+}: {
+  label: string;
+  items: string[];
+  onSelect: (text: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="tom-examples tom-help-examples" role="group" aria-label={label}>
+      {items.map((item) => (
+        <button
+          key={item}
+          type="button"
+          className="tom-example-chip"
+          onClick={() => onSelect(item)}
+          disabled={disabled}
+        >
+          {item}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function TomChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string>(() => generateId());
@@ -901,9 +1085,14 @@ export default function TomChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const messagesRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const helpTriggerRef = useRef<HTMLButtonElement>(null);
+  const helpModalRef = useRef<HTMLDivElement>(null);
+  const helpCloseRef = useRef<HTMLButtonElement>(null);
   // Mirrors `sessionId` for synchronous reads inside async callbacks, so an
   // in-flight request started before "New Chat" can detect it's now stale.
   const sessionIdRef = useRef(sessionId);
@@ -1152,6 +1341,71 @@ export default function TomChatPage() {
     setShowJumpToLatest(false);
   }
 
+  /** Closes Help and returns focus to the trigger button that opened it. */
+  function closeHelp() {
+    setHelpOpen(false);
+    helpTriggerRef.current?.focus();
+  }
+
+  /**
+   * Inserts an example's exact text into the chat input — reusing the same
+   * setInput() path the input's onChange and the starter prompts write
+   * through — without sending it, then closes Help and hands focus back to
+   * the input so the user can edit or send.
+   */
+  function handleInsertExample(text: string) {
+    setInput(text);
+    setHelpOpen(false);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  // While Help is open: focus the close button (a real tabbable control, so
+  // an immediate Shift+Tab is caught by the trap below instead of escaping
+  // to whatever sits behind the overlay), trap Tab within the dialog, close
+  // on Escape, and lock background scroll (mainly for the mobile sheet layout).
+  useEffect(() => {
+    if (!helpOpen) return;
+
+    helpCloseRef.current?.focus();
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeHelp();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const modal = helpModalRef.current;
+      if (!modal) return;
+      // Excludes disabled controls (e.g. example chips while a Tom request
+      // is loading) — an element matching the selector but disabled or
+      // aria-disabled is present in the DOM but never an actual tab stop,
+      // so it must not be treated as the trap's first/last boundary.
+      const focusable = Array.from(
+        modal.querySelectorAll<HTMLElement>('button, a[href], input, [tabindex]:not([tabindex="-1"])')
+      ).filter((el) => !("disabled" in el && (el as HTMLButtonElement).disabled) && el.getAttribute("aria-disabled") !== "true");
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = originalOverflow;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [helpOpen]);
+
   return (
     <>
       <style>{CHAT_CSS}</style>
@@ -1188,9 +1442,19 @@ export default function TomChatPage() {
                 </div>
               </div>
             </div>
-            <button type="button" className="tom-new-chat-btn" onClick={handleNewChat}>
-              New Chat
-            </button>
+            <div className="tom-header-actions">
+              <button
+                type="button"
+                className="tom-new-chat-btn"
+                ref={helpTriggerRef}
+                onClick={() => setHelpOpen(true)}
+              >
+                Help
+              </button>
+              <button type="button" className="tom-new-chat-btn" onClick={handleNewChat}>
+                New Chat
+              </button>
+            </div>
           </div>
           <p className="tom-helper">{HELPER_TEXT}</p>
         </div>
@@ -1199,10 +1463,10 @@ export default function TomChatPage() {
           {messages.length === 0 && !loading && (
             <div className="tom-empty">
               <img className="tom-avatar-empty" src={TOM_AVATAR_SRC} alt="Tom Morrow" />
-              <div className="tom-empty-title">Ask Tom anything about your Disney trip</div>
+              <div className="tom-empty-title">Ask Tom about your Disney trip</div>
               <div>
-                Ask Tom about Disney parks, wait times, attractions, and the latest Disney,
-                Marvel, and Star Wars news.
+                Ask about your planner, or explore Disney parks, attractions, dining, wait times,
+                and the latest Disney, Marvel, and Star Wars news.
               </div>
               <div className="tom-examples" role="group" aria-label="Example questions">
                 {STARTER_PROMPTS.map((prompt) => (
@@ -1283,6 +1547,7 @@ export default function TomChatPage() {
 
         <form className="tom-form" onSubmit={handleSubmit}>
           <input
+            ref={inputRef}
             className="tom-input"
             type="text"
             value={input}
@@ -1296,6 +1561,104 @@ export default function TomChatPage() {
           </button>
         </form>
       </div>
+
+      {helpOpen && (
+        <div className="tom-help-backdrop" onClick={closeHelp}>
+          <div
+            className="tom-help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="tom-help-title"
+            ref={helpModalRef}
+            tabIndex={-1}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="tom-help-header">
+              <div className="tom-help-header-row">
+                <h2 id="tom-help-title" className="tom-help-title">
+                  Help &amp; Examples
+                </h2>
+                <button
+                  type="button"
+                  className="tom-help-close"
+                  aria-label="Close help"
+                  ref={helpCloseRef}
+                  onClick={closeHelp}
+                >
+                  ×
+                </button>
+              </div>
+              <p className="tom-help-hint">
+                Click any example below to insert it into the chat — you can edit it before sending.
+              </p>
+            </div>
+
+            <div className="tom-help-body">
+              <section className="tom-help-section">
+                <h3>About Tom</h3>
+                <p>
+                  Tom is Disney Wait Planner&rsquo;s Disney information assistant. Start a New Chat
+                  anytime to begin a fresh conversation.
+                </p>
+                <p>
+                  Tom can answer questions about your local planner, but can&rsquo;t make changes to
+                  it. Tom also understands common Disney abbreviations and park aliases, like MK,
+                  EPCOT, DHS, DAK, DLR, and DCA.
+                </p>
+              </section>
+
+              <section className="tom-help-section">
+                <h3>Disney Information</h3>
+                <HelpExampleChips
+                  label="Disney information examples"
+                  items={HELP_DISNEY_EXAMPLES}
+                  onSelect={handleInsertExample}
+                  disabled={loading}
+                />
+              </section>
+
+              <section className="tom-help-section">
+                <h3>My Planner</h3>
+                <HelpExampleChips
+                  label="My planner examples"
+                  items={HELP_PLANNER_EXAMPLES}
+                  onSelect={handleInsertExample}
+                  disabled={loading}
+                />
+              </section>
+
+              <section className="tom-help-section">
+                <h3>Follow-Up Questions</h3>
+                <HelpExampleChips
+                  label="Follow-up conversation examples"
+                  items={HELP_FOLLOWUP_EXAMPLES}
+                  onSelect={handleInsertExample}
+                  disabled={loading}
+                />
+              </section>
+
+              <section className="tom-help-section">
+                <h3>Privacy</h3>
+                <ul>
+                  <li>Your planner stays local-first, on this device.</li>
+                  <li>Only a compact, read-only planner summary is sent to Tom.</li>
+                  <li>Tom cannot modify your planner data.</li>
+                </ul>
+              </section>
+
+              <section className="tom-help-section">
+                <h3>Current Limitations</h3>
+                <p>Tom cannot currently:</p>
+                <ul>
+                  <li>Add, edit, or move planner items</li>
+                  <li>Optimize itineraries</li>
+                  <li>Synchronize with Disney accounts</li>
+                </ul>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
