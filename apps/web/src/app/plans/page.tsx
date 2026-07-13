@@ -1437,15 +1437,15 @@ export default function PlansPage() {
           try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
           setSelectedPark(autoFallback as ParkId);
           try { localStorage.setItem(parkKeyRef.current, autoFallback); } catch {}
-        } else {
-          // Phase 10.4.2 — no override, no inferable items, no preserved
-          // fallback: this Auto day has no park context of its own. Clear
-          // selectedPark (and its storage mirror) instead of leaving it at
-          // whatever a previously-active day resolved to — an empty Auto day
-          // must render as unresolved, never as an inherited park.
-          setSelectedPark(null);
-          try { localStorage.removeItem(parkKeyRef.current); } catch {}
         }
+        // else: no override, no inferable items, no preserved fallback —
+        // this Auto day has no park context of its own. resort/park left
+        // unchanged here on purpose (Phase 10.4.2): resolveDayPark() no
+        // longer reads selectedPark/selectedResort as a fallback (see
+        // below), so this day's own render is already isolated without
+        // touching them, and other pages (Wait Times, etc.) intentionally
+        // share this profile-scoped nav state — clearing it here would wipe
+        // out a selection that has nothing to do with this day.
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1515,6 +1515,7 @@ export default function PlansPage() {
     const _profileId = getActiveProfileId();
     const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
+    const clearedOverride = dayParks[dayId]; // captured before deletion, for the Auto branch below
     const next = { ...dayParks };
     if (parkId) {
       next[dayId] = parkId;
@@ -1540,8 +1541,25 @@ export default function PlansPage() {
         try { localStorage.setItem(resortKeyRef.current, inferredResort); } catch {}
         setSelectedPark(inferredPark);
         try { localStorage.setItem(parkKeyRef.current, inferredPark); } catch {}
+      } else if (clearedOverride && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, clearedOverride)) {
+        // Phase 9.6 — no inferable items: preserve the park just cleared from
+        // manual mode as this day's own Auto fallback, so it survives
+        // navigating away and back instead of being lost the moment the day
+        // has no plans of its own. Same dayAutoFallbacks map the backup
+        // restore flow populates; resolveDayPark's inference step (2) still
+        // overrides this the moment real plan content resolves a park.
+        const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+        dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
+        const nextAutoFallbacks = { ...dayAutoFallbacks, [dayId]: clearedOverride };
+        setDayAutoFallbacks(nextAutoFallbacks);
+        saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+        const fallbackResort = PARK_TO_RESORT[clearedOverride] as ResortId;
+        setSelectedResort(fallbackResort);
+        try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
+        setSelectedPark(clearedOverride as ParkId);
+        try { localStorage.setItem(parkKeyRef.current, clearedOverride); } catch {}
       }
-      // Inference failed — resort/park unchanged.
+      // Inference failed and no manual park was set to preserve — resort/park unchanged.
     }
   }
 
