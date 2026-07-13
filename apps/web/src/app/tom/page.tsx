@@ -1465,7 +1465,7 @@ export default function TomChatPage() {
               <img className="tom-avatar-empty" src={TOM_AVATAR_SRC} alt="Tom Morrow" />
               <div className="tom-empty-title">Ask Tom about your Disney trip</div>
               <div>
-                Ask about your planner or explore Disney parks, attractions, dining, wait times,
+                Ask about your planner, or explore Disney parks, attractions, dining, wait times,
                 and the latest Disney, Marvel, and Star Wars news.
               </div>
               <div className="tom-examples" role="group" aria-label="Example questions">
