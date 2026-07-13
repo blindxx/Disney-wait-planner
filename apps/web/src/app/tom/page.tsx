@@ -1039,15 +1039,23 @@ function HelpExampleChips({
   label,
   items,
   onSelect,
+  disabled,
 }: {
   label: string;
   items: string[];
   onSelect: (text: string) => void;
+  disabled: boolean;
 }) {
   return (
     <div className="tom-examples tom-help-examples" role="group" aria-label={label}>
       {items.map((item) => (
-        <button key={item} type="button" className="tom-example-chip" onClick={() => onSelect(item)}>
+        <button
+          key={item}
+          type="button"
+          className="tom-example-chip"
+          onClick={() => onSelect(item)}
+          disabled={disabled}
+        >
           {item}
         </button>
       ))}
@@ -1570,6 +1578,7 @@ export default function TomChatPage() {
                   label="Disney information examples"
                   items={HELP_DISNEY_EXAMPLES}
                   onSelect={handleInsertExample}
+                  disabled={loading}
                 />
               </section>
 
@@ -1579,6 +1588,7 @@ export default function TomChatPage() {
                   label="My planner examples"
                   items={HELP_PLANNER_EXAMPLES}
                   onSelect={handleInsertExample}
+                  disabled={loading}
                 />
               </section>
 
@@ -1588,6 +1598,7 @@ export default function TomChatPage() {
                   label="Follow-up conversation examples"
                   items={HELP_FOLLOWUP_EXAMPLES}
                   onSelect={handleInsertExample}
+                  disabled={loading}
                 />
               </section>
 
