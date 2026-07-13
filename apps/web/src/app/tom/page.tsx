@@ -59,7 +59,7 @@ const STARTER_PROMPTS = [
   "What's new at Disneyland?",
   "What's the latest Star Wars news?",
   "What's the latest Marvel news?",
-  "Tell me about Savi's Workshop.",
+  "What do I have planned today?",
 ];
 
 /** Example prompts shown in the Help modal — Disney-information capabilities. */
@@ -75,13 +75,14 @@ const HELP_DISNEY_EXAMPLES = [
 /** Example prompts shown in the Help modal — read-only local planner questions. */
 const HELP_PLANNER_EXAMPLES = [
   "What do I have planned today?",
-  "Show Day 2.",
+  "What are my plans for Day 2?",
+  "What park am I visiting on Day 3?",
+  "What day is Magic Kingdom?",
   "What dining do I have?",
   "What entertainment do I have?",
   "What Lightning selections do I have?",
   "Do I have any conflicts?",
   "What am I repeating?",
-  "Which park am I visiting on Day 3?",
 ];
 
 /** Example prompts shown in the Help modal — follow-up questions within a conversation. */
@@ -892,19 +893,30 @@ const CHAT_CSS = `
     top: 0;
     z-index: 1;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    flex-direction: column;
+    gap: 4px;
     padding: 16px 18px;
     border-bottom: 1px solid #e5e7eb;
     background-color: #fff;
     border-radius: 12px 12px 0 0;
+  }
+  .tom-help-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
   }
   .tom-help-title {
     margin: 0;
     font-size: 17px;
     font-weight: 700;
     color: #111827;
+  }
+  .tom-help-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: #6b7280;
   }
   .tom-help-close {
     flex-shrink: 0;
@@ -1554,12 +1566,17 @@ export default function TomChatPage() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="tom-help-header">
-              <h2 id="tom-help-title" className="tom-help-title">
-                Help &amp; Examples
-              </h2>
-              <button type="button" className="tom-help-close" aria-label="Close help" onClick={closeHelp}>
-                ×
-              </button>
+              <div className="tom-help-header-row">
+                <h2 id="tom-help-title" className="tom-help-title">
+                  Help &amp; Examples
+                </h2>
+                <button type="button" className="tom-help-close" aria-label="Close help" onClick={closeHelp}>
+                  ×
+                </button>
+              </div>
+              <p className="tom-help-hint">
+                Click any example below to insert it into the chat — you can edit it before sending.
+              </p>
             </div>
 
             <div className="tom-help-body">
@@ -1567,13 +1584,14 @@ export default function TomChatPage() {
                 <h3>About Tom</h3>
                 <p>
                   Tom is Disney Wait Planner&rsquo;s Disney information assistant. Your conversation
-                  continues until you start a New Chat, and Tom is aware of your local planner
-                  in a read-only way — enough to answer questions about it, never to change it.
+                  continues until you start a New Chat. Tom understands your local planner in a
+                  read-only way and can&rsquo;t modify your planner data. Tom also understands common
+                  Disney abbreviations and park aliases, like MK, EPCOT, DHS, DAK, DLR, and DCA.
                 </p>
               </section>
 
               <section className="tom-help-section">
-                <h3>Disney Information examples</h3>
+                <h3>Disney Information</h3>
                 <HelpExampleChips
                   label="Disney information examples"
                   items={HELP_DISNEY_EXAMPLES}
@@ -1583,7 +1601,7 @@ export default function TomChatPage() {
               </section>
 
               <section className="tom-help-section">
-                <h3>My Planner examples</h3>
+                <h3>My Planner</h3>
                 <HelpExampleChips
                   label="My planner examples"
                   items={HELP_PLANNER_EXAMPLES}
@@ -1593,7 +1611,7 @@ export default function TomChatPage() {
               </section>
 
               <section className="tom-help-section">
-                <h3>Follow-Up Conversations examples</h3>
+                <h3>Follow-Up Questions</h3>
                 <HelpExampleChips
                   label="Follow-up conversation examples"
                   items={HELP_FOLLOWUP_EXAMPLES}
