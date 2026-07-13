@@ -46,7 +46,7 @@ const TOM_AVATAR_SRC = "/images/tom-avatar.png";
 const DISCORD_INVITE_URL = "https://discord.gg/tMhXGHEgt";
 
 const HELPER_TEXT =
-  "Ask about Disney attractions, dining, entertainment, wait times, park updates, and Disney news.";
+  "Ask about your Disney trip, including your planner, or explore Disney attractions, dining, wait times, park updates, and news.";
 const INFO_TEXT =
   "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news. Tom can also answer read-only questions about your local planner, like what you have planned, dining, entertainment, Lightning selections, conflicts, and repeats. Select Help above for examples and the full list of supported features.";
 
@@ -70,6 +70,7 @@ const HELP_DISNEY_EXAMPLES = [
   "Tell me about TRON.",
   "Wait for Rise of the Resistance",
   "Disney Parks Blog news",
+  "Tell me about Savi's Workshop.",
 ];
 
 /** Example prompts shown in the Help modal — read-only local planner questions. */
@@ -1583,10 +1584,13 @@ export default function TomChatPage() {
               <section className="tom-help-section">
                 <h3>About Tom</h3>
                 <p>
-                  Tom is Disney Wait Planner&rsquo;s Disney information assistant. Your conversation
-                  continues until you start a New Chat. Tom understands your local planner in a
-                  read-only way and can&rsquo;t modify your planner data. Tom also understands common
-                  Disney abbreviations and park aliases, like MK, EPCOT, DHS, DAK, DLR, and DCA.
+                  Tom is Disney Wait Planner&rsquo;s Disney information assistant. Conversations
+                  continue until you start a New Chat.
+                </p>
+                <p>
+                  Tom can answer questions about your local planner, but can&rsquo;t make changes to
+                  it. Tom also understands common Disney abbreviations and park aliases, like MK,
+                  EPCOT, DHS, DAK, DLR, and DCA.
                 </p>
               </section>
 
