@@ -592,8 +592,14 @@ function fitToByteBudget(snapshot: PlannerContextSnapshot): PlannerContextSnapsh
 
 /**
  * Builds a compact, read-only planner context snapshot for the active
- * profile, or undefined when there's nothing useful to send (no plans and
- * no Lightning selections, or localStorage is unavailable e.g. during SSR).
+ * profile. bootstrapProfiles() guarantees a profile (Default, if nothing
+ * else) always exists once this runs client-side, so a snapshot is returned
+ * even for a brand-new/empty planner — days:[...], plans:[], lightning:[],
+ * etc. Only returns undefined when there is no planner/profile context to
+ * read at all: SSR (no window/localStorage) or a thrown error while reading
+ * (Phase 10.4.2 — previously also omitted for an empty planner with zero
+ * plans/Lightning; that gate is removed so Tom can still answer questions
+ * like "what park is Day 1?" on an otherwise-empty planner).
  */
 export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefined {
   if (typeof window === "undefined") return undefined;
@@ -623,8 +629,6 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     // MAX_ITEMS itself already dropped some items — flag it below even if
     // the resulting payload turns out to be within the byte budget.
     const itemCapTruncated = plans.length < parsedPlans.length || lightning.length < parsedLightning.length;
-
-    if (plans.length === 0 && lightning.length === 0) return undefined;
 
     const storedResort = readPlainString(buildNamespacedKey(profile.id, "selectedResort"));
     const storedPark = readPlainString(buildNamespacedKey(profile.id, "selectedPark"));

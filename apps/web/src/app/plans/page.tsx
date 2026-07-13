@@ -850,9 +850,9 @@ export default function PlansPage() {
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
   // Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days,
   // populated at restore time (and at empty-day import bootstrap time).
-  // resolveDayPark checks this between item inference (step 2) and the global
-  // selectedPark fallback (step 3), and the day-switching effect uses it when
-  // inference yields nothing.
+  // resolveDayPark checks this after item inference (step 2); a day with
+  // neither is unresolved (Phase 10.4.2 — no further global fallback). The
+  // day-switching effect also uses it when inference yields nothing.
   // Phase 10.4.1 — now also persisted to profile-scoped localStorage (mirrors
   // dayParks) so it survives page reloads/new sessions and so
   // plannerContextSnapshot.ts (a separate, localStorage-only reader) can
@@ -1437,8 +1437,15 @@ export default function PlansPage() {
           try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
           setSelectedPark(autoFallback as ParkId);
           try { localStorage.setItem(parkKeyRef.current, autoFallback); } catch {}
+        } else {
+          // Phase 10.4.2 — no override, no inferable items, no preserved
+          // fallback: this Auto day has no park context of its own. Clear
+          // selectedPark (and its storage mirror) instead of leaving it at
+          // whatever a previously-active day resolved to — an empty Auto day
+          // must render as unresolved, never as an inherited park.
+          setSelectedPark(null);
+          try { localStorage.removeItem(parkKeyRef.current); } catch {}
         }
-        // else: no fallback — resort/park unchanged.
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1471,9 +1478,14 @@ export default function PlansPage() {
 
   // Phase 8.4 — resolve the effective park for a given day.
   // Priority: (1) explicit override, (2) inferred from day's items,
-  //           (2.5) per-day auto fallback, (3) global selectedPark.
-  // Always returns a valid ParkId for the current resort. Never throws.
-  function resolveDayPark(dayId: string): ParkId {
+  //           (2.5) per-day auto fallback.
+  // Phase 10.4.2 — deliberately day-scoped only: never falls back to the
+  // global selectedPark/selectedResort (a different day's resolved value, or
+  // a stale leftover from whichever day was active last). A day with no
+  // override, no inferable items, and no preserved auto fallback of its own
+  // returns null — "unresolved" — rather than guessing. Mirrors Lightning's
+  // resolvedDayPark computation (lightning/page.tsx) for the same reason.
+  function resolveDayPark(dayId: string): ParkId | null {
     // 1. Explicit override — validate it belongs to the active resort
     const override = dayParks[dayId];
     if (override && PARK_TO_RESORT[override] === selectedResort) {
@@ -1489,8 +1501,9 @@ export default function PlansPage() {
     if (autoFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, autoFallback)) {
       return autoFallback as ParkId;
     }
-    // 3. Fallback to global selectedPark or first park of resort
-    return (selectedPark ?? RESORT_PARKS[selectedResort][0]) as ParkId;
+    // No day-scoped signal — unresolved. Callers must not substitute a
+    // global/previous-day value here.
+    return null;
   }
 
   // Phase 8.4.2 — set or clear the explicit park override for the active day.
@@ -2087,7 +2100,7 @@ export default function PlansPage() {
     // current effective park so custom-only days can restore park context on
     // import. Omitted for manual-park days (their override lives in dayParks,
     // not in the day-plan payload).
-    const autoParkFallback = dayParks[activeDayId] ? undefined : resolveDayPark(activeDayId);
+    const autoParkFallback = dayParks[activeDayId] ? undefined : (resolveDayPark(activeDayId) ?? undefined);
     const payload = buildDayPlanExportPayload(activeDayPlans, autoParkFallback);
     const json = JSON.stringify(payload, null, 2);
     const blob = new Blob([json], { type: "application/json" });
@@ -2123,11 +2136,15 @@ export default function PlansPage() {
     } catch {}
     // Phase 9.6 backup gap fix — snapshot effective park for every Auto day so
     // custom-only days can restore their park context. resolveDayPark already
-    // applies the full priority chain (inference → dayAutoFallbacks → selectedPark).
+    // applies the day-scoped priority chain (override → inference →
+    // dayAutoFallbacks); a day with none of those is left out rather than
+    // fabricating a fallback (Phase 10.4.2 — resolveDayPark no longer
+    // substitutes a global/previous-day park for a genuinely unresolved day).
     const backupDayAutoFallbacks: Record<string, string> = {};
     for (const dayId of days) {
       if (!dayParks[dayId]) {
-        backupDayAutoFallbacks[dayId] = resolveDayPark(dayId);
+        const resolved = resolveDayPark(dayId);
+        if (resolved) backupDayAutoFallbacks[dayId] = resolved;
       }
     }
     const payload = buildPlannerBackupPayload({
@@ -2153,10 +2170,13 @@ export default function PlansPage() {
   // Phase 8.9.1 — Export plans-only backup (no Lightning).
   function handleExportPlansBackup() {
     // Phase 9.6 backup gap fix — same dayAutoFallbacks snapshot as full backup.
+    // Phase 10.4.2 — skip days resolveDayPark leaves unresolved rather than
+    // fabricating a fallback for them.
     const backupDayAutoFallbacks: Record<string, string> = {};
     for (const dayId of days) {
       if (!dayParks[dayId]) {
-        backupDayAutoFallbacks[dayId] = resolveDayPark(dayId);
+        const resolved = resolveDayPark(dayId);
+        if (resolved) backupDayAutoFallbacks[dayId] = resolved;
       }
     }
     const payload = buildPlannerBackupPayload({
@@ -2245,7 +2265,7 @@ export default function PlansPage() {
     // park for custom-only days without setting a manual park override.
     // dayParks is not modified; the day remains in Auto mode.
     // Normal inference from any known item added later will take precedence
-    // (resolveDayPark step 2 > selectedPark step 3).
+    // (resolveDayPark step 2 > this preserved auto fallback).
     let effectiveResort = targetDayParkResort ?? inferredResort ?? null;
     if (wasEmpty && !effectiveResort && autoParkFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, autoParkFallback)) {
       const fallbackResort = PARK_TO_RESORT[autoParkFallback] as ResortId;
@@ -2621,6 +2641,11 @@ export default function PlansPage() {
     dayAutoFallbacksKeyRef.current = buildNamespacedKey(activeProfileIdRef.current, "dayAutoFallbacks");
     saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current);
   }
+
+  // Phase 10.4.2 — active day's resolved park for render, computed once so
+  // the park selector and wait-overlay label agree; null (unresolved) is a
+  // valid, expected state for an Auto day with no park context of its own.
+  const activeDayPark = ready ? resolveDayPark(activeDayId) : null;
 
   return (
     <>
@@ -3568,9 +3593,9 @@ export default function PlansPage() {
                 className="plans-park-tab"
                 onClick={() => handleSetDayPark(activeDayId, parkId)}
                 style={{
-                  backgroundColor: resolveDayPark(activeDayId) === parkId ? "#1e3a5f" : "#f9fafb",
-                  color: resolveDayPark(activeDayId) === parkId ? "#fff" : "#374151",
-                  borderColor: resolveDayPark(activeDayId) === parkId ? "#1e3a5f" : "#d1d5db",
+                  backgroundColor: activeDayPark === parkId ? "#1e3a5f" : "#f9fafb",
+                  color: activeDayPark === parkId ? "#fff" : "#374151",
+                  borderColor: activeDayPark === parkId ? "#1e3a5f" : "#d1d5db",
                 }}
               >
                 {PARK_LABELS[parkId]}
@@ -3758,7 +3783,12 @@ export default function PlansPage() {
         )}
 
         <p className="wait-scope-label">
-          Wait overlay: {selectedResort}{ready ? ` / ${PARK_LABELS[resolveDayPark(activeDayId)] ?? resolveDayPark(activeDayId)}` : ""}
+          Wait overlay: {selectedResort}
+          {ready
+            ? activeDayPark
+              ? ` / ${PARK_LABELS[activeDayPark] ?? activeDayPark}`
+              : " / Auto — no park set yet"
+            : ""}
         </p>
 
 
