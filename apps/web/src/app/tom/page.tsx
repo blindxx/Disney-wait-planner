@@ -48,7 +48,7 @@ const DISCORD_INVITE_URL = "https://discord.gg/tMhXGHEgt";
 const HELPER_TEXT =
   "Ask about your Disney trip, including your planner, or explore Disney attractions, dining, wait times, park updates, and news.";
 const INFO_TEXT =
-  "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news. Tom can also answer read-only questions about your local planner, like what you have planned, dining, entertainment, Lightning selections, conflicts, and repeats. Select Help above for examples and the full list of supported features.";
+  "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Ask Tom about Disney parks, attractions, dining, entertainment, wait times, and the latest Disney news. Tom can also answer questions about your local planner, including your plans, Lightning selections, conflicts, and more. Select Help above for examples and the full list of supported features.";
 
 /** How close (px) to the bottom of the scroll container still counts as "at the bottom" for auto-scroll. */
 const NEAR_BOTTOM_THRESHOLD = 80;
@@ -1584,8 +1584,8 @@ export default function TomChatPage() {
               <section className="tom-help-section">
                 <h3>About Tom</h3>
                 <p>
-                  Tom is Disney Wait Planner&rsquo;s Disney information assistant. Conversations
-                  continue until you start a New Chat.
+                  Tom is Disney Wait Planner&rsquo;s Disney information assistant. Start a New Chat
+                  anytime to begin a fresh conversation.
                 </p>
                 <p>
                   Tom can answer questions about your local planner, but can&rsquo;t make changes to
