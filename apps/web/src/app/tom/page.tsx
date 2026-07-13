@@ -1379,9 +1379,13 @@ export default function TomChatPage() {
       if (e.key !== "Tab") return;
       const modal = helpModalRef.current;
       if (!modal) return;
-      const focusable = modal.querySelectorAll<HTMLElement>(
-        'button, a[href], input, [tabindex]:not([tabindex="-1"])'
-      );
+      // Excludes disabled controls (e.g. example chips while a Tom request
+      // is loading) — an element matching the selector but disabled or
+      // aria-disabled is present in the DOM but never an actual tab stop,
+      // so it must not be treated as the trap's first/last boundary.
+      const focusable = Array.from(
+        modal.querySelectorAll<HTMLElement>('button, a[href], input, [tabindex]:not([tabindex="-1"])')
+      ).filter((el) => !("disabled" in el && (el as HTMLButtonElement).disabled) && el.getAttribute("aria-disabled") !== "true");
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
