@@ -1456,10 +1456,10 @@ export default function TomChatPage() {
           {messages.length === 0 && !loading && (
             <div className="tom-empty">
               <img className="tom-avatar-empty" src={TOM_AVATAR_SRC} alt="Tom Morrow" />
-              <div className="tom-empty-title">Ask Tom anything about your Disney trip</div>
+              <div className="tom-empty-title">Ask Tom about your Disney trip</div>
               <div>
-                Ask Tom about Disney parks, wait times, attractions, and the latest Disney,
-                Marvel, and Star Wars news.
+                Ask about your planner or explore Disney parks, attractions, dining, wait times,
+                and the latest Disney, Marvel, and Star Wars news.
               </div>
               <div className="tom-examples" role="group" aria-label="Example questions">
                 {STARTER_PROMPTS.map((prompt) => (
