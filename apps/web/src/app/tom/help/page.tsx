@@ -19,6 +19,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { TOM_HELP_SECTIONS } from "@/lib/tomHelpContent";
+import BackToTopButton from "@/components/BackToTopButton";
 
 export const metadata: Metadata = {
   title: "Tom Help Guide | Disney Wait Planner",
@@ -144,12 +145,46 @@ const GUIDE_CSS = `
     font-weight: 500;
   }
 
+  .tomhg-footer-nav {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid #e5e7eb;
+  }
+
+  .tomhg-back-to-top {
+    position: fixed;
+    right: 20px;
+    bottom: 24px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px;
+    border-radius: 999px;
+    border: none;
+    background-color: #1e3a5f;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  }
+  .tomhg-back-to-top:hover {
+    background-color: #16324f;
+  }
+
   @media (max-width: 480px) {
     .tomhg-title {
       font-size: 22px;
     }
     .tomhg-toc-list {
       grid-template-columns: 1fr;
+    }
+    .tomhg-back-to-top {
+      right: 16px;
+      bottom: 16px;
+      padding: 8px 14px;
+      font-size: 12px;
     }
   }
 `;
@@ -168,7 +203,7 @@ export default function TomHelpGuidePage() {
       </p>
 
       <nav className="tomhg-toc" aria-label="Table of contents">
-        <h2>On this page</h2>
+        <h2>Explore Tom&rsquo;s Capabilities</h2>
         <ul className="tomhg-toc-list">
           {TOM_HELP_SECTIONS.map((section) => (
             <li key={section.id}>
@@ -180,7 +215,9 @@ export default function TomHelpGuidePage() {
 
       {TOM_HELP_SECTIONS.map((section) => (
         <section key={section.id} id={section.id} className="tomhg-section">
-          <h2>{section.title}</h2>
+          <h2>
+            <span aria-hidden="true">{section.icon}</span> {section.title}
+          </h2>
           {section.paragraphs?.map((paragraph, i) => (
             <p key={i}>{paragraph}</p>
           ))}
@@ -197,6 +234,7 @@ export default function TomHelpGuidePage() {
               <ul className="tomhg-examples">
                 {section.examples.map((example) => (
                   <li key={example} className="tomhg-example-chip">
+                    {section.chipIcon && <span aria-hidden="true">{section.chipIcon} </span>}
                     {example}
                   </li>
                 ))}
@@ -205,6 +243,14 @@ export default function TomHelpGuidePage() {
           )}
         </section>
       ))}
+
+      <div className="tomhg-footer-nav">
+        <Link href="/tom" className="tomhg-back">
+          &larr; Back to Ask Tom
+        </Link>
+      </div>
+
+      <BackToTopButton />
     </div>
   );
 }
