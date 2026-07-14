@@ -34,6 +34,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
 import { bootstrapProfiles, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 
@@ -919,6 +920,13 @@ const CHAT_CSS = `
     line-height: 1.4;
     color: #6b7280;
   }
+  .tom-help-guide-link {
+    align-self: flex-start;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1e3a5f;
+    text-decoration: underline;
+  }
   .tom-help-close {
     flex-shrink: 0;
     width: 28px;
@@ -1591,6 +1599,9 @@ export default function TomChatPage() {
               <p className="tom-help-hint">
                 Click any example below to insert it into the chat — you can edit it before sending.
               </p>
+              <Link href="/tom/help" className="tom-help-guide-link">
+                View Full Help Guide
+              </Link>
             </div>
 
             <div className="tom-help-body">
