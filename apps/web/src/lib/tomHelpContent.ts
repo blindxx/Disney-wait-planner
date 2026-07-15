@@ -155,12 +155,17 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     icon: "📊",
     paragraphs: [
       "Tom can look across your itinerary to answer higher-level questions, like which day has the most or fewest items planned, or what's first or last on a given day, where your planner has enough detail to support it. Results depend on how much you've entered and may vary as your plans change.",
+      "Activity ordering is fully deterministic: days are ordered the way they appear in your itinerary, same-day activities are ordered by their explicit times, and anything without a time (or a tied time) keeps its original planner order. Tom never invents an order from names, categories, or typical touring patterns.",
+      "Tom can also tell you what's immediately before or after an activity you name explicitly, like a specific attraction, show, or reservation — not general moments like \"after lunch\" or \"in the evening\", since those aren't real planner items.",
+      "If you've given a day a custom name, Tom uses it naturally in answers, and \"Day 2\"-style references still work the same way. Today/tomorrow questions only work when your planner days have real dates attached — without them, Tom will let you know rather than guess.",
     ],
     examples: [
       "Which day has the most planned?",
       "Which day has the fewest things planned?",
       "What's the first thing I'm doing on Day 1?",
       "What's the last thing I'm doing on Day 2?",
+      "What's my earliest activity?",
+      "What comes after Space Mountain?",
     ],
     chipIcon: "📊",
   },
