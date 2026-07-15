@@ -10,6 +10,15 @@
  * profileStorage's buildNamespacedKey) — never mutates them, never reads
  * unrelated keys, and never includes secrets, sync tokens, account data, or
  * raw backup payloads. Item counts are capped to keep the payload compact.
+ *
+ * Phase 10.5 audit (Planner Insights, DWP-side only): this snapshot already
+ * carries sufficient explicit data for deterministic ordering, optional
+ * dates, category/park/repeat/conflict summaries, empty-day detection,
+ * before/after day navigation, and first/last-activity calculations — see
+ * the per-field notes on PlannerContextSnapshot/PlannerContextSnapshotDay
+ * below. No new fields were needed; day display names were already covered
+ * by `days[].label`. Nothing here infers dates, times, durations, transport,
+ * walking, feasibility, or intent — only what the planner explicitly stores.
  */
 
 import type { ResortId } from "@disney-wait-planner/shared";
@@ -52,6 +61,13 @@ export type PlannerContextSnapshotLightningItem = {
 
 export type PlannerContextSnapshotDay = {
   id: string;
+  /**
+   * Phase 10.5 — this IS the day's display name: the user's custom/renamed
+   * label when set (dayMeta[id].label, same field the Plans page's
+   * dayDisplayLabel reads), otherwise the "Day N" default derived from id.
+   * Always populated. Tom should use this when responding about a day, while
+   * still accepting numeric "Day X" references (id encodes that as day-X).
+   */
   label: string;
   date?: string;
   park?: string;
@@ -70,7 +86,22 @@ export type PlannerContextSnapshotConflict = {
 export type PlannerContextSnapshot = {
   resort?: string;
   park?: string;
+  /**
+   * Phase 10.5 — always sorted ascending by day number (daySort), so the
+   * array's own order gives before/after-day navigation for free; no
+   * separate index/order field is needed.
+   */
   days: PlannerContextSnapshotDay[];
+  /**
+   * Phase 10.5 — items keep their original per-day storage order (only ever
+   * trimmed from the end, never reordered), which mirrors the Plans page's
+   * own stable time-sort: valid times sort first, and this array order is
+   * the planner-order tie-breaker beneath equal/missing times — see
+   * plans/page.tsx's sortKey(). It's also the sole ordering signal when a
+   * day has no valid times at all. First/last activity for a day and
+   * category summaries are both derivable directly from this plus each
+   * item's own `time`/`type` — no separate ordering or summary field needed.
+   */
   plans: PlannerContextSnapshotItem[];
   lightning: PlannerContextSnapshotLightningItem[];
   repeats: PlannerContextSnapshotRepeat[];
