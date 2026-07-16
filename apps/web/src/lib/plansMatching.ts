@@ -282,7 +282,11 @@ export const ALIASES_WDW: Record<string, string> = {
 
   // ---- MK Tomorrowland ----
   // "peoplemover" is a single token → stage-2 fails (only 1 meaningful token).
-  "peoplemover":                 "tomorrowland transit authority peoplemover",
+  "peoplemover":                        "tomorrowland transit authority peoplemover",
+  "people mover":                       "tomorrowland transit authority peoplemover",
+  "tomorrowland transit authority":     "tomorrowland transit authority peoplemover",
+  tta:                                  "tomorrowland transit authority peoplemover",
+  "tta peoplemover":                    "tomorrowland transit authority peoplemover",
 
   // ---- EPCOT World Showcase ----
   "gran fiesta":                 "gran fiesta tour starring the three caballeros",
@@ -456,6 +460,10 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "tiana",                 resort: "WDW", expectedKey: "tianas bayou adventure" },
   { input: "kali",                  resort: "WDW", expectedKey: "kali river rapids" },
   { input: "peoplemover",           resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
+  { input: "People Mover",          resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
+  { input: "TTA",                   resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
+  { input: "TTA PeopleMover",       resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
+  { input: "Tomorrowland Transit Authority", resort: "WDW", expectedKey: "tomorrowland transit authority peoplemover" },
   { input: "gran fiesta",           resort: "WDW", expectedKey: "gran fiesta tour starring the three caballeros" },
   { input: "soarin",                   resort: "WDW", expectedKey: "soarin across america" }, // EPCOT
   { input: "Soarin' Across America",   resort: "WDW", expectedKey: "soarin across america" }, // Phase 8.5.1: stage-1 exact
