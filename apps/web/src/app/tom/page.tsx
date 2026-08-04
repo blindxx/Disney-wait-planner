@@ -220,16 +220,6 @@ function sourceLabel(source: TomSource): string {
   return source.title || source.name || source.url || "Source";
 }
 
-/**
- * True on touch/mobile devices — keyed off the primary pointer's precision
- * (same signal responsive CSS would use), not viewport width, so it tracks
- * actual touch input rather than just a narrow screen. Not available during
- * SSR, so only ever called client-side (inside effects/handlers).
- */
-function isTouchDevice(): boolean {
-  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-}
-
 /** Only http:/https: URLs are safe to render as clickable links (blocks javascript:, data:, etc). */
 function isSafeHttpUrl(value: unknown): value is string {
   if (typeof value !== "string" || !value) return false;
@@ -1109,10 +1099,12 @@ export default function TomChatPage() {
   const isNearBottomRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const wasLoadingRef = useRef(false);
-  // Set on touch input to the conversation area while a response is pending
-  // (see handleConversationTouch); reset each time a new question is
-  // submitted. Only consulted on touch devices — on desktop, auto-focus
-  // ignores it entirely.
+  // Set whenever a real touch event hits the conversation area while a
+  // response is pending (see handleConversationTouch); reset each time a
+  // new question is submitted. A touchstart only ever fires from actual
+  // touch input, so this is authoritative on its own — no device/pointer-
+  // type classification is needed to decide whether it counts. Mouse
+  // interaction never sets it, so desktop auto-focus is unaffected.
   const conversationInteractedRef = useRef(false);
   // Set by handleNewChat when it cancels an in-flight request (see there) —
   // lets the focus-restore effect below tell a genuine completed response
@@ -1191,12 +1183,13 @@ export default function TomChatPage() {
   /**
    * Marks that the user physically touched the conversation area — checked
    * by the post-response focus-restore effect above to avoid reopening the
-   * software keyboard on touch devices when the user was mid-interaction
-   * (e.g. scrolling) as Tom's response landed. No-op on non-touch devices,
-   * where auto-focus behavior is unconditional regardless of interaction.
+   * software keyboard when the user was mid-interaction (e.g. scrolling) as
+   * Tom's response landed. The touchstart event itself is the signal: it
+   * only ever fires from real touch input (never from a mouse, and never
+   * programmatically), so it's recorded unconditionally.
    */
   function handleConversationTouch() {
-    if (isTouchDevice()) conversationInteractedRef.current = true;
+    conversationInteractedRef.current = true;
   }
 
   function handleMessagesScroll() {
@@ -1265,11 +1258,12 @@ export default function TomChatPage() {
   // a link, the Help modal trapping focus, etc.), document.activeElement
   // will be that element instead, and we leave it alone.
   //
-  // On touch devices specifically, focusing a text input also reopens the
-  // software keyboard — so there we additionally withhold refocus if the
-  // user touched the conversation (e.g. scrolling to reread history) while
-  // the response was pending, per conversationInteractedRef. Desktop ignores
-  // that ref entirely and keeps its existing always-refocus behavior.
+  // Focusing a text input also reopens the software keyboard on touch
+  // devices — so we additionally withhold refocus if a real touch hit the
+  // conversation (e.g. scrolling to reread history) while the response was
+  // pending, per conversationInteractedRef. That ref is only ever set by an
+  // actual touchstart event (see handleConversationTouch), never by mouse
+  // interaction, so desktop's always-refocus behavior is unaffected.
   //
   // A loading:true->false transition can also happen because New Chat force-
   // cleared it to cancel an in-flight request, rather than because Tom
@@ -1283,8 +1277,7 @@ export default function TomChatPage() {
       } else {
         const active = document.activeElement;
         const nothingElseFocused = !active || active === document.body;
-        const suppressedByMobileInteraction = isTouchDevice() && conversationInteractedRef.current;
-        if (nothingElseFocused && !suppressedByMobileInteraction) {
+        if (nothingElseFocused && !conversationInteractedRef.current) {
           inputRef.current?.focus();
         }
       }
