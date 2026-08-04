@@ -220,6 +220,16 @@ function sourceLabel(source: TomSource): string {
   return source.title || source.name || source.url || "Source";
 }
 
+/**
+ * True on touch/mobile devices — keyed off the primary pointer's precision
+ * (same signal responsive CSS would use), not viewport width, so it tracks
+ * actual touch input rather than just a narrow screen. Not available during
+ * SSR, so only ever called client-side (inside effects/handlers).
+ */
+function isTouchDevice(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
+}
+
 /** Only http:/https: URLs are safe to render as clickable links (blocks javascript:, data:, etc). */
 function isSafeHttpUrl(value: unknown): value is string {
   if (typeof value !== "string" || !value) return false;
@@ -1099,6 +1109,11 @@ export default function TomChatPage() {
   const isNearBottomRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const wasLoadingRef = useRef(false);
+  // Set on touch input to the conversation area while a response is pending
+  // (see handleConversationTouch); reset each time a new question is
+  // submitted. Only consulted on touch devices — on desktop, auto-focus
+  // ignores it entirely.
+  const conversationInteractedRef = useRef(false);
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
   const helpModalRef = useRef<HTMLDivElement>(null);
   const helpCloseRef = useRef<HTMLButtonElement>(null);
@@ -1168,6 +1183,17 @@ export default function TomChatPage() {
     setShowJumpToLatest(false);
   }
 
+  /**
+   * Marks that the user physically touched the conversation area — checked
+   * by the post-response focus-restore effect above to avoid reopening the
+   * software keyboard on touch devices when the user was mid-interaction
+   * (e.g. scrolling) as Tom's response landed. No-op on non-touch devices,
+   * where auto-focus behavior is unconditional regardless of interaction.
+   */
+  function handleConversationTouch() {
+    if (isTouchDevice()) conversationInteractedRef.current = true;
+  }
+
   function handleMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
@@ -1233,10 +1259,18 @@ export default function TomChatPage() {
   // user deliberately moved focus elsewhere in the meantime (Help, New Chat,
   // a link, the Help modal trapping focus, etc.), document.activeElement
   // will be that element instead, and we leave it alone.
+  //
+  // On touch devices specifically, focusing a text input also reopens the
+  // software keyboard — so there we additionally withhold refocus if the
+  // user touched the conversation (e.g. scrolling to reread history) while
+  // the response was pending, per conversationInteractedRef. Desktop ignores
+  // that ref entirely and keeps its existing always-refocus behavior.
   useEffect(() => {
     if (wasLoadingRef.current && !loading) {
       const active = document.activeElement;
-      if (!active || active === document.body) {
+      const nothingElseFocused = !active || active === document.body;
+      const suppressedByMobileInteraction = isTouchDevice() && conversationInteractedRef.current;
+      if (nothingElseFocused && !suppressedByMobileInteraction) {
         inputRef.current?.focus();
       }
     }
@@ -1322,6 +1356,7 @@ export default function TomChatPage() {
     // profile's chat history/session.
     syncActiveProfile();
     const requestSessionId = sessionIdRef.current;
+    conversationInteractedRef.current = false;
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
@@ -1487,7 +1522,12 @@ export default function TomChatPage() {
           <p className="tom-helper">{HELPER_TEXT}</p>
         </div>
 
-        <div className="tom-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
+        <div
+          className="tom-messages"
+          ref={messagesRef}
+          onScroll={handleMessagesScroll}
+          onTouchStart={handleConversationTouch}
+        >
           {messages.length === 0 && !loading && (
             <div className="tom-empty">
               <img className="tom-avatar-empty" src={TOM_AVATAR_SRC} alt="Tom Morrow" />
