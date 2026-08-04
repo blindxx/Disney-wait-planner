@@ -165,15 +165,7 @@ export function formatClosureDateRangeForDisplay(
  */
 export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
   // ---- DLR: Disneyland Park ----
-  [
-    "disneyland:disneyland monorail",
-    {
-      name: "Disneyland Monorail",
-      parkId: "disneyland",
-      land: "Tomorrowland",
-      dateRange: "2026-03-30 - TBD",
-    },
-  ],
+  // (no active Disneyland Resort closures)
   // ---- WDW: Magic Kingdom ----
   [
     "mk:big thunder mountain railroad",
