@@ -1098,6 +1098,7 @@ export default function TomChatPage() {
   const messagesRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
+  const wasLoadingRef = useRef(false);
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
   const helpModalRef = useRef<HTMLDivElement>(null);
   const helpCloseRef = useRef<HTMLButtonElement>(null);
@@ -1222,6 +1223,25 @@ export default function TomChatPage() {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, loading]);
+
+  // Restore focus to the message input once Tom's response finishes and the
+  // input is re-enabled, so the next question can be typed immediately with
+  // no click. The input is disabled (and thus unfocusable) for the duration
+  // of the request, so the browser moves focus to <body> the moment that
+  // happens — if focus is still sitting on <body> when the response lands,
+  // nothing else claimed it, and it's safe to return it to the input. If the
+  // user deliberately moved focus elsewhere in the meantime (Help, New Chat,
+  // a link, the Help modal trapping focus, etc.), document.activeElement
+  // will be that element instead, and we leave it alone.
+  useEffect(() => {
+    if (wasLoadingRef.current && !loading) {
+      const active = document.activeElement;
+      if (!active || active === document.body) {
+        inputRef.current?.focus();
+      }
+    }
+    wasLoadingRef.current = loading;
+  }, [loading]);
 
   /** Returns true on success so the caller can decide whether to restore the input. */
   async function sendQuestion(question: string): Promise<boolean> {
