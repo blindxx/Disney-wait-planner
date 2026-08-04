@@ -1114,6 +1114,11 @@ export default function TomChatPage() {
   // submitted. Only consulted on touch devices — on desktop, auto-focus
   // ignores it entirely.
   const conversationInteractedRef = useRef(false);
+  // Set by handleNewChat when it cancels an in-flight request (see there) —
+  // lets the focus-restore effect below tell a genuine completed response
+  // apart from loading simply being force-cleared by New Chat, so the
+  // latter never triggers auto-focus.
+  const cancelledByNewChatRef = useRef(false);
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
   const helpModalRef = useRef<HTMLDivElement>(null);
   const helpCloseRef = useRef<HTMLButtonElement>(null);
@@ -1265,13 +1270,23 @@ export default function TomChatPage() {
   // user touched the conversation (e.g. scrolling to reread history) while
   // the response was pending, per conversationInteractedRef. Desktop ignores
   // that ref entirely and keeps its existing always-refocus behavior.
+  //
+  // A loading:true->false transition can also happen because New Chat force-
+  // cleared it to cancel an in-flight request, rather than because Tom
+  // actually responded — cancelledByNewChatRef distinguishes that case and
+  // is consumed (reset) here so it only suppresses the one transition it
+  // was set for; the next real completion behaves normally again.
   useEffect(() => {
     if (wasLoadingRef.current && !loading) {
-      const active = document.activeElement;
-      const nothingElseFocused = !active || active === document.body;
-      const suppressedByMobileInteraction = isTouchDevice() && conversationInteractedRef.current;
-      if (nothingElseFocused && !suppressedByMobileInteraction) {
-        inputRef.current?.focus();
+      if (cancelledByNewChatRef.current) {
+        cancelledByNewChatRef.current = false;
+      } else {
+        const active = document.activeElement;
+        const nothingElseFocused = !active || active === document.body;
+        const suppressedByMobileInteraction = isTouchDevice() && conversationInteractedRef.current;
+        if (nothingElseFocused && !suppressedByMobileInteraction) {
+          inputRef.current?.focus();
+        }
       }
     }
     wasLoadingRef.current = loading;
@@ -1388,6 +1403,12 @@ export default function TomChatPage() {
     // profile, and the next send would reload the current profile's old
     // (un-cleared) session/history, silently undoing "New Chat".
     syncActiveProfile();
+
+    // A request is currently in flight — this setLoading(false) below is
+    // about to cancel it (its response, if it lands, is discarded as stale
+    // via sessionIdRef), not report a completion, so the focus-restore
+    // effect must not treat it as one.
+    if (loading) cancelledByNewChatRef.current = true;
 
     const newSessionId = generateId();
     // Update the ref synchronously, before any state-setter-triggered
