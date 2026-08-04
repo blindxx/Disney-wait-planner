@@ -1098,6 +1098,19 @@ export default function TomChatPage() {
   const messagesRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
+  const wasLoadingRef = useRef(false);
+  // Set whenever a real touch event hits the conversation area while a
+  // response is pending (see handleConversationTouch); reset each time a
+  // new question is submitted. A touchstart only ever fires from actual
+  // touch input, so this is authoritative on its own — no device/pointer-
+  // type classification is needed to decide whether it counts. Mouse
+  // interaction never sets it, so desktop auto-focus is unaffected.
+  const conversationInteractedRef = useRef(false);
+  // Set by handleNewChat when it cancels an in-flight request (see there) —
+  // lets the focus-restore effect below tell a genuine completed response
+  // apart from loading simply being force-cleared by New Chat, so the
+  // latter never triggers auto-focus.
+  const cancelledByNewChatRef = useRef(false);
   const helpTriggerRef = useRef<HTMLButtonElement>(null);
   const helpModalRef = useRef<HTMLDivElement>(null);
   const helpCloseRef = useRef<HTMLButtonElement>(null);
@@ -1167,6 +1180,18 @@ export default function TomChatPage() {
     setShowJumpToLatest(false);
   }
 
+  /**
+   * Marks that the user physically touched the conversation area — checked
+   * by the post-response focus-restore effect above to avoid reopening the
+   * software keyboard when the user was mid-interaction (e.g. scrolling) as
+   * Tom's response landed. The touchstart event itself is the signal: it
+   * only ever fires from real touch input (never from a mouse, and never
+   * programmatically), so it's recorded unconditionally.
+   */
+  function handleConversationTouch() {
+    conversationInteractedRef.current = true;
+  }
+
   function handleMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
@@ -1222,6 +1247,43 @@ export default function TomChatPage() {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, loading]);
+
+  // Restore focus to the message input once Tom's response finishes and the
+  // input is re-enabled, so the next question can be typed immediately with
+  // no click. The input is disabled (and thus unfocusable) for the duration
+  // of the request, so the browser moves focus to <body> the moment that
+  // happens — if focus is still sitting on <body> when the response lands,
+  // nothing else claimed it, and it's safe to return it to the input. If the
+  // user deliberately moved focus elsewhere in the meantime (Help, New Chat,
+  // a link, the Help modal trapping focus, etc.), document.activeElement
+  // will be that element instead, and we leave it alone.
+  //
+  // Focusing a text input also reopens the software keyboard on touch
+  // devices — so we additionally withhold refocus if a real touch hit the
+  // conversation (e.g. scrolling to reread history) while the response was
+  // pending, per conversationInteractedRef. That ref is only ever set by an
+  // actual touchstart event (see handleConversationTouch), never by mouse
+  // interaction, so desktop's always-refocus behavior is unaffected.
+  //
+  // A loading:true->false transition can also happen because New Chat force-
+  // cleared it to cancel an in-flight request, rather than because Tom
+  // actually responded — cancelledByNewChatRef distinguishes that case and
+  // is consumed (reset) here so it only suppresses the one transition it
+  // was set for; the next real completion behaves normally again.
+  useEffect(() => {
+    if (wasLoadingRef.current && !loading) {
+      if (cancelledByNewChatRef.current) {
+        cancelledByNewChatRef.current = false;
+      } else {
+        const active = document.activeElement;
+        const nothingElseFocused = !active || active === document.body;
+        if (nothingElseFocused && !conversationInteractedRef.current) {
+          inputRef.current?.focus();
+        }
+      }
+    }
+    wasLoadingRef.current = loading;
+  }, [loading]);
 
   /** Returns true on success so the caller can decide whether to restore the input. */
   async function sendQuestion(question: string): Promise<boolean> {
@@ -1302,6 +1364,7 @@ export default function TomChatPage() {
     // profile's chat history/session.
     syncActiveProfile();
     const requestSessionId = sessionIdRef.current;
+    conversationInteractedRef.current = false;
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
@@ -1333,6 +1396,12 @@ export default function TomChatPage() {
     // profile, and the next send would reload the current profile's old
     // (un-cleared) session/history, silently undoing "New Chat".
     syncActiveProfile();
+
+    // A request is currently in flight — this setLoading(false) below is
+    // about to cancel it (its response, if it lands, is discarded as stale
+    // via sessionIdRef), not report a completion, so the focus-restore
+    // effect must not treat it as one.
+    if (loading) cancelledByNewChatRef.current = true;
 
     const newSessionId = generateId();
     // Update the ref synchronously, before any state-setter-triggered
@@ -1467,7 +1536,12 @@ export default function TomChatPage() {
           <p className="tom-helper">{HELPER_TEXT}</p>
         </div>
 
-        <div className="tom-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
+        <div
+          className="tom-messages"
+          ref={messagesRef}
+          onScroll={handleMessagesScroll}
+          onTouchStart={handleConversationTouch}
+        >
           {messages.length === 0 && !loading && (
             <div className="tom-empty">
               <img className="tom-avatar-empty" src={TOM_AVATAR_SRC} alt="Tom Morrow" />
