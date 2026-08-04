@@ -165,42 +165,7 @@ export function formatClosureDateRangeForDisplay(
  */
 export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
   // ---- DLR: Disneyland Park ----
-  [
-    "disneyland:jungle cruise",
-    {
-      name: "Jungle Cruise",
-      parkId: "disneyland",
-      land: "Adventureland",
-      dateRange: "2026-02-17 - TBD",
-    },
-  ],
-  [
-    "disneyland:roger rabbit's car toon spin",
-    {
-      name: "Roger Rabbit\u2019s Car Toon Spin",
-      parkId: "disneyland",
-      land: "Mickey's Toontown",
-      dateRange: "2026-03-30 - TBD",
-    },
-  ],
-  [
-    "disneyland:disneyland monorail",
-    {
-      name: "Disneyland Monorail",
-      parkId: "disneyland",
-      land: "Tomorrowland",
-      dateRange: "2026-03-30 - TBD",
-    },
-  ],
-  [
-    "disneyland:buzz lightyear astro blasters",
-    {
-      name: "Buzz Lightyear Astro Blasters",
-      parkId: "disneyland",
-      land: "Tomorrowland",
-      dateRange: "2026-04-13 - TBD",
-    },
-  ],
+  // (no active Disneyland Resort closures)
   // ---- WDW: Magic Kingdom ----
   [
     "mk:big thunder mountain railroad",
