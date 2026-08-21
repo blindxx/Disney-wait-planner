@@ -78,6 +78,19 @@ const GUIDE_CSS = `
     padding: 0;
     list-style: none;
   }
+  .tomhg-toc-group-start {
+    border-top: 1px solid #e5e7eb;
+    padding-top: 8px;
+    margin-top: 4px;
+  }
+  @media (min-width: 481px) {
+    /* At the two-column width, also line up the item beside a group-start entry so the divider reads as one row. */
+    .tomhg-toc-group-start + li {
+      border-top: 1px solid #e5e7eb;
+      padding-top: 8px;
+      margin-top: 4px;
+    }
+  }
   .tomhg-toc-list a {
     display: block;
     padding: 4px 0;
@@ -206,7 +219,7 @@ export default function TomHelpGuidePage() {
         <h2>Explore Tom&rsquo;s Capabilities</h2>
         <ul className="tomhg-toc-list">
           {TOM_HELP_SECTIONS.map((section) => (
-            <li key={section.id}>
+            <li key={section.id} className={section.navGroupStart ? "tomhg-toc-group-start" : undefined}>
               <a href={`#${section.id}`}>{section.title}</a>
             </li>
           ))}

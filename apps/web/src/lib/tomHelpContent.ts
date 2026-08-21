@@ -23,6 +23,8 @@ export interface TomHelpSection {
   examples?: string[];
   /** Decorative emoji prefixed to this section's example chips, when one fits the topic without adding clutter. */
   chipIcon?: string;
+  /** Marks this section as the start of a new conceptual group in the two-column capability index (visual only — doesn't affect section rendering or anchors). */
+  navGroupStart?: boolean;
 }
 
 export const TOM_HELP_SECTIONS: TomHelpSection[] = [
@@ -51,6 +53,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     id: "disney-information",
     title: "Disney Information",
     icon: "🏰",
+    navGroupStart: true,
     paragraphs: [
       "Tom can answer general Disney questions spanning parks, lands, attractions, wait times, dining, entertainment, and news. The sections below break these down by category.",
     ],
@@ -116,6 +119,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     id: "planner",
     title: "Planner",
     icon: "📅",
+    navGroupStart: true,
     paragraphs: [
       "Tom can answer questions about your local planner, but can't make changes to it. Tom understands your itinerary information, including plans, Lightning Lane, dining, entertainment, conflicts, repeats, and park assignments.",
       "Tom also understands common Disney abbreviations and aliases when looking things up — for example MK, EPCOT, DHS, DAK, DLR, and DCA. These are just examples, not a complete list.",
@@ -169,6 +173,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     id: "privacy",
     title: "Privacy",
     icon: "🔒",
+    navGroupStart: true,
     bullets: [
       "Your planner stays local-first, on this device.",
       "Only a compact, read-only planner summary is sent to Tom.",
