@@ -59,8 +59,8 @@ const STARTER_PROMPTS = [
   "What's new at Walt Disney World?",
   "What's new at Disneyland?",
   "What's the latest Star Wars news?",
-  "What's the latest Marvel news?",
   "What do I have planned today?",
+  "What comes after Space Mountain?",
 ];
 
 /** Example prompts shown in the Help modal — Disney-information capabilities. */
@@ -83,6 +83,7 @@ const HELP_PLANNER_EXAMPLES = [
   "What dining do I have?",
   "What entertainment do I have?",
   "What Lightning selections do I have?",
+  "What comes after Space Mountain?",
   "Do I have any conflicts?",
   "What am I repeating?",
 ];
@@ -1673,9 +1674,13 @@ export default function TomChatPage() {
               <p className="tom-help-hint">
                 Click any example below to insert it into the chat — you can edit it before sending.
               </p>
-              <Link href="/tom/help" className="tom-help-guide-link">
-                View Full Help Guide
-              </Link>
+              <p className="tom-help-hint">
+                Want to explore everything I can do?{" "}
+                <Link href="/tom/help" className="tom-help-guide-link">
+                  Visit the Tom Help Guide
+                </Link>
+                .
+              </p>
             </div>
 
             <div className="tom-help-body">

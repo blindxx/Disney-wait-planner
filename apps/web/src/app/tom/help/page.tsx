@@ -8,7 +8,7 @@
  * Comprehensive, living documentation of Tom's current user-facing
  * capabilities. This is a reference page, not onboarding, and is
  * intentionally not linked from main navigation — it's reachable from the
- * "View Full Help Guide" link in the Ask Tom Help modal (see
+ * "Visit the Tom Help Guide" link in the Ask Tom Help modal (see
  * app/tom/page.tsx) or by direct URL.
  *
  * Section content lives in lib/tomHelpContent.ts as plain data, so adding a
