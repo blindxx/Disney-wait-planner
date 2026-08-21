@@ -8,7 +8,7 @@
  * Comprehensive, living documentation of Tom's current user-facing
  * capabilities. This is a reference page, not onboarding, and is
  * intentionally not linked from main navigation — it's reachable from the
- * "View Full Help Guide" link in the Ask Tom Help modal (see
+ * "Visit the Tom Help Guide" link in the Ask Tom Help modal (see
  * app/tom/page.tsx) or by direct URL.
  *
  * Section content lives in lib/tomHelpContent.ts as plain data, so adding a
@@ -77,6 +77,19 @@ const GUIDE_CSS = `
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+  .tomhg-toc-group-start {
+    border-top: 1px solid #e5e7eb;
+    padding-top: 8px;
+    margin-top: 4px;
+  }
+  @media (min-width: 481px) {
+    /* At the two-column width, also line up the item beside a group-start entry so the divider reads as one row. */
+    .tomhg-toc-group-start + li {
+      border-top: 1px solid #e5e7eb;
+      padding-top: 8px;
+      margin-top: 4px;
+    }
   }
   .tomhg-toc-list a {
     display: block;
@@ -206,7 +219,7 @@ export default function TomHelpGuidePage() {
         <h2>Explore Tom&rsquo;s Capabilities</h2>
         <ul className="tomhg-toc-list">
           {TOM_HELP_SECTIONS.map((section) => (
-            <li key={section.id}>
+            <li key={section.id} className={section.navGroupStart ? "tomhg-toc-group-start" : undefined}>
               <a href={`#${section.id}`}>{section.title}</a>
             </li>
           ))}

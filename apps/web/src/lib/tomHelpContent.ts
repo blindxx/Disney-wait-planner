@@ -23,6 +23,8 @@ export interface TomHelpSection {
   examples?: string[];
   /** Decorative emoji prefixed to this section's example chips, when one fits the topic without adding clutter. */
   chipIcon?: string;
+  /** Marks this section as the start of a new conceptual group in the two-column capability index (visual only — doesn't affect section rendering or anchors). */
+  navGroupStart?: boolean;
 }
 
 export const TOM_HELP_SECTIONS: TomHelpSection[] = [
@@ -41,6 +43,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     icon: "🚀",
     paragraphs: [
       "Ask Tom naturally, the way you'd ask a person — there's no required command syntax. Every example question in this guide is representative, not an exact script; you can phrase things however feels natural.",
+      "You don't need to repeat yourself every time. Tom remembers the current conversation, so you can ask natural follow-up questions — for example, after asking \"What time is Space Mountain?\" you could just ask \"What else do I have planned that day?\"",
       "Tom understands common Disney park abbreviations and aliases, like MK, EPCOT, DHS, DAK, DLR, and DCA.",
       "Use New Chat in the Ask Tom header anytime you want to start a fresh conversation.",
     ],
@@ -50,6 +53,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     id: "disney-information",
     title: "Disney Information",
     icon: "🏰",
+    navGroupStart: true,
     paragraphs: [
       "Tom can answer general Disney questions spanning parks, lands, attractions, wait times, dining, entertainment, and news. The sections below break these down by category.",
     ],
@@ -115,6 +119,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     id: "planner",
     title: "Planner",
     icon: "📅",
+    navGroupStart: true,
     paragraphs: [
       "Tom can answer questions about your local planner, but can't make changes to it. Tom understands your itinerary information, including plans, Lightning Lane, dining, entertainment, conflicts, repeats, and park assignments.",
       "Tom also understands common Disney abbreviations and aliases when looking things up — for example MK, EPCOT, DHS, DAK, DLR, and DCA. These are just examples, not a complete list.",
@@ -122,67 +127,53 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     bullets: [
       "Trip itinerary summaries",
       "Individual day summaries",
+      "Item day/time lookups — when a specific saved item is scheduled",
+      "Category summaries — attractions, dining, and entertainment you have planned",
       "Park assignment lookups — which park a given day visits",
       "Park-to-day lookups — which day a given park falls on",
-      "Dining included in your planner",
-      "Entertainment included in your planner",
       "Conflicts between plans and Lightning selections",
       "Repeated items across days",
     ],
     examples: [
       "What do I have planned today?",
       "What are my plans for Day 2?",
-      "What park am I visiting on Day 3?",
-      "What day is Magic Kingdom?",
+      "What day is my Space Mountain Lightning Lane?",
+      "What attractions do I have?",
       "What dining do I have?",
       "What entertainment do I have?",
+      "What park am I visiting on Day 3?",
+      "What day is Magic Kingdom?",
+      "What Lightning selections do I have?",
       "Do I have any conflicts?",
       "What am I repeating?",
     ],
     chipIcon: "📅",
   },
   {
-    id: "lightning-lane",
-    title: "Lightning Lane",
-    icon: "⚡",
-    paragraphs: ["Ask about your saved Lightning Lane selections."],
-    examples: ["What Lightning selections do I have?"],
-    chipIcon: "⚡",
-  },
-  {
     id: "planner-analytics",
     title: "Planner Analytics",
     icon: "📊",
     paragraphs: [
-      "Tom can look across your itinerary to answer higher-level questions, like which day has the most or fewest items planned, or what's first or last on a given day, where your planner has enough detail to support it. Results depend on how much you've entered and may vary as your plans change.",
-      "Activity ordering is fully deterministic: days are ordered the way they appear in your itinerary, same-day activities are ordered by their explicit times, and anything without a time (or a tied time) keeps its original planner order. Tom never invents an order from names, categories, or typical touring patterns.",
-      "Tom can also tell you what's immediately before or after an activity you name explicitly, like a specific attraction, show, or reservation — not general moments like \"after lunch\" or \"in the evening\", since those aren't real planner items.",
-      "If you've given a day a custom name, Tom uses it naturally in answers, and \"Day 2\"-style references still work the same way. Today/tomorrow questions only work when your planner days have real dates attached — without them, Tom will let you know rather than guess.",
+      "Tom can look across your itinerary to answer questions like which day has the most or fewest activities, what's first or last on a day, your earliest or latest activity, and what comes before or after a specific saved item.",
+      "Tom uses what's actually saved in your planner rather than filling in missing details. If the same item appears more than once, Tom may ask which one you mean.",
     ],
     examples: [
       "Which day has the most planned?",
       "Which day has the fewest things planned?",
-      "What's the first thing I'm doing on Day 1?",
-      "What's the last thing I'm doing on Day 2?",
+      "What's the first activity on Day 2?",
+      "What's my last dining item on Day 4?",
       "What's my earliest activity?",
+      "What's my latest activity?",
       "What comes after Space Mountain?",
+      "What comes before Fantasmic!?",
     ],
     chipIcon: "📊",
-  },
-  {
-    id: "follow-up-conversations",
-    title: "Follow-up Conversations",
-    icon: "💬",
-    paragraphs: [
-      "Tom remembers the current conversation, so you can ask natural follow-up questions — including about your planner — without repeating context.",
-    ],
-    examples: ["Tell me more about number 2.", "What about dining there?", "Any other news?", "Show me the next one."],
-    chipIcon: "💬",
   },
   {
     id: "privacy",
     title: "Privacy",
     icon: "🔒",
+    navGroupStart: true,
     bullets: [
       "Your planner stays local-first, on this device.",
       "Only a compact, read-only planner summary is sent to Tom.",
