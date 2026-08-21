@@ -41,6 +41,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     icon: "🚀",
     paragraphs: [
       "Ask Tom naturally, the way you'd ask a person — there's no required command syntax. Every example question in this guide is representative, not an exact script; you can phrase things however feels natural.",
+      "You don't need to repeat yourself every time. Tom remembers the current conversation, so you can ask natural follow-up questions — for example, after asking \"What time is Space Mountain?\" you could just ask \"What else do I have planned that day?\"",
       "Tom understands common Disney park abbreviations and aliases, like MK, EPCOT, DHS, DAK, DLR, and DCA.",
       "Use New Chat in the Ask Tom header anytime you want to start a fresh conversation.",
     ],
@@ -149,8 +150,8 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     title: "Planner Analytics",
     icon: "📊",
     paragraphs: [
-      "Tom can also look across your itinerary for higher-level answers: which day has the most or fewest items planned, what's first or last on a given day (or overall, your earliest or latest activity), and what comes immediately before or after a specific saved item, like an attraction, show, or reservation — not general moments like \"after lunch,\" since those aren't real planner items.",
-      "These answers come from your saved days, times, and planner order — never a guess at missing details. Ordering is deterministic: days follow itinerary order, same-day items follow their explicit times, and untimed items keep their original planner order. If a name matches more than one saved item, Tom will ask which one you mean rather than guess.",
+      "Tom can look across your itinerary to answer questions like which day has the most or fewest activities, what's first or last on a day, your earliest or latest activity, and what comes before or after a specific saved item.",
+      "Tom uses what's actually saved in your planner rather than filling in missing details. If the same item appears more than once, Tom may ask which one you mean.",
     ],
     examples: [
       "Which day has the most planned?",
@@ -158,20 +159,11 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
       "What's the first activity on Day 2?",
       "What's my last dining item on Day 4?",
       "What's my earliest activity?",
+      "What's my latest activity?",
       "What comes after Space Mountain?",
       "What comes before Fantasmic!?",
     ],
     chipIcon: "📊",
-  },
-  {
-    id: "follow-up-conversations",
-    title: "Follow-up Conversations",
-    icon: "💬",
-    paragraphs: [
-      "Tom remembers the current conversation, so you can ask natural follow-up questions — including about your planner — without repeating context.",
-    ],
-    examples: ["Tell me more about number 2.", "What about dining there?", "Show me the next one."],
-    chipIcon: "💬",
   },
   {
     id: "privacy",
