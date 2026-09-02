@@ -1763,21 +1763,27 @@ export default function PlansPage() {
     // Park handling:
     // - Manual source (explicit dayParks override) — copy the override
     //   verbatim so the duplicate is Manual with the same park.
-    // - Auto source — the duplicate stays Auto. Copied items resolve their
-    //   own park through the normal inferDayPark path (same inputs as the
-    //   source's own resolution, since items/name are unchanged). A source
-    //   dayAutoFallbacks value is only copied over when that inference still
-    //   comes up empty — i.e. the copied plans can't recover the source's
-    //   Auto context on their own — and it is stored as an auto fallback,
-    //   never promoted into a manual dayParks override.
+    // - Auto source — the duplicate stays Auto. Recoverability is judged with
+    //   inferPlansContext (resort-agnostic), the same inference the active-day
+    //   effect above uses to resolve a day's context — NOT inferDayPark(...,
+    //   selectedResort), which only checks whether the copied items happen to
+    //   match *whichever resort is currently selected* and so can wrongly
+    //   report "recovered" for an item that's ambiguous across resorts (e.g.
+    //   Haunted Mansion exists at both DLR and WDW) purely because of
+    //   whatever day the user was viewing when they clicked Duplicate. A
+    //   source dayAutoFallbacks value is only copied over when inferPlansContext
+    //   still can't resolve a resort from the copied items on their own — i.e.
+    //   the copied plans can't recover the source's Auto context — and it is
+    //   stored as an auto fallback, never promoted into a manual dayParks
+    //   override.
     const nextDayParks = { ...dayParks };
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     const sourceOverride = dayParks[sourceDayId];
     if (sourceOverride) {
       nextDayParks[newDayId] = sourceOverride;
     } else {
-      const inferred = inferDayPark(copiedItems, selectedResort);
-      if (!inferred) {
+      const inferredContext = inferPlansContext(copiedItems);
+      if (!inferredContext.resort) {
         const sourceFallback = dayAutoFallbacks[sourceDayId];
         if (sourceFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, sourceFallback)) {
           nextAutoFallbacks[newDayId] = sourceFallback;
