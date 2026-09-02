@@ -3,10 +3,12 @@
  *
  * Exports:
  *   PLANNED_CLOSURES                  — Map<key, ClosureEntry>
- *   getClosureTiming                  — "UPCOMING" | "ACTIVE" | "ENDED"
+ *   getClosureTiming                  — "UPCOMING" | "ACTIVE" | "ENDED" (PRESENTATION only)
+ *   isClosureStatusEnforced           — boolean (STATUS ENFORCEMENT only)
  *   formatClosureDateRangeForDisplay  — ISO dateRange → human-readable label
  *   ClosureTiming, ClosureType        — types
- *   PERMANENT_RETENTION_DAYS          — days a PERMANENT closure stays active
+ *   PERMANENT_RETENTION_DAYS          — days a PERMANENT closure stays in the
+ *                                        active Planned Closures presentation
  *                                        after its closure date before aging out
  *
  * Closure lifecycle (ClosureEntry.closureType, optional, defaults to
@@ -17,17 +19,23 @@
  *                 reopeningLabel is explicitly set — open-ended closures
  *                 default to a neutral "TBD".
  *   "PERMANENT" — always displays "Closed Permanently"; stays in the active
- *                 list for PERMANENT_RETENTION_DAYS (~1 year) after its
- *                 dateRange start, then deterministically ages out of the
- *                 active list only (the record, canonical attraction data,
- *                 aliases, and planner matching are untouched).
+ *                 Planned Closures *presentation* for PERMANENT_RETENTION_DAYS
+ *                 (~1 year) after its dateRange start, then deterministically
+ *                 ages out of that presentation only (the record, canonical
+ *                 attraction data, aliases, and planner matching are
+ *                 untouched) — AND keeps forcing live status CLOSED forever,
+ *                 independent of that presentation retention window. These
+ *                 are two intentionally separate concerns, split across
+ *                 getClosureTiming() (presentation) and
+ *                 isClosureStatusEnforced() (status enforcement) — do not
+ *                 use one in place of the other.
  *
  * Key format: `${parkId}:${normalizedAttractionName}` (lowercase, straight punctuation).
  * This matches the output of normalizeAttractionName() in liveWaitApi.ts.
  *
  * Consumed by:
- *   liveWaitApi.ts        — live status enforcement (force CLOSED when ACTIVE).
- *   wait-times/page.tsx   — Planned Closures UI section.
+ *   liveWaitApi.ts        — live status enforcement, via isClosureStatusEnforced().
+ *   wait-times/page.tsx   — Planned Closures UI section, via getClosureTiming().
  */
 
 import type { ParkId } from "@disney-wait-planner/shared";
@@ -115,9 +123,11 @@ export function parseClosureDateRange(
 /**
  * How long a PERMANENT closure stays in the active Planned Closures list
  * after its closure date (dateRange start), before deterministically aging
- * out. Aging out only affects active-list presentation (see getClosureTiming
- * callers) — it never touches canonical attraction data, aliases, planner
- * matching, or saved plans.
+ * out. Aging out only affects getClosureTiming()'s active-list presentation
+ * — it never touches canonical attraction data, aliases, planner matching,
+ * saved plans, or (critically) live status enforcement, which is governed
+ * separately by isClosureStatusEnforced() and never expires for a
+ * PERMANENT closure.
  */
 export const PERMANENT_RETENTION_DAYS = 365;
 
@@ -179,6 +189,51 @@ export function getClosureTiming(
 
   if (end !== null && todayKey > end) return "ENDED";
   return "ACTIVE";
+}
+
+/**
+ * Determine whether a closure should force live status to CLOSED right now.
+ *
+ * Deliberately separate from getClosureTiming(): that function's "ENDED"
+ * result for a PERMANENT closure means only "aged out of the active Planned
+ * Closures *presentation*" (see PERMANENT_RETENTION_DAYS) — it must NOT be
+ * read as "no longer closed". A PERMANENT closure is never expected to
+ * reopen, so once it starts it keeps forcing CLOSED forever, independent of
+ * the ~1-year presentation retention window. Using getClosureTiming's
+ * ACTIVE/ENDED result for status enforcement was the bug: after retention
+ * expired, a permanently closed attraction could fall through to
+ * Queue-Times and show as DOWN/OPERATING.
+ *
+ * TEMPORARY (default, unchanged from prior behavior — identical to
+ * `getClosureTiming(...) === "ACTIVE"`):
+ * - undefined dateRange              → true  (indefinite refurbishment)
+ * - today < start                    → false (UPCOMING — not yet closed)
+ * - end !== null && today > end      → false (ENDED — closure is over)
+ * - otherwise (on/after start)       → true
+ *
+ * PERMANENT:
+ * - undefined dateRange              → true  (closure date unknown, but the
+ *                                       attraction is still permanently closed)
+ * - today < start                    → false (UPCOMING — not yet closed)
+ * - otherwise (on/after start)       → true  (forever — retention window
+ *                                       does not apply to enforcement)
+ */
+export function isClosureStatusEnforced(
+  dateRange: string | undefined,
+  now: Date,
+  closureType: ClosureType = "TEMPORARY",
+): boolean {
+  if (!dateRange) return true;
+
+  const todayKey = normalizeToDayKeyLocal(now);
+  const { start, end } = parseClosureDateRange(dateRange);
+
+  if (todayKey < start) return false;
+
+  if (closureType === "PERMANENT") return true;
+
+  if (end !== null && todayKey > end) return false;
+  return true;
 }
 
 // ============================================
@@ -324,19 +379,28 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
 // ============================================
 
 /**
- * Reference test cases for getClosureTiming() + formatClosureDateRangeForDisplay(),
- * covering the temporary/permanent lifecycle split and the permanent-closure
- * retention/aging-out window. Mirrors the DEV_PLAN_ALIAS_CASES convention in
- * plansMatching.ts — not wired into CI (no test runner in this repo), run
- * manually from Node:
+ * Reference test cases for getClosureTiming() [PRESENTATION] +
+ * isClosureStatusEnforced() [STATUS ENFORCEMENT] + formatClosureDateRangeForDisplay(),
+ * covering the temporary/permanent lifecycle split, the permanent-closure
+ * presentation retention/aging-out window, and — critically — that status
+ * enforcement for a PERMANENT closure never expires even after it ages out
+ * of the active Planned Closures presentation (that was the P2 bug: a
+ * permanently closed attraction could fall through to Queue-Times as
+ * DOWN/OPERATING once retention expired). Mirrors the DEV_PLAN_ALIAS_CASES
+ * convention in plansMatching.ts — not wired into CI (no test runner in
+ * this repo), run manually from Node:
  *
- *   import { DEV_CLOSURE_TIMING_CASES, getClosureTiming, formatClosureDateRangeForDisplay }
- *     from "@/lib/plannedClosures";
+ *   import {
+ *     DEV_CLOSURE_TIMING_CASES, getClosureTiming,
+ *     isClosureStatusEnforced, formatClosureDateRangeForDisplay,
+ *   } from "@/lib/plannedClosures";
  *   for (const c of DEV_CLOSURE_TIMING_CASES) {
- *     const timing = getClosureTiming(c.dateRange, new Date(`${c.now}T12:00:00`), c.closureType);
+ *     const now = new Date(`${c.now}T12:00:00`);
+ *     const timing = getClosureTiming(c.dateRange, now, c.closureType);
+ *     const enforced = isClosureStatusEnforced(c.dateRange, now, c.closureType);
  *     const label = formatClosureDateRangeForDisplay(c.dateRange, c.reopeningLabel, c.closureType);
- *     const ok = timing === c.expectedTiming && label === c.expectedLabel;
- *     console.log(ok ? "✓" : "✗ FAIL", c.description, { timing, label });
+ *     const ok = timing === c.expectedTiming && enforced === c.expectedEnforced && label === c.expectedLabel;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, { timing, enforced, label });
  *   }
  */
 export const DEV_CLOSURE_TIMING_CASES: Array<{
@@ -346,12 +410,16 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   closureType?: ClosureType;
   /** "YYYY-MM-DD" — evaluated at local noon to avoid DST/midnight edge cases. */
   now: string;
+  /** Expected getClosureTiming() result — active-list PRESENTATION only. */
   expectedTiming: ClosureTiming;
+  /** Expected isClosureStatusEnforced() result — live STATUS ENFORCEMENT only. */
+  expectedEnforced: boolean;
   expectedLabel: string;
 }> = [
   // ---- TEMPORARY: known end date (unchanged prior behavior) ----
   {
     description: "temporary, active, known end date",
+    expectedEnforced: true,
     dateRange: "2026-03-02 - 2026-05-25",
     now: "2026-04-01",
     expectedTiming: "ACTIVE",
@@ -359,6 +427,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   },
   {
     description: "temporary, upcoming, known end date",
+    expectedEnforced: false,
     dateRange: "2026-03-02 - 2026-05-25",
     now: "2026-01-01",
     expectedTiming: "UPCOMING",
@@ -366,6 +435,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   },
   {
     description: "temporary, ended, known end date",
+    expectedEnforced: false,
     dateRange: "2026-03-02 - 2026-05-25",
     now: "2026-06-01",
     expectedTiming: "ENDED",
@@ -374,6 +444,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   // ---- TEMPORARY: open-ended (TBD) — custom reopening wording ----
   {
     description: "temporary, open-ended, custom Reopening TBD wording (Carousel of Progress)",
+    expectedEnforced: true,
     dateRange: "2026-07-06 - TBD",
     reopeningLabel: "Reopening TBD",
     now: "2026-08-01",
@@ -383,6 +454,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   // ---- TEMPORARY: open-ended, no override — must stay neutral "TBD", never invented ----
   {
     description: "temporary, open-ended, no reopeningLabel stays neutral TBD (never invented)",
+    expectedEnforced: true,
     dateRange: "2026-02-02 - TBD",
     now: "2026-08-01",
     expectedTiming: "ACTIVE",
@@ -391,6 +463,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   // ---- PERMANENT: active, inside retention window ----
   {
     description: "permanent, active, well inside 1-year retention window",
+    expectedEnforced: true,
     dateRange: "2026-01-15 - TBD",
     closureType: "PERMANENT",
     now: "2026-03-01",
@@ -400,24 +473,39 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   // ---- PERMANENT: still active exactly at the retention boundary ----
   {
     description: "permanent, active, exactly on the 365-day retention boundary",
+    expectedEnforced: true,
     dateRange: "2025-01-01 - TBD",
     closureType: "PERMANENT",
     now: "2026-01-01", // 2025-01-01 + 365 days
     expectedTiming: "ACTIVE",
     expectedLabel: "Closed Permanently",
   },
-  // ---- PERMANENT: aged out the day after the retention boundary ----
+  // ---- PERMANENT: aged out of PRESENTATION the day after the retention
+  // boundary, but status enforcement must NOT expire (P2 regression case:
+  // ENDED presentation + still-true enforcement, together, is the fix). ----
   {
-    description: "permanent, ages out the day after the 365-day retention boundary",
+    description: "permanent, ages out of presentation the day after retention, enforcement stays true",
+    expectedEnforced: true,
     dateRange: "2025-01-01 - TBD",
     closureType: "PERMANENT",
     now: "2026-01-02",
     expectedTiming: "ENDED",
     expectedLabel: "Closed Permanently",
   },
+  // ---- PERMANENT: years past retention — enforcement still never expires ----
+  {
+    description: "permanent, years past retention, presentation hidden but still force-CLOSED",
+    expectedEnforced: true,
+    dateRange: "2025-01-01 - TBD",
+    closureType: "PERMANENT",
+    now: "2028-06-15",
+    expectedTiming: "ENDED",
+    expectedLabel: "Closed Permanently",
+  },
   // ---- PERMANENT: announced but not yet in effect ----
   {
     description: "permanent, upcoming (announced future closure date)",
+    expectedEnforced: false,
     dateRange: "2026-12-25 - TBD",
     closureType: "PERMANENT",
     now: "2026-08-01",
@@ -427,6 +515,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   // ---- PERMANENT: no known closure date — never invented, stays ACTIVE ----
   {
     description: "permanent, no dateRange, never ages out (no date to compute from)",
+    expectedEnforced: true,
     dateRange: undefined,
     closureType: "PERMANENT",
     now: "2030-01-01",
@@ -436,6 +525,7 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
   // ---- Legacy records without closureType behave exactly as before ----
   {
     description: "legacy record with no closureType field behaves as TEMPORARY",
+    expectedEnforced: true,
     dateRange: "2025-01-01 - 2026-05-01",
     now: "2025-06-01",
     expectedTiming: "ACTIVE",

@@ -27,7 +27,7 @@ import {
   type ResortId,
   type WaitStatus,
 } from "@disney-wait-planner/shared";
-import { PLANNED_CLOSURES, getClosureTiming } from "./plannedClosures";
+import { PLANNED_CLOSURES, isClosureStatusEnforced } from "./plannedClosures";
 
 // ============================================
 // CONFIG
@@ -70,7 +70,7 @@ const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
   "WDW:ak": 8,          // Queue-Times: Animal Kingdom
 };
 
-// PLANNED_CLOSURES and getClosureTiming are imported from ./plannedClosures.
+// PLANNED_CLOSURES and isClosureStatusEnforced are imported from ./plannedClosures.
 
 // ============================================
 // PUBLIC RETURN TYPE
@@ -459,10 +459,18 @@ function normalizeQueueTimesResponse(
 
   // Overlay live values onto mock rides; keep mock where no match exists.
   // Status priority:
-  //   1. Planned closure (ACTIVE timing) → "CLOSED" (unless sanity override)
-  //   2. Planned closure (UPCOMING/ENDED) → fall through to live
-  //   3. Live says not open              → "DOWN"   (temporary outage)
-  //   4. Live says open                  → "OPERATING" with live wait time
+  //   1. Planned closure (status enforced) → "CLOSED" (unless sanity override)
+  //   2. Planned closure (not enforced)    → fall through to live
+  //   3. Live says not open                → "DOWN"   (temporary outage)
+  //   4. Live says open                    → "OPERATING" with live wait time
+  //
+  // "Status enforced" (isClosureStatusEnforced) is deliberately NOT the same
+  // check as the Planned Closures UI's active-list presentation
+  // (getClosureTiming): a PERMANENT closure ages out of that presentation
+  // ~1 year after its closure date, but must keep forcing CLOSED forever —
+  // it is never expected to reopen, so it must never fall through to
+  // Queue-Times as DOWN/OPERATING just because it's no longer shown in the
+  // Planned Closures list.
   const resolved = mockPark.map((mockRide): AttractionWait => {
     const normName = normalizeAttractionName(mockRide.name);
     const closureKey = `${parkId}:${normName}`;
@@ -470,9 +478,8 @@ function normalizeQueueTimesResponse(
 
     if (PLANNED_CLOSURES.has(closureKey)) {
       const entry = PLANNED_CLOSURES.get(closureKey);
-      const timing = getClosureTiming(entry?.dateRange, now, entry?.closureType);
 
-      if (timing === "ACTIVE") {
+      if (isClosureStatusEnforced(entry?.dateRange, now, entry?.closureType)) {
         // SANITY OVERRIDE: if live clearly reports the ride is operating
         // (is_open=true AND wait_time>0), do NOT force CLOSED — live data wins.
         if (!isClearlyOperatingFromLive(live)) {
@@ -486,7 +493,8 @@ function normalizeQueueTimesResponse(
         }
         // Fall through to live status below.
       }
-      // UPCOMING or ENDED: fall through to live status below.
+      // Not enforced (UPCOMING, or TEMPORARY past its end date): fall
+      // through to live status below.
     }
 
     if (!live) return mockRide; // no match: keep mock values unchanged
