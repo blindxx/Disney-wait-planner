@@ -54,12 +54,13 @@ Invariants that must be preserved when touching this area:
   cloud state for a new profile before re-opening the sync gate).
 - `/api/sync/planner` is the current combined (plans + Lightning) sync
   endpoint. For the `default` profile only, it falls back to reading the
-  legacy plans-only data (`user_plans` table) directly when no combined
-  row exists yet, then write-through migrates it — this fallback reads
-  the legacy data, not the separate `/api/sync/plans` route. `/api/sync/plans`
-  remains its own standalone legacy plans-only endpoint. Do not treat the
-  legacy route as the primary sync path, and do not describe it as what
-  `/api/sync/planner` calls internally.
+  legacy plans-only data (`user_plans` table) directly whenever the
+  combined row is missing OR unusable (e.g. unparseable `planner_json`),
+  then write-through migrates/repairs it into combined storage — this
+  fallback reads the legacy data itself, not the separate `/api/sync/plans`
+  route. `/api/sync/plans` remains its own standalone legacy plans-only
+  endpoint. Do not treat the legacy route as the primary sync path, and
+  do not describe it as what `/api/sync/planner` calls internally.
 
 ## Planner identity / matching
 
