@@ -67,7 +67,7 @@ Live attraction wait times are powered by the Queue-Times API, accessed through 
 - Planner state (My Plans, Lightning Lane) is **local-first**: `localStorage` is the source of truth, and cloud sync mirrors it when signed in
 - Live wait data is unified behind a single provider path (see Live Data above)
 - Tom is integrated through a server-side proxy (`/api/tom/ask`) to the Tom Railway API — Tom credentials are never exposed to the browser
-- All attraction/plan name matching goes through a shared canonical normalization + alias layer, so live data, My Plans, Lightning Lane, and planned closures stay in sync despite provider naming differences
+- Attraction naming is resolved deterministically through coordinated canonical-identity paths — one for live data and planned closures, one for My Plans and Lightning Lane — kept in parity so naming differences never cause mismatches or duplicates
 
 For implementation-level invariants, data flow details, and correctness constraints, see [`AGENTS.md`](./AGENTS.md).
 
