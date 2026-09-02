@@ -1616,10 +1616,27 @@ export default function PlansPage() {
 
   // Phase 8.1 — remove a day entirely. Must not be the last day or day-1.
   // Preserves canonical IDs of remaining days; does NOT reindex.
+  // Phase 11.0 review fix — bound to activeProfileIdRef.current (the profile
+  // this mounted page actually represents, set once on mount) rather than
+  // getActiveProfileId() (a live read of the global active-profile key).
+  // Unlike handleAddDay/handleSetDayPark/etc., which deliberately re-resolve
+  // the profile at write time (Phase 8.0.10) because a same-tab profile
+  // switch always triggers location.reload() (see settings/page.tsx) before
+  // those handlers could ever run against stale state, Remove Day now also
+  // deletes Lightning entries directly from localStorage. If another tab
+  // changes the global active profile while this Plans page stays mounted
+  // (no reload here), a live getActiveProfileId() read could diverge from
+  // the profile this page's `days`/`items`/`dayMeta` in-memory state actually
+  // reflects — causing Remove Day to write/delete data under the wrong
+  // profile's storage keys. Binding to activeProfileIdRef.current keeps every
+  // write in this function scoped to the one profile this mounted instance
+  // represents, matching the pattern already used by crossDayChecks,
+  // lightningClearAllStats, the Lightning storage listener, and the Lightning
+  // wipe inside handleClearAll.
   function handleRemoveDay(dayId: string) {
     if (dayId === "day-1") return;   // Day 1 is a permanent base day
     if (days.length <= 1) return;   // Cannot remove the last day
-    const _profileId = getActiveProfileId();
+    const _profileId = activeProfileIdRef.current;
     const _daysKey = buildNamespacedKey(_profileId, "days");
     const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
     const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
