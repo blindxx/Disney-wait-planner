@@ -1003,6 +1003,8 @@ export default function PlansPage() {
   // Phase 8.9.2 — Lightning totals for Clear All enable/disable and confirmation count.
   // Reads from localStorage so it stays in sync with the Lightning page edits (lightningVersion
   // bumps whenever this page writes lightning storage, covering Clear All and sync hydration).
+  // Phase 11.0 review fix — also tracks a per-day count (byDay) so Remove Day's confirmation
+  // can account for Lightning entries scoped to the target day, not just planner items.
   const lightningClearAllStats = useMemo(() => {
     try {
       const _key = buildNamespacedKey(activeProfileIdRef.current, "lightning");
@@ -1011,11 +1013,17 @@ export default function PlansPage() {
         const _parsed = JSON.parse(_raw) as { items?: Array<{ dayId?: string }> };
         const _items = Array.isArray(_parsed?.items) ? _parsed.items : [];
         const _daySet = new Set<string>();
-        for (const it of _items) { if (it.dayId) _daySet.add(it.dayId); }
-        return { count: _items.length, dayIds: _daySet };
+        const _byDay: Record<string, number> = {};
+        for (const it of _items) {
+          if (it.dayId) {
+            _daySet.add(it.dayId);
+            _byDay[it.dayId] = (_byDay[it.dayId] ?? 0) + 1;
+          }
+        }
+        return { count: _items.length, dayIds: _daySet, byDay: _byDay };
       }
     } catch { /* ignore */ }
-    return { count: 0, dayIds: new Set<string>() };
+    return { count: 0, dayIds: new Set<string>(), byDay: {} as Record<string, number> };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightningVersion, days]);
 
@@ -3709,7 +3717,11 @@ export default function PlansPage() {
                       title="Remove this day"
                       onClick={() => {
                         const itemCount = itemCountByDay[dayId] ?? 0;
-                        if (itemCount > 0) {
+                        // Phase 11.0 review fix — Lightning entries are now part of
+                        // what Remove Day deletes, so a day with Lightning but no
+                        // planner items must still require confirmation.
+                        const llCount = lightningClearAllStats.byDay[dayId] ?? 0;
+                        if (itemCount > 0 || llCount > 0) {
                           // Reset sibling confirms before opening this one
                           setClearDayTargetId(null);
                           setClearConfirm(false);
@@ -3741,15 +3753,23 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.1 — Remove day confirmation (shown when day has items) */}
+        {/* Phase 8.1 — Remove day confirmation (shown when day has items).
+            Phase 11.0 review fix — also accounts for Lightning entries scoped
+            to the target day, since Remove Day deletes those too. */}
         {removeConfirmDayId !== null && (
           <div className="day-remove-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
                 Remove {dayDisplayLabel(removeConfirmDayId, dayMeta)}?
-                {(itemCountByDay[removeConfirmDayId] ?? 0) > 0 && (
-                  <>{" "}({itemCountByDay[removeConfirmDayId]} {itemCountByDay[removeConfirmDayId] === 1 ? "item" : "items"} will be deleted)</>
-                )}
+                {(() => {
+                  const planCount = itemCountByDay[removeConfirmDayId] ?? 0;
+                  const llCount = lightningClearAllStats.byDay[removeConfirmDayId] ?? 0;
+                  if (planCount === 0 && llCount === 0) return null;
+                  const parts: string[] = [];
+                  if (planCount > 0) parts.push(`${planCount} ${planCount === 1 ? "item" : "items"}`);
+                  if (llCount > 0) parts.push(`${llCount} Lightning ${llCount === 1 ? "Selection" : "Selections"}`);
+                  return <>{" "}({parts.join(" and ")} will be deleted)</>;
+                })()}
               </span>
               <button
                 className="btn-cancel-delete"
