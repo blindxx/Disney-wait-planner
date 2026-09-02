@@ -1016,7 +1016,7 @@ export default function WaitTimesPage() {
             .map(([key, entry]) => ({
               key,
               entry,
-              timing: getClosureTiming(entry.dateRange, now),
+              timing: getClosureTiming(entry.dateRange, now, entry.closureType),
               startKey: entry.dateRange?.slice(0, 10) ?? "",
             }))
             .filter(
@@ -1088,7 +1088,7 @@ export default function WaitTimesPage() {
                         {entry.land}
                       </div>
                     )}
-                    {entry.dateRange && (
+                    {(entry.dateRange || entry.closureType === "PERMANENT") && (
                       <div
                         style={{
                           fontSize: "12px",
@@ -1102,7 +1102,7 @@ export default function WaitTimesPage() {
                           order: 2,
                         }}
                       >
-                        {formatClosureDateRangeForDisplay(entry.dateRange, entry.reopeningLabel)}
+                        {formatClosureDateRangeForDisplay(entry.dateRange, entry.reopeningLabel, entry.closureType)}
                       </div>
                     )}
                     {timing === "UPCOMING" && (

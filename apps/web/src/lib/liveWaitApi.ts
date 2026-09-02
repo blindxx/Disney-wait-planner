@@ -470,7 +470,7 @@ function normalizeQueueTimesResponse(
 
     if (PLANNED_CLOSURES.has(closureKey)) {
       const entry = PLANNED_CLOSURES.get(closureKey);
-      const timing = getClosureTiming(entry?.dateRange, now);
+      const timing = getClosureTiming(entry?.dateRange, now, entry?.closureType);
 
       if (timing === "ACTIVE") {
         // SANITY OVERRIDE: if live clearly reports the ride is operating
