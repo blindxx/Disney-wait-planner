@@ -38,13 +38,16 @@ and `apps/web/src/lib/syncHelper.ts` (debounced push, per-profile sync
 status keys, `pullPlanner()`).
 
 Invariants that must be preserved when touching this area:
-- Any async, debounced, or in-flight work (sync pushes, cloud pulls,
-  timers) must never cross a profile or auth boundary. A pending operation
-  for a prior profile/session must be cancelled, not allowed to land.
-- Results and writes from an in-flight operation must remain tied to the
-  profile that originated them, even if the active profile changes before
-  the operation resolves (`syncHelper.ts` captures `profileId` at push-start
-  for exactly this reason).
+- Scheduled/debounced work that has not yet started (e.g. a pending
+  `scheduleSync()` timer) must be cancelled on relevant profile/auth
+  transitions, not allowed to fire for a stale profile/session.
+- An already-running, origin-scoped operation (e.g. an in-flight
+  `doPush()` fetch) may finish safely rather than being aborted —
+  `cancelScheduledSync()` clears the pending timer, not an in-flight
+  fetch. Its results and status writes must remain tied to the profile
+  captured when it started (`syncHelper.ts` captures `profileId` at
+  push-start for exactly this reason), and completion from one
+  profile/session must never mutate another profile's state.
 - Preserve pull-before-push and stale-response protections around
   profile/auth transitions (e.g. `setSyncProfileId()` cancelling pending
   sync, `cancelScheduledSync()` on auth transitions, the caller pulling
@@ -86,13 +89,19 @@ collapse them or use one in place of the other:
   active Planned Closures list; permanent closures age out of this list
   after a retention window).
 - `isClosureStatusEnforced()` — live status enforcement only (whether live
-  wait data is forced to `CLOSED`). A permanent closure must keep forcing
-  `CLOSED` in live status forever, independent of whether it still appears
-  in the Planned Closures presentation.
+  wait data is forced to `CLOSED`). A permanent closure remains eligible
+  for enforcement independent of whether it has aged out of the Planned
+  Closures presentation — presentation lifecycle and enforcement
+  eligibility are separate and must not be collapsed.
+
+`liveWaitApi.ts` layers a sanity override on top of enforcement: when live
+data clearly shows the ride operating (`is_open === true` and a positive
+wait time), that credible live signal overrides closure enforcement rather
+than being masked by it. Preserve this override when changing this area.
 
 When changing this area, avoid regressions where a known closure falls
 through to Queue-Times live data and renders as `DOWN`/`OPERATING`
-(misleading live status) instead of the enforced `CLOSED` state.
+(misleading live status) without going through the sanity override.
 
 ## Tom integration
 
@@ -139,10 +148,12 @@ details before changing chat state handling.
 - SSRF protections (blocked private/loopback/link-local IP ranges, DNS
   validation, public-host validation)
 - Redirect validation (each hop revalidated, hop count capped)
-- Rate limiting
 - HTTP/HTTPS-only previews
-- Graceful fallback (always resolves 200 with null fields on failure —
-  never surfaces an error status to the client)
+- Graceful fallback (URL validation, upstream fetch, and metadata parsing
+  failures resolve 200 with null fields rather than an error status)
+- Rate limiting — an intentional exception to the graceful fallback;
+  returns HTTP 429 rather than the 200/null shape. Preserve both
+  behaviors distinctly.
 
 ### Planner context
 
