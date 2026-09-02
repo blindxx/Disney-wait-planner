@@ -358,11 +358,12 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
     },
   ],
   // ---- WDW: Animal Kingdom ----
-  // Open-ended (no confirmed reopening date), but no repository evidence
-  // confirms this is a permanent closure — left as TEMPORARY (default)
-  // with a neutral "TBD" label rather than guessing at closureType or
-  // inventing a "Reopening TBD" wording. Reclassify only when an official
-  // reopening date or permanent-closure announcement is confirmed.
+  // Permanent closure confirmed — not expected to reopen. dateRange's start
+  // (2026-02-02) is the closure date and doubles as the retention/aging-out
+  // anchor (see PERMANENT_RETENTION_DAYS); the "TBD" end is irrelevant for
+  // PERMANENT display (formatClosureDateRangeForDisplay always renders
+  // "Closed Permanently" for this closureType) but is kept so dateRange
+  // still parses as a normal start/end pair.
   [
     "ak:dinosaur",
     {
@@ -370,6 +371,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "ak",
       land: "DinoLand U.S.A.",
       dateRange: "2026-02-02 - TBD",
+      closureType: "PERMANENT",
     },
   ],
 ]);
