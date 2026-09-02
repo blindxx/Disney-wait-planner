@@ -1713,6 +1713,97 @@ export default function PlansPage() {
     setRemoveConfirmDayId(null);
   }
 
+  // Phase 11.1 — duplicate a day into a new, independent day.
+  // Bound to activeProfileIdRef.current rather than getActiveProfileId(), same
+  // reasoning as handleRemoveDay above: this writes days/dayMeta/dayParks/
+  // dayAutoFallbacks directly, so it must stay scoped to the profile this
+  // mounted page actually represents rather than a live (possibly stale)
+  // global active-profile read.
+  function handleDuplicateDay(sourceDayId: string) {
+    const _profileId = activeProfileIdRef.current;
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    daysKeyRef.current = _daysKey;
+    activeDayKeyRef.current = _activeDayKey;
+    dayMetaKeyRef.current = _dayMetaKey;
+    dayParksKeyRef.current = _dayParksKey;
+    dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
+
+    // New day ID — same "max numeric suffix + 1" rule as handleAddDay, so a
+    // deleted day's ID is never reused.
+    const nums = days
+      .map((d) => parseInt(d.split("-")[1], 10))
+      .filter((n) => !isNaN(n));
+    const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
+    const newDayId = `day-${nextNum}`;
+    if (days.includes(newDayId)) return; // guard against an impossible collision
+
+    // Copy source plan items in their existing order; each copy gets a fresh
+    // ID via the same makeId() every other add/import path uses. Name, time,
+    // and type are preserved as-is.
+    const sourceItems = items.filter((it) => it.dayId === sourceDayId);
+    const copiedItems: PlanItem[] = sourceItems.map((it) => ({
+      id: makeId(),
+      name: it.name,
+      timeLabel: it.timeLabel,
+      dayId: newDayId,
+      type: it.type,
+    }));
+
+    // Label copies; calendar date deliberately does not.
+    const sourceMeta = dayMeta[sourceDayId];
+    const nextMeta = { ...dayMeta };
+    if (sourceMeta?.label) {
+      nextMeta[newDayId] = { label: sourceMeta.label };
+    }
+
+    // Park handling:
+    // - Manual source (explicit dayParks override) — copy the override
+    //   verbatim so the duplicate is Manual with the same park.
+    // - Auto source — the duplicate stays Auto. Copied items resolve their
+    //   own park through the normal inferDayPark path (same inputs as the
+    //   source's own resolution, since items/name are unchanged). A source
+    //   dayAutoFallbacks value is only copied over when that inference still
+    //   comes up empty — i.e. the copied plans can't recover the source's
+    //   Auto context on their own — and it is stored as an auto fallback,
+    //   never promoted into a manual dayParks override.
+    const nextDayParks = { ...dayParks };
+    const nextAutoFallbacks = { ...dayAutoFallbacks };
+    const sourceOverride = dayParks[sourceDayId];
+    if (sourceOverride) {
+      nextDayParks[newDayId] = sourceOverride;
+    } else {
+      const inferred = inferDayPark(copiedItems, selectedResort);
+      if (!inferred) {
+        const sourceFallback = dayAutoFallbacks[sourceDayId];
+        if (sourceFallback && Object.prototype.hasOwnProperty.call(PARK_TO_RESORT, sourceFallback)) {
+          nextAutoFallbacks[newDayId] = sourceFallback;
+        }
+      }
+    }
+    // Lightning selections are never copied — the new day simply has none.
+
+    const nextDays = [...days, newDayId].sort(daySort);
+    setDays(nextDays);
+    saveDays(nextDays, _daysKey);
+    setItems((prev) => [...prev, ...copiedItems]);
+    setDayMeta(nextMeta);
+    saveDayMeta(nextMeta, _dayMetaKey);
+    setDayParks(nextDayParks);
+    saveDayParks(nextDayParks, _dayParksKey);
+    setDayAutoFallbacks(nextAutoFallbacks);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+
+    // Make the duplicate active.
+    setActiveDayId(newDayId);
+    saveActiveDayId(newDayId, _activeDayKey);
+    setRemoveConfirmDayId(null);
+    setClearDayTargetId(null);
+  }
+
   // Phase 8.1 — clear all items from the target day.
   // Uses clearDayTargetId (set when the confirm row was opened) to avoid
   // targeting activeDayId when the confirm was triggered from the edit modal.
@@ -3723,6 +3814,21 @@ export default function PlansPage() {
                   onClick={() => openEditDay(dayId)}
                 >
                   ✏
+                </button>
+                <div className="day-pill-divider" aria-hidden="true" />
+                {/* Phase 11.1 — duplicate this day into a new independent day */}
+                <button
+                  className="btn-day-icon"
+                  aria-label={`Duplicate ${label}`}
+                  title="Duplicate this day"
+                  onClick={() => {
+                    setRemoveConfirmDayId(null);
+                    setClearDayTargetId(null);
+                    setClearConfirm(false);
+                    handleDuplicateDay(dayId);
+                  }}
+                >
+                  ⧉
                 </button>
                 {/* Remove day — only shown for non-Day-1 days when more than one day exists */}
                 {days.length > 1 && dayId !== "day-1" && (
