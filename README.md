@@ -6,7 +6,7 @@ A mobile-first Disney park planning app focused on fast decisions, low cognitive
 
 ## 🌐 Overview
 
-Disney Wait Planner supports Disneyland Resort (DLR) and Walt Disney World (WDW). It combines live attraction wait times, a multi-day trip planner (attractions, dining, entertainment, and custom entries), Lightning Lane tracking, and an AI assistant (Ask Tom) into a single mobile-first interface.
+Disney Wait Planner supports Disneyland Resort (DLR) and Walt Disney World (WDW). It combines live attraction wait times, a multi-day trip planner (attractions, dining, entertainment, and custom entries), Lightning Lane tracking, and a built-in assistant (Ask Tom) into a single mobile-first interface.
 
 The system enforces a strict boundary between live data and local planner state, and all attraction/plan matching is canonical and deterministic — there is no fuzzy logic.
 
