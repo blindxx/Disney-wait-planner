@@ -1,11 +1,6 @@
 # Disney Wait Planner
 
-A mobile-first Disney park planning app focused on fast decisions, low cognitive load, and clean UX.
-
-The app answers two core questions:
-
-- **What should I do right now?**
-- **What am I planning to do today?**
+A mobile-first Disney park planning app focused on fast decisions, low cognitive load, and clean UX. Disney Wait Planner pairs live attraction wait times with a local-first, multi-day trip planner — and Tom, a built-in assistant that can answer Disney questions and read-only questions about what you've planned.
 
 ---
 
@@ -33,7 +28,7 @@ The system enforces a strict boundary between live data and local planner state,
 - Smart Entry suggestions for known attractions, dining locations, and entertainment, with automatic type detection; unmatched names fall back to a manual type selector
 - Multi-day planning with per-day labels/dates, and day-scoped Lightning Lane reservations
 - Day-aware park context (auto-derived from your plans, or manually overridden)
-- TXT/CSV import, plus Full Backup, Plans Backup, and Day Export/restore, with a metadata preview before restoring
+- TXT/CSV import, plus three export/restore scopes — **Full Backup** (all days, Plans and Lightning Lane), **Plans Backup** (all days, Plans only), and **Day Export** (just the active day's Plans and Lightning Lane) — with a metadata preview shown before restoring
 - Cross-day duplicate detection (attractions and Lightning Lane) and conflict detection (overlapping times, Lightning Lane vs. plan conflicts), shown as informational signals — the app never modifies your itinerary automatically
 
 ### Lightning Lane
@@ -52,19 +47,25 @@ Tom is Disney Wait Planner's built-in assistant. Tom can:
 
 - Answer general Disney questions — parks, lands, attractions, dining, entertainment, and news
 - Answer supported wait time questions
-- Answer read-only questions about your local trip planner (what you have planned, conflicts, repeats, park assignments, and simple planner analytics like "which day has the most planned")
+- Answer **Planner Insights** questions: read-only, planner-aware questions and analytics about your local trip planner — what you have planned, conflicts, repeats, park assignments, and simple analytics like "which day has the most planned"
 - Hold a conversation, including natural follow-up questions
 
 Tom does **not** edit your plans, generate or optimize itineraries, reason about transportation or travel time, or make predictions/recommendations it isn't designed to support. Planner data shared with Tom is a compact, read-only summary — Tom cannot write back to your planner. See the in-app **Tom Help Guide** (`/tom/help`, linked from the Ask Tom Help modal) for the full, current list of what Tom can do.
 
 ---
 
+## 📡 Live Data
+
+Live attraction wait times are powered by the Queue-Times API, accessed through a server-side proxy rather than called directly from the browser. All wait data flows through a single unified path (`liveWaitApi.ts`), which returns the same shape regardless of source and falls back to a mock dataset if live data is disabled or unavailable — so the UI never breaks on a live-data outage.
+
+---
+
 ## 🏗 Architecture
 
 - **Next.js (App Router) + TypeScript**, in a **pnpm monorepo** (`apps/*`, `packages/*`)
-- Deployed on **Vercel**, with `main` as the production branch and preview deployments per branch
+- Deployed on **Vercel** (see Development below for branch/deploy workflow)
 - Planner state (My Plans, Lightning Lane) is **local-first**: `localStorage` is the source of truth, and cloud sync mirrors it when signed in
-- Live wait data flows through a single unified path (`apps/web/src/lib/liveWaitApi.ts`) backed by the Queue-Times API via a server-side proxy, with safe fallback to a mock dataset
+- Live wait data is unified behind a single provider path (see Live Data above)
 - Tom is integrated through a server-side proxy (`/api/tom/ask`) to the Tom Railway API — Tom credentials are never exposed to the browser
 - All attraction/plan name matching goes through a shared canonical normalization + alias layer, so live data, My Plans, Lightning Lane, and planned closures stay in sync despite provider naming differences
 
@@ -84,6 +85,8 @@ The Next.js App Router lives at `apps/web/src/app` (not `apps/web/app`).
 ---
 
 ## 🛠 Development
+
+Development happens on feature branches; `main` is the production branch, and Vercel builds a preview deployment for every branch.
 
 ```bash
 # Install dependencies
