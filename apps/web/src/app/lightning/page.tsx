@@ -741,6 +741,17 @@ export default function LightningPage() {
         setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, safeActiveDayIdRef.current));
         setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
       }
+      // Phase 11.0 review fix — reconcile this page's own Lightning items when
+      // another tab (e.g. My Plans doing Remove Day) writes the active profile's
+      // Lightning storage key directly. Without this, a stale tab's in-memory
+      // `items` still holds the removed day's entries, and the very next local
+      // edit here would persist that stale array — resurrecting entries Remove
+      // Day already deleted. This only ever fires for writes from OTHER tabs
+      // (the tab that wrote the key never receives its own 'storage' event), so
+      // it cannot clobber an in-progress edit made in this tab.
+      if (e.key === lightningKeyRef.current) {
+        setItems(loadFromStorage(lightningKeyRef.current));
+      }
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);

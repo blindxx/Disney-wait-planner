@@ -1003,6 +1003,8 @@ export default function PlansPage() {
   // Phase 8.9.2 — Lightning totals for Clear All enable/disable and confirmation count.
   // Reads from localStorage so it stays in sync with the Lightning page edits (lightningVersion
   // bumps whenever this page writes lightning storage, covering Clear All and sync hydration).
+  // Phase 11.0 review fix — also tracks a per-day count (byDay) so Remove Day's confirmation
+  // can account for Lightning entries scoped to the target day, not just planner items.
   const lightningClearAllStats = useMemo(() => {
     try {
       const _key = buildNamespacedKey(activeProfileIdRef.current, "lightning");
@@ -1011,11 +1013,17 @@ export default function PlansPage() {
         const _parsed = JSON.parse(_raw) as { items?: Array<{ dayId?: string }> };
         const _items = Array.isArray(_parsed?.items) ? _parsed.items : [];
         const _daySet = new Set<string>();
-        for (const it of _items) { if (it.dayId) _daySet.add(it.dayId); }
-        return { count: _items.length, dayIds: _daySet };
+        const _byDay: Record<string, number> = {};
+        for (const it of _items) {
+          if (it.dayId) {
+            _daySet.add(it.dayId);
+            _byDay[it.dayId] = (_byDay[it.dayId] ?? 0) + 1;
+          }
+        }
+        return { count: _items.length, dayIds: _daySet, byDay: _byDay };
       }
     } catch { /* ignore */ }
-    return { count: 0, dayIds: new Set<string>() };
+    return { count: 0, dayIds: new Set<string>(), byDay: {} as Record<string, number> };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightningVersion, days]);
 
@@ -1608,10 +1616,27 @@ export default function PlansPage() {
 
   // Phase 8.1 — remove a day entirely. Must not be the last day or day-1.
   // Preserves canonical IDs of remaining days; does NOT reindex.
+  // Phase 11.0 review fix — bound to activeProfileIdRef.current (the profile
+  // this mounted page actually represents, set once on mount) rather than
+  // getActiveProfileId() (a live read of the global active-profile key).
+  // Unlike handleAddDay/handleSetDayPark/etc., which deliberately re-resolve
+  // the profile at write time (Phase 8.0.10) because a same-tab profile
+  // switch always triggers location.reload() (see settings/page.tsx) before
+  // those handlers could ever run against stale state, Remove Day now also
+  // deletes Lightning entries directly from localStorage. If another tab
+  // changes the global active profile while this Plans page stays mounted
+  // (no reload here), a live getActiveProfileId() read could diverge from
+  // the profile this page's `days`/`items`/`dayMeta` in-memory state actually
+  // reflects — causing Remove Day to write/delete data under the wrong
+  // profile's storage keys. Binding to activeProfileIdRef.current keeps every
+  // write in this function scoped to the one profile this mounted instance
+  // represents, matching the pattern already used by crossDayChecks,
+  // lightningClearAllStats, the Lightning storage listener, and the Lightning
+  // wipe inside handleClearAll.
   function handleRemoveDay(dayId: string) {
     if (dayId === "day-1") return;   // Day 1 is a permanent base day
     if (days.length <= 1) return;   // Cannot remove the last day
-    const _profileId = getActiveProfileId();
+    const _profileId = activeProfileIdRef.current;
     const _daysKey = buildNamespacedKey(_profileId, "days");
     const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
     const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
@@ -1643,6 +1668,35 @@ export default function PlansPage() {
     delete nextAutoFallbacks[dayId];
     setDayAutoFallbacks(nextAutoFallbacks);
     saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    // Phase 11.0 — Remove Day must also drop Lightning entries scoped to the
+    // removed day; otherwise they survive in localStorage (and get pushed to
+    // cloud sync) with no owning day left to display them against. This page
+    // holds no Lightning React state of its own (see lightning/page.tsx for
+    // the owning UI), so — same direct-localStorage pattern already used by
+    // handleClearAll/handleExportBackup above — read, filter, and write back
+    // through the existing profile-scoped Lightning storage key. scheduleSync()
+    // picks this up automatically: setItems() above already changes `items`,
+    // which triggers the existing items-effect that debounces a cloud push,
+    // and that push reads Lightning fresh from localStorage at push time.
+    const _lightningKey = buildNamespacedKey(_profileId, "lightning");
+    try {
+      const rawLightning = localStorage.getItem(_lightningKey);
+      if (rawLightning) {
+        const parsed = JSON.parse(rawLightning) as unknown;
+        if (
+          typeof parsed === "object" && parsed !== null &&
+          (parsed as Record<string, unknown>).version === 1 &&
+          Array.isArray((parsed as Record<string, unknown>).items)
+        ) {
+          const llItems = (parsed as Record<string, unknown>).items as Array<{ dayId?: unknown }>;
+          const nextLlItems = llItems.filter((it) => normalizeDayId(it?.dayId) !== dayId);
+          if (nextLlItems.length !== llItems.length) {
+            localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
+            setLightningVersion((v) => v + 1);
+          }
+        }
+      }
+    } catch {}
     // Active day reset guard — result must always be a valid existing day ID.
     if (activeDayId === dayId) {
       // Removed day was active: prefer the previous day; else first remaining.
@@ -3680,7 +3734,11 @@ export default function PlansPage() {
                       title="Remove this day"
                       onClick={() => {
                         const itemCount = itemCountByDay[dayId] ?? 0;
-                        if (itemCount > 0) {
+                        // Phase 11.0 review fix — Lightning entries are now part of
+                        // what Remove Day deletes, so a day with Lightning but no
+                        // planner items must still require confirmation.
+                        const llCount = lightningClearAllStats.byDay[dayId] ?? 0;
+                        if (itemCount > 0 || llCount > 0) {
                           // Reset sibling confirms before opening this one
                           setClearDayTargetId(null);
                           setClearConfirm(false);
@@ -3712,15 +3770,23 @@ export default function PlansPage() {
           </div>
         )}
 
-        {/* Phase 8.1 — Remove day confirmation (shown when day has items) */}
+        {/* Phase 8.1 — Remove day confirmation (shown when day has items).
+            Phase 11.0 review fix — also accounts for Lightning entries scoped
+            to the target day, since Remove Day deletes those too. */}
         {removeConfirmDayId !== null && (
           <div className="day-remove-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
                 Remove {dayDisplayLabel(removeConfirmDayId, dayMeta)}?
-                {(itemCountByDay[removeConfirmDayId] ?? 0) > 0 && (
-                  <>{" "}({itemCountByDay[removeConfirmDayId]} {itemCountByDay[removeConfirmDayId] === 1 ? "item" : "items"} will be deleted)</>
-                )}
+                {(() => {
+                  const planCount = itemCountByDay[removeConfirmDayId] ?? 0;
+                  const llCount = lightningClearAllStats.byDay[removeConfirmDayId] ?? 0;
+                  if (planCount === 0 && llCount === 0) return null;
+                  const parts: string[] = [];
+                  if (planCount > 0) parts.push(`${planCount} ${planCount === 1 ? "item" : "items"}`);
+                  if (llCount > 0) parts.push(`${llCount} Lightning ${llCount === 1 ? "Selection" : "Selections"}`);
+                  return <>{" "}({parts.join(" and ")} will be deleted)</>;
+                })()}
               </span>
               <button
                 className="btn-cancel-delete"
