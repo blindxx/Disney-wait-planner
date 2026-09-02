@@ -1643,6 +1643,35 @@ export default function PlansPage() {
     delete nextAutoFallbacks[dayId];
     setDayAutoFallbacks(nextAutoFallbacks);
     saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    // Phase 11.0 — Remove Day must also drop Lightning entries scoped to the
+    // removed day; otherwise they survive in localStorage (and get pushed to
+    // cloud sync) with no owning day left to display them against. This page
+    // holds no Lightning React state of its own (see lightning/page.tsx for
+    // the owning UI), so — same direct-localStorage pattern already used by
+    // handleClearAll/handleExportBackup above — read, filter, and write back
+    // through the existing profile-scoped Lightning storage key. scheduleSync()
+    // picks this up automatically: setItems() above already changes `items`,
+    // which triggers the existing items-effect that debounces a cloud push,
+    // and that push reads Lightning fresh from localStorage at push time.
+    const _lightningKey = buildNamespacedKey(_profileId, "lightning");
+    try {
+      const rawLightning = localStorage.getItem(_lightningKey);
+      if (rawLightning) {
+        const parsed = JSON.parse(rawLightning) as unknown;
+        if (
+          typeof parsed === "object" && parsed !== null &&
+          (parsed as Record<string, unknown>).version === 1 &&
+          Array.isArray((parsed as Record<string, unknown>).items)
+        ) {
+          const llItems = (parsed as Record<string, unknown>).items as Array<{ dayId?: unknown }>;
+          const nextLlItems = llItems.filter((it) => normalizeDayId(it?.dayId) !== dayId);
+          if (nextLlItems.length !== llItems.length) {
+            localStorage.setItem(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
+            setLightningVersion((v) => v + 1);
+          }
+        }
+      }
+    } catch {}
     // Active day reset guard — result must always be a valid existing day ID.
     if (activeDayId === dayId) {
       // Removed day was active: prefer the previous day; else first remaining.
