@@ -53,9 +53,13 @@ Invariants that must be preserved when touching this area:
   sync, `cancelScheduledSync()` on auth transitions, the caller pulling
   cloud state for a new profile before re-opening the sync gate).
 - `/api/sync/planner` is the current combined (plans + Lightning) sync
-  endpoint; `/api/sync/plans` is legacy plans-only and is read as a
-  fallback only for the `default` profile. Do not treat the legacy route
-  as the primary sync path.
+  endpoint. For the `default` profile only, it falls back to reading the
+  legacy plans-only data (`user_plans` table) directly when no combined
+  row exists yet, then write-through migrates it — this fallback reads
+  the legacy data, not the separate `/api/sync/plans` route. `/api/sync/plans`
+  remains its own standalone legacy plans-only endpoint. Do not treat the
+  legacy route as the primary sync path, and do not describe it as what
+  `/api/sync/planner` calls internally.
 
 ## Planner identity / matching
 
@@ -99,9 +103,13 @@ data clearly shows the ride operating (`is_open === true` and a positive
 wait time), that credible live signal overrides closure enforcement rather
 than being masked by it. Preserve this override when changing this area.
 
-When changing this area, avoid regressions where a known closure falls
-through to Queue-Times live data and renders as `DOWN`/`OPERATING`
-(misleading live status) without going through the sanity override.
+Fallthrough to Queue-Times live data is expected and correct whenever
+`isClosureStatusEnforced()` is false (e.g. an UPCOMING closure that
+hasn't started, or a TEMPORARY closure past its end date) — this is not
+a bug. When changing this area, avoid regressions only where enforcement
+is active: a known closure must not accidentally fall through to
+Queue-Times and render as `DOWN`/`OPERATING` (misleading live status)
+without going through the deliberate sanity override.
 
 ## Tom integration
 
