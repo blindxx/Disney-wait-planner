@@ -55,7 +55,9 @@ Invariants that must be preserved when touching this area:
 - `/api/sync/planner` is the current combined (plans + Lightning) sync
   endpoint. For the `default` profile only, it falls back to reading the
   legacy plans-only data (`user_plans` table) directly whenever the
-  combined row is missing OR unusable (e.g. unparseable `planner_json`),
+  combined row is missing or its `planner_json` fails to parse (no
+  further shape/schema validation gates this fallback — syntactically
+  valid but unexpected JSON, e.g. `null` or `{}`, does not trigger it),
   then write-through migrates/repairs it into combined storage — this
   fallback reads the legacy data itself, not the separate `/api/sync/plans`
   route. `/api/sync/plans` remains its own standalone legacy plans-only
@@ -199,7 +201,8 @@ Files frequently involved in state transitions:
 - `apps/web/src/lib/liveWaitApi.ts`
 - `apps/web/src/lib/plannedClosures.ts`
 - `apps/web/src/app/api/sync/planner/route.ts`
-- `apps/web/src/app/api/sync/plans/route.ts` (legacy fallback)
+- `apps/web/src/app/api/sync/plans/route.ts` (standalone legacy
+  plans-only endpoint)
 
 Ignore style-only feedback unless it affects correctness. Prefer
 identifying production-impacting logic risks.
