@@ -1525,7 +1525,14 @@ export default function PlansPage() {
   // dayParks, dayAutoFallbacks) stays correctly attached without any
   // migration.
   function handleMoveDay(dayId: string, direction: "up" | "down") {
-    const _profileId = getActiveProfileId();
+    // Bound to activeProfileIdRef.current (the profile this mounted page
+    // actually represents), not a live getActiveProfileId() read — same
+    // reasoning as handleRemoveDay/handleDuplicateDay above: if another tab
+    // changes the global active profile while this Plans page stays
+    // mounted (no reload here), a live read could diverge from the profile
+    // this page's `days` state actually reflects, causing Move Up/Down to
+    // write the wrong profile's days key.
+    const _profileId = activeProfileIdRef.current;
     const _daysKey = buildNamespacedKey(_profileId, "days");
     daysKeyRef.current = _daysKey;
     const idx = days.indexOf(dayId);
