@@ -414,13 +414,17 @@ function formatDayDate(iso: string): string {
  * - label only   → "Magic Kingdom Day"
  * - date only    → "Day 1 — Mon, May 12"
  * - neither      → "Day 1"
+ *
+ * `days` is the current persisted planner order — required so the default
+ * "Day N" fallback below is positional (Phase 11.2), not derived from the
+ * dayId's own numeric suffix.
  */
-function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>): string {
+function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>, days: string[]): string {
   const m = meta[dayId];
   const label = m?.label?.trim();
   const date = m?.date;
   // Use custom label if set, otherwise fall back to "Day N"
-  const baseLabel = label || dayLabelFromId(dayId);
+  const baseLabel = label || dayLabelFromId(dayId, days);
   if (date) {
     const formatted = formatDayDate(date);
     if (formatted) return `${baseLabel} — ${formatted}`;
@@ -463,10 +467,17 @@ function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
   } catch {}
 }
 
-/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
-function dayLabelFromId(dayId: string): string {
-  const n = parseInt(dayId.split("-")[1], 10);
-  return isNaN(n) ? dayId : `Day ${n}`;
+/**
+ * Default "Day N" label for a day with no custom label set.
+ * Phase 11.2 — positional, not derived from the dayId's own numeric suffix:
+ * N is this day's 1-based position within the current planner order (`days`),
+ * so moving a high-suffix ID to the front displays it as "Day 1" while its
+ * stable identity (dayId) never changes. Falls back to the raw id if it
+ * isn't present in `days` (should not normally happen).
+ */
+function dayLabelFromId(dayId: string, days: string[]): string {
+  const idx = days.indexOf(dayId);
+  return idx === -1 ? dayId : `Day ${idx + 1}`;
 }
 
 function loadDays(key: string): string[] {
@@ -475,16 +486,24 @@ function loadDays(key: string): string[] {
     if (!raw) return ["day-1"];
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.length > 0) {
-      // Phase 8.0.3 — normalize each entry through strict canonical check,
-      // dedupe, sort, then guarantee "day-1" baseline.
-      const sanitized = [
-        ...new Set(
-          (parsed as unknown[])
-            .map((d) => normalizeDayId(d))
-            .filter((d) => d !== "day-1") // collect non-baseline first
-        ),
-      ];
-      return ["day-1", ...sanitized].sort(daySort);
+      // Phase 11.2 — preserve the persisted planner order (position is now
+      // authoritative for display; dayId stays permanent identity only).
+      // Normalize each entry through strict canonical check and dedupe, but
+      // do NOT numerically re-sort — a stored reorder must survive reload.
+      const seen = new Set<string>();
+      const sanitized: string[] = [];
+      for (const raw of parsed as unknown[]) {
+        const id = normalizeDayId(raw);
+        if (!seen.has(id)) {
+          seen.add(id);
+          sanitized.push(id);
+        }
+      }
+      // Defensive baseline: guarantee "day-1" is present even if corrupted/
+      // legacy storage omitted it. Appended rather than forced to the front
+      // so it never overrides a genuinely persisted order.
+      if (!seen.has("day-1")) sanitized.push("day-1");
+      return sanitized;
     }
     return ["day-1"];
   } catch {
@@ -1149,8 +1168,15 @@ export default function PlansPage() {
     // so synced/imported items with day-2/day-3 always appear in the selector.
     const storedDays = loadDays(daysKeyRef.current);
     const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
+    // Phase 11.2 — preserve storedDays' persisted (positional) order; only
+    // append day IDs found on items but missing from the stored list (a
+    // self-heal for synced/imported items whose dayId has no matching
+    // `days` entry yet). New entries have no established position, so they
+    // are appended in a deterministic numeric order rather than an
+    // arbitrary Set-iteration order.
     const itemDayIds = [...new Set(loaded.map((it) => it.dayId))];
-    const mergedDays = [...new Set(["day-1", ...storedDays, ...itemDayIds])].sort(daySort);
+    const extraDayIds = itemDayIds.filter((id) => !storedDays.includes(id)).sort(daySort);
+    const mergedDays = extraDayIds.length > 0 ? [...storedDays, ...extraDayIds] : storedDays;
     if (mergedDays.join(",") !== storedDays.join(",")) {
       saveDays(mergedDays, daysKeyRef.current);
     }
@@ -1334,13 +1360,16 @@ export default function PlansPage() {
           const cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Merge cloud item day IDs into the days list.
+          // Merge cloud item day IDs into the days list, preserving `prev`'s
+          // persisted (positional) order — Phase 11.2 — and appending only
+          // day IDs not already known, in deterministic numeric order.
           // Uses functional setDays(prev) — this is an async .then() callback
           // so `days` from the outer closure may be stale; `prev` is always fresh.
           const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
           setDays((prev) => {
-            const next = [...new Set([...prev, ...cloudDayIds])].sort(daySort);
-            if (next.join(",") === prev.join(",")) return prev;
+            const extra = cloudDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+            if (extra.length === 0) return prev;
+            const next = [...prev, ...extra];
             saveDays(next, daysKeyRef.current);
             return next;
           });
@@ -1477,11 +1506,36 @@ export default function PlansPage() {
     const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
     const candidate = `day-${nextNum}`;
     if (days.includes(candidate)) return; // already exists — no-op
-    const nextDays = [...days, candidate].sort(daySort);
+    // Phase 11.2 — append at the end of the persisted order; never re-sort
+    // (the new candidate's suffix is already the max, so append is
+    // equivalent, but this keeps a reordered `days` list intact).
+    const nextDays = [...days, candidate];
     setDays(nextDays);
     saveDays(nextDays, _daysKey);
     setActiveDayId(candidate);
     saveActiveDayId(candidate, _activeDayKey);
+  }
+
+  // Phase 11.2 — reorder days: explicit Move Up / Move Down (no drag-and-drop).
+  // Swaps dayId with the adjacent position; a boundary move (already first/
+  // last) is a no-op — the calling buttons are also disabled at the
+  // boundary so this is a defensive guard, not the only protection.
+  // dayId itself never changes; only its position within `days` moves, so
+  // every other piece of state keyed by dayId (plans, Lightning, dayMeta,
+  // dayParks, dayAutoFallbacks) stays correctly attached without any
+  // migration.
+  function handleMoveDay(dayId: string, direction: "up" | "down") {
+    const _profileId = getActiveProfileId();
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    daysKeyRef.current = _daysKey;
+    const idx = days.indexOf(dayId);
+    if (idx === -1) return;
+    const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= days.length) return;
+    const nextDays = [...days];
+    [nextDays[idx], nextDays[targetIdx]] = [nextDays[targetIdx], nextDays[idx]];
+    setDays(nextDays);
+    saveDays(nextDays, _daysKey);
   }
 
   // Phase 8.4 — resolve the effective park for a given day.
@@ -1792,7 +1846,8 @@ export default function PlansPage() {
     }
     // Lightning selections are never copied — the new day simply has none.
 
-    const nextDays = [...days, newDayId].sort(daySort);
+    // Phase 11.2 — append at the end of the persisted order; never re-sort.
+    const nextDays = [...days, newDayId];
     setDays(nextDays);
     saveDays(nextDays, _daysKey);
     setItems((prev) => [...prev, ...copiedItems]);
@@ -2677,10 +2732,13 @@ export default function PlansPage() {
   function handleRestoreConfirm() {
     if (!restoreConfirmPayload) return;
     const { data } = restoreConfirmPayload;
-    const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
+    // Phase 11.2 — preserve the backup's own days[] order (dedupe only, no
+    // numeric re-sort) so a reordered backup restores in the same order.
+    const restoredDays: string[] = [...new Set(data.days as string[])];
     // Phase 8.9 — always land on Day 1 after restore, regardless of what was
-    // active in the backup or before the restore was triggered.
-    const restoredActiveDayId = "day-1";
+    // active in the backup or before the restore was triggered. Phase 11.2 —
+    // "Day 1" is positional: whichever day is first in the restored order.
+    const restoredActiveDayId = restoredDays[0] ?? "day-1";
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
 
@@ -3478,6 +3536,19 @@ export default function PlansPage() {
           background-color: #1d4ed8;
           color: #fff;
         }
+        /* Phase 11.2 — boundary Move Up/Down (already first/last day) */
+        .btn-day-icon:disabled {
+          opacity: 0.35;
+          cursor: not-allowed;
+        }
+        .btn-day-icon:disabled:hover {
+          background-color: #f9fafb;
+          color: #9ca3af;
+        }
+        .day-pill-active .btn-day-icon:disabled:hover {
+          background-color: #2563eb;
+          color: rgba(255, 255, 255, 0.7);
+        }
         .btn-day-remove {
           background-color: #f9fafb;
           color: #9ca3af;
@@ -3783,10 +3854,10 @@ export default function PlansPage() {
             hydration resolves (same pattern as resort/park tab ready gate). */}
         {initialized ? (
         <div className="day-selector-row">
-          {days.map((dayId) => {
+          {days.map((dayId, dayIdx) => {
             const isActive = activeDayId === dayId;
             const count = itemCountByDay[dayId] ?? 0;
-            const label = dayDisplayLabel(dayId, dayMeta);
+            const label = dayDisplayLabel(dayId, dayMeta, days);
             return (
               <div
                 key={dayId}
@@ -3810,6 +3881,26 @@ export default function PlansPage() {
                   {count > 0 && (
                     <span className="day-count">({count})</span>
                   )}
+                </button>
+                <div className="day-pill-divider" aria-hidden="true" />
+                {/* Phase 11.2 — reorder: explicit Move Up/Down, no drag-and-drop */}
+                <button
+                  className="btn-day-icon"
+                  aria-label={`Move ${label} up`}
+                  title="Move day up"
+                  disabled={dayIdx === 0}
+                  onClick={() => handleMoveDay(dayId, "up")}
+                >
+                  ↑
+                </button>
+                <button
+                  className="btn-day-icon"
+                  aria-label={`Move ${label} down`}
+                  title="Move day down"
+                  disabled={dayIdx === days.length - 1}
+                  onClick={() => handleMoveDay(dayId, "down")}
+                >
+                  ↓
                 </button>
                 <div className="day-pill-divider" aria-hidden="true" />
                 {/* Edit label/date */}
@@ -3889,7 +3980,7 @@ export default function PlansPage() {
           <div className="day-remove-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Remove {dayDisplayLabel(removeConfirmDayId, dayMeta)}?
+                Remove {dayDisplayLabel(removeConfirmDayId, dayMeta, days)}?
                 {(() => {
                   const planCount = itemCountByDay[removeConfirmDayId] ?? 0;
                   const llCount = lightningClearAllStats.byDay[removeConfirmDayId] ?? 0;
@@ -3929,7 +4020,7 @@ export default function PlansPage() {
                       const _days = _planDays.size;
                       return `Clear all plans and Lightning (${_total} items across ${_days} ${_days === 1 ? "day" : "days"})?`;
                     })()
-                  : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
+                  : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta, days)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
@@ -4009,7 +4100,7 @@ export default function PlansPage() {
           <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Replace {pendingDayImportItems.existingCount} {pendingDayImportItems.existingCount === 1 ? "item" : "items"} in {dayDisplayLabel(pendingDayImportItems.targetDayId, dayMeta)} with {pendingDayImportItems.items.length} imported {pendingDayImportItems.items.length === 1 ? "item" : "items"}?
+                Replace {pendingDayImportItems.existingCount} {pendingDayImportItems.existingCount === 1 ? "item" : "items"} in {dayDisplayLabel(pendingDayImportItems.targetDayId, dayMeta, days)} with {pendingDayImportItems.items.length} imported {pendingDayImportItems.items.length === 1 ? "item" : "items"}?
               </span>
               <button
                 className="btn-cancel-delete"
@@ -4295,8 +4386,8 @@ export default function PlansPage() {
                                     <span key={d}>
                                       {i > 0 && ", "}
                                       {d === activeDayId
-                                        ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
-                                        : dayDisplayLabel(d, dayMeta)}
+                                        ? <strong>Current: {dayDisplayLabel(d, dayMeta, days)}</strong>
+                                        : dayDisplayLabel(d, dayMeta, days)}
                                     </span>
                                   ))}
                                 </span>
@@ -4324,8 +4415,8 @@ export default function PlansPage() {
                                 <span key={d}>
                                   {i > 0 && ", "}
                                   {d === activeDayId
-                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
-                                    : dayDisplayLabel(d, dayMeta)}
+                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta, days)}</strong>
+                                    : dayDisplayLabel(d, dayMeta, days)}
                                 </span>
                               ))}
                             </span>
@@ -4492,7 +4583,7 @@ export default function PlansPage() {
                 : mode === "edit"
                 ? "Edit activity"
                 : mode === "edit-day"
-                ? `Edit day — ${editingDayId ? dayLabelFromId(editingDayId) : ""}`
+                ? `Edit day — ${editingDayId ? dayLabelFromId(editingDayId, days) : ""}`
                 : "Import activities"}
             </h2>
 

@@ -60,13 +60,24 @@ export type PlannerContextSnapshotLightningItem = {
 };
 
 export type PlannerContextSnapshotDay = {
+  /**
+   * Stable identity only (Phase 11.2). Never renamed/reindexed when the
+   * user reorders days — do not derive "Day N" from this string's numeric
+   * suffix; that no longer matches the day's positional number once
+   * reordering has happened. Use it only to match/match-back an item's own
+   * `dayId` to its day entry.
+   */
   id: string;
   /**
    * Phase 10.5 — this IS the day's display name: the user's custom/renamed
    * label when set (dayMeta[id].label, same field the Plans page's
-   * dayDisplayLabel reads), otherwise the "Day N" default derived from id.
-   * Always populated. Tom should use this when responding about a day, while
-   * still accepting numeric "Day X" references (id encodes that as day-X).
+   * dayDisplayLabel reads), otherwise the "Day N" default. Phase 11.2 — that
+   * default is now derived from this entry's 1-based position in the
+   * `days` array (this array's own order is the planner's positional
+   * order — see the `days` field doc above), not from `id`. Always
+   * populated. Tom should use this (or this array's position) when
+   * responding about a day/"Day X" — `id` alone no longer identifies a
+   * position after a reorder.
    */
   label: string;
   date?: string;
@@ -93,6 +104,15 @@ export type PlannerContextSnapshot = {
    */
   days: PlannerContextSnapshotDay[];
   /**
+   * Phase 11.2 — the array's order is the user's actual planner (positional)
+   * order, exactly as shown in My Plans' day selector: first entry is
+   * "Day 1", second is "Day 2", etc., regardless of each entry's own `id`
+   * suffix. `id` is stable identity only (never renamed/reindexed on
+   * reorder) — before/after-day navigation and any "Day N" derivation must
+   * come from this array's position, not from parsing `id`. Previously this
+   * was always numeric-id-sorted (before day reordering existed, position
+   * and id suffix always coincided); it no longer is.
+   *
    * Phase 10.5 — items keep their original per-day storage order (only ever
    * trimmed from the end, never reordered), which mirrors the Plans page's
    * own stable time-sort: valid times sort first, and this array order is
@@ -126,10 +146,16 @@ function truncate(value: string, max: number): string {
   return value.length > max ? value.slice(0, max) : value;
 }
 
-/** "day-1" → "Day 1". Falls back to the raw id — mirrors plans/lightning pages. */
-function dayLabelFromId(dayId: string): string {
-  const n = parseInt(dayId.split("-")[1], 10);
-  return isNaN(n) ? dayId : `Day ${n}`;
+/**
+ * Default "Day N" label for a day with no custom label set. Phase 11.2 —
+ * positional (mirrors plans/lightning pages): N is the day's 1-based
+ * position in `days` (the planner's persisted order), not parsed from the
+ * dayId's own numeric suffix. Falls back to the raw id if it isn't present
+ * in `days` (should not normally happen).
+ */
+function dayLabelFromId(dayId: string, days: string[]): string {
+  const idx = days.indexOf(dayId);
+  return idx === -1 ? dayId : `Day ${idx + 1}`;
 }
 
 function readJson(key: string): unknown {
@@ -677,8 +703,19 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     // restore or cloud sync that didn't touch it) can't leave items whose
     // dayId has no matching `days` entry. Read-only — unlike My Plans, this
     // never writes the merged list back to storage.
-    const itemDayIds = [...plans.map((p) => p.dayId), ...lightning.map((l) => l.dayId)];
-    const mergedDayIds = [...new Set(["day-1", ...days, ...itemDayIds])].sort(daySort);
+    //
+    // Phase 11.2 — `days` (from readDays) already preserves the planner's
+    // persisted (positional) order; it is NOT re-sorted here, only deduped
+    // (readDays doesn't dedupe). Only day IDs found on items but missing
+    // from `days` are appended, in deterministic numeric order since they
+    // have no established position of their own. This order is what Tom's
+    // day-number derivation must follow — see the `days` field doc on
+    // PlannerContextSnapshot above.
+    const dedupedDays = [...new Set(days)];
+    const itemDayIds = [...new Set([...plans.map((p) => p.dayId), ...lightning.map((l) => l.dayId)])];
+    const extraDayIds = itemDayIds.filter((id) => !dedupedDays.includes(id)).sort(daySort);
+    let mergedDayIds = extraDayIds.length > 0 ? [...dedupedDays, ...extraDayIds] : dedupedDays;
+    if (!mergedDayIds.includes("day-1")) mergedDayIds = [...mergedDayIds, "day-1"];
 
     // Per-day resort map (manual override, then that day's own plan/Lightning
     // items) — mirrors crossDayChecks.ts's dayResortMap so a DCA day isn't
@@ -689,7 +726,7 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
 
     const days_: PlannerContextSnapshotDay[] = mergedDayIds.map((id) => ({
       id,
-      label: dayMeta[id]?.label || dayLabelFromId(id),
+      label: dayMeta[id]?.label || dayLabelFromId(id, mergedDayIds),
       date: dayMeta[id]?.date,
       park: dayParks[id],
     }));
