@@ -3516,6 +3516,21 @@ export default function PlansPage() {
         .day-pill-active .day-pill-divider {
           background-color: rgba(255, 255, 255, 0.3);
         }
+        /* Phase 11.2 cosmetic — a wider variant of the same divider, used
+           only at the boundary between the reorder controls (↑↓) and the
+           day-management controls (Edit/Duplicate/Remove) so that group
+           break reads more clearly than the plain 1px dividers separating
+           individual buttons within each group. Same color tokens as
+           .day-pill-divider — just thicker — so it stays visually
+           consistent rather than introducing a new treatment. */
+        .day-pill-group-divider {
+          width: 3px;
+          background-color: #d1d5db;
+          flex-shrink: 0;
+        }
+        .day-pill-active .day-pill-group-divider {
+          background-color: rgba(255, 255, 255, 0.3);
+        }
         .btn-day-icon {
           background-color: #f9fafb;
           color: #9ca3af;
@@ -3909,7 +3924,10 @@ export default function PlansPage() {
                 >
                   ↓
                 </button>
-                <div className="day-pill-divider" aria-hidden="true" />
+                {/* Phase 11.2 cosmetic — wider divider marks the boundary
+                    between the reorder group (↑↓) and the day-management
+                    group (Edit/Duplicate/Remove) below. */}
+                <div className="day-pill-group-divider" aria-hidden="true" />
                 {/* Edit label/date */}
                 <button
                   className="btn-day-icon"
