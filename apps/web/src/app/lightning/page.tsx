@@ -139,7 +139,9 @@ function loadKnownDays(key: string): string[] {
       const id = normalizeDayId(d);
       if (!seen.has(id)) { seen.add(id); valid.push(id); }
     }
-    if (!seen.has("day-1")) valid.unshift("day-1");
+    // Phase 11.2 — appended, not unshifted, so this defensive fallback never
+    // overrides a genuinely persisted (positional) order.
+    if (!seen.has("day-1")) valid.push("day-1");
     return valid;
   } catch {
     return ["day-1"];
@@ -148,16 +150,22 @@ function loadKnownDays(key: string): string[] {
 
 // ===== DAY CONTEXT HELPERS (Phase 8.8) =====
 
-/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
-function dayLabelFromId(dayId: string): string {
-  const n = parseInt(dayId.split("-")[1], 10);
-  return isNaN(n) ? dayId : `Day ${n}`;
+/**
+ * Default "Day N" label for a day with no custom label set.
+ * Phase 11.2 — positional (mirrors plans/page.tsx): N is this day's 1-based
+ * position within `knownDays` (the planner's persisted order), not derived
+ * from the dayId's own numeric suffix. Falls back to the raw id if it isn't
+ * present in knownDays (should not normally happen).
+ */
+function dayLabelFromId(dayId: string, knownDays: string[]): string {
+  const idx = knownDays.indexOf(dayId);
+  return idx === -1 ? dayId : `Day ${idx + 1}`;
 }
 
 /** Human-readable day label using optional dayMeta (no date formatting — label only). */
-function dayContextLabel(dayId: string, meta: Record<string, DayMeta>): string {
+function dayContextLabel(dayId: string, meta: Record<string, DayMeta>, knownDays: string[]): string {
   const label = meta[dayId]?.label?.trim();
-  return label || dayLabelFromId(dayId);
+  return label || dayLabelFromId(dayId, knownDays);
 }
 
 /** Load per-day park overrides from profile-scoped localStorage (read-only on Lightning page). */
@@ -1111,7 +1119,7 @@ export default function LightningPage() {
       {clearDayLightningTarget !== null && (
         <div style={{ marginBottom: "1rem", padding: "0.6rem 1rem", background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
           <span style={{ fontSize: "0.9rem", color: "#b91c1c", flex: "1 1 auto", minWidth: 0 }}>
-            {`Clear all Lightning selections from ${dayContextLabel(clearDayLightningTarget, dayMeta)}?`}
+            {`Clear all Lightning selections from ${dayContextLabel(clearDayLightningTarget, dayMeta, knownDays)}?`}
           </span>
           <button
             style={{ background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", whiteSpace: "nowrap" }}
@@ -1152,7 +1160,7 @@ export default function LightningPage() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {dayContextLabel(dayId, dayMeta)}
+                {dayContextLabel(dayId, dayMeta, knownDays)}
               </button>
             );
           })}
@@ -1176,7 +1184,7 @@ export default function LightningPage() {
         >
           <div>
             <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#1e40af", lineHeight: 1.3 }}>
-              {dayContextLabel(safeActiveDayId, dayMeta)}
+              {dayContextLabel(safeActiveDayId, dayMeta, knownDays)}
             </div>
             {resolvedDayPark ? (
               <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
@@ -1231,9 +1239,9 @@ export default function LightningPage() {
                       <span key={d}>
                         {di > 0 && ", "}
                         {d === safeActiveDayId ? (
-                          <strong>Current: {dayContextLabel(d, dayMeta)}</strong>
+                          <strong>Current: {dayContextLabel(d, dayMeta, knownDays)}</strong>
                         ) : (
-                          dayContextLabel(d, dayMeta)
+                          dayContextLabel(d, dayMeta, knownDays)
                         )}
                       </span>
                     ))}
