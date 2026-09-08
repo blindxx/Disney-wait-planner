@@ -1300,9 +1300,17 @@ export default function PlansPage() {
     saveToStorage(items, planKeyRef.current);
   }, [items, initialized]);
 
-  // Schedule a debounced cloud push after every items change, but only once
-  // syncReady is true (initial cloud pull has resolved) AND the user is
-  // authenticated. Unauthenticated edits are local-only — no network calls.
+  // Schedule a debounced cloud push after every items OR days change, but
+  // only once syncReady is true (initial cloud pull has resolved) AND the
+  // user is authenticated. Unauthenticated edits are local-only — no
+  // network calls.
+  // Phase 11.2 Codex fix — `days` is included so a reorder (Move Up/Down,
+  // Add/Remove/Duplicate Day) alone schedules a push: buildPayloadFromStorage
+  // already reads days[] fresh from localStorage at push time (Move Up/Down
+  // etc. persist synchronously via saveDays before this effect's next run),
+  // so reordering without any other items mutation would otherwise never
+  // reach the cloud until some unrelated items change happened to fire this
+  // same effect.
   // NOTE: no unmount cleanup here intentionally — cancelling on unmount would
   // silently drop the pending push on SPA navigation before the debounce fires,
   // because beforeunload does not fire on in-app route changes. Auth/session
@@ -1312,7 +1320,7 @@ export default function PlansPage() {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, initialized, syncReady, sessionStatus]);
+  }, [items, days, initialized, syncReady, sessionStatus]);
 
   // Manage syncReady gate based on auth state transitions.
   // loading      → gate resets to false immediately; guards against re-auth races
@@ -1360,13 +1368,33 @@ export default function PlansPage() {
           const cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Merge cloud item day IDs into the days list, preserving `prev`'s
-          // persisted (positional) order — Phase 11.2 — and appending only
-          // day IDs not already known, in deterministic numeric order.
-          // Uses functional setDays(prev) — this is an async .then() callback
-          // so `days` from the outer closure may be stale; `prev` is always fresh.
+          // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
+          // authoritative on pull, exactly like cloudItems is for `items`
+          // above: it reflects the pushing device's actual persisted order,
+          // so it replaces local state outright rather than being merged
+          // into it. Any item dayIds not present in it (e.g. items added on
+          // a device whose own days[] hadn't yet synced) are appended using
+          // the same deterministic daySort fallback used everywhere else for
+          // previously-unknown IDs. Uses functional setDays(prev) — this is
+          // an async .then() callback so `days` from the outer closure may
+          // be stale; `prev` is always fresh.
+          //
+          // Older cloud payloads omit `days` entirely (legacy — synced
+          // before this fix, or from a device that had no local order to
+          // send). In that case fall back to the pre-existing behavior:
+          // `prev`'s persisted order is preserved exactly and only day IDs
+          // not already known are appended — never overwritten just because
+          // this particular payload lacks a synced order.
           const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
+          const cloudDaysOrder = planner?.days;
           setDays((prev) => {
+            if (cloudDaysOrder && cloudDaysOrder.length > 0) {
+              const extra = cloudDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+              const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
+              if (next.join(",") === prev.join(",")) return prev;
+              saveDays(next, daysKeyRef.current);
+              return next;
+            }
             const extra = cloudDayIds.filter((id) => !prev.includes(id)).sort(daySort);
             if (extra.length === 0) return prev;
             const next = [...prev, ...extra];

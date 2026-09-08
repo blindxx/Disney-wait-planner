@@ -618,17 +618,31 @@ export default function LightningPage() {
             }
           }
         }
-        // Phase 11.2 Codex fix — reconcile the full union of newly discovered
-        // day IDs from both sources in one step. `prev` (a genuinely
-        // persisted days[] order, when one exists) is preserved exactly and
-        // never re-sorted; only IDs not already known are appended, and only
-        // those are ordered — via the same daySort numeric-suffix comparator
-        // My Plans uses for its own unordered/unknown-ID tail (see
-        // plans/page.tsx's mount and cloud-pull merges) — so the fallback
-        // order matches My Plans regardless of which source discovered which
-        // ID first.
         const discoveredDayIds = [...new Set([...lightningDiscoveredDayIds, ...planDiscoveredDayIds])];
-        if (discoveredDayIds.length > 0) {
+        // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
+        // authoritative, exactly as it is for My Plans' own pull handling:
+        // it reflects the pushing device's real persisted order, so it
+        // replaces knownDays outright rather than being merged into it.
+        // Lightning stays read-only for the shared `days` localStorage key
+        // (Plans page owns writes there) — this only updates Lightning's own
+        // in-memory display state, which the next visit to My Plans on this
+        // device will also persist via its own pull handling.
+        const cloudDaysOrder = planner?.days;
+        if (cloudDaysOrder && cloudDaysOrder.length > 0) {
+          setKnownDays((prev) => {
+            const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+            const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
+            return next.join(",") === prev.join(",") ? prev : next;
+          });
+        } else if (discoveredDayIds.length > 0) {
+          // Legacy payload with no synced days[] — reconcile the full union
+          // of newly discovered day IDs from both sources in one step.
+          // `prev` (a genuinely persisted days[] order, when one exists) is
+          // preserved exactly and never re-sorted; only IDs not already
+          // known are appended, and only those are ordered — via the same
+          // daySort numeric-suffix comparator My Plans uses for its own
+          // unordered/unknown-ID tail — so the fallback order matches My
+          // Plans regardless of which source discovered which ID first.
           setKnownDays((prev) => {
             const extra = discoveredDayIds.filter((id) => !prev.includes(id)).sort(daySort);
             return extra.length > 0 ? [...prev, ...extra] : prev;
