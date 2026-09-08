@@ -860,6 +860,16 @@ export default function PlansPage() {
   const [lightningVersion, setLightningVersion] = useState(0);
   // Phase 8.0 — multi-day state (default to day-1; hydrated from storage on mount)
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
+  // Codex fix — ref that always holds the latest activeDayId, same pattern
+  // as itemsRef above: the cloud-pull's .then() callback is an async
+  // context whose closure over activeDayId is fixed to whatever it was
+  // when the effect was (re)created, not necessarily what's on screen by
+  // the time the pull resolves (e.g. the user switched the active day tab
+  // while the pull was in flight) — reading this ref instead avoids acting
+  // on a stale snapshot when revalidating activeDayId against a newly
+  // authoritative cloud days[] order.
+  const activeDayIdRef = useRef(activeDayId);
+  activeDayIdRef.current = activeDayId;
   const [days, setDays] = useState<string[]>(["day-1"]);
   // Phase 8.1 — day metadata (labels + dates) and per-profile storage key
   const dayMetaKeyRef = useRef("dwp:default:dayMeta");
@@ -1453,6 +1463,30 @@ export default function PlansPage() {
                 daysWriteFailed = true;
               }
               setDays(next);
+              // Codex fix — revalidate activeDayId against the newly
+              // authoritative order: another device may have removed the
+              // day this device currently has active (e.g. Remove Day
+              // there, synced here). Mirrors the exact same fallback
+              // handleRemoveDay already uses locally — if the active ID is
+              // still present, leave it; otherwise fall back to the new
+              // order's first (positional Day 1) entry. Set + persisted
+              // synchronously, in the same batch as setDays above, so any
+              // Add/Edit action the user takes before the next explicit
+              // day-switch is scoped under a dayId that still exists in
+              // `next` rather than the stale, now-removed one. Uses
+              // activeDayKeyRef (bound to this mounted profile at mount
+              // time, same as daysKeyRef above) — never a live profile
+              // lookup. Only runs when `next` actually changed (this
+              // branch), so a pull that resolves to the same order the
+              // active day was already valid against never re-touches it.
+              // Reads activeDayIdRef (not the closure `activeDayId`) since
+              // this async callback's closure could otherwise be stale
+              // relative to a day-tab switch the user made while the pull
+              // was in flight.
+              if (!next.includes(activeDayIdRef.current)) {
+                setActiveDayId(next[0]);
+                saveActiveDayId(next[0], activeDayKeyRef.current);
+              }
             }
           } else {
             setDays((prev) => {

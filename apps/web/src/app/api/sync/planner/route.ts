@@ -33,6 +33,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession, type Session } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
+import { parseSyncedPlannerPayload } from "@/lib/syncPayload";
 
 // 1 MB hard limit; realistic planner payloads are well under 100 KB.
 const MAX_BODY_BYTES = 1_000_000;
@@ -187,20 +188,70 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
   }
 
   // Validate that the body is parseable JSON before storing
+  let parsedBody: unknown;
   try {
-    JSON.parse(body);
+    parsedBody = JSON.parse(body);
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const { rows } = await getPool().query<{ updated_at: Date }>(
+  const pool = getPool();
+
+  // Codex fix — legacy-writer days[] preservation. A client running code
+  // from before the `days` addition (or a current client with nothing
+  // local to send) still pushes a valid combined-planner body that simply
+  // omits `days`. planner_json is stored/replaced wholesale below, so
+  // without this, such a write would silently erase a newer `days[]`
+  // already stored by another, up-to-date device for this same profile.
+  //
+  // bodyToStore defaults to the raw incoming body unchanged — this only
+  // ever reshapes the write when the incoming payload both (a) parses as
+  // a valid combined-planner shape via the same client-side validation
+  // semantics (parseSyncedPlannerPayload), reused here rather than
+  // reimplemented, and (b) itself has no valid `days` (omitted, or present
+  // but malformed — both collapse to "no days" through that same parser).
+  // Anything else — an unrecognized shape, or one that already carries its
+  // own valid `days` — is stored exactly as received, preserving the
+  // existing "plans/lightning replacement unchanged" and "opaque
+  // planner_json" behavior for every other case.
+  let bodyToStore = body;
+  const incoming = parseSyncedPlannerPayload(parsedBody);
+  if (incoming && !incoming.days) {
+    const { rows: existingRows } = await pool.query<{ planner_json: string }>(
+      "SELECT planner_json FROM user_planner WHERE user_id = $1 AND profile_id = $2",
+      [userId, profileId]
+    );
+    if (existingRows.length > 0) {
+      let existingParsed: unknown;
+      try {
+        existingParsed = JSON.parse(existingRows[0].planner_json);
+      } catch {
+        existingParsed = null;
+      }
+      // Only ever preserves a genuinely VALID existing days[] (same
+      // sanitization the client already applies) — never blindly carries
+      // forward malformed existing data.
+      const existing = parseSyncedPlannerPayload(existingParsed);
+      if (existing?.days) {
+        // Merge into the raw parsed body (not the normalized `incoming`
+        // object) so plans/lightning are stored exactly as the client sent
+        // them — only the top-level `days` key is added.
+        bodyToStore = JSON.stringify({
+          ...(parsedBody as Record<string, unknown>),
+          days: existing.days,
+        });
+      }
+    }
+  }
+
+  const { rows } = await pool.query<{ updated_at: Date }>(
     `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at)
      VALUES ($1, $2, $3, NOW())
      ON CONFLICT (user_id, profile_id) DO UPDATE
        SET planner_json = EXCLUDED.planner_json,
            updated_at   = NOW()
      RETURNING updated_at`,
-    [userId, profileId, body]
+    [userId, profileId, bodyToStore]
   );
 
   return NextResponse.json({ updatedAt: rows[0].updated_at.toISOString() });
