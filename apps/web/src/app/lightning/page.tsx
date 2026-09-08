@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, daySort } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -563,6 +563,17 @@ export default function LightningPage() {
       .then((planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
+        // Phase 11.2 Codex fix — day IDs discovered from Lightning items and
+        // from plan items are collected here and reconciled into knownDays
+        // in a single step below, rather than two independent sequential
+        // setKnownDays calls. Two independent merges each append their own
+        // newly-found IDs in isolation, which can interleave two unrelated
+        // discovery orders (e.g. Lightning's [day-1, day-3] then Plans'
+        // [day-2] landing as [day-1, day-3, day-2]) instead of the single
+        // deterministic fallback order My Plans uses for IDs with no
+        // persisted position.
+        let lightningDiscoveredDayIds: string[] = [];
+        let planDiscoveredDayIds: string[] = [];
         // Only apply cloud lightning data if no local edits occurred while
         // the pull was in flight. Either way, open the sync gate.
         if (!localEditRef.current && cloud) {
@@ -572,15 +583,10 @@ export default function LightningPage() {
           setItems(cloudItems);
           // Phase 8.3.2 — Refresh knownDays after cloud pull so safeActiveDayId
           // doesn't stay stale on a fresh device where Plans page hasn't yet
-          // written the days list to localStorage. Merge pulled dayIds into the
-          // current known set — new days are added, nothing is removed.
+          // written the days list to localStorage. New days are added, nothing
+          // is removed — see the single reconciliation step below.
           if (cloudItems.length > 0) {
-            const pulledIds = [...new Set(cloudItems.map((it) => it.dayId))];
-            setKnownDays((prev) => {
-              const prevSet = new Set(prev);
-              const hasNew = pulledIds.some((id) => !prevSet.has(id));
-              return hasNew ? [...new Set([...prev, ...pulledIds])] : prev;
-            });
+            lightningDiscoveredDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
           }
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
@@ -601,22 +607,32 @@ export default function LightningPage() {
               setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
               const allPlans = loadAllPlanItems(profileKeysForPull.plans);
               setAllPlanItems(allPlans);
-              // Merge plan-only dayIds into knownDays (same pattern as the
-              // Lightning cloudItems merge above) so a fresh profile that
-              // hydrates cloud plans on Lightning first still shows those
-              // days in the day picker and duplicate checks.
+              // Plan-only dayIds — merged together with lightningDiscoveredDayIds
+              // below so a fresh profile that hydrates cloud plans and Lightning
+              // together resolves one consistent fallback order.
               if (allPlans.length > 0) {
-                const planDayIds = [...new Set(allPlans.map((it) => it.dayId))];
-                setKnownDays((prev) => {
-                  const prevSet = new Set(prev);
-                  const hasNew = planDayIds.some((id) => !prevSet.has(id));
-                  return hasNew ? [...new Set([...prev, ...planDayIds])] : prev;
-                });
+                planDiscoveredDayIds = [...new Set(allPlans.map((it) => it.dayId))];
               }
             } catch {
               hydrationSucceeded = false;
             }
           }
+        }
+        // Phase 11.2 Codex fix — reconcile the full union of newly discovered
+        // day IDs from both sources in one step. `prev` (a genuinely
+        // persisted days[] order, when one exists) is preserved exactly and
+        // never re-sorted; only IDs not already known are appended, and only
+        // those are ordered — via the same daySort numeric-suffix comparator
+        // My Plans uses for its own unordered/unknown-ID tail (see
+        // plans/page.tsx's mount and cloud-pull merges) — so the fallback
+        // order matches My Plans regardless of which source discovered which
+        // ID first.
+        const discoveredDayIds = [...new Set([...lightningDiscoveredDayIds, ...planDiscoveredDayIds])];
+        if (discoveredDayIds.length > 0) {
+          setKnownDays((prev) => {
+            const extra = discoveredDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+            return extra.length > 0 ? [...prev, ...extra] : prev;
+          });
         }
         if (hydrationSucceeded) setSyncReady(true);
       })
