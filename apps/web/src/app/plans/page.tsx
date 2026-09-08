@@ -1060,11 +1060,52 @@ export default function PlansPage() {
   // or another tab so lightningClearAllStats stays fresh without a full page reload.
   // Bumps lightningVersion (same counter used by crossDayChecks and lightningClearAllStats)
   // on any external write to the active profile's lightning key.
+  //
+  // Phase 11.2 Codex fix — also listen for this mounted profile's `days` key.
+  // Lightning already treats a cross-tab days[] write as a local edit (its own
+  // "Codex fix (cross-tab race)" — see lightning/page.tsx); My Plans had no
+  // equivalent, so a reorder made in one Plans tab could be silently reverted
+  // by another Plans tab's own in-flight initial pull resolving with a stale
+  // cloud order afterward (the exact race the existing regression suite only
+  // ever exercised as Lightning-pulls-while-Plans-reorders, never the
+  // Plans-pulls-while-another-Plans-tab-reorders direction). daysKeyRef is the
+  // mounted profile's own key (assigned once at profile-resolution time, same
+  // as activeDayKeyRef below) — never a live/dynamic profile lookup, so a
+  // storage event for a DIFFERENT profile's days key (e.g. another tab has a
+  // different active profile) is correctly ignored.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
       const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
       if (e.key === expectedKey) {
         setLightningVersion((v) => v + 1);
+      }
+      if (e.key === daysKeyRef.current) {
+        // Refresh this tab's local day state to match what the other tab
+        // just persisted — loadDays() applies the same sanitize/dedupe/
+        // day-1-baseline rules used at mount-time hydration, so a malformed
+        // cross-tab write can't corrupt this tab's in-memory `days`.
+        const next = loadDays(daysKeyRef.current);
+        setDays(next);
+        // Mirror the same active-day fallback used after a cloud-authoritative
+        // replacement (and in handleRemoveDay): if the other tab's write
+        // dropped the day this tab currently has active, fall back to the
+        // new order's first entry and persist it now — so an Add/Edit made in
+        // this tab before its own next explicit day-switch cannot create an
+        // item under a dayId that no longer exists in `next`.
+        if (!next.includes(activeDayIdRef.current)) {
+          setActiveDayId(next[0]);
+          saveActiveDayId(next[0], activeDayKeyRef.current);
+        }
+        // Mark as a local edit so this tab's own in-flight initial pull (if
+        // any) sees `localEditRef.current === true` at the start of its
+        // .then() callback and skips applying its own — now possibly stale —
+        // cloud snapshot over the newer order the other tab just persisted.
+        // Same guard the items/days mutation-marking effects already rely on
+        // for same-tab edits; this only ever fires for writes from OTHER tabs
+        // (the tab that wrote the key never receives its own 'storage'
+        // event), so it can never mark this tab's own pull-applied write as
+        // if it were an external edit.
+        localEditRef.current = true;
       }
     }
     window.addEventListener("storage", onStorage);
