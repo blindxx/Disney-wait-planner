@@ -438,7 +438,12 @@ export default function LightningPage() {
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   // Phase 8.3 — active day for filtering; read from localStorage on mount.
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
-  // Phase 8.3.2 — per-profile days key (read-only; Plans page owns writes).
+  // Phase 8.3.2 — per-profile days key. Plans page owns writes for normal
+  // UI-driven day mutations (reorder/add/remove/duplicate) — Lightning has
+  // no such controls. Codex fix (Phase 11.2) — the cloud-pull handler below
+  // is a scoped exception: it writes the resolved authoritative synced
+  // order here before reopening the sync gate, since a subsequent push
+  // reads this key directly and must never revert what was just pulled.
   const daysKeyRef = useRef("dwp:default:days");
   // Phase 8.3.2 — known planner days for safe display-day validation.
   const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
@@ -623,17 +628,33 @@ export default function LightningPage() {
         // authoritative, exactly as it is for My Plans' own pull handling:
         // it reflects the pushing device's real persisted order, so it
         // replaces knownDays outright rather than being merged into it.
-        // Lightning stays read-only for the shared `days` localStorage key
-        // (Plans page owns writes there) — this only updates Lightning's own
-        // in-memory display state, which the next visit to My Plans on this
-        // device will also persist via its own pull handling.
         const cloudDaysOrder = planner?.days;
         if (cloudDaysOrder && cloudDaysOrder.length > 0) {
-          setKnownDays((prev) => {
-            const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
-            const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
-            return next.join(",") === prev.join(",") ? prev : next;
-          });
+          const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+          const resolvedDays = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
+          // Codex fix — persist the resolved authoritative order to the
+          // mounted profile's namespaced `days` key BEFORE the sync gate
+          // reopens below. syncHelper's push payload reads `days`
+          // exclusively from this localStorage key (buildPayloadFromStorage
+          // → readLocalDaysOrder) — Lightning previously only updated
+          // in-memory knownDays here, so on a fresh/stale device the
+          // correct cloud order was never written locally; the very next
+          // push (e.g. from adding a Lightning reservation, or even the
+          // items-hydration push below) would then read the still-stale
+          // or missing local `days` key and push it back to the cloud,
+          // silently reverting the order this pull just resolved. Writing
+          // it here — using the same daysKeyRef bound to this mounted
+          // profile at mount time — is required before syncReady reopens;
+          // a failed write must NOT reopen the gate, mirroring the plans
+          // hydration-write failure handling above.
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem(daysKeyRef.current, JSON.stringify(resolvedDays));
+            } catch {
+              hydrationSucceeded = false;
+            }
+          }
+          setKnownDays((prev) => (resolvedDays.join(",") === prev.join(",") ? prev : resolvedDays));
         } else if (discoveredDayIds.length > 0) {
           // Legacy payload with no synced days[] — reconcile the full union
           // of newly discovered day IDs from both sources in one step.

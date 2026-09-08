@@ -1300,6 +1300,29 @@ export default function PlansPage() {
     saveToStorage(items, planKeyRef.current);
   }, [items, initialized]);
 
+  // Phase 11.2 Codex fix — mirror the items effect above for `days`: mark
+  // localEditRef so any in-flight authenticated pull sees a days[] change
+  // (Move Up/Down, Add/Remove/Duplicate Day, restore, clear-all reset, etc.)
+  // that happened while the pull was pending and skips applying a
+  // now-stale cloud order over it. Every days-mutating call site already
+  // persists via saveDays() inline at its own call site (unlike items,
+  // which centralizes persistence in the effect above) — this effect only
+  // needs to set the flag, driven purely by "did `days` change", the same
+  // state-driven approach the items effect already uses. This deliberately
+  // does NOT distinguish a user-driven days[] change from the cloud-pull's
+  // own authoritative-replace setDays: that call also flows through this
+  // same effect, exactly mirroring how the items effect already treats a
+  // cloud-applied setItems as marking localEditRef too. This is harmless —
+  // localEditRef is only ever read once, synchronously, at the very start
+  // of the next pull's own .then() callback, and that next pull always
+  // resets it to false before starting — so a stray `true` left over from
+  // a just-completed pull's own state update is cleared before it could
+  // ever cause a false guard.
+  useEffect(() => {
+    if (!initialized) return;
+    localEditRef.current = true;
+  }, [days, initialized]);
+
   // Schedule a debounced cloud push after every items OR days change, but
   // only once syncReady is true (initial cloud pull has resolved) AND the
   // user is authenticated. Unauthenticated edits are local-only — no
@@ -1351,8 +1374,9 @@ export default function PlansPage() {
     // cloud data from overwriting local state mid-auth-transition.
     let cancelled = false;
     // Reset the local-edit guard so the upcoming pull starts with a clean slate.
-    // If the user edits anything while the pull is in flight, localEditRef
-    // flips back to true and we skip applying the cloud result.
+    // If the user edits anything (items OR days[] — Move Up/Down, Add/Remove/
+    // Duplicate Day, etc.) while the pull is in flight, localEditRef flips
+    // back to true and we skip applying the cloud result.
     localEditRef.current = false;
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
