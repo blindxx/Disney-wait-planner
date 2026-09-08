@@ -1385,6 +1385,17 @@ export default function PlansPage() {
         if (cancelled) return;
         // Extract the plans portion from the combined planner payload.
         const cloud = planner?.plans ?? null;
+        // Codex fix — tracks whether the checked authoritative days[] write
+        // below (inside the cloudDaysOrder branch) failed. saveDays()
+        // swallows localStorage failures, so writing authoritative cloud
+        // order through it would let syncReady reopen even though the
+        // persisted value never actually changed — the next push would then
+        // read the old stored order and could overwrite cloud. Declared
+        // here (not just inside the setDays updater) so its outcome can
+        // gate setSyncReady(true) below, matching the existing
+        // hydrationSucceeded pattern used for the plans/lightning dataset
+        // writes and Lightning's own checked days[] hydration write.
+        let daysWriteFailed = false;
         // Only apply cloud data if no local edits occurred while the pull was
         // in flight. Either way, open the sync gate so edits can push.
         if (!localEditRef.current && cloud) {
@@ -1399,9 +1410,7 @@ export default function PlansPage() {
           // into it. Any item dayIds not present in it (e.g. items added on
           // a device whose own days[] hadn't yet synced) are appended using
           // the same deterministic daySort fallback used everywhere else for
-          // previously-unknown IDs. Uses functional setDays(prev) — this is
-          // an async .then() callback so `days` from the outer closure may
-          // be stale; `prev` is always fresh.
+          // previously-unknown IDs.
           //
           // Older cloud payloads omit `days` entirely (legacy — synced
           // before this fix, or from a device that had no local order to
@@ -1411,20 +1420,49 @@ export default function PlansPage() {
           // this particular payload lacks a synced order.
           const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
           const cloudDaysOrder = planner?.days;
-          setDays((prev) => {
-            if (cloudDaysOrder && cloudDaysOrder.length > 0) {
-              const extra = cloudDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
-              const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
-              if (next.join(",") === prev.join(",")) return prev;
+          if (cloudDaysOrder && cloudDaysOrder.length > 0) {
+            // Codex fix — computed and written synchronously here, NOT
+            // inside a setDays(prev => ...) functional updater: React does
+            // not invoke that updater callback synchronously within this
+            // same call stack (it's deferred to the next render), so a
+            // daysWriteFailed flag set inside one could not be read
+            // reliably by this callback's own hydrationSucceeded check
+            // below — an earlier version of this fix had exactly that bug.
+            // Reading `days` directly here (instead of a functional prev)
+            // is safe specifically because we're inside the
+            // !localEditRef.current branch: every days[] mutation anywhere
+            // in this component (Move Up/Down, Add/Remove/Duplicate Day,
+            // restore, clear-all, and this same path) flows through
+            // setDays, and the sibling effect that marks
+            // localEditRef.current = true fires on every such change — so
+            // localEditRef.current === false here guarantees `days` has not
+            // changed since this pull started, i.e. it IS the fresh value.
+            const extra = cloudDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+            const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
+            if (next.join(",") !== days.join(",")) {
+              // Checked write (not saveDays(), which swallows failures): a
+              // failed persist here must be observable so daysWriteFailed
+              // can keep the sync gate closed below, rather than letting
+              // React state move on to an order that was never actually
+              // saved. The legacy/fallback merge below (no cloudDaysOrder)
+              // is unaffected — normal saveDays() is fine there, per this
+              // fix's stated scope.
+              try {
+                localStorage.setItem(daysKeyRef.current, JSON.stringify(next));
+              } catch {
+                daysWriteFailed = true;
+              }
+              setDays(next);
+            }
+          } else {
+            setDays((prev) => {
+              const extra = cloudDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+              if (extra.length === 0) return prev;
+              const next = [...prev, ...extra];
               saveDays(next, daysKeyRef.current);
               return next;
-            }
-            const extra = cloudDayIds.filter((id) => !prev.includes(id)).sort(daySort);
-            if (extra.length === 0) return prev;
-            const next = [...prev, ...extra];
-            saveDays(next, daysKeyRef.current);
-            return next;
-          });
+            });
+          }
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
@@ -1460,7 +1498,11 @@ export default function PlansPage() {
             }
           }
         }
-        if (hydrationSucceeded) setSyncReady(true);
+        // Codex fix — a failed authoritative days[] write (daysWriteFailed)
+        // keeps the gate closed exactly like a failed lightning-hydration
+        // write already does, so a stale locally-persisted order can never
+        // be pushed back over the cloud's actual value.
+        if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
       })
       .catch(() => {
         if (cancelled) return;

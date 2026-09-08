@@ -628,8 +628,18 @@ export default function LightningPage() {
         // authoritative, exactly as it is for My Plans' own pull handling:
         // it reflects the pushing device's real persisted order, so it
         // replaces knownDays outright rather than being merged into it.
+        //
+        // Codex fix (cross-tab race) — gated on !localEditRef.current, same
+        // as the lightning-items application above: without this, this
+        // branch ran unconditionally regardless of whether a newer local
+        // days[] had just arrived (same-tab item edit, or — since the
+        // storage listener now marks a cross-tab days[] write as a local
+        // edit too — another tab's reorder received while this pull was in
+        // flight), so a stale planner.days could still clobber it. Skipping
+        // here does not fail hydration — it just defers to the newer local
+        // state, exactly like skipping the items application does.
         const cloudDaysOrder = planner?.days;
-        if (cloudDaysOrder && cloudDaysOrder.length > 0) {
+        if (!localEditRef.current && cloudDaysOrder && cloudDaysOrder.length > 0) {
           const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
           const resolvedDays = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
           // Codex fix — persist the resolved authoritative order to the
@@ -788,6 +798,21 @@ export default function LightningPage() {
       }
       if (e.key === daysKeyRef.current) {
         setKnownDays(loadKnownDays(daysKeyRef.current));
+        // Codex fix — another tab (e.g. My Plans reordering, or another
+        // Lightning tab's own successful pull) just wrote a newer days[]
+        // order for this same profile. Mark it as a local edit so that if
+        // this tab's own pullPlanner() is still in flight, its eventual
+        // (possibly older) planner.days does not clobber the value the
+        // other tab just persisted — same `if (!localEditRef.current &&
+        // cloud)` guard already used for same-tab item/day edits, just
+        // triggered by a cross-tab write instead of a same-tab one.
+        // onStorage only ever fires for writes from OTHER tabs (the tab
+        // that wrote the key never receives its own 'storage' event), so
+        // this can never mark this tab's own pull-applied write as if it
+        // were external, and it never fires at all when no other tab
+        // wrote anything — so a genuine first hydration with no
+        // concurrent edit is never blocked.
+        localEditRef.current = true;
       }
       if (e.key === dayParksKeyRef.current) {
         setDayParks(loadDayParks(dayParksKeyRef.current));
