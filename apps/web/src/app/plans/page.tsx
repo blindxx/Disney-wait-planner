@@ -414,13 +414,17 @@ function formatDayDate(iso: string): string {
  * - label only   → "Magic Kingdom Day"
  * - date only    → "Day 1 — Mon, May 12"
  * - neither      → "Day 1"
+ *
+ * `days` is the current persisted planner order — required so the default
+ * "Day N" fallback below is positional (Phase 11.2), not derived from the
+ * dayId's own numeric suffix.
  */
-function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>): string {
+function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>, days: string[]): string {
   const m = meta[dayId];
   const label = m?.label?.trim();
   const date = m?.date;
   // Use custom label if set, otherwise fall back to "Day N"
-  const baseLabel = label || dayLabelFromId(dayId);
+  const baseLabel = label || dayLabelFromId(dayId, days);
   if (date) {
     const formatted = formatDayDate(date);
     if (formatted) return `${baseLabel} — ${formatted}`;
@@ -463,10 +467,17 @@ function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
   } catch {}
 }
 
-/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
-function dayLabelFromId(dayId: string): string {
-  const n = parseInt(dayId.split("-")[1], 10);
-  return isNaN(n) ? dayId : `Day ${n}`;
+/**
+ * Default "Day N" label for a day with no custom label set.
+ * Phase 11.2 — positional, not derived from the dayId's own numeric suffix:
+ * N is this day's 1-based position within the current planner order (`days`),
+ * so moving a high-suffix ID to the front displays it as "Day 1" while its
+ * stable identity (dayId) never changes. Falls back to the raw id if it
+ * isn't present in `days` (should not normally happen).
+ */
+function dayLabelFromId(dayId: string, days: string[]): string {
+  const idx = days.indexOf(dayId);
+  return idx === -1 ? dayId : `Day ${idx + 1}`;
 }
 
 function loadDays(key: string): string[] {
@@ -475,16 +486,24 @@ function loadDays(key: string): string[] {
     if (!raw) return ["day-1"];
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.length > 0) {
-      // Phase 8.0.3 — normalize each entry through strict canonical check,
-      // dedupe, sort, then guarantee "day-1" baseline.
-      const sanitized = [
-        ...new Set(
-          (parsed as unknown[])
-            .map((d) => normalizeDayId(d))
-            .filter((d) => d !== "day-1") // collect non-baseline first
-        ),
-      ];
-      return ["day-1", ...sanitized].sort(daySort);
+      // Phase 11.2 — preserve the persisted planner order (position is now
+      // authoritative for display; dayId stays permanent identity only).
+      // Normalize each entry through strict canonical check and dedupe, but
+      // do NOT numerically re-sort — a stored reorder must survive reload.
+      const seen = new Set<string>();
+      const sanitized: string[] = [];
+      for (const raw of parsed as unknown[]) {
+        const id = normalizeDayId(raw);
+        if (!seen.has(id)) {
+          seen.add(id);
+          sanitized.push(id);
+        }
+      }
+      // Defensive baseline: guarantee "day-1" is present even if corrupted/
+      // legacy storage omitted it. Appended rather than forced to the front
+      // so it never overrides a genuinely persisted order.
+      if (!seen.has("day-1")) sanitized.push("day-1");
+      return sanitized;
     }
     return ["day-1"];
   } catch {
@@ -841,7 +860,26 @@ export default function PlansPage() {
   const [lightningVersion, setLightningVersion] = useState(0);
   // Phase 8.0 — multi-day state (default to day-1; hydrated from storage on mount)
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
+  // Codex fix — ref that always holds the latest activeDayId, same pattern
+  // as itemsRef above: the cloud-pull's .then() callback is an async
+  // context whose closure over activeDayId is fixed to whatever it was
+  // when the effect was (re)created, not necessarily what's on screen by
+  // the time the pull resolves (e.g. the user switched the active day tab
+  // while the pull was in flight) — reading this ref instead avoids acting
+  // on a stale snapshot when revalidating activeDayId against a newly
+  // authoritative cloud days[] order.
+  const activeDayIdRef = useRef(activeDayId);
+  activeDayIdRef.current = activeDayId;
   const [days, setDays] = useState<string[]>(["day-1"]);
+  // Codex fix — ref that always holds the latest `days`, same pattern as
+  // activeDayIdRef above: used by the cross-tab storage listener below to
+  // tell a genuine cross-tab reorder apart from a no-op hydration write
+  // (e.g. Lightning's own cloud-pull writes this key unconditionally, even
+  // when the resolved order is already identical to what this tab has) —
+  // reading `days` state directly there would be a stale closure, since
+  // that listener effect only runs once on mount.
+  const daysRef = useRef(days);
+  daysRef.current = days;
   // Phase 8.1 — day metadata (labels + dates) and per-profile storage key
   const dayMetaKeyRef = useRef("dwp:default:dayMeta");
   const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
@@ -1031,11 +1069,83 @@ export default function PlansPage() {
   // or another tab so lightningClearAllStats stays fresh without a full page reload.
   // Bumps lightningVersion (same counter used by crossDayChecks and lightningClearAllStats)
   // on any external write to the active profile's lightning key.
+  //
+  // Phase 11.2 Codex fix — also listen for this mounted profile's `days` key.
+  // Lightning already treats a cross-tab days[] write as a local edit (its own
+  // "Codex fix (cross-tab race)" — see lightning/page.tsx); My Plans had no
+  // equivalent, so a reorder made in one Plans tab could be silently reverted
+  // by another Plans tab's own in-flight initial pull resolving with a stale
+  // cloud order afterward (the exact race the existing regression suite only
+  // ever exercised as Lightning-pulls-while-Plans-reorders, never the
+  // Plans-pulls-while-another-Plans-tab-reorders direction). daysKeyRef is the
+  // mounted profile's own key (assigned once at profile-resolution time, same
+  // as activeDayKeyRef below) — never a live/dynamic profile lookup, so a
+  // storage event for a DIFFERENT profile's days key (e.g. another tab has a
+  // different active profile) is correctly ignored.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
       const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
       if (e.key === expectedKey) {
         setLightningVersion((v) => v + 1);
+      }
+      if (e.key === daysKeyRef.current) {
+        // Refresh this tab's local day state to match what the other tab
+        // just persisted — loadDays() applies the same sanitize/dedupe/
+        // day-1-baseline rules used at mount-time hydration, so a malformed
+        // cross-tab write can't corrupt this tab's in-memory `days`.
+        const next = loadDays(daysKeyRef.current);
+        // Codex fix — distinguish a genuine cross-tab days[] change from a
+        // no-op hydration write. Lightning's own cloud-pull handler writes
+        // this key unconditionally on every authoritative pull (it isn't
+        // gated on a diff the way this page's own write below is), so this
+        // listener can fire even when the newly-persisted order is already
+        // identical to what this tab currently has (e.g. both tabs hydrate
+        // from the same already-correct local order at once). Comparing
+        // against daysRef.current — this tab's own latest `days`, captured
+        // BEFORE any state update below — tells that apart from an actual
+        // reorder this tab doesn't yet know about.
+        const isGenuineChange = next.join(",") !== daysRef.current.join(",");
+        // setDays is itself gated on isGenuineChange — not just the
+        // localEditRef assignment further down — because a separate,
+        // pre-existing effect (`useEffect(() => { ...; localEditRef.current
+        // = true; }, [days, initialized])`) marks localEditRef on ANY
+        // `days` state change, by reference, regardless of content. `next`
+        // is always a fresh array from loadDays() even when its content is
+        // identical to daysRef.current, so calling setDays(next)
+        // unconditionally would still swap in a new array reference, firing
+        // that other effect and reintroducing the exact false-block this
+        // fix removes — skipping the call entirely for a no-op value avoids
+        // that indirect path, not just the direct one below.
+        if (isGenuineChange) {
+          setDays(next);
+        }
+        // Mirror the same active-day fallback used after a cloud-authoritative
+        // replacement (and in handleRemoveDay): if the other tab's write
+        // dropped the day this tab currently has active, fall back to the
+        // new order's first entry and persist it now — so an Add/Edit made in
+        // this tab before its own next explicit day-switch cannot create an
+        // item under a dayId that no longer exists in `next`. Left gated on
+        // `next` (not isGenuineChange) since it only ever needs to run when
+        // there's a `next` to validate against — it's already idempotent
+        // beyond that, a no-op unless the active day is genuinely invalid.
+        if (!next.includes(activeDayIdRef.current)) {
+          setActiveDayId(next[0]);
+          saveActiveDayId(next[0], activeDayKeyRef.current);
+        }
+        // Only mark this a local edit — and thus block this tab's own
+        // in-flight initial pull from applying its cloud snapshot — when the
+        // other tab's write actually introduced an order this tab didn't
+        // already have. A no-op-relative-to-this-tab write (isGenuineChange
+        // === false) carries no real conflict to protect against, so it must
+        // not block an otherwise-valid pending pull's plans/items from
+        // applying. A genuine reorder still sets this exactly as before —
+        // real cross-tab reorder protection is unchanged. This only ever
+        // fires for writes from OTHER tabs (the tab that wrote the key never
+        // receives its own 'storage' event), so it can never mark this tab's
+        // own pull-applied write as if it were an external edit.
+        if (isGenuineChange) {
+          localEditRef.current = true;
+        }
       }
     }
     window.addEventListener("storage", onStorage);
@@ -1149,8 +1259,15 @@ export default function PlansPage() {
     // so synced/imported items with day-2/day-3 always appear in the selector.
     const storedDays = loadDays(daysKeyRef.current);
     const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
+    // Phase 11.2 — preserve storedDays' persisted (positional) order; only
+    // append day IDs found on items but missing from the stored list (a
+    // self-heal for synced/imported items whose dayId has no matching
+    // `days` entry yet). New entries have no established position, so they
+    // are appended in a deterministic numeric order rather than an
+    // arbitrary Set-iteration order.
     const itemDayIds = [...new Set(loaded.map((it) => it.dayId))];
-    const mergedDays = [...new Set(["day-1", ...storedDays, ...itemDayIds])].sort(daySort);
+    const extraDayIds = itemDayIds.filter((id) => !storedDays.includes(id)).sort(daySort);
+    const mergedDays = extraDayIds.length > 0 ? [...storedDays, ...extraDayIds] : storedDays;
     if (mergedDays.join(",") !== storedDays.join(",")) {
       saveDays(mergedDays, daysKeyRef.current);
     }
@@ -1274,9 +1391,40 @@ export default function PlansPage() {
     saveToStorage(items, planKeyRef.current);
   }, [items, initialized]);
 
-  // Schedule a debounced cloud push after every items change, but only once
-  // syncReady is true (initial cloud pull has resolved) AND the user is
-  // authenticated. Unauthenticated edits are local-only — no network calls.
+  // Phase 11.2 Codex fix — mirror the items effect above for `days`: mark
+  // localEditRef so any in-flight authenticated pull sees a days[] change
+  // (Move Up/Down, Add/Remove/Duplicate Day, restore, clear-all reset, etc.)
+  // that happened while the pull was pending and skips applying a
+  // now-stale cloud order over it. Every days-mutating call site already
+  // persists via saveDays() inline at its own call site (unlike items,
+  // which centralizes persistence in the effect above) — this effect only
+  // needs to set the flag, driven purely by "did `days` change", the same
+  // state-driven approach the items effect already uses. This deliberately
+  // does NOT distinguish a user-driven days[] change from the cloud-pull's
+  // own authoritative-replace setDays: that call also flows through this
+  // same effect, exactly mirroring how the items effect already treats a
+  // cloud-applied setItems as marking localEditRef too. This is harmless —
+  // localEditRef is only ever read once, synchronously, at the very start
+  // of the next pull's own .then() callback, and that next pull always
+  // resets it to false before starting — so a stray `true` left over from
+  // a just-completed pull's own state update is cleared before it could
+  // ever cause a false guard.
+  useEffect(() => {
+    if (!initialized) return;
+    localEditRef.current = true;
+  }, [days, initialized]);
+
+  // Schedule a debounced cloud push after every items OR days change, but
+  // only once syncReady is true (initial cloud pull has resolved) AND the
+  // user is authenticated. Unauthenticated edits are local-only — no
+  // network calls.
+  // Phase 11.2 Codex fix — `days` is included so a reorder (Move Up/Down,
+  // Add/Remove/Duplicate Day) alone schedules a push: buildPayloadFromStorage
+  // already reads days[] fresh from localStorage at push time (Move Up/Down
+  // etc. persist synchronously via saveDays before this effect's next run),
+  // so reordering without any other items mutation would otherwise never
+  // reach the cloud until some unrelated items change happened to fire this
+  // same effect.
   // NOTE: no unmount cleanup here intentionally — cancelling on unmount would
   // silently drop the pending push on SPA navigation before the debounce fires,
   // because beforeunload does not fire on in-app route changes. Auth/session
@@ -1286,7 +1434,7 @@ export default function PlansPage() {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, initialized, syncReady, sessionStatus]);
+  }, [items, days, initialized, syncReady, sessionStatus]);
 
   // Manage syncReady gate based on auth state transitions.
   // loading      → gate resets to false immediately; guards against re-auth races
@@ -1317,8 +1465,9 @@ export default function PlansPage() {
     // cloud data from overwriting local state mid-auth-transition.
     let cancelled = false;
     // Reset the local-edit guard so the upcoming pull starts with a clean slate.
-    // If the user edits anything while the pull is in flight, localEditRef
-    // flips back to true and we skip applying the cloud result.
+    // If the user edits anything (items OR days[] — Move Up/Down, Add/Remove/
+    // Duplicate Day, etc.) while the pull is in flight, localEditRef flips
+    // back to true and we skip applying the cloud result.
     localEditRef.current = false;
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
@@ -1327,6 +1476,17 @@ export default function PlansPage() {
         if (cancelled) return;
         // Extract the plans portion from the combined planner payload.
         const cloud = planner?.plans ?? null;
+        // Codex fix — tracks whether the checked authoritative days[] write
+        // below (inside the cloudDaysOrder branch) failed. saveDays()
+        // swallows localStorage failures, so writing authoritative cloud
+        // order through it would let syncReady reopen even though the
+        // persisted value never actually changed — the next push would then
+        // read the old stored order and could overwrite cloud. Declared
+        // here (not just inside the setDays updater) so its outcome can
+        // gate setSyncReady(true) below, matching the existing
+        // hydrationSucceeded pattern used for the plans/lightning dataset
+        // writes and Lightning's own checked days[] hydration write.
+        let daysWriteFailed = false;
         // Only apply cloud data if no local edits occurred while the pull was
         // in flight. Either way, open the sync gate so edits can push.
         if (!localEditRef.current && cloud) {
@@ -1334,16 +1494,90 @@ export default function PlansPage() {
           const cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Merge cloud item day IDs into the days list.
-          // Uses functional setDays(prev) — this is an async .then() callback
-          // so `days` from the outer closure may be stale; `prev` is always fresh.
+          // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
+          // authoritative on pull, exactly like cloudItems is for `items`
+          // above: it reflects the pushing device's actual persisted order,
+          // so it replaces local state outright rather than being merged
+          // into it. Any item dayIds not present in it (e.g. items added on
+          // a device whose own days[] hadn't yet synced) are appended using
+          // the same deterministic daySort fallback used everywhere else for
+          // previously-unknown IDs.
+          //
+          // Older cloud payloads omit `days` entirely (legacy — synced
+          // before this fix, or from a device that had no local order to
+          // send). In that case fall back to the pre-existing behavior:
+          // `prev`'s persisted order is preserved exactly and only day IDs
+          // not already known are appended — never overwritten just because
+          // this particular payload lacks a synced order.
           const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
-          setDays((prev) => {
-            const next = [...new Set([...prev, ...cloudDayIds])].sort(daySort);
-            if (next.join(",") === prev.join(",")) return prev;
-            saveDays(next, daysKeyRef.current);
-            return next;
-          });
+          const cloudDaysOrder = planner?.days;
+          if (cloudDaysOrder && cloudDaysOrder.length > 0) {
+            // Codex fix — computed and written synchronously here, NOT
+            // inside a setDays(prev => ...) functional updater: React does
+            // not invoke that updater callback synchronously within this
+            // same call stack (it's deferred to the next render), so a
+            // daysWriteFailed flag set inside one could not be read
+            // reliably by this callback's own hydrationSucceeded check
+            // below — an earlier version of this fix had exactly that bug.
+            // Reading `days` directly here (instead of a functional prev)
+            // is safe specifically because we're inside the
+            // !localEditRef.current branch: every days[] mutation anywhere
+            // in this component (Move Up/Down, Add/Remove/Duplicate Day,
+            // restore, clear-all, and this same path) flows through
+            // setDays, and the sibling effect that marks
+            // localEditRef.current = true fires on every such change — so
+            // localEditRef.current === false here guarantees `days` has not
+            // changed since this pull started, i.e. it IS the fresh value.
+            const extra = cloudDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+            const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
+            if (next.join(",") !== days.join(",")) {
+              // Checked write (not saveDays(), which swallows failures): a
+              // failed persist here must be observable so daysWriteFailed
+              // can keep the sync gate closed below, rather than letting
+              // React state move on to an order that was never actually
+              // saved. The legacy/fallback merge below (no cloudDaysOrder)
+              // is unaffected — normal saveDays() is fine there, per this
+              // fix's stated scope.
+              try {
+                localStorage.setItem(daysKeyRef.current, JSON.stringify(next));
+              } catch {
+                daysWriteFailed = true;
+              }
+              setDays(next);
+              // Codex fix — revalidate activeDayId against the newly
+              // authoritative order: another device may have removed the
+              // day this device currently has active (e.g. Remove Day
+              // there, synced here). Mirrors the exact same fallback
+              // handleRemoveDay already uses locally — if the active ID is
+              // still present, leave it; otherwise fall back to the new
+              // order's first (positional Day 1) entry. Set + persisted
+              // synchronously, in the same batch as setDays above, so any
+              // Add/Edit action the user takes before the next explicit
+              // day-switch is scoped under a dayId that still exists in
+              // `next` rather than the stale, now-removed one. Uses
+              // activeDayKeyRef (bound to this mounted profile at mount
+              // time, same as daysKeyRef above) — never a live profile
+              // lookup. Only runs when `next` actually changed (this
+              // branch), so a pull that resolves to the same order the
+              // active day was already valid against never re-touches it.
+              // Reads activeDayIdRef (not the closure `activeDayId`) since
+              // this async callback's closure could otherwise be stale
+              // relative to a day-tab switch the user made while the pull
+              // was in flight.
+              if (!next.includes(activeDayIdRef.current)) {
+                setActiveDayId(next[0]);
+                saveActiveDayId(next[0], activeDayKeyRef.current);
+              }
+            }
+          } else {
+            setDays((prev) => {
+              const extra = cloudDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+              if (extra.length === 0) return prev;
+              const next = [...prev, ...extra];
+              saveDays(next, daysKeyRef.current);
+              return next;
+            });
+          }
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative cloud
           // dataset. The mount-time inference ran on stale local plans; the
@@ -1379,7 +1613,11 @@ export default function PlansPage() {
             }
           }
         }
-        if (hydrationSucceeded) setSyncReady(true);
+        // Codex fix — a failed authoritative days[] write (daysWriteFailed)
+        // keeps the gate closed exactly like a failed lightning-hydration
+        // write already does, so a stale locally-persisted order can never
+        // be pushed back over the cloud's actual value.
+        if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
       })
       .catch(() => {
         if (cancelled) return;
@@ -1477,11 +1715,43 @@ export default function PlansPage() {
     const nextNum = nums.length > 0 ? Math.max(...nums) + 1 : 2;
     const candidate = `day-${nextNum}`;
     if (days.includes(candidate)) return; // already exists — no-op
-    const nextDays = [...days, candidate].sort(daySort);
+    // Phase 11.2 — append at the end of the persisted order; never re-sort
+    // (the new candidate's suffix is already the max, so append is
+    // equivalent, but this keeps a reordered `days` list intact).
+    const nextDays = [...days, candidate];
     setDays(nextDays);
     saveDays(nextDays, _daysKey);
     setActiveDayId(candidate);
     saveActiveDayId(candidate, _activeDayKey);
+  }
+
+  // Phase 11.2 — reorder days: explicit Move Up / Move Down (no drag-and-drop).
+  // Swaps dayId with the adjacent position; a boundary move (already first/
+  // last) is a no-op — the calling buttons are also disabled at the
+  // boundary so this is a defensive guard, not the only protection.
+  // dayId itself never changes; only its position within `days` moves, so
+  // every other piece of state keyed by dayId (plans, Lightning, dayMeta,
+  // dayParks, dayAutoFallbacks) stays correctly attached without any
+  // migration.
+  function handleMoveDay(dayId: string, direction: "up" | "down") {
+    // Bound to activeProfileIdRef.current (the profile this mounted page
+    // actually represents), not a live getActiveProfileId() read — same
+    // reasoning as handleRemoveDay/handleDuplicateDay above: if another tab
+    // changes the global active profile while this Plans page stays
+    // mounted (no reload here), a live read could diverge from the profile
+    // this page's `days` state actually reflects, causing Move Up/Down to
+    // write the wrong profile's days key.
+    const _profileId = activeProfileIdRef.current;
+    const _daysKey = buildNamespacedKey(_profileId, "days");
+    daysKeyRef.current = _daysKey;
+    const idx = days.indexOf(dayId);
+    if (idx === -1) return;
+    const targetIdx = direction === "up" ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= days.length) return;
+    const nextDays = [...days];
+    [nextDays[idx], nextDays[targetIdx]] = [nextDays[targetIdx], nextDays[idx]];
+    setDays(nextDays);
+    saveDays(nextDays, _daysKey);
   }
 
   // Phase 8.4 — resolve the effective park for a given day.
@@ -1792,7 +2062,8 @@ export default function PlansPage() {
     }
     // Lightning selections are never copied — the new day simply has none.
 
-    const nextDays = [...days, newDayId].sort(daySort);
+    // Phase 11.2 — append at the end of the persisted order; never re-sort.
+    const nextDays = [...days, newDayId];
     setDays(nextDays);
     saveDays(nextDays, _daysKey);
     setItems((prev) => [...prev, ...copiedItems]);
@@ -2677,10 +2948,13 @@ export default function PlansPage() {
   function handleRestoreConfirm() {
     if (!restoreConfirmPayload) return;
     const { data } = restoreConfirmPayload;
-    const restoredDays: string[] = [...new Set(data.days as string[])].sort(daySort);
+    // Phase 11.2 — preserve the backup's own days[] order (dedupe only, no
+    // numeric re-sort) so a reordered backup restores in the same order.
+    const restoredDays: string[] = [...new Set(data.days as string[])];
     // Phase 8.9 — always land on Day 1 after restore, regardless of what was
-    // active in the backup or before the restore was triggered.
-    const restoredActiveDayId = "day-1";
+    // active in the backup or before the restore was triggered. Phase 11.2 —
+    // "Day 1" is positional: whichever day is first in the restored order.
+    const restoredActiveDayId = restoredDays[0] ?? "day-1";
     // Only persist dayMeta keys that belong to actual restored days.
     const restoredDaysSet = new Set(restoredDays);
 
@@ -3451,6 +3725,21 @@ export default function PlansPage() {
         .day-pill-active .day-pill-divider {
           background-color: rgba(255, 255, 255, 0.3);
         }
+        /* Phase 11.2 cosmetic — a wider variant of the same divider, used
+           only at the boundary between the reorder controls (↑↓) and the
+           day-management controls (Edit/Duplicate/Remove) so that group
+           break reads more clearly than the plain 1px dividers separating
+           individual buttons within each group. Same color tokens as
+           .day-pill-divider — just thicker — so it stays visually
+           consistent rather than introducing a new treatment. */
+        .day-pill-group-divider {
+          width: 3px;
+          background-color: #d1d5db;
+          flex-shrink: 0;
+        }
+        .day-pill-active .day-pill-group-divider {
+          background-color: rgba(255, 255, 255, 0.3);
+        }
         .btn-day-icon {
           background-color: #f9fafb;
           color: #9ca3af;
@@ -3477,6 +3766,19 @@ export default function PlansPage() {
         .day-pill-active .btn-day-icon:hover {
           background-color: #1d4ed8;
           color: #fff;
+        }
+        /* Phase 11.2 — boundary Move Up/Down (already first/last day) */
+        .btn-day-icon:disabled {
+          opacity: 0.35;
+          cursor: not-allowed;
+        }
+        .btn-day-icon:disabled:hover {
+          background-color: #f9fafb;
+          color: #9ca3af;
+        }
+        .day-pill-active .btn-day-icon:disabled:hover {
+          background-color: #2563eb;
+          color: rgba(255, 255, 255, 0.7);
         }
         .btn-day-remove {
           background-color: #f9fafb;
@@ -3783,10 +4085,10 @@ export default function PlansPage() {
             hydration resolves (same pattern as resort/park tab ready gate). */}
         {initialized ? (
         <div className="day-selector-row">
-          {days.map((dayId) => {
+          {days.map((dayId, dayIdx) => {
             const isActive = activeDayId === dayId;
             const count = itemCountByDay[dayId] ?? 0;
-            const label = dayDisplayLabel(dayId, dayMeta);
+            const label = dayDisplayLabel(dayId, dayMeta, days);
             return (
               <div
                 key={dayId}
@@ -3812,6 +4114,29 @@ export default function PlansPage() {
                   )}
                 </button>
                 <div className="day-pill-divider" aria-hidden="true" />
+                {/* Phase 11.2 — reorder: explicit Move Up/Down, no drag-and-drop */}
+                <button
+                  className="btn-day-icon"
+                  aria-label={`Move ${label} up`}
+                  title="Move day up"
+                  disabled={dayIdx === 0}
+                  onClick={() => handleMoveDay(dayId, "up")}
+                >
+                  ↑
+                </button>
+                <button
+                  className="btn-day-icon"
+                  aria-label={`Move ${label} down`}
+                  title="Move day down"
+                  disabled={dayIdx === days.length - 1}
+                  onClick={() => handleMoveDay(dayId, "down")}
+                >
+                  ↓
+                </button>
+                {/* Phase 11.2 cosmetic — wider divider marks the boundary
+                    between the reorder group (↑↓) and the day-management
+                    group (Edit/Duplicate/Remove) below. */}
+                <div className="day-pill-group-divider" aria-hidden="true" />
                 {/* Edit label/date */}
                 <button
                   className="btn-day-icon"
@@ -3889,7 +4214,7 @@ export default function PlansPage() {
           <div className="day-remove-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Remove {dayDisplayLabel(removeConfirmDayId, dayMeta)}?
+                Remove {dayDisplayLabel(removeConfirmDayId, dayMeta, days)}?
                 {(() => {
                   const planCount = itemCountByDay[removeConfirmDayId] ?? 0;
                   const llCount = lightningClearAllStats.byDay[removeConfirmDayId] ?? 0;
@@ -3929,7 +4254,7 @@ export default function PlansPage() {
                       const _days = _planDays.size;
                       return `Clear all plans and Lightning (${_total} items across ${_days} ${_days === 1 ? "day" : "days"})?`;
                     })()
-                  : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta)}?`}
+                  : `Clear all plans from ${dayDisplayLabel(clearDayTargetId!, dayMeta, days)}?`}
               </span>
               <button
                 className="btn-cancel-delete"
@@ -4009,7 +4334,7 @@ export default function PlansPage() {
           <div className="clear-confirm-row">
             <div className="confirm-row">
               <span className="confirm-text">
-                Replace {pendingDayImportItems.existingCount} {pendingDayImportItems.existingCount === 1 ? "item" : "items"} in {dayDisplayLabel(pendingDayImportItems.targetDayId, dayMeta)} with {pendingDayImportItems.items.length} imported {pendingDayImportItems.items.length === 1 ? "item" : "items"}?
+                Replace {pendingDayImportItems.existingCount} {pendingDayImportItems.existingCount === 1 ? "item" : "items"} in {dayDisplayLabel(pendingDayImportItems.targetDayId, dayMeta, days)} with {pendingDayImportItems.items.length} imported {pendingDayImportItems.items.length === 1 ? "item" : "items"}?
               </span>
               <button
                 className="btn-cancel-delete"
@@ -4295,8 +4620,8 @@ export default function PlansPage() {
                                     <span key={d}>
                                       {i > 0 && ", "}
                                       {d === activeDayId
-                                        ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
-                                        : dayDisplayLabel(d, dayMeta)}
+                                        ? <strong>Current: {dayDisplayLabel(d, dayMeta, days)}</strong>
+                                        : dayDisplayLabel(d, dayMeta, days)}
                                     </span>
                                   ))}
                                 </span>
@@ -4324,8 +4649,8 @@ export default function PlansPage() {
                                 <span key={d}>
                                   {i > 0 && ", "}
                                   {d === activeDayId
-                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta)}</strong>
-                                    : dayDisplayLabel(d, dayMeta)}
+                                    ? <strong>Current: {dayDisplayLabel(d, dayMeta, days)}</strong>
+                                    : dayDisplayLabel(d, dayMeta, days)}
                                 </span>
                               ))}
                             </span>
@@ -4492,7 +4817,7 @@ export default function PlansPage() {
                 : mode === "edit"
                 ? "Edit activity"
                 : mode === "edit-day"
-                ? `Edit day — ${editingDayId ? dayLabelFromId(editingDayId) : ""}`
+                ? `Edit day — ${editingDayId ? dayLabelFromId(editingDayId, days) : ""}`
                 : "Import activities"}
             </h2>
 

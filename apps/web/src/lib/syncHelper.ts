@@ -269,16 +269,39 @@ function parseLocalDatasetEntry(
 }
 
 /**
- * Read the current plans + lightning for a profile from localStorage and
- * construct a SyncedPlannerPayload.
+ * Phase 11.2 Codex fix — read the profile's locally persisted days[] order
+ * (dwp:{profileId}:days, owned/written by the Plans page) for inclusion in
+ * the sync payload. Returns undefined when the key is missing, unreadable,
+ * or not an array — unlike plans/lightning, a missing or malformed local
+ * `days` value is never a reason to abort the push: buildSyncedPlannerPayload
+ * sanitizes whatever is returned here down to valid canonical day IDs (or
+ * omits the field entirely), so this only needs to hand it the raw parsed
+ * value, not pre-validate it.
+ */
+function readLocalDaysOrder(profileId: string): unknown[] | undefined {
+  try {
+    const raw = localStorage.getItem(buildNamespacedKey(profileId, "days"));
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read the current plans + lightning + days for a profile from localStorage
+ * and construct a SyncedPlannerPayload.
  *
  * Returns null when:
  *   • localStorage is unavailable (SSR guard)
- *   • either dataset contains malformed JSON or an unrecognised shape
- *     (prevents pushing stale/empty data over valid cloud state)
+ *   • either the plans or lightning dataset contains malformed JSON or an
+ *     unrecognised shape (prevents pushing stale/empty data over valid
+ *     cloud state)
  *
- * Missing localStorage keys are treated as empty datasets (safe).
- * Legacy array-only shapes are normalised automatically.
+ * Missing localStorage keys for plans/lightning are treated as empty
+ * datasets (safe). Legacy array-only shapes are normalised automatically.
+ * A missing/malformed local `days[]` is not fatal — see readLocalDaysOrder.
  */
 function buildPayloadFromStorage(profileId: string): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
@@ -293,7 +316,8 @@ function buildPayloadFromStorage(profileId: string): SyncedPlannerPayload | null
     // push potentially empty data over valid cloud state.
     if (plans === null || lightning === null) return null;
 
-    return buildSyncedPlannerPayload(plans, lightning);
+    const days = readLocalDaysOrder(profileId);
+    return buildSyncedPlannerPayload(plans, lightning, days);
   } catch {
     return null;
   }

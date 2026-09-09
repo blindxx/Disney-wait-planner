@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, daySort } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -139,7 +139,9 @@ function loadKnownDays(key: string): string[] {
       const id = normalizeDayId(d);
       if (!seen.has(id)) { seen.add(id); valid.push(id); }
     }
-    if (!seen.has("day-1")) valid.unshift("day-1");
+    // Phase 11.2 — appended, not unshifted, so this defensive fallback never
+    // overrides a genuinely persisted (positional) order.
+    if (!seen.has("day-1")) valid.push("day-1");
     return valid;
   } catch {
     return ["day-1"];
@@ -148,16 +150,22 @@ function loadKnownDays(key: string): string[] {
 
 // ===== DAY CONTEXT HELPERS (Phase 8.8) =====
 
-/** "day-1" → "Day 1", "day-3" → "Day 3". Falls back to the raw id. */
-function dayLabelFromId(dayId: string): string {
-  const n = parseInt(dayId.split("-")[1], 10);
-  return isNaN(n) ? dayId : `Day ${n}`;
+/**
+ * Default "Day N" label for a day with no custom label set.
+ * Phase 11.2 — positional (mirrors plans/page.tsx): N is this day's 1-based
+ * position within `knownDays` (the planner's persisted order), not derived
+ * from the dayId's own numeric suffix. Falls back to the raw id if it isn't
+ * present in knownDays (should not normally happen).
+ */
+function dayLabelFromId(dayId: string, knownDays: string[]): string {
+  const idx = knownDays.indexOf(dayId);
+  return idx === -1 ? dayId : `Day ${idx + 1}`;
 }
 
 /** Human-readable day label using optional dayMeta (no date formatting — label only). */
-function dayContextLabel(dayId: string, meta: Record<string, DayMeta>): string {
+function dayContextLabel(dayId: string, meta: Record<string, DayMeta>, knownDays: string[]): string {
   const label = meta[dayId]?.label?.trim();
-  return label || dayLabelFromId(dayId);
+  return label || dayLabelFromId(dayId, knownDays);
 }
 
 /** Load per-day park overrides from profile-scoped localStorage (read-only on Lightning page). */
@@ -430,7 +438,21 @@ export default function LightningPage() {
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   // Phase 8.3 — active day for filtering; read from localStorage on mount.
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
-  // Phase 8.3.2 — per-profile days key (read-only; Plans page owns writes).
+  // Codex fix — ref that always holds the latest activeDayId, mirroring the
+  // same pattern in plans/page.tsx: the cloud-pull's .then() callback is an
+  // async context whose closure over activeDayId is fixed to whatever it
+  // was when the effect was (re)created, not necessarily what's current by
+  // the time the pull resolves — reading this ref instead avoids acting on
+  // a stale snapshot when revalidating activeDayId against a newly
+  // authoritative cloud days[] order.
+  const activeDayIdRef = useRef(activeDayId);
+  activeDayIdRef.current = activeDayId;
+  // Phase 8.3.2 — per-profile days key. Plans page owns writes for normal
+  // UI-driven day mutations (reorder/add/remove/duplicate) — Lightning has
+  // no such controls. Codex fix (Phase 11.2) — the cloud-pull handler below
+  // is a scoped exception: it writes the resolved authoritative synced
+  // order here before reopening the sync gate, since a subsequent push
+  // reads this key directly and must never revert what was just pulled.
   const daysKeyRef = useRef("dwp:default:days");
   // Phase 8.3.2 — known planner days for safe display-day validation.
   const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
@@ -555,6 +577,17 @@ export default function LightningPage() {
       .then((planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
+        // Phase 11.2 Codex fix — day IDs discovered from Lightning items and
+        // from plan items are collected here and reconciled into knownDays
+        // in a single step below, rather than two independent sequential
+        // setKnownDays calls. Two independent merges each append their own
+        // newly-found IDs in isolation, which can interleave two unrelated
+        // discovery orders (e.g. Lightning's [day-1, day-3] then Plans'
+        // [day-2] landing as [day-1, day-3, day-2]) instead of the single
+        // deterministic fallback order My Plans uses for IDs with no
+        // persisted position.
+        let lightningDiscoveredDayIds: string[] = [];
+        let planDiscoveredDayIds: string[] = [];
         // Only apply cloud lightning data if no local edits occurred while
         // the pull was in flight. Either way, open the sync gate.
         if (!localEditRef.current && cloud) {
@@ -564,15 +597,10 @@ export default function LightningPage() {
           setItems(cloudItems);
           // Phase 8.3.2 — Refresh knownDays after cloud pull so safeActiveDayId
           // doesn't stay stale on a fresh device where Plans page hasn't yet
-          // written the days list to localStorage. Merge pulled dayIds into the
-          // current known set — new days are added, nothing is removed.
+          // written the days list to localStorage. New days are added, nothing
+          // is removed — see the single reconciliation step below.
           if (cloudItems.length > 0) {
-            const pulledIds = [...new Set(cloudItems.map((it) => it.dayId))];
-            setKnownDays((prev) => {
-              const prevSet = new Set(prev);
-              const hasNew = pulledIds.some((id) => !prevSet.has(id));
-              return hasNew ? [...new Set([...prev, ...pulledIds])] : prev;
-            });
+            lightningDiscoveredDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
           }
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
@@ -593,22 +621,98 @@ export default function LightningPage() {
               setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
               const allPlans = loadAllPlanItems(profileKeysForPull.plans);
               setAllPlanItems(allPlans);
-              // Merge plan-only dayIds into knownDays (same pattern as the
-              // Lightning cloudItems merge above) so a fresh profile that
-              // hydrates cloud plans on Lightning first still shows those
-              // days in the day picker and duplicate checks.
+              // Plan-only dayIds — merged together with lightningDiscoveredDayIds
+              // below so a fresh profile that hydrates cloud plans and Lightning
+              // together resolves one consistent fallback order.
               if (allPlans.length > 0) {
-                const planDayIds = [...new Set(allPlans.map((it) => it.dayId))];
-                setKnownDays((prev) => {
-                  const prevSet = new Set(prev);
-                  const hasNew = planDayIds.some((id) => !prevSet.has(id));
-                  return hasNew ? [...new Set([...prev, ...planDayIds])] : prev;
-                });
+                planDiscoveredDayIds = [...new Set(allPlans.map((it) => it.dayId))];
               }
             } catch {
               hydrationSucceeded = false;
             }
           }
+        }
+        const discoveredDayIds = [...new Set([...lightningDiscoveredDayIds, ...planDiscoveredDayIds])];
+        // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
+        // authoritative, exactly as it is for My Plans' own pull handling:
+        // it reflects the pushing device's real persisted order, so it
+        // replaces knownDays outright rather than being merged into it.
+        //
+        // Codex fix (cross-tab race) — gated on !localEditRef.current, same
+        // as the lightning-items application above: without this, this
+        // branch ran unconditionally regardless of whether a newer local
+        // days[] had just arrived (same-tab item edit, or — since the
+        // storage listener now marks a cross-tab days[] write as a local
+        // edit too — another tab's reorder received while this pull was in
+        // flight), so a stale planner.days could still clobber it. Skipping
+        // here does not fail hydration — it just defers to the newer local
+        // state, exactly like skipping the items application does.
+        const cloudDaysOrder = planner?.days;
+        if (!localEditRef.current && cloudDaysOrder && cloudDaysOrder.length > 0) {
+          const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+          const resolvedDays = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
+          // Codex fix — persist the resolved authoritative order to the
+          // mounted profile's namespaced `days` key BEFORE the sync gate
+          // reopens below. syncHelper's push payload reads `days`
+          // exclusively from this localStorage key (buildPayloadFromStorage
+          // → readLocalDaysOrder) — Lightning previously only updated
+          // in-memory knownDays here, so on a fresh/stale device the
+          // correct cloud order was never written locally; the very next
+          // push (e.g. from adding a Lightning reservation, or even the
+          // items-hydration push below) would then read the still-stale
+          // or missing local `days` key and push it back to the cloud,
+          // silently reverting the order this pull just resolved. Writing
+          // it here — using the same daysKeyRef bound to this mounted
+          // profile at mount time — is required before syncReady reopens;
+          // a failed write must NOT reopen the gate, mirroring the plans
+          // hydration-write failure handling above.
+          if (typeof window !== "undefined") {
+            try {
+              localStorage.setItem(daysKeyRef.current, JSON.stringify(resolvedDays));
+            } catch {
+              hydrationSucceeded = false;
+            }
+          }
+          setKnownDays((prev) => (resolvedDays.join(",") === prev.join(",") ? prev : resolvedDays));
+          // Codex fix — revalidate activeDayId against the newly
+          // authoritative order: another device may have removed the day
+          // this device currently has active (e.g. Remove Day there, synced
+          // here). Mirrors the same fallback plans/page.tsx already uses
+          // after its own cloud-authoritative days[] replacement — if the
+          // active day is still present, leave it; otherwise fall back to
+          // the new order's first (positional Day 1) entry and persist it
+          // now, using activeDayKeyRef (bound to this mounted profile,
+          // same as daysKeyRef above) — never a live profile lookup. Reads
+          // activeDayIdRef (not the closure `activeDayId`) since this async
+          // callback's closure could otherwise be stale relative to a
+          // day-picker switch the user made while the pull was in flight.
+          if (!resolvedDays.includes(activeDayIdRef.current)) {
+            const nextActiveDayId = resolvedDays[0];
+            setActiveDayId(nextActiveDayId);
+            try {
+              localStorage.setItem(activeDayKeyRef.current, nextActiveDayId);
+            } catch {}
+            // Refresh day-scoped Lightning state that depends on the active
+            // day: planDayItems was already computed above (for the
+            // pre-correction active day, via safeActiveDayIdRef.current) and
+            // would otherwise stay stale — showing plan items for the
+            // now-invalid removed day — until some unrelated trigger (e.g.
+            // the user manually picking a day) happened to refresh it.
+            setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
+          }
+        } else if (discoveredDayIds.length > 0) {
+          // Legacy payload with no synced days[] — reconcile the full union
+          // of newly discovered day IDs from both sources in one step.
+          // `prev` (a genuinely persisted days[] order, when one exists) is
+          // preserved exactly and never re-sorted; only IDs not already
+          // known are appended, and only those are ordered — via the same
+          // daySort numeric-suffix comparator My Plans uses for its own
+          // unordered/unknown-ID tail — so the fallback order matches My
+          // Plans regardless of which source discovered which ID first.
+          setKnownDays((prev) => {
+            const extra = discoveredDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+            return extra.length > 0 ? [...prev, ...extra] : prev;
+          });
         }
         if (hydrationSucceeded) setSyncReady(true);
       })
@@ -729,6 +833,21 @@ export default function LightningPage() {
       }
       if (e.key === daysKeyRef.current) {
         setKnownDays(loadKnownDays(daysKeyRef.current));
+        // Codex fix — another tab (e.g. My Plans reordering, or another
+        // Lightning tab's own successful pull) just wrote a newer days[]
+        // order for this same profile. Mark it as a local edit so that if
+        // this tab's own pullPlanner() is still in flight, its eventual
+        // (possibly older) planner.days does not clobber the value the
+        // other tab just persisted — same `if (!localEditRef.current &&
+        // cloud)` guard already used for same-tab item/day edits, just
+        // triggered by a cross-tab write instead of a same-tab one.
+        // onStorage only ever fires for writes from OTHER tabs (the tab
+        // that wrote the key never receives its own 'storage' event), so
+        // this can never mark this tab's own pull-applied write as if it
+        // were external, and it never fires at all when no other tab
+        // wrote anything — so a genuine first hydration with no
+        // concurrent edit is never blocked.
+        localEditRef.current = true;
       }
       if (e.key === dayParksKeyRef.current) {
         setDayParks(loadDayParks(dayParksKeyRef.current));
@@ -1111,7 +1230,7 @@ export default function LightningPage() {
       {clearDayLightningTarget !== null && (
         <div style={{ marginBottom: "1rem", padding: "0.6rem 1rem", background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
           <span style={{ fontSize: "0.9rem", color: "#b91c1c", flex: "1 1 auto", minWidth: 0 }}>
-            {`Clear all Lightning selections from ${dayContextLabel(clearDayLightningTarget, dayMeta)}?`}
+            {`Clear all Lightning selections from ${dayContextLabel(clearDayLightningTarget, dayMeta, knownDays)}?`}
           </span>
           <button
             style={{ background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", whiteSpace: "nowrap" }}
@@ -1152,7 +1271,7 @@ export default function LightningPage() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {dayContextLabel(dayId, dayMeta)}
+                {dayContextLabel(dayId, dayMeta, knownDays)}
               </button>
             );
           })}
@@ -1176,7 +1295,7 @@ export default function LightningPage() {
         >
           <div>
             <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#1e40af", lineHeight: 1.3 }}>
-              {dayContextLabel(safeActiveDayId, dayMeta)}
+              {dayContextLabel(safeActiveDayId, dayMeta, knownDays)}
             </div>
             {resolvedDayPark ? (
               <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
@@ -1231,9 +1350,9 @@ export default function LightningPage() {
                       <span key={d}>
                         {di > 0 && ", "}
                         {d === safeActiveDayId ? (
-                          <strong>Current: {dayContextLabel(d, dayMeta)}</strong>
+                          <strong>Current: {dayContextLabel(d, dayMeta, knownDays)}</strong>
                         ) : (
-                          dayContextLabel(d, dayMeta)
+                          dayContextLabel(d, dayMeta, knownDays)
                         )}
                       </span>
                     ))}

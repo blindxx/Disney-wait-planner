@@ -192,6 +192,20 @@ export function computeCrossDayChecks(
 ): CrossDayChecksResult {
   const runDuplicates = days.length >= 2;
 
+  // Phase 11.2 — cross-day presentation follows planner order, not numeric
+  // dayId order: sort by each id's position in the caller-supplied `days`
+  // list (the persisted, possibly-reordered planner order). An id that
+  // somehow isn't in `days` sorts after everything that is, via daySort as
+  // a last-resort tiebreak, so it's never silently dropped from output.
+  function dayPositionSort(a: string, b: string): number {
+    const aIdx = days.indexOf(a);
+    const bIdx = days.indexOf(b);
+    if (aIdx === -1 && bIdx === -1) return daySort(a, b);
+    if (aIdx === -1) return 1;
+    if (bIdx === -1) return -1;
+    return aIdx - bIdx;
+  }
+
   function tryResolve(name: string, resort: ResortId): string | null {
     const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
     const rideMap = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
@@ -355,7 +369,7 @@ export function computeCrossDayChecks(
         }
         parkSections.push({
           parkLabel: parkLabelFromCompositeKey(compositeKey),
-          dayIds: [...ce.dayIds].sort(daySort),
+          dayIds: [...ce.dayIds].sort(dayPositionSort),
         });
       }
 
