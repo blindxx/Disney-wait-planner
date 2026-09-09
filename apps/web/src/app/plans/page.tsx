@@ -871,6 +871,15 @@ export default function PlansPage() {
   const activeDayIdRef = useRef(activeDayId);
   activeDayIdRef.current = activeDayId;
   const [days, setDays] = useState<string[]>(["day-1"]);
+  // Codex fix — ref that always holds the latest `days`, same pattern as
+  // activeDayIdRef above: used by the cross-tab storage listener below to
+  // tell a genuine cross-tab reorder apart from a no-op hydration write
+  // (e.g. Lightning's own cloud-pull writes this key unconditionally, even
+  // when the resolved order is already identical to what this tab has) —
+  // reading `days` state directly there would be a stale closure, since
+  // that listener effect only runs once on mount.
+  const daysRef = useRef(days);
+  daysRef.current = days;
   // Phase 8.1 — day metadata (labels + dates) and per-profile storage key
   const dayMetaKeyRef = useRef("dwp:default:dayMeta");
   const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
@@ -1085,27 +1094,58 @@ export default function PlansPage() {
         // day-1-baseline rules used at mount-time hydration, so a malformed
         // cross-tab write can't corrupt this tab's in-memory `days`.
         const next = loadDays(daysKeyRef.current);
-        setDays(next);
+        // Codex fix — distinguish a genuine cross-tab days[] change from a
+        // no-op hydration write. Lightning's own cloud-pull handler writes
+        // this key unconditionally on every authoritative pull (it isn't
+        // gated on a diff the way this page's own write below is), so this
+        // listener can fire even when the newly-persisted order is already
+        // identical to what this tab currently has (e.g. both tabs hydrate
+        // from the same already-correct local order at once). Comparing
+        // against daysRef.current — this tab's own latest `days`, captured
+        // BEFORE any state update below — tells that apart from an actual
+        // reorder this tab doesn't yet know about.
+        const isGenuineChange = next.join(",") !== daysRef.current.join(",");
+        // setDays is itself gated on isGenuineChange — not just the
+        // localEditRef assignment further down — because a separate,
+        // pre-existing effect (`useEffect(() => { ...; localEditRef.current
+        // = true; }, [days, initialized])`) marks localEditRef on ANY
+        // `days` state change, by reference, regardless of content. `next`
+        // is always a fresh array from loadDays() even when its content is
+        // identical to daysRef.current, so calling setDays(next)
+        // unconditionally would still swap in a new array reference, firing
+        // that other effect and reintroducing the exact false-block this
+        // fix removes — skipping the call entirely for a no-op value avoids
+        // that indirect path, not just the direct one below.
+        if (isGenuineChange) {
+          setDays(next);
+        }
         // Mirror the same active-day fallback used after a cloud-authoritative
         // replacement (and in handleRemoveDay): if the other tab's write
         // dropped the day this tab currently has active, fall back to the
         // new order's first entry and persist it now — so an Add/Edit made in
         // this tab before its own next explicit day-switch cannot create an
-        // item under a dayId that no longer exists in `next`.
+        // item under a dayId that no longer exists in `next`. Left gated on
+        // `next` (not isGenuineChange) since it only ever needs to run when
+        // there's a `next` to validate against — it's already idempotent
+        // beyond that, a no-op unless the active day is genuinely invalid.
         if (!next.includes(activeDayIdRef.current)) {
           setActiveDayId(next[0]);
           saveActiveDayId(next[0], activeDayKeyRef.current);
         }
-        // Mark as a local edit so this tab's own in-flight initial pull (if
-        // any) sees `localEditRef.current === true` at the start of its
-        // .then() callback and skips applying its own — now possibly stale —
-        // cloud snapshot over the newer order the other tab just persisted.
-        // Same guard the items/days mutation-marking effects already rely on
-        // for same-tab edits; this only ever fires for writes from OTHER tabs
-        // (the tab that wrote the key never receives its own 'storage'
-        // event), so it can never mark this tab's own pull-applied write as
-        // if it were an external edit.
-        localEditRef.current = true;
+        // Only mark this a local edit — and thus block this tab's own
+        // in-flight initial pull from applying its cloud snapshot — when the
+        // other tab's write actually introduced an order this tab didn't
+        // already have. A no-op-relative-to-this-tab write (isGenuineChange
+        // === false) carries no real conflict to protect against, so it must
+        // not block an otherwise-valid pending pull's plans/items from
+        // applying. A genuine reorder still sets this exactly as before —
+        // real cross-tab reorder protection is unchanged. This only ever
+        // fires for writes from OTHER tabs (the tab that wrote the key never
+        // receives its own 'storage' event), so it can never mark this tab's
+        // own pull-applied write as if it were an external edit.
+        if (isGenuineChange) {
+          localEditRef.current = true;
+        }
       }
     }
     window.addEventListener("storage", onStorage);

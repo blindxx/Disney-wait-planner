@@ -438,6 +438,15 @@ export default function LightningPage() {
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   // Phase 8.3 — active day for filtering; read from localStorage on mount.
   const [activeDayId, setActiveDayId] = useState<string>("day-1");
+  // Codex fix — ref that always holds the latest activeDayId, mirroring the
+  // same pattern in plans/page.tsx: the cloud-pull's .then() callback is an
+  // async context whose closure over activeDayId is fixed to whatever it
+  // was when the effect was (re)created, not necessarily what's current by
+  // the time the pull resolves — reading this ref instead avoids acting on
+  // a stale snapshot when revalidating activeDayId against a newly
+  // authoritative cloud days[] order.
+  const activeDayIdRef = useRef(activeDayId);
+  activeDayIdRef.current = activeDayId;
   // Phase 8.3.2 — per-profile days key. Plans page owns writes for normal
   // UI-driven day mutations (reorder/add/remove/duplicate) — Lightning has
   // no such controls. Codex fix (Phase 11.2) — the cloud-pull handler below
@@ -665,6 +674,32 @@ export default function LightningPage() {
             }
           }
           setKnownDays((prev) => (resolvedDays.join(",") === prev.join(",") ? prev : resolvedDays));
+          // Codex fix — revalidate activeDayId against the newly
+          // authoritative order: another device may have removed the day
+          // this device currently has active (e.g. Remove Day there, synced
+          // here). Mirrors the same fallback plans/page.tsx already uses
+          // after its own cloud-authoritative days[] replacement — if the
+          // active day is still present, leave it; otherwise fall back to
+          // the new order's first (positional Day 1) entry and persist it
+          // now, using activeDayKeyRef (bound to this mounted profile,
+          // same as daysKeyRef above) — never a live profile lookup. Reads
+          // activeDayIdRef (not the closure `activeDayId`) since this async
+          // callback's closure could otherwise be stale relative to a
+          // day-picker switch the user made while the pull was in flight.
+          if (!resolvedDays.includes(activeDayIdRef.current)) {
+            const nextActiveDayId = resolvedDays[0];
+            setActiveDayId(nextActiveDayId);
+            try {
+              localStorage.setItem(activeDayKeyRef.current, nextActiveDayId);
+            } catch {}
+            // Refresh day-scoped Lightning state that depends on the active
+            // day: planDayItems was already computed above (for the
+            // pre-correction active day, via safeActiveDayIdRef.current) and
+            // would otherwise stay stale — showing plan items for the
+            // now-invalid removed day — until some unrelated trigger (e.g.
+            // the user manually picking a day) happened to refresh it.
+            setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
+          }
         } else if (discoveredDayIds.length > 0) {
           // Legacy payload with no synced days[] — reconcile the full union
           // of newly discovered day IDs from both sources in one step.
