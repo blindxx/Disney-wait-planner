@@ -20,6 +20,18 @@
   test framework.
 - Only document commands that actually exist in the relevant `package.json`.
 
+## Deployment
+
+- Canonical production origin: **`https://dwpapp.com`**. Vercel builds a
+  preview deployment for every branch (see README Development section);
+  those preview URLs are previews only and must not be treated as, or
+  assumed to behave like, the canonical production origin.
+- Production `NEXTAUTH_URL` is `https://dwpapp.com`. Production
+  passwordless (magic-link) auth flows should return through this
+  canonical production domain.
+- Prefer configuration/environment variables (e.g. `NEXTAUTH_URL`) over
+  hardcoding the production domain in application code.
+
 ## Scope discipline
 
 - Prefer small, isolated, phase-scoped changes.
@@ -27,6 +39,35 @@
   new abstractions to make a change "cleaner."
 - No unrelated cleanup, refactors, or dependency upgrades bundled into a
   feature/fix change.
+
+### Sync Hardening & Architecture Fix — temporary exception
+
+During the **Sync Hardening & Architecture Fix** phase (SH.0 through
+SH.7), the "preserve existing architecture" rule above does not apply to
+cloud-sync architecture:
+
+- Cloud-sync architecture changes are explicitly in scope, when required
+  to establish the approved authoritative sync model.
+- The current sync implementation is not itself an invariant: existing
+  payload shape, conflict-tracking mechanisms, compatibility/fallback
+  logic, and sync module boundaries may all be revised when justified.
+- This exception applies only to sync-related architecture. It does not
+  authorize unrelated refactors, dependency upgrades, or cleanup outside
+  sync.
+- Implementation should continue to prefer small, independently
+  reviewable changes even while sync architecture is being revised.
+
+The following remain mandatory throughout Sync Hardening and are **not**
+suspended by this exception: local-first behavior, user/profile
+isolation, pull-before-push protection, auth/profile transition safety,
+stale-response protection, and destructive-first-sync prevention.
+
+**The final sync architecture has not been established yet.** SH.0
+inspects current `main` and recommends the target architecture — no
+proposed concept (snapshot version, profile registry design, payload
+schema, conflict model, or similar) is a permanent invariant until
+adopted there. Permanent sync architecture documentation is added to this
+file after implementation and production QA, in SH.7.
 
 ## Local-first + profile safety
 
