@@ -42,23 +42,47 @@ export interface SyncedPlannerPayload {
 const DAY_ID_RE = /^day-[1-9]\d*$/;
 
 /**
- * Filter+dedupe a raw value down to a valid ordered days[] array (preserving
- * first-occurrence order), or undefined if it isn't a non-empty array of
- * canonical day ID strings. Shared by the builder (so a malformed local
- * days[] is simply omitted rather than corrupting the push) and the parser
- * (so a malformed/legacy cloud value degrades to "no synced order" instead
- * of invalidating the whole payload).
+ * Normalize a raw value down to a valid ordered days[] array (preserving
+ * first-occurrence order), or undefined if it isn't an array at all — a
+ * missing/non-array `days` stays absent rather than manufacturing one, so
+ * legacy payloads that never supplied the field are untouched. Shared by
+ * the builder (push), the parser (pull and, via parseSyncedPlannerPayload,
+ * the server's legacy-writer preservation) so every path that can produce
+ * or accept a synced days[] applies the exact same rules.
+ *
+ * Phase 11.2 Codex fix — matches loadDays() (plans/page.tsx) and
+ * loadKnownDays() (lightning/page.tsx) exactly, rather than merely
+ * filtering: each raw entry is normalized in place (a malformed entry
+ * becomes "day-1" in its own slot, same as normalizeDayId's fallback),
+ * then "day-1" is appended if it still never appeared. Filtering alone
+ * (the previous behavior) could produce a valid-but-day-1-less order —
+ * e.g. ["bad","day-2"] sanitized to ["day-2"] — silently violating the
+ * planner's permanent baseline-day invariant that every page loader
+ * already enforces on read. Normalizing instead of dropping also means an
+ * array that is present but contains no genuinely valid entries at all
+ * (e.g. ["not-a-real-day", 123]) now sanitizes to ["day-1"], matching
+ * what loadDays()/loadKnownDays() would themselves produce from that same
+ * raw array (they treat any non-empty array as "there is a days list
+ * here", never as "absent") — it is only a fully missing/non-array value
+ * that stays absent.
  */
 function sanitizeDaysOrder(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const seen = new Set<string>();
   const valid: string[] = [];
   for (const d of raw) {
-    if (typeof d === "string" && DAY_ID_RE.test(d) && !seen.has(d)) {
-      seen.add(d);
-      valid.push(d);
+    const id = typeof d === "string" && DAY_ID_RE.test(d) ? d : "day-1";
+    if (!seen.has(id)) {
+      seen.add(id);
+      valid.push(id);
     }
   }
+  // Defensive baseline, same as the loaders' own fallback: appended (never
+  // unshifted) so it never overrides a genuinely persisted order — this
+  // only triggers when every raw entry was a distinct, genuinely valid
+  // non-day-1 ID (the normalize loop above already backfills day-1 for
+  // anything else, including a fully empty raw array).
+  if (!seen.has("day-1")) valid.push("day-1");
   return valid.length > 0 ? valid : undefined;
 }
 
@@ -86,10 +110,12 @@ export function buildSyncedPlannerPayload(
  * "no data" and fall through to local-only mode.
  *
  * `days`, when present, is sanitized rather than treated as all-or-nothing
- * like plans/lightning: a malformed or empty `days` value degrades to
- * "absent" (undefined) instead of rejecting an otherwise-valid payload —
+ * like plans/lightning: a non-array (or entirely missing) `days` degrades
+ * to "absent" (undefined) instead of rejecting an otherwise-valid payload —
  * plans/lightning data must never be discarded over a corrupted `days` tag
- * on an incidental field older clients never wrote.
+ * on an incidental field older clients never wrote. A present array is
+ * always normalized (never dropped) — see sanitizeDaysOrder — so it never
+ * comes back missing the planner's permanent "day-1" baseline day.
  */
 export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
