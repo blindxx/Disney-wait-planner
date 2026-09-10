@@ -202,33 +202,65 @@ export const DEV_PICK_WINNING_ITEMS_CASES: Array<{
 
 /**
  * SH.2 architecture — structural reconciliation. Given the winning items
- * and winning days[] for one pull (each already chosen independently by
- * pickWinningItems/pickWinningDays), plus the days[] baseline those days[]
- * were compared against, returns items sanitized to only reference days
- * present in the (possibly extended) returned days[].
+ * for one pull (already chosen by pickWinningItems, which also reports
+ * whether they won because LOCAL storage differed from the pull-start
+ * baseline) and the winning days[] (already chosen by pickWinningDays),
+ * plus the days[] baseline those days[] were compared against, returns
+ * items sanitized to only reference days present in the (possibly
+ * extended) returned days[].
  *
- * A day present in `daysBaseline` but absent from `winningDays` is
- * authoritatively removed — for THIS pull, from THIS page's own
- * perspective — regardless of why `winningDays` ended up without it
- * (this page's own local removal, or a cloud days[] that already reflects
- * a removal made elsewhere). Any item referencing it is dropped, from
- * EITHER candidate source: a stale cloud snapshot that hasn't caught up
- * to the removal, or a local read that hasn't caught up to a sibling
- * domain's own (possibly still in-flight) write for the same removal —
- * neither is ever grounds to re-add the day. A day NOT in `daysBaseline`
- * at all (never known before this pull) is not "removed" by this
- * comparison — an item referencing it is legitimate new-day evidence,
- * appended to the returned days[] (never reordering or removing existing
- * entries). `extraDiscoveredDayIds` (optional) lets a sibling domain
- * (Lightning discovering Plans-referenced days, or vice versa) contribute
- * to that same additive step, subject to the identical removed-day filter.
+ * Codex P1 fix — `itemsChangedLocally` (pickWinningItems' own verdict for
+ * `items`) is what lets this function tell apart the two cases that used
+ * to be conflated under one blanket "day missing from winningDays means
+ * removed" rule:
+ *
+ *   - itemsChangedLocally === true: `items` is this pull's LOCALLY
+ *     winning set — a real, possibly still-unpushed local edit. It must
+ *     NEVER be discarded merely because the INDEPENDENTLY-decided days
+ *     winner happens to omit a day it references (e.g. days won from a
+ *     cloud snapshot — or an unrelated device's state — that simply
+ *     doesn't know about this locally-edited day yet). Every day these
+ *     items reference is trusted outright and reconciled into the
+ *     returned days[] (appended when missing, never reordering or
+ *     removing existing entries) — this is what actually closes "a
+ *     locally winning Plans/Lightning item got deleted because
+ *     cloud-winning days[] removed its day".
+ *   - itemsChangedLocally === false: `items` is cloud-sourced, or is the
+ *     unchanged-local fallback (no local edit AND no valid cloud payload)
+ *     — either way it is NOT evidence of a fresh local decision to keep
+ *     referencing a day. A day present in `daysBaseline` but absent from
+ *     `winningDays` is then authoritatively removed for this pull, and
+ *     any such item is dropped — a stale cloud/local snapshot must never
+ *     resurrect a day a local (or already-synced) removal dropped. A day
+ *     NOT in `daysBaseline` at all (never known before this pull) is
+ *     still legitimate new-day evidence either way, appended to the
+ *     returned days[].
+ *
+ * `extraDiscoveredDayIds` (optional) lets a sibling domain (Lightning
+ * discovering Plans-referenced days, or vice versa) contribute to the
+ * same additive step, subject to the identical rules as `items` above —
+ * pass an empty array (the default) when the sibling has no local-winner
+ * context of its own to assert.
  */
 export function reconcileItemsWithDays<T extends { dayId: string }>(
   items: T[],
+  itemsChangedLocally: boolean,
   daysBaseline: string[],
   winningDays: string[],
   extraDiscoveredDayIds: string[] = []
 ): { items: T[]; days: string[] } {
+  if (itemsChangedLocally) {
+    // Locally winning items are trusted outright — see this function's
+    // own doc. Every day they (or a sibling's discovered ids) reference
+    // is required membership; append whatever winningDays doesn't already
+    // have, never touching existing entries.
+    const knownDays = new Set(winningDays);
+    const discovered = [
+      ...new Set([...items.map((it) => it.dayId), ...extraDiscoveredDayIds]),
+    ].filter((id) => !knownDays.has(id));
+    const days = discovered.length > 0 ? [...winningDays, ...discovered.sort(daySort)] : winningDays;
+    return { items, days };
+  }
   const removed = new Set(removedDayIds(daysBaseline, winningDays));
   const sanitizedItems = removed.size === 0 ? items : items.filter((it) => !removed.has(it.dayId));
   const knownDays = new Set(winningDays);
@@ -316,18 +348,20 @@ export const DEV_DAYS_RECONCILIATION_CASES: Array<{
 
 /**
  * Reference cases for reconcileItemsWithDays() — the structural
- * reconciliation step that closes the Codex "removed day resurrected via
- * a stale sibling/cloud item snapshot" finding without any tombstone. Run
- * from Node:
+ * reconciliation step that closes two Codex findings without any
+ * tombstone: (1) a removed day resurrected via a stale sibling/cloud item
+ * snapshot, and (2) a LOCALLY winning item wrongly deleted merely because
+ * the independently-decided days winner omitted its day. Run from Node:
  *   import { DEV_RECONCILE_ITEMS_CASES, reconcileItemsWithDays } from "@/lib/crossDayChecks";
  *   DEV_RECONCILE_ITEMS_CASES.forEach(c => {
- *     const got = reconcileItemsWithDays(c.items, c.daysBaseline, c.winningDays, c.extraDiscoveredDayIds);
+ *     const got = reconcileItemsWithDays(c.items, c.itemsChangedLocally, c.daysBaseline, c.winningDays, c.extraDiscoveredDayIds);
  *     ...
  *   });
  */
 export const DEV_RECONCILE_ITEMS_CASES: Array<{
   name: string;
   items: Array<{ dayId: string }>;
+  itemsChangedLocally: boolean;
   daysBaseline: string[];
   winningDays: string[];
   extraDiscoveredDayIds?: string[];
@@ -335,24 +369,27 @@ export const DEV_RECONCILE_ITEMS_CASES: Array<{
   expectedDays: string[];
 }> = [
   {
-    name: "regression — stale item snapshot still references a day the winning days[] already removed: dropped, not re-added",
+    name: "regression — stale (non-locally-winning) item snapshot still references a day the winning days[] already removed: dropped, not re-added",
     items: [{ dayId: "day-1" }, { dayId: "day-2" }, { dayId: "day-2" }],
+    itemsChangedLocally: false,
     daysBaseline: ["day-1", "day-2", "day-3"],
     winningDays: ["day-1", "day-3"],
     expectedItemDayIds: ["day-1"],
     expectedDays: ["day-1", "day-3"],
   },
   {
-    name: "legitimate new day: winning items reference a day cloud omitted — appended, not dropped",
+    name: "legitimate new day (items not locally winning): winning items reference a day cloud omitted — appended, not dropped",
     items: [{ dayId: "day-1" }, { dayId: "day-4" }],
+    itemsChangedLocally: false,
     daysBaseline: ["day-1"],
     winningDays: ["day-1"],
     expectedItemDayIds: ["day-1", "day-4"],
     expectedDays: ["day-1", "day-4"],
   },
   {
-    name: "sibling-discovered day ID also subject to the same removed-day filter",
+    name: "sibling-discovered day ID also subject to the same removed-day filter when items did not win locally",
     items: [{ dayId: "day-1" }],
+    itemsChangedLocally: false,
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1"],
     extraDiscoveredDayIds: ["day-2", "day-5"],
@@ -362,6 +399,7 @@ export const DEV_RECONCILE_ITEMS_CASES: Array<{
   {
     name: "day removed then recreated with the same ID before this pull — no longer treated as removed, items trusted",
     items: [{ dayId: "day-3" }],
+    itemsChangedLocally: false,
     daysBaseline: ["day-1", "day-2", "day-3"],
     winningDays: ["day-1", "day-2", "day-3"],
     expectedItemDayIds: ["day-3"],
@@ -370,9 +408,38 @@ export const DEV_RECONCILE_ITEMS_CASES: Array<{
   {
     name: "nothing to reconcile — items already fully consistent with winningDays",
     items: [{ dayId: "day-1" }, { dayId: "day-2" }],
+    itemsChangedLocally: false,
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1", "day-2"],
     expectedItemDayIds: ["day-1", "day-2"],
+    expectedDays: ["day-1", "day-2"],
+  },
+  {
+    name: "Codex P1 — locally winning item survives even though cloud-winning days[] removed its day (day reconciled back in)",
+    items: [{ dayId: "day-1" }, { dayId: "day-5" }],
+    itemsChangedLocally: true,
+    daysBaseline: ["day-1", "day-5"],
+    winningDays: ["day-1"],
+    expectedItemDayIds: ["day-1", "day-5"],
+    expectedDays: ["day-1", "day-5"],
+  },
+  {
+    name: "Codex P1 — locally winning items untouched by removal reconcile cleanly against locally-won days too",
+    items: [{ dayId: "day-1" }, { dayId: "day-3" }],
+    itemsChangedLocally: true,
+    daysBaseline: ["day-1", "day-2", "day-3"],
+    winningDays: ["day-1", "day-3"],
+    expectedItemDayIds: ["day-1", "day-3"],
+    expectedDays: ["day-1", "day-3"],
+  },
+  {
+    name: "locally winning items never filtered even when extraDiscoveredDayIds includes a day daysBaseline says was removed",
+    items: [{ dayId: "day-1" }],
+    itemsChangedLocally: true,
+    daysBaseline: ["day-1", "day-2"],
+    winningDays: ["day-1"],
+    extraDiscoveredDayIds: ["day-2"],
+    expectedItemDayIds: ["day-1"],
     expectedDays: ["day-1", "day-2"],
   },
 ];

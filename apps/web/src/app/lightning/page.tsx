@@ -28,7 +28,6 @@ import {
   registerUnloadSync,
   cancelScheduledSync,
   getConfirmedSnapshot,
-  confirmedSnapshotKeyForProfile,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -505,61 +504,65 @@ export default function LightningPage() {
   // localStorage is the device-local authority; a 'storage' event is only
   // ever a notification, never proof of ordering or synchronization.
   //
-  // itemsBaselineRef/daysBaselineRef hold this page's own last-confirmed
-  // local Lightning items / days[] — captured once at mount as a starting
-  // assumption, and from then on kept current by resyncConfirmedBaselines()
-  // (declared below), which is the ONLY thing ever allowed to advance them
-  // once a real confirmation exists. NEVER merely because a pull effect
-  // re-ran, and NEVER when local won a domain's conflict (that domain's
-  // edit may still be unpushed; only a confirmed push proves it's safe to
-  // stop protecting it). Each pull re-reads CURRENT local storage fresh
-  // and compares it against these stable baselines
-  // (pickWinningDays/pickWinningItems in crossDayChecks.ts) to determine,
-  // independently per domain, whether it changed locally (before OR during
-  // the pull, same-tab OR cross-tab) — see the pull effect below.
+  // itemsBaselineRef/daysBaselineRef hold this page's own FALLBACK
+  // baseline — used only when no confirmed snapshot exists yet for this
+  // profile (see captureConfirmedSnapshotForPull() below). Captured once
+  // at mount, and updated ONLY when a pull resolves and cloud wins a
+  // domain (local was unchanged, so adopting cloud's value is safe) —
+  // NEVER merely because a pull effect re-ran, and NEVER when local won a
+  // domain's conflict. Each pull captures its OWN immutable baseline once,
+  // at pull start (see captureConfirmedSnapshotForPull()), preferring a
+  // real confirmed snapshot over these refs whenever one exists.
   const itemsBaselineRef = useRef<LightningItem[]>([]);
   const daysBaselineRef = useRef<string[]>([]);
-  // Same baseline concept, applied to the OPPOSITE dataset (Plans' raw
+  // Same fallback concept, applied to the OPPOSITE dataset (Plans' raw
   // storage) this page hydrates on every pull (Phase 7.6.3). Captured as
   // the raw string (Lightning never parses/normalizes Plans items) so
   // comparison is a simple, exact string check. A null baseline (key
   // absent at mount) legitimately compares unequal to any later non-null
-  // read. Also kept current by resyncConfirmedBaselines() below, exactly
-  // like the two refs above — see its own doc for why the opposite
-  // dataset obeys the same confirmation semantics as this page's own
-  // domains.
+  // read.
   const plansRawBaselineRef = useRef<string | null>(null);
 
-  // SH.2 architecture — the SOLE mechanism that advances this page's
-  // baselines to a genuinely cloud-confirmed value. Mirrors plans/page.tsx
-  // exactly (see its own detailed doc). Reads
-  // getConfirmedSnapshot(profileId) — the durable, profile-scoped record
-  // syncHelper's doPush() writes verbatim from the exact payload it just
-  // successfully sent — and, when one exists, assigns the baselines to
-  // EXACTLY that recorded content, never to a fresh read of whatever the
-  // mutable plans/lightning/days storage keys currently hold (which is
-  // what let a same-tab edit made after push-start get misclassified as
-  // confirmed — Codex P1 #1). Reading getConfirmedSnapshot() is a plain
-  // localStorage read of a durable, shared key — identical in every tab
-  // for this profile regardless of which tab performed the push (Codex P1
-  // #2) — so this needs no cross-tab message-passing, only a fresh call
-  // at the moment an answer is wanted. Called from two places: (a) at the
-  // top of every pull, so a pull is always self-healing even if this tab
-  // missed every notification below; (b) from the 'storage' listener when
-  // ANOTHER tab writes this profile's confirmed-snapshot key.
+  // SH.2 architecture — capture ONE pull's immutable causal baseline.
+  // Mirrors plans/page.tsx exactly (see its own detailed doc for the full
+  // rationale). Codex P1 fix (#2 of this round) — the PREVIOUS version of
+  // this mechanism (resyncConfirmedBaselines) was called at GET COMPLETION
+  // time, which meant a push confirmation that completed WHILE the GET was
+  // in flight could be consumed by that same pull — making an already-
+  // stale GET response look "unchanged" relative to the now-advanced
+  // baseline and incorrectly overwrite the just-confirmed local state. The
+  // fix is purely about WHEN this runs: called ONCE, synchronously, before
+  // pullPlanner() is even invoked (see the pull effect below), and its
+  // return value is closed over by that pull's `.then()` — never
+  // re-derived at resolution time, never mutated for the lifetime of that
+  // one pull.
   //
-  // Idempotent and safe to call redundantly. When no confirmed snapshot
-  // exists yet, this is a deliberate no-op — baselines keep whatever they
-  // already hold. `days` is updated only when the confirmed snapshot
-  // actually carries it.
-  function resyncConfirmedBaselines() {
+  // Reads getConfirmedSnapshot(profileId) — the durable, profile-scoped
+  // record syncHelper's doPush() writes verbatim from the exact payload it
+  // just successfully sent — and, when one exists, uses it AS this pull's
+  // baseline outright: never a fresh read of the current plans/lightning/
+  // days storage keys (Codex P1 #1, fixed last round and preserved here).
+  // getConfirmedSnapshot() is a plain localStorage read of a key shared
+  // across every tab for this profile, so no cross-tab message-passing is
+  // needed — a DIFFERENT tab's confirmed push is visible here as soon as
+  // this function is called, with no separate listener required.
+  //
+  // When no confirmed snapshot exists yet, falls back to
+  // itemsBaselineRef/daysBaselineRef/plansRawBaselineRef — the mount-time
+  // load, or a previous pull's own cloud-won resolution.
+  function captureConfirmedSnapshotForPull(): {
+    items: LightningItem[];
+    days: string[];
+    plansRaw: string | null;
+  } {
     const confirmed = getConfirmedSnapshot(activeProfileIdRef.current);
-    if (!confirmed) return;
-    itemsBaselineRef.current = migrateLightningDayIds(confirmed.lightning.items as LightningItem[]);
-    if (confirmed.days) {
-      daysBaselineRef.current = confirmed.days;
-    }
-    plansRawBaselineRef.current = JSON.stringify(confirmed.plans);
+    return {
+      items: confirmed
+        ? migrateLightningDayIds(confirmed.lightning.items as LightningItem[])
+        : itemsBaselineRef.current,
+      days: confirmed?.days ?? daysBaselineRef.current,
+      plansRaw: confirmed ? JSON.stringify(confirmed.plans) : plansRawBaselineRef.current,
+    };
   }
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
@@ -622,12 +625,12 @@ export default function LightningPage() {
     setSyncProfileId(currentProfileId);
     const loadedItems = loadFromStorage(lightningKeyRef.current);
     setItems(loadedItems);
-    // SH.2 architecture — capture this page's own last-confirmed-local
-    // baselines from the values just loaded above. This is only a
-    // STARTING assumption for a profile that has never had a successful
-    // push yet (or is offline/unauthenticated) — resyncConfirmedBaselines()
-    // (declared above) supersedes it the moment a real cloud confirmation
-    // exists, and is what future pulls actually rely on.
+    // SH.2 architecture — capture this page's own FALLBACK baselines from
+    // the values just loaded above. This is only a STARTING assumption for
+    // a profile that has never had a successful push yet (or is offline/
+    // unauthenticated) — captureConfirmedSnapshotForPull() (declared
+    // above) prefers a real confirmed snapshot the moment one exists,
+    // falling back to these refs only until then.
     itemsBaselineRef.current = loadedItems;
     daysBaselineRef.current = loadedKnownDays;
     // Same baseline concept for the opposite (Plans) dataset this page
@@ -683,13 +686,14 @@ export default function LightningPage() {
     // edit get silently discarded by a later pull (Codex finding).
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
+    // SH.2 architecture — freeze this pull's causal baseline NOW, before
+    // the GET is even issued (Codex P1 #2). `pullStartBaseline` is closed
+    // over by `.then()` below and consulted there instead of any ref — see
+    // captureConfirmedSnapshotForPull()'s own doc above.
+    const pullStartBaseline = captureConfirmedSnapshotForPull();
     void pullPlanner(activeProfileIdRef.current)
       .then((planner) => {
         if (cancelled) return;
-        // SH.2 architecture — self-heal all baselines from this profile's
-        // durable confirmed snapshot FIRST, before computing anything
-        // else — see resyncConfirmedBaselines()'s own doc above.
-        resyncConfirmedBaselines();
         const cloud = planner?.lightning ?? null;
         // Codex fix — tracks whether the checked authoritative days[] write
         // below failed. A failed write must not let syncReady reopen (it
@@ -716,27 +720,31 @@ export default function LightningPage() {
         const currentDays = loadKnownDays(daysKeyRef.current);
 
         const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
-          itemsBaselineRef.current,
+          pullStartBaseline.items,
           currentItems,
           cloudLightningItems
         );
         const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
-          daysBaselineRef.current,
+          pullStartBaseline.days,
           currentDays,
           cloudDaysOrder
         );
-        // Structural reconciliation: a day known at daysBaselineRef but
-        // absent from daysCandidate is authoritatively removed for this
-        // pull — any Lightning item referencing it is dropped, from
-        // EITHER candidate source, never re-added. This is what closes
-        // Codex finding #3 (Lightning re-adding a removed day before the
-        // coupled deletion here happened to land): the removal is detected
-        // from the days[] baseline/winner diff alone, independent of
-        // whether THIS page's own items read happened to be stale — see
+        // Structural reconciliation — Codex P1 fix (#1 of this round):
+        // itemsChangedLocally is passed through so a LOCALLY winning
+        // Lightning item is never discarded merely because the
+        // independently-decided days winner omits its day (it's
+        // reconciled back into winningDays instead); only a
+        // non-locally-winning (cloud or unchanged-local) item is subject
+        // to the removed-day filter — which is what still closes Codex
+        // finding #3 from an earlier round (Lightning re-adding a removed
+        // day before the coupled deletion here happened to land): that
+        // removal is detected from the days[] baseline/winner diff alone,
+        // applied only to items that did NOT win locally — see
         // reconcileItemsWithDays's own doc.
         const { items: winningLightningItems, days: winningDays } = reconcileItemsWithDays(
           itemsCandidate,
-          daysBaselineRef.current,
+          itemsChangedLocally,
+          pullStartBaseline.days,
           daysCandidate
         );
 
@@ -785,14 +793,14 @@ export default function LightningPage() {
             setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
           }
         }
-        // Days baseline updates only when NEITHER domain had a local,
-        // unconfirmed change this pull — i.e. winningDays is entirely
-        // cloud-sourced (including any additive extension, since that
-        // extension was itself derived from cloud-sourced winning items).
-        // If either domain won locally, any extension may be locally
-        // sourced too; leave the baseline stale so a later pull keeps
-        // protecting it until resyncConfirmedBaselines() (see its own doc)
-        // advances it from a genuine cloud-confirmed push.
+        // Days FALLBACK baseline updates only when NEITHER domain had a
+        // local, unconfirmed change this pull — i.e. winningDays is
+        // entirely cloud-sourced (including any additive extension, since
+        // that extension was itself derived from cloud-sourced winning
+        // items). If either domain won locally, any extension may be
+        // locally sourced too; leave this fallback stale so a later pull
+        // (absent a genuine confirmed snapshot by then) keeps protecting
+        // it rather than assuming it's safe.
         if (itemsCloudWon && !daysChangedLocally) {
           daysBaselineRef.current = winningDays;
         }
@@ -806,13 +814,13 @@ export default function LightningPage() {
         if (typeof window !== "undefined" && planner?.plans) {
           // SH.2 architecture — same baseline-comparison model, applied to
           // the opposite (Plans) dataset: a fresh raw read compared against
-          // plansRawBaselineRef (this page's own last-confirmed view of
-          // Plans' storage) tells whether another tab wrote a genuinely
-          // newer Plans edit since this page last confirmed it — skip the
-          // unconditional overwrite below if so, rather than reverting
-          // that edit with a possibly-stale cloud snapshot.
+          // pullStartBaseline.plansRaw (this pull's frozen causal baseline,
+          // not a mutable ref — see Codex P1 #2) tells whether another tab
+          // wrote a genuinely newer Plans edit since this pull started —
+          // skip the unconditional overwrite below if so, rather than
+          // reverting that edit with a possibly-stale cloud snapshot.
           const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
-          const plansChangedLocally = currentPlansRaw !== plansRawBaselineRef.current;
+          const plansChangedLocally = currentPlansRaw !== pullStartBaseline.plansRaw;
           if (!plansChangedLocally) {
             const plansRawToWrite = JSON.stringify(planner.plans);
             try {
@@ -998,16 +1006,12 @@ export default function LightningPage() {
       if (e.key === lightningKeyRef.current) {
         setItems(loadFromStorage(lightningKeyRef.current));
       }
-      // SH.2 architecture — another tab (any tab sharing this profile)
-      // just recorded a new cloud-confirmed snapshot. This is the
-      // cross-tab half of resyncConfirmedBaselines()'s contract: 'storage'
-      // events never fire in the tab that performed the write, so a
-      // same-tab push's own resync happens via the pull effect instead —
-      // this branch is what lets a DIFFERENT tab's successful push become
-      // visible here without waiting for this tab's own next pull.
-      if (e.key === confirmedSnapshotKeyForProfile(activeProfileIdRef.current)) {
-        resyncConfirmedBaselines();
-      }
+      // SH.2 architecture — no confirmed-snapshot listener here (removed —
+      // obsolete under the pull-start-baseline model). Each pull captures
+      // its own causal baseline fresh, once, at pull start (see
+      // captureConfirmedSnapshotForPull()) — a live cross-tab listener
+      // that could update an in-use baseline mid-pull is exactly the
+      // mechanism Codex P1 #2 flagged.
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
