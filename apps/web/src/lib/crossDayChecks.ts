@@ -67,6 +67,78 @@ function parseDayNumLocal(dayId: string): number {
   return m ? parseInt(m[1], 10) : Infinity;
 }
 
+/**
+ * SH.2 Codex P1 fix — distinguishes a pure days[] REORDER (same set of day
+ * IDs, different order — e.g. Move Up/Down) from a MEMBERSHIP change (a day
+ * was added and/or removed — e.g. Remove Day, Add Day, Duplicate Day).
+ *
+ * Used by plans/page.tsx's cross-tab days[] storage listener to decide
+ * whether a genuine cross-tab days[] change also implies the shared
+ * plans/items storage may have changed: Remove Day deletes that day's plan
+ * items in the same handler that shrinks `days`, so a membership change
+ * observed from another tab means this tab's own in-flight pull must not
+ * apply a stale cloud items snapshot (which would still contain the
+ * removed day's items) and persist it back over the other tab's newer
+ * plans storage, resurrecting items it just deleted. A pure reorder never
+ * touches items, so it must NOT trigger this coupling — doing so would
+ * unnecessarily block an otherwise-valid cloud plans apply, regressing the
+ * SH.2 guarantee that unrelated conflict domains stay independent.
+ */
+export function isDaysMembershipChange(prevDayIds: string[], nextDayIds: string[]): boolean {
+  if (prevDayIds.length !== nextDayIds.length) return true;
+  const nextSet = new Set(nextDayIds);
+  if (prevDayIds.some((id) => !nextSet.has(id))) return true;
+  const prevSet = new Set(prevDayIds);
+  return nextDayIds.some((id) => !prevSet.has(id));
+}
+
+/**
+ * Reference cases for isDaysMembershipChange() — Codex P1 #1 fix. Run from
+ * Node (mirrors the DEV_PLAN_ALIAS_CASES convention in plansMatching.ts):
+ *   import { DEV_DAYS_MEMBERSHIP_CASES, isDaysMembershipChange } from "@/lib/crossDayChecks";
+ *   DEV_DAYS_MEMBERSHIP_CASES.forEach(c => {
+ *     const got = isDaysMembershipChange(c.prev, c.next);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DAYS_MEMBERSHIP_CASES: Array<{
+  name: string;
+  prev: string[];
+  next: string[];
+  expected: boolean;
+}> = [
+  {
+    name: "identical order — no change at all",
+    prev: ["day-1", "day-2"],
+    next: ["day-1", "day-2"],
+    expected: false,
+  },
+  {
+    name: "pure reorder — Move Up/Down swaps two days, same set (regression case B)",
+    prev: ["day-1", "day-2", "day-3"],
+    next: ["day-1", "day-3", "day-2"],
+    expected: false,
+  },
+  {
+    name: "day removed — Remove Day shrinks the set (regression case A)",
+    prev: ["day-1", "day-2", "day-3"],
+    next: ["day-1", "day-3"],
+    expected: true,
+  },
+  {
+    name: "day added — Add Day/Duplicate Day grows the set",
+    prev: ["day-1", "day-2"],
+    next: ["day-1", "day-2", "day-3"],
+    expected: true,
+  },
+  {
+    name: "same length, different set — swap-in-place edge case (length check alone is insufficient)",
+    prev: ["day-1", "day-2", "day-3"],
+    next: ["day-1", "day-2", "day-4"],
+    expected: true,
+  },
+];
+
 export function resolveIdentityKey(name: string, aliases: Record<string, string>): string {
   const key = normalizeKey(stripAnnotations(name));
   const aliasTarget =

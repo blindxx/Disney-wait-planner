@@ -43,7 +43,7 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, inferDayPark } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, inferDayPark, isDaysMembershipChange } from "@/lib/crossDayChecks";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
@@ -838,6 +838,15 @@ export default function PlansPage() {
   // domain's cloud state.
   const localPlansEditRef = useRef(false);
   const localDaysEditRef = useRef(false);
+  // Codex P1 fix — tracks whether another tab wrote this profile's shared
+  // Lightning storage key while this tab's pull is in flight. Plans doesn't
+  // own the Lightning domain, so it has no localLightningEditRef of its
+  // own — but the pull's Phase 7.6.3 hydration write below unconditionally
+  // overwrites the shared Lightning key with (possibly stale) cloud
+  // Lightning data, which would otherwise clobber a genuinely newer
+  // cross-tab Lightning edit made in another tab during this same window.
+  // Reset to false at the start of each pull, mirroring the domain refs.
+  const crossTabLightningChangedRef = useRef(false);
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
   // Gate: set by import pipelines (processImportText) to signal that the
@@ -1091,6 +1100,12 @@ export default function PlansPage() {
       const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
       if (e.key === expectedKey) {
         setLightningVersion((v) => v + 1);
+        // Codex P1 fix — another tab just wrote this profile's shared
+        // Lightning storage key. Mark it so this tab's in-flight pull (if
+        // any) skips its own unconditional Lightning-hydration write below
+        // rather than overwriting that newer cross-tab edit with a
+        // possibly-stale cloud snapshot.
+        crossTabLightningChangedRef.current = true;
       }
       if (e.key === daysKeyRef.current) {
         // Refresh this tab's local day state to match what the other tab
@@ -1152,6 +1167,29 @@ export default function PlansPage() {
         // this tab's own pull-applied write as if it were an external edit.
         if (isGenuineChange) {
           localDaysEditRef.current = true;
+          // Codex P1 fix — a genuine cross-tab days[] change is either a
+          // pure REORDER (same set of day IDs, different order — e.g. Move
+          // Up/Down) or a MEMBERSHIP change (a day was added/removed/
+          // duplicated — e.g. Remove Day, Add Day, Duplicate Day). Remove
+          // Day in particular deletes that day's plan items in the SAME
+          // handler that shrinks `days`, so a membership change structurally
+          // implies the shared plans/items storage may have changed too.
+          // Detected via isDaysMembershipChange() (see crossDayChecks.ts,
+          // with its own DEV_DAYS_MEMBERSHIP_CASES) by comparing the day-ID
+          // SET (not the order) before vs. after: a reorder keeps the same
+          // set, a membership change does not. Only a membership change
+          // also marks localPlansEditRef — this protects the plans domain
+          // from a still-in-flight pull applying a stale cloud items
+          // snapshot (which would still contain the removed day's items)
+          // and then persisting that stale snapshot back over the newer
+          // shared plans storage the other tab just wrote, resurrecting
+          // items it just deleted. A pure reorder never touches items, so
+          // it deliberately leaves localPlansEditRef untouched — preserving
+          // SH.2's guarantee that an unrelated cloud plans apply is not
+          // blocked by a same-tab or cross-tab reorder alone.
+          if (isDaysMembershipChange(daysRef.current, next)) {
+            localPlansEditRef.current = true;
+          }
         }
       }
     }
@@ -1484,6 +1522,10 @@ export default function PlansPage() {
     // applying the other domain's cloud result (SH.2 — Conflict Domains).
     localPlansEditRef.current = false;
     localDaysEditRef.current = false;
+    // Codex P1 fix — reset alongside the domain refs so a foreign Lightning
+    // write observed before this pull started never leaks into this pull's
+    // hydration decision.
+    crossTabLightningChangedRef.current = false;
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
@@ -1502,19 +1544,13 @@ export default function PlansPage() {
         // hydrationSucceeded pattern used for the plans/lightning dataset
         // writes and Lightning's own checked days[] hydration write.
         let daysWriteFailed = false;
-        // SH.2 — cloudItems/cloudDayIds are derived once (pure, no state
-        // writes) whenever a valid cloud plans payload exists, independent
-        // of whether localPlansEditRef blocks applying them to `items`
-        // below. The days-domain merge further down needs cloudDayIds even
-        // when local plans win the plans-domain conflict, so a day
-        // referenced only by an as-yet-unapplied cloud item still gets
-        // represented in the days list.
+        // SH.2 — cloudItems is derived once (pure, no state writes)
+        // whenever a valid cloud plans payload exists, independent of
+        // whether localPlansEditRef blocks applying it to `items` below.
         let cloudItems: PlanItem[] | null = null;
-        let cloudDayIds: string[] = [];
         if (cloud) {
           // Phase 8.0.1 — normalize dayIds from cloud before applying to state.
           cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
-          cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
         }
         // Plans domain: only apply cloud items if no local plans edits
         // occurred while the pull was in flight. Either way, the sync gate
@@ -1536,6 +1572,20 @@ export default function PlansPage() {
             }
           }
         }
+        // Codex P1 #2 fix — the days-domain safety net below must reconcile
+        // against whichever plans item dataset actually WON this pull's
+        // conflict decision, not always the cloud snapshot. When cloud
+        // plans applied (above), that's cloudItems; when local plans won
+        // (localPlansEditRef.current) — or there was no valid cloud payload
+        // to apply at all — the winning dataset is the CURRENT local items,
+        // read via itemsRef (always up to date, unlike a stale closure)
+        // rather than the `items` state captured when this effect was
+        // created. Sourcing this from cloudItems unconditionally would let
+        // a day referenced only by winning local items get dropped from
+        // days[] whenever local plans won, violating the invariant that
+        // every persisted item's dayId belongs to persisted days[].
+        const winningPlanItems = !localPlansEditRef.current && cloudItems ? cloudItems : itemsRef.current;
+        const winningItemDayIds = [...new Set(winningPlanItems.map((it) => it.dayId))];
         // Days domain: gated independently of the plans-domain guard above
         // — a local days[] edit/reorder protects cloud days from applying
         // even when cloud plans just applied, and vice versa. Requires
@@ -1577,7 +1627,7 @@ export default function PlansPage() {
             // so localDaysEditRef.current === false here guarantees `days`
             // has not changed since this pull started, i.e. it IS the
             // fresh value.
-            const extra = cloudDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
+            const extra = winningItemDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
             const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
             if (next.join(",") !== days.join(",")) {
               // Checked write (not saveDays(), which swallows failures): a
@@ -1620,13 +1670,37 @@ export default function PlansPage() {
             }
           } else {
             setDays((prev) => {
-              const extra = cloudDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+              const extra = winningItemDayIds.filter((id) => !prev.includes(id)).sort(daySort);
               if (extra.length === 0) return prev;
               const next = [...prev, ...extra];
               saveDays(next, daysKeyRef.current);
               return next;
             });
           }
+        } else if (cloud) {
+          // Codex P1 fix — invariant safety net: even when a local days[]
+          // edit/reorder is protecting the persisted ORDER from a stale/
+          // rejected cloud days[] replacement (localDaysEditRef.current
+          // true), every persisted item's dayId must still belong to
+          // persisted days[]. If cloud plans won the plans-domain conflict
+          // above (localPlansEditRef.current false) and reference a day not
+          // yet known locally — e.g. added on another device whose days[]
+          // sync raced with this device's own local reorder — it must
+          // still be appended here. Purely additive: never reorders or
+          // removes existing entries, so it cannot disturb whatever order
+          // this device's local edit is protecting, preserving SH.2's pure-
+          // reorder independence. Uses the functional setDays(prev => ...)
+          // form (not the raw `days` closure the branch above uses) because
+          // we are NOT guaranteed `days` is fresh here — localDaysEditRef.
+          // current === true means it may have changed since this pull
+          // started.
+          setDays((prev) => {
+            const extra = winningItemDayIds.filter((id) => !prev.includes(id)).sort(daySort);
+            if (extra.length === 0) return prev;
+            const next = [...prev, ...extra];
+            saveDays(next, daysKeyRef.current);
+            return next;
+          });
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate lightning into localStorage
         // so sync pushes always include a complete dataset regardless of which page loads first.
@@ -1635,7 +1709,19 @@ export default function PlansPage() {
         // treat as empty data on the next push — potentially overwriting valid cloud state.
         let hydrationSucceeded = true;
         if (typeof window !== "undefined") {
-          if (planner?.lightning) {
+          // Codex P1 fix — skip this unconditional overwrite when another
+          // tab wrote the shared Lightning storage key while this pull was
+          // in flight (crossTabLightningChangedRef). That other tab's write
+          // is a genuinely newer local edit; this pull's cloud snapshot may
+          // predate it (the other tab's own push may not have reached the
+          // server yet), so applying it here would silently revert that
+          // edit in shared storage — and, since Lightning's own page
+          // reactively reloads its items from this exact key on every
+          // cross-tab write, could even revert it out of that page's
+          // in-memory state. Skipping is not a failure — hydrationSucceeded
+          // stays true — it simply defers to the newer local state, exactly
+          // like skipping a domain's own conflicted apply does elsewhere.
+          if (planner?.lightning && !crossTabLightningChangedRef.current) {
             try {
               localStorage.setItem(
                 profileKeysForPull.lightning,
