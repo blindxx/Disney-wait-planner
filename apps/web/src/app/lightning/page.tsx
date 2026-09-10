@@ -775,7 +775,10 @@ export default function LightningPage() {
     // SH.2 architecture — freeze this pull's causal baseline NOW, before
     // the GET is even issued (Codex P1 #2). `pullStartBaseline` is closed
     // over by `.then()` below and consulted there instead of any ref — see
-    // captureConfirmedSnapshotForPull()'s own doc above.
+    // captureConfirmedSnapshotForPull()'s own doc above. Codex P1 fix (8th
+    // round) — this is a floor, not necessarily what winner selection
+    // actually uses: mirrors plans/page.tsx exactly, see `effectiveBaseline`
+    // below.
     const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
     // SH.2 architecture (Codex P1, 7th round) — read any still-unresolved
     // beacon's opId BEFORE this pull's fetch starts. Mirrors
@@ -784,7 +787,7 @@ export default function LightningPage() {
       ? getPendingBeaconOpId(activeUserIdRef.current, activeProfileIdRef.current)
       : null;
     void pullPlanner(activeProfileIdRef.current, pendingBeaconOpId)
-      .then((planner) => {
+      .then(async (planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
         // Codex fix — tracks whether the checked authoritative days[] write
@@ -798,6 +801,34 @@ export default function LightningPage() {
           cloudLightningItems = migrateLightningDayIds(cloud.items as LightningItem[]);
         }
         const cloudDaysOrder = planner?.days;
+
+        // SH.2 architecture (Codex P1, 8th round) — PULL ORDER: resolve any
+        // pending beacon's fate against THIS SAME GET response BEFORE any
+        // winner is selected. Mirrors plans/page.tsx exactly — see its own
+        // detailed doc for the full rationale.
+        const beaconAccepted =
+          pendingBeaconOpId !== null &&
+          planner?.opStatus?.opId === pendingBeaconOpId &&
+          planner?.opStatus?.found === true;
+        if (activeUserIdRef.current && pendingBeaconOpId) {
+          await resolveConfirmedSnapshotAfterBeacon(
+            activeUserIdRef.current,
+            activeProfileIdRef.current,
+            pendingBeaconOpId,
+            beaconAccepted,
+            planner?.revision ?? null,
+            planner
+          );
+        }
+        // A newer pull may have started (and set `cancelled`) while the
+        // await above was in flight — re-check before this stale pull
+        // mutates anything further.
+        if (cancelled) return;
+        // This pull's EFFECTIVE baseline for winner selection — mirrors
+        // plans/page.tsx exactly.
+        const effectiveBaseline = beaconAccepted
+          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch)
+          : pullStartBaseline;
 
         // SH.2 architecture — read CURRENT local storage fresh, right now,
         // for both domains this page owns. This is what actually closes
@@ -821,11 +852,11 @@ export default function LightningPage() {
         // own detailed doc). When this transition's ownership check found
         // the raw content in storage attributed to a different, known
         // identity, every "current" fed into a conflict decision below is
-        // forced to equal this pull's own frozen baseline instead of a
+        // forced to equal this pull's own effective baseline instead of a
         // real (possibly foreign-owned) read.
-        const itemsForComparison = contentOwnershipMismatch ? pullStartBaseline.items : currentItems;
-        const daysForComparison = contentOwnershipMismatch ? pullStartBaseline.days : currentDays;
-        const plansRawForComparison = contentOwnershipMismatch ? pullStartBaseline.plansRaw : currentPlansRaw;
+        const itemsForComparison = contentOwnershipMismatch ? effectiveBaseline.items : currentItems;
+        const daysForComparison = contentOwnershipMismatch ? effectiveBaseline.days : currentDays;
+        const plansRawForComparison = contentOwnershipMismatch ? effectiveBaseline.plansRaw : currentPlansRaw;
 
         // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
         // (Plans) dataset's own local-vs-cloud CANDIDATE (winning items,
@@ -833,26 +864,27 @@ export default function LightningPage() {
         // below can reconcile it structurally alongside Lightning's own
         // items — not just extend days[] with its day IDs. Same
         // baseline-comparison model as Lightning's own domains: a fresh
-        // raw read compared against pullStartBaseline.plansRaw (this
-        // pull's frozen causal baseline) tells whether Plans changed since
-        // this pull started. Codex P1 fix (4th round) — the actual
-        // hydration WRITE to Plans' storage is deferred until AFTER
+        // raw read compared against effectiveBaseline.plansRaw (this
+        // pull's causal baseline, advanced ahead of any pre-fetch freeze if
+        // an accepted beacon was just resolved above) tells whether Plans
+        // changed since this pull started. Codex P1 fix (4th round) — the
+        // actual hydration WRITE to Plans' storage is deferred until AFTER
         // reconciliation below (it needs the sanitized result, not the raw
         // cloud payload — see reconcilePlannerSnapshot's own doc), unlike
         // the 2nd round's version of this code which wrote here first.
-        const plansChangedLocally = plansRawForComparison !== pullStartBaseline.plansRaw;
+        const plansChangedLocally = plansRawForComparison !== effectiveBaseline.plansRaw;
         const plansCandidateItems: unknown[] =
           !plansChangedLocally && planner?.plans
             ? (planner.plans.items as unknown[])
             : parsePlansRawItems(plansRawForComparison);
 
         const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
-          pullStartBaseline.items,
+          effectiveBaseline.items,
           itemsForComparison,
           cloudLightningItems
         );
         const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
-          pullStartBaseline.days,
+          effectiveBaseline.days,
           daysForComparison,
           cloudDaysOrder
         );
@@ -876,7 +908,7 @@ export default function LightningPage() {
           reconcilePlannerSnapshot(
             { items: itemsCandidate, changedLocally: itemsChangedLocally },
             { items: plansCandidateItems, changedLocally: plansChangedLocally },
-            pullStartBaseline.days,
+            effectiveBaseline.days,
             daysCandidate
           );
 
@@ -1028,22 +1060,9 @@ export default function LightningPage() {
           setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
         }
 
-        // SH.2 architecture (Codex P1, 7th round) — BEACON UNCERTAINTY via
-        // SERVER-VERIFIABLE OPERATION IDENTITY. Mirrors plans/page.tsx
-        // exactly — see its own detailed comment and
-        // resolveConfirmedSnapshotAfterBeacon's doc in syncHelper.ts.
-        if (activeUserIdRef.current && pendingBeaconOpId) {
-          const beaconAccepted =
-            planner?.opStatus?.opId === pendingBeaconOpId && planner?.opStatus?.found === true;
-          void resolveConfirmedSnapshotAfterBeacon(
-            activeUserIdRef.current,
-            activeProfileIdRef.current,
-            pendingBeaconOpId,
-            beaconAccepted,
-            planner?.revision ?? null,
-            planner
-          );
-        }
+        // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
+        // MOVED to the top of this `.then()`, before winner selection.
+        // Mirrors plans/page.tsx exactly — see its own detailed doc.
 
         // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
         // DURABLE confirmed baseline for whichever domain(s) this pull

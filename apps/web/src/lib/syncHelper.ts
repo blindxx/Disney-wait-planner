@@ -61,14 +61,22 @@ Reviewers should check any changes affecting:
  *                                                       (7th round; see its
  *                                                       own doc)
  *   await resolveConfirmedSnapshotAfterBeacon(userId, — resolve a pending
- *     profileId, beaconAccepted, cloudRevision,          beacon's fate
- *     cloudSnapshot)                                     against a
+ *     profileId, resolvedOpId, beaconAccepted,            beacon's fate
+ *     cloudRevision, cloudSnapshot)                       against a
  *                                                         just-fetched GET's
  *                                                         server-verified
- *                                                         opStatus (7th
- *                                                         round; see its own
- *                                                         doc), then clear
+ *                                                         opStatus, then
+ *                                                         (only when
+ *                                                         accepted) clear
  *                                                         pendingBeaconOpId
+ *                                                         (7th/8th rounds;
+ *                                                         see its own doc —
+ *                                                         MUST be awaited
+ *                                                         and its result
+ *                                                         folded into this
+ *                                                         pull's baseline
+ *                                                         BEFORE winner
+ *                                                         selection)
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -619,11 +627,11 @@ function clearPendingBeaconOpId(userId: string, profileId: string): void {
 }
 
 /**
- * SH.2 architecture (Codex P1, 7th round) — BEACON UNCERTAINTY resolution
- * via server-verified operation identity. Call this after EVERY successful
- * pull (a genuinely resolved GET — never from a `.catch()` branch, which
- * teaches nothing about a pending beacon's fate) for the SAME
- * (userId, profileId) the pull was for, passing:
+ * SH.2 architecture (Codex P1, 7th round; hardened 8th round) — BEACON
+ * UNCERTAINTY resolution via server-verified operation identity. Call this
+ * after EVERY successful pull (a genuinely resolved GET — never from a
+ * `.catch()` branch, which teaches nothing about a pending beacon's fate)
+ * for the SAME (userId, profileId) the pull was for, passing:
  *   • `beaconAccepted` — computed by the caller as
  *     `pendingOpId !== null && opStatus?.opId === pendingOpId && opStatus.found === true`,
  *     where `pendingOpId` is what getPendingBeaconOpId() returned BEFORE
@@ -636,25 +644,49 @@ function clearPendingBeaconOpId(userId: string, profileId: string): void {
  * Delegates to resolveConfirmedAfterBeacon() (syncPayload.ts) for the
  * actual decision — see its own doc for the full accepted/superseded/
  * failed contract — under the SAME lock commitConfirmedBaseline() uses, so
- * this can never race it into a regressed confirmed snapshot. Always
- * clears `pendingBeaconOpId` afterward (via the caller — see below):
- * a successful GET is always conclusive enough to stop treating ANY
- * previously-pending beacon as unresolved, matching from the 6th round.
+ * this can never race it into a regressed confirmed snapshot.
  *
- * Safe to call with `beaconAccepted` false (including when no beacon was
- * ever pending) — it is then a no-op that never touches the lock at all,
- * since resolveConfirmedAfterBeacon() would just pass `current` through
- * unchanged; skipping the lock entirely in that case is a pure
- * optimization, not a correctness requirement.
+ * Codex P1 fix (8th round) — TWO further corrections:
  *
- * `resolvedOpId` is the opId THIS pull looked up (i.e. what
- * getPendingBeaconOpId() returned before the pull's fetch started) — it is
- * cleared only if it is STILL the stored value (a plain compare-and-clear,
- * no lock needed since it's a single synchronous read+write): if a NEWER
- * beacon overwrote pendingBeaconOpId while this pull's fetch was in
- * flight (e.g. the tab is navigating away right as a pull resolves), that
- * newer, still-genuinely-unresolved opId must survive for the NEXT pull to
- * resolve, rather than being wiped out by this one's unconditional clear.
+ * (1) MUST BE AWAITED AND ACTED ON BEFORE THIS PULL SELECTS WINNERS. The
+ * 7th round called this only at the very END of the pull effect, after
+ * plans/lightning/days winners had already been chosen against the
+ * FROZEN pre-fetch `pullStartBaseline`. If this pull's beacon was in fact
+ * accepted — and, per the GET response's own opStatus, has already been
+ * folded into (or superseded within) the cloud state this SAME GET
+ * returned — using the stale pre-fetch baseline for winner selection could
+ * classify this device's own already-accepted local content as a "local
+ * edit" relative to that stale baseline, letting it be re-pushed over a
+ * newer cloud write the GET already revealed. The caller MUST now: await
+ * this function, then (only when `beaconAccepted` is true) re-derive the
+ * pull's EFFECTIVE baseline from a FRESH getConfirmedSnapshot() call
+ * (mirroring captureConfirmedSnapshotForPull()'s own transformation) and
+ * use THAT for every winner-selection comparison this pull performs — see
+ * each page's pull effect for the exact sequencing. When Web Locks are
+ * unavailable, this promotion silently no-ops (see
+ * withConfirmedSnapshotLock's own fail-safe doc) and a fresh
+ * getConfirmedSnapshot() read simply reproduces the SAME value
+ * `pullStartBaseline` already had — safe, and requires no special-casing
+ * by the caller.
+ *
+ * (2) NEVER CLEARS `pendingBeaconOpId` ON `beaconAccepted === false`. A
+ * `false` answer (see route.ts's GET doc) is NOT proof the beacon will
+ * never be accepted — even under the 8th round's now-lock-serialized
+ * server lookup, a beacon whose HTTP request has not yet reached the
+ * server at all is indistinguishable, at lookup time, from one that will
+ * never arrive. Clearing the marker on an inconclusive `false` would
+ * permanently foreclose ever re-checking it: if that SAME beacon commits
+ * moments later (after this pull's GET already ran), a LATER pull with no
+ * opId left to check would fall back to ordinary reconciliation, which —
+ * if this device's local storage still holds exactly the beacon's own
+ * content — could misclassify it as a fresh unsynced edit and re-push it
+ * over whatever newer state has since landed. Only `beaconAccepted ===
+ * true` (the one fact this architecture can actually prove) ever clears
+ * it; a beacon that truly never arrives simply leaves its opId in place
+ * indefinitely (harmless — every subsequent pull re-checks it for free)
+ * until either it is eventually found accepted, or a NEW beacon overwrites
+ * the key outright (setPendingBeaconOpId is last-write-wins, so only the
+ * MOST RECENT beacon's fate is ever worth tracking).
  */
 export async function resolveConfirmedSnapshotAfterBeacon(
   userId: string,
@@ -664,10 +696,11 @@ export async function resolveConfirmedSnapshotAfterBeacon(
   cloudRevision: number | null,
   cloudSnapshot: SyncedPlannerPayload | null
 ): Promise<void> {
+  if (!beaconAccepted) return;
   if (typeof window !== "undefined" && getPendingBeaconOpId(userId, profileId) === resolvedOpId) {
     clearPendingBeaconOpId(userId, profileId);
   }
-  if (typeof window === "undefined" || !beaconAccepted) return;
+  if (typeof window === "undefined") return;
   await withConfirmedSnapshotLock(userId, profileId, (current) =>
     resolveConfirmedAfterBeacon(current, beaconAccepted, cloudRevision, cloudSnapshot)
   );

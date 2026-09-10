@@ -98,11 +98,28 @@ ALTER TABLE user_planner ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAU
 -- CONFLICT DO NOTHING at the insert site makes a retried write with the
 -- same opId idempotent. Deliberately unbounded/unpruned — see this
 -- feature's own round-7 report for the accepted operational tradeoff.
+-- Codex P1 fix (8th round) — `updated_at` stores the EXACT `updated_at` the
+-- original accepted write produced (copied from user_planner's own
+-- RETURNING clause at insert time), NOT a re-read of user_planner's
+-- CURRENT value. This is what lets a duplicate delivery of the same
+-- client_op_id (handleWrite in route.ts, checked under the SAME
+-- per-(user,profile) advisory lock as the write itself, BEFORE any merge/
+-- upsert runs) return the ORIGINAL accepted {updatedAt, revision} result
+-- without touching user_planner again — by the time a duplicate arrives,
+-- user_planner may already reflect a newer write, so re-reading it would
+-- return the WRONG (newer, unrelated) result for what is supposed to be a
+-- pure idempotent replay of THIS specific operation.
 CREATE TABLE IF NOT EXISTS user_planner_writes (
   user_id       TEXT        NOT NULL,
   profile_id    TEXT        NOT NULL,
   client_op_id  TEXT        NOT NULL,
   revision      BIGINT      NOT NULL,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id, profile_id, client_op_id)
 );
+
+-- Idempotent self-heal — same rationale as user_planner's own `revision`
+-- backfill above: picks up `updated_at` on a table created by round 7,
+-- before this column existed, on an already-deployed database.
+ALTER TABLE user_planner_writes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

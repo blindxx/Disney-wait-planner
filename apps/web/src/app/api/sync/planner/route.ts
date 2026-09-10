@@ -12,21 +12,45 @@
  *   400: missing or invalid profileId
  *   401: not signed in
  *
- * `lastOpId` (SH.2, Codex P1 7th round) is OPTIONAL — when supplied, the
- * response also carries `opStatus`, a conclusive, server-verified answer to
- * "was the write tagged with this opId ever accepted", looked up against the
- * append-only `user_planner_writes` table (see db-schema.sql and
- * handleWrite's own doc below). This is independent of whichever of the
- * three response paths below actually fires (main / legacy-concurrent-writer
- * / legacy-self-heal) — it is a lookup against a completely separate table,
- * keyed only by (userId, profileId, lastOpId), so it is computed once, up
- * front, and attached to whichever response the rest of this handler
- * produces. Never computed at all for the 204 path — nothing was found for
- * this user+profile at all, so there is no planner state to report
- * `opStatus` alongside (a caller with a pendingBeacon opId still gets a
- * conclusive answer: `found` reflects the same "did user_planner_writes ever
- * record this exact opId" fact regardless of whether user_planner itself
- * currently has a row).
+ * `lastOpId` (SH.2, Codex P1 7th/8th rounds) is OPTIONAL — when supplied,
+ * the response also carries `opStatus`, an answer to "was the write tagged
+ * with this opId ever accepted", looked up against the append-only
+ * `user_planner_writes` table (see db-schema.sql and handleWrite's own doc
+ * below).
+ *
+ * Codex P1 fix (8th round) — the 7th round's opStatus lookup ran as a
+ * SEPARATE, UNLOCKED query, entirely independent of the per-(user,profile)
+ * advisory lock that serializes every PUT/POST for this pair. That let a
+ * concurrent write's transaction be ACTIVELY IN PROGRESS (already past this
+ * lookup's own read, not yet committed) at the exact moment this lookup
+ * ran, so `found: false` could be returned even though the operation was, at
+ * that very instant, in the process of being accepted — a false negative a
+ * client could wrongly treat as conclusive proof of failure. The fix: when
+ * `lastOpId` is supplied, the ENTIRE read (opStatus lookup + the
+ * user_planner select + the legacy-migration fallback, whichever fires) now
+ * runs inside ONE transaction holding the SAME `pg_advisory_xact_lock` used
+ * by handleWrite — see getPlannerWithOpStatus() below. Any write already
+ * IN PROGRESS for this (user, profile) is holding that same lock, so this
+ * lookup simply waits for it to commit (or roll back) before proceeding,
+ * and then sees its up-to-date, fully-committed result — never a
+ * point-in-time snapshot torn mid-write. This makes `found` a DETERMINISTIC
+ * fact as of a single consistent instant, not a racy unlocked read.
+ *
+ * What this does NOT and cannot resolve: a write whose HTTP request has not
+ * yet reached this server process at all (still queued in the browser, or
+ * in transit over the network) has no transaction to serialize against —
+ * no lock, however placed, can make the server aware of a request it has
+ * not received yet. `found: false` therefore still never means "will never
+ * be accepted", only "not accepted as of this fully-serialized instant" —
+ * see resolveConfirmedSnapshotAfterBeacon's own doc in syncHelper.ts for
+ * why the client accordingly treats `found: false` as inconclusive (never
+ * clearing its pending-beacon marker on it) and only `found: true` as
+ * proof, rather than the server trying to manufacture a third "unresolved"
+ * wire value for a fact it fundamentally cannot observe.
+ *
+ * When `lastOpId` is omitted, GET is unaffected — the ordinary, unlocked
+ * fast path (unchanged from prior rounds) is used, since there is no
+ * pending operation to verify.
  *
  * PUT  /api/sync/planner?profileId=…&clientOpId=… — merge-write the planner
  *   blob for (user, profile)
@@ -41,18 +65,42 @@
  *   401: not signed in
  *   413: payload exceeds size limit
  *
- * `clientOpId` (SH.2, Codex P1 7th round) is OPTIONAL and, when present, is
- * always a QUERY parameter — NEVER a body field, since a body field would
- * trip findUnknownDomainKeys' unknown-top-level-key rejection below. When
- * supplied, this write's acceptance is durably recorded in
- * `user_planner_writes` (ON CONFLICT DO NOTHING — a retried beacon carrying
- * the same opId is idempotent) in the SAME transaction, under the SAME
- * per-(user,profile) advisory lock, as the main upsert — so a later
- * `lastOpId` GET lookup can never observe a write recorded as accepted that
- * didn't actually land, or vice versa. An ordinary push that omits
- * `clientOpId` (the debounced doPush() path) is completely unaffected — this
- * table is populated only for callers that opt in by supplying one (today,
- * only registerUnloadSync's beacon).
+ * `clientOpId` (SH.2, Codex P1 7th/8th rounds) is OPTIONAL and, when
+ * present, is always a QUERY parameter — NEVER a body field, since a body
+ * field would trip findUnknownDomainKeys' unknown-top-level-key rejection
+ * below.
+ *
+ * Codex P1 fix (8th round) — TRUE IDEMPOTENCY. The 7th round recorded
+ * acceptance into `user_planner_writes` AFTER an UNCONDITIONAL merge/
+ * upsert — every delivery of a given clientOpId, duplicate or not, still
+ * re-ran the full merge against whatever `user_planner` currently held.
+ * A delayed duplicate beacon (e.g. a network-level retry) arriving AFTER a
+ * newer write C had already landed would merge ITS OWN (stale) payload
+ * against C and overwrite C's domains with the duplicate's old content —
+ * `user_planner_writes`' ON CONFLICT DO NOTHING only deduplicated the
+ * LEDGER row, never the planner mutation itself. The fix: `clientOpId`
+ * now identifies ONE idempotent operation for real. Under the SAME
+ * advisory lock, BEFORE any merge/upsert, handleWrite first checks whether
+ * this exact (userId, profileId, clientOpId) is already recorded:
+ *   • already recorded — the planner is NOT touched again; the ORIGINAL
+ *     accepted {updatedAt, revision} (copied verbatim from the ledger row,
+ *     not re-derived from user_planner's possibly-since-changed current
+ *     state) is returned as-is.
+ *   • not yet recorded — the merge/upsert proceeds exactly as before, and
+ *     the ledger row is inserted (still ON CONFLICT DO NOTHING, as
+ *     defense-in-depth against a genuinely simultaneous duplicate that
+ *     also passed the check — see handleWrite's own doc) with the revision
+ *     AND updated_at this write actually produced.
+ * Both branches happen inside the SAME transaction/lock as every other
+ * write for this (user, profile), so two literally-concurrent deliveries
+ * of the same clientOpId are still fully serialized: the second one to
+ * acquire the lock always sees the first one's already-committed ledger
+ * row and takes the "already recorded" branch. A duplicate can therefore
+ * never overwrite a planner revision written after the original — see
+ * handleWrite's own doc for the exact sequencing. An ordinary push that
+ * omits `clientOpId` (the debounced doPush() path) is completely
+ * unaffected — this table is populated and consulted only for callers that
+ * opt in by supplying one (today, only registerUnloadSync's beacon).
  *
  * SH.2 (Codex P1) — `revision` is a monotonically increasing integer
  * (backed by the `user_planner_revision_seq` Postgres sequence — see
@@ -107,6 +155,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession, type Session } from "next-auth";
+import type { Pool, PoolClient } from "pg";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
 import { findUnknownDomainKeys, mergePlannerDomains, parseSyncedPlannerPayload } from "@/lib/syncPayload";
@@ -149,23 +198,29 @@ function validateOpId(raw: string | null): string | null {
 }
 
 type OpStatus = { opId: string; found: boolean; revision: number | null };
+type Queryable = Pool | PoolClient;
 
 /**
  * Look up whether `opId` was ever durably recorded as accepted for this
  * (userId, profileId) — see user_planner_writes' own doc in db-schema.sql.
- * Independent of, and unlocked relative to, whatever else this request does
- * with `user_planner` — the two tables are queried separately, and this
- * lookup's own correctness never depends on lock ordering against the main
- * upsert/select paths, since `user_planner_writes` is append-only (a row,
- * once inserted, is never updated or deleted).
+ *
+ * Codex P1 fix (8th round) — accepts a `Queryable` (a bare `Pool` OR an
+ * already-`BEGIN`-ed `PoolClient` holding the per-(user,profile) advisory
+ * lock), so the SAME lookup logic serves both: the ordinary unlocked
+ * fast path (no `lastOpId` — never calls this at all) and the LOCKED path
+ * (getPlannerWithOpStatus below), which passes its own transactional
+ * `client` so this lookup is serialized against any write for this exact
+ * (user, profile) — see this file's module doc for why an unlocked lookup
+ * could return a stale `found: false` while a concurrent write was still
+ * committing.
  */
 async function lookupOpStatus(
-  pool: ReturnType<typeof getPool>,
+  db: Queryable,
   userId: string,
   profileId: string,
   opId: string
 ): Promise<OpStatus> {
-  const { rows } = await pool.query<{ revision: string }>(
+  const { rows } = await db.query<{ revision: string }>(
     "SELECT revision FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
     [userId, profileId, opId]
   );
@@ -175,6 +230,131 @@ async function lookupOpStatus(
 }
 
 // ── GET ──────────────────────────────────────────────────────────────────────
+
+/**
+ * The `lastOpId`-present path (Codex P1, 8th round). Runs the ENTIRE read —
+ * opStatus lookup, the user_planner select, and the legacy-migration
+ * fallback if it fires — inside ONE transaction holding the same
+ * `pg_advisory_xact_lock` handleWrite uses for this (user, profile). See
+ * this file's module doc for why: it eliminates the race where an unlocked
+ * opStatus lookup could return `found: false` while the write that would
+ * have made it `true` was still an in-progress, uncommitted transaction.
+ * Structurally identical to the pre-8th-round unlocked fast path otherwise
+ * — same three response tiers, same normalization/migration logic — just
+ * fully serialized and with `opStatus` attached to every response tier
+ * (never reachable on 204, since a write that recorded an opId always
+ * also upserts a `user_planner` row in the SAME transaction — see
+ * handleWrite's own doc).
+ */
+async function getPlannerWithOpStatus(
+  pool: Pool,
+  userId: string,
+  profileId: string,
+  lastOpId: string
+): Promise<NextResponse> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [userId, profileId]);
+
+    const opStatus = await lookupOpStatus(client, userId, profileId, lastOpId);
+
+    const { rows } = await client.query<{ planner_json: string; updated_at: Date; revision: string }>(
+      "SELECT planner_json, updated_at, revision FROM user_planner WHERE user_id = $1 AND profile_id = $2",
+      [userId, profileId]
+    );
+    if (rows.length > 0) {
+      let plannerJson: unknown;
+      try {
+        plannerJson = JSON.parse(rows[0].planner_json);
+      } catch {
+        // Stored data is corrupted — treat as missing and fall through to legacy
+      }
+      if (plannerJson !== undefined) {
+        await client.query("COMMIT");
+        return NextResponse.json({
+          plannerJson,
+          updatedAt: rows[0].updated_at.toISOString(),
+          revision: Number(rows[0].revision),
+          opStatus,
+        });
+      }
+    }
+
+    if (profileId === "default") {
+      const { rows: legacyRows } = await client.query<{ plans_json: string; updated_at: Date }>(
+        "SELECT plans_json, updated_at FROM user_plans WHERE user_id = $1",
+        [userId]
+      );
+      if (legacyRows.length > 0) {
+        let legacyPlans: unknown;
+        try {
+          legacyPlans = JSON.parse(legacyRows[0].plans_json);
+        } catch {
+          // Legacy data corrupted — treat as missing
+        }
+        if (
+          legacyPlans &&
+          typeof legacyPlans === "object" &&
+          !Array.isArray(legacyPlans) &&
+          typeof (legacyPlans as Record<string, unknown>).version === "number" &&
+          Array.isArray((legacyPlans as Record<string, unknown>).items)
+        ) {
+          const normalizedPlanner = {
+            version: 1,
+            plans: legacyPlans,
+            lightning: { version: 1, items: [] },
+          };
+          const normalizedJson = JSON.stringify(normalizedPlanner);
+          const legacyUpdatedAt = legacyRows[0].updated_at;
+          // Already holding the lock (unlike the unlocked fast path below,
+          // which needs its own separate re-check) — safe to write the
+          // legacy-migrated shape through directly, self-healing a
+          // corrupted row via DO UPDATE.
+          const { rows: migratedRows } = await client.query<{ revision: string }>(
+            `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at, revision)
+             VALUES ($1, $2, $3, $4, nextval('user_planner_revision_seq'))
+             ON CONFLICT (user_id, profile_id) DO UPDATE
+               SET planner_json = EXCLUDED.planner_json,
+                   updated_at   = EXCLUDED.updated_at,
+                   revision     = EXCLUDED.revision
+             RETURNING revision`,
+            [userId, profileId, normalizedJson, legacyUpdatedAt]
+          );
+          const migratedRevision = migratedRows[0]?.revision;
+          if (migratedRevision !== undefined) {
+            await client.query("COMMIT");
+            return NextResponse.json({
+              plannerJson: normalizedPlanner,
+              updatedAt: legacyUpdatedAt.toISOString(),
+              revision: Number(migratedRevision),
+              opStatus,
+            });
+          }
+          // Migration write unexpectedly returned nothing — fall through
+          // to the best-effort legacy-only response below (still commits;
+          // nothing was written, so there is nothing to roll back).
+          await client.query("COMMIT");
+          return NextResponse.json({
+            plannerJson: normalizedPlanner,
+            updatedAt: legacyUpdatedAt.toISOString(),
+            opStatus,
+          });
+        }
+      }
+    }
+
+    // Neither table has data — definitively empty. opStatus.found is
+    // structurally guaranteed false here (see this function's own doc).
+    await client.query("COMMIT");
+    return new NextResponse(null, { status: 204 });
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const session = await getServerSession(authOptions) as Session | null;
@@ -190,7 +370,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const lastOpId = validateOpId(req.nextUrl.searchParams.get("lastOpId"));
 
   const pool = getPool();
-  const opStatus = lastOpId ? await lookupOpStatus(pool, userId, profileId, lastOpId) : undefined;
+
+  // Codex P1 fix (8th round) — route through the locked path whenever there
+  // is an operation to verify; see getPlannerWithOpStatus's own doc and
+  // this file's module doc for why the lookup itself must be lock-
+  // serialized against concurrent writes. An ordinary pull with no pending
+  // beacon (the common case) takes the unchanged, unlocked fast path below.
+  if (lastOpId) {
+    return getPlannerWithOpStatus(pool, userId, profileId, lastOpId);
+  }
 
   // ── 1. Try new user_planner table first ──────────────────────────────────
   const { rows } = await pool.query<{ planner_json: string; updated_at: Date; revision: string }>(
@@ -210,7 +398,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         plannerJson,
         updatedAt: rows[0].updated_at.toISOString(),
         revision: Number(rows[0].revision),
-        ...(opStatus ? { opStatus } : {}),
       });
     }
   }
@@ -296,7 +483,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
                 plannerJson: freshParsed,
                 updatedAt: freshRows[0].updated_at.toISOString(),
                 revision: Number(freshRows[0].revision),
-                ...(opStatus ? { opStatus } : {}),
               });
             }
           }
@@ -324,7 +510,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
               plannerJson: normalizedPlanner,
               updatedAt: legacyUpdatedAt.toISOString(),
               revision: Number(migratedRevision),
-              ...(opStatus ? { opStatus } : {}),
             });
           }
         } catch {
@@ -337,7 +522,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({
           plannerJson: normalizedPlanner,
           updatedAt: legacyUpdatedAt.toISOString(),
-          ...(opStatus ? { opStatus } : {}),
         });
       }
     }
@@ -452,6 +636,33 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
       profileId,
     ]);
 
+    // Codex P1 fix (8th round) — TRUE IDEMPOTENCY: if this exact
+    // (userId, profileId, clientOpId) was already accepted by a PRIOR
+    // request, this is a duplicate delivery (network retry, a resend, or
+    // any other re-delivery of the identical operation) — return the
+    // ORIGINAL accepted result verbatim and do NOT touch `user_planner`
+    // again. Checked FIRST, before any merge/upsert, under the SAME
+    // advisory lock as the rest of this transaction, so two literally
+    // concurrent deliveries of the same clientOpId are fully serialized:
+    // whichever acquires the lock second always sees the first's
+    // already-committed ledger row here and takes this branch — a
+    // duplicate can therefore never merge/overwrite a planner revision
+    // written after the original (see this file's module doc for the full
+    // rationale, and required case #4/#5 in the round-8 report).
+    if (clientOpId) {
+      const { rows: existingOpRows } = await client.query<{ revision: string; updated_at: Date }>(
+        "SELECT revision, updated_at FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
+        [userId, profileId, clientOpId]
+      );
+      if (existingOpRows.length > 0) {
+        await client.query("COMMIT");
+        return NextResponse.json({
+          updatedAt: existingOpRows[0].updated_at.toISOString(),
+          revision: Number(existingOpRows[0].revision),
+        });
+      }
+    }
+
     const { rows: existingRows } = await client.query<{ planner_json: string }>(
       "SELECT planner_json FROM user_planner WHERE user_id = $1 AND profile_id = $2",
       [userId, profileId]
@@ -483,20 +694,30 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
       [userId, profileId, bodyToStore]
     );
 
-    // SH.2 (Codex P1, 7th round) — durably record acceptance of this write
-    // under its client-supplied opId, in the SAME transaction/lock as the
-    // upsert above, so a later `lastOpId` GET lookup can never observe
+    // SH.2 (Codex P1, 7th/8th rounds) — durably record acceptance of this
+    // write under its client-supplied opId, in the SAME transaction/lock as
+    // the upsert above, so a later `lastOpId` GET lookup can never observe
     // "accepted" without the write itself having actually landed (or vice
     // versa). Skipped entirely when the caller didn't supply one — see
-    // user_planner_writes' own doc in db-schema.sql. ON CONFLICT DO NOTHING
-    // makes a retried beacon carrying the same opId idempotent rather than
-    // erroring on the primary key.
+    // user_planner_writes' own doc in db-schema.sql. `updated_at` is copied
+    // from THIS write's own RETURNING clause (not a later re-read), so a
+    // duplicate delivery caught by the check above always replays the
+    // EXACT original result — see this file's module doc. ON CONFLICT DO
+    // NOTHING is defense-in-depth only: the per-(user,profile) advisory
+    // lock held for this entire transaction already makes it impossible
+    // for two requests to both pass the "not yet recorded" check above for
+    // the SAME clientOpId (the second can only reach that check after the
+    // first has committed and released the lock, at which point it would
+    // see the first's row and take the early-return branch instead) — this
+    // INSERT is therefore expected to always succeed in practice, and the
+    // clause exists only to fail safe rather than error if that invariant
+    // is ever violated.
     if (clientOpId) {
       await client.query(
-        `INSERT INTO user_planner_writes (user_id, profile_id, client_op_id, revision)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO user_planner_writes (user_id, profile_id, client_op_id, revision, updated_at)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (user_id, profile_id, client_op_id) DO NOTHING`,
-        [userId, profileId, clientOpId, rows[0].revision]
+        [userId, profileId, clientOpId, rows[0].revision, rows[0].updated_at]
       );
     }
 

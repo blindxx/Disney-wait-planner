@@ -1680,8 +1680,12 @@ export default function PlansPage() {
     // the GET is even issued (Codex P1 #2). `pullStartBaseline` is closed
     // over by `.then()` below and consulted there instead of any ref —
     // nothing between now and pull resolution (a push confirming, another
-    // tab writing storage) can change what this pull compares against.
-    // See captureConfirmedSnapshotForPull()'s own doc above.
+    // tab writing storage) can change what this pull compares against. See
+    // captureConfirmedSnapshotForPull()'s own doc above. Codex P1 fix (8th
+    // round) — this is a floor, not necessarily what winner selection
+    // actually uses: if THIS pull's own GET resolves an accepted beacon,
+    // `.then()` re-derives an `effectiveBaseline` from the freshly-promoted
+    // confirmed snapshot instead — see that block's own doc.
     const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
     // SH.2 architecture (Codex P1, 7th round) — read any still-unresolved
     // beacon's opId BEFORE this pull's fetch starts, so it can be passed as
@@ -1694,7 +1698,7 @@ export default function PlansPage() {
       ? getPendingBeaconOpId(activeUserIdRef.current, activeProfileIdRef.current)
       : null;
     void pullPlanner(activeProfileIdRef.current, pendingBeaconOpId)
-      .then((planner) => {
+      .then(async (planner) => {
         if (cancelled) return;
         // Extract the plans portion from the combined planner payload.
         const cloud = planner?.plans ?? null;
@@ -1713,6 +1717,58 @@ export default function PlansPage() {
           cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
         }
         const cloudDaysOrder = planner?.days;
+
+        // SH.2 architecture (Codex P1, 8th round) — PULL ORDER: resolve any
+        // pending beacon's fate against THIS SAME GET response BEFORE any
+        // winner is selected. `beaconAccepted` is a direct, server-verified
+        // fact (never inferred from content comparison or timing): the SAME
+        // opId this pull looked up (`pendingBeaconOpId`, read before the
+        // fetch) must match what THIS GET's own `opStatus` reports, AND
+        // that opStatus must say `found`. A definitive 204 (`planner` null)
+        // is structurally incompatible with `found` ever being true (see
+        // pullPlanner's own doc), so it correctly resolves to `false` here
+        // without needing to special-case it. See
+        // resolveConfirmedSnapshotAfterBeacon's own doc in syncHelper.ts for
+        // why this must be AWAITED and folded into this pull's baseline
+        // HERE, before winner selection, rather than only recorded at the
+        // end (7th round) — the 7th-round ordering let a stale pre-fetch
+        // baseline classify this device's own just-accepted content as an
+        // unsynced local edit and re-push it over cloud state this SAME GET
+        // had already revealed as newer.
+        const beaconAccepted =
+          pendingBeaconOpId !== null &&
+          planner?.opStatus?.opId === pendingBeaconOpId &&
+          planner?.opStatus?.found === true;
+        if (activeUserIdRef.current && pendingBeaconOpId) {
+          await resolveConfirmedSnapshotAfterBeacon(
+            activeUserIdRef.current,
+            activeProfileIdRef.current,
+            pendingBeaconOpId,
+            beaconAccepted,
+            planner?.revision ?? null,
+            planner
+          );
+        }
+        // A newer pull may have started (and set `cancelled`) while the
+        // await above was in flight — re-check before this stale pull
+        // mutates anything further.
+        if (cancelled) return;
+        // This pull's EFFECTIVE baseline for winner selection: when the
+        // beacon was just confirmed accepted, re-derive it from the
+        // NOW-updated confirmed snapshot (captureConfirmedSnapshotForPull
+        // reads getConfirmedSnapshot() fresh) rather than the frozen
+        // pre-fetch `pullStartBaseline` — so a domain this device already
+        // got acknowledged for is never mistaken for a fresh local edit
+        // relative to a now-stale baseline. Falls back to
+        // `pullStartBaseline` unchanged whenever no promotion happened (no
+        // beacon was pending, it wasn't accepted, or Web Locks were
+        // unavailable so the promotion silently no-op'd — re-reading
+        // confirmed in that case just reproduces the SAME value
+        // `pullStartBaseline` already had, so no special-casing is needed
+        // here either way).
+        const effectiveBaseline = beaconAccepted
+          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch)
+          : pullStartBaseline;
 
         // SH.2 architecture — read CURRENT local storage fresh, right now,
         // for both domains this page owns. This is what actually closes
@@ -1750,10 +1806,10 @@ export default function PlansPage() {
         // compare against the REAL on-disk values, so a resolved winner
         // that legitimately differs from contaminated storage still
         // actually overwrites it.
-        const itemsForComparison = contentOwnershipMismatch ? pullStartBaseline.items : currentItems;
-        const daysForComparison = contentOwnershipMismatch ? pullStartBaseline.days : currentDays;
+        const itemsForComparison = contentOwnershipMismatch ? effectiveBaseline.items : currentItems;
+        const daysForComparison = contentOwnershipMismatch ? effectiveBaseline.days : currentDays;
         const lightningRawForComparison = contentOwnershipMismatch
-          ? pullStartBaseline.lightningRaw
+          ? effectiveBaseline.lightningRaw
           : currentLightningRaw;
 
         // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
@@ -1762,10 +1818,11 @@ export default function PlansPage() {
         // reconcilePlannerSnapshot below can reconcile it structurally
         // alongside Plans' own items — not just extend days[] with its
         // day IDs. Same baseline-comparison model as Plans' own domains: a
-        // fresh raw read compared against pullStartBaseline.lightningRaw
-        // (this pull's frozen causal baseline) tells whether Lightning
-        // changed since this pull started.
-        const lightningChangedLocally = lightningRawForComparison !== pullStartBaseline.lightningRaw;
+        // fresh raw read compared against effectiveBaseline.lightningRaw
+        // (this pull's causal baseline, advanced ahead of any pre-fetch
+        // freeze if an accepted beacon was just resolved above) tells
+        // whether Lightning changed since this pull started.
+        const lightningChangedLocally = lightningRawForComparison !== effectiveBaseline.lightningRaw;
         // The candidate Lightning items are whichever content would win
         // for that domain this pull: cloud's, if Lightning didn't change
         // locally AND a valid cloud payload exists; otherwise the current
@@ -1778,12 +1835,12 @@ export default function PlansPage() {
             : parseLightningRawItems(lightningRawForComparison);
 
         const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
-          pullStartBaseline.items,
+          effectiveBaseline.items,
           itemsForComparison,
           cloudItems
         );
         const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
-          pullStartBaseline.days,
+          effectiveBaseline.days,
           daysForComparison,
           cloudDaysOrder
         );
@@ -1805,7 +1862,7 @@ export default function PlansPage() {
           reconcilePlannerSnapshot(
             { items: itemsCandidate, changedLocally: itemsChangedLocally },
             { items: lightningCandidateItems, changedLocally: lightningChangedLocally },
-            pullStartBaseline.days,
+            effectiveBaseline.days,
             daysCandidate
           );
 
@@ -1974,35 +2031,10 @@ export default function PlansPage() {
           setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
         }
 
-        // SH.2 architecture (Codex P1, 7th round) — BEACON UNCERTAINTY via
-        // SERVER-VERIFIABLE OPERATION IDENTITY: resolve any pendingBeacon
-        // opId left by a prior sendBeacon() against THIS pull's own GET
-        // response — see resolveConfirmedSnapshotAfterBeacon's own doc in
-        // syncHelper.ts and resolveConfirmedAfterBeacon's own doc in
-        // syncPayload.ts for the full accepted/superseded/failed contract.
-        // `beaconAccepted` is a direct, server-verified fact (never
-        // inferred from content comparison or timing): the SAME opId this
-        // pull looked up (`pendingBeaconOpId`, read before the fetch) must
-        // match what THIS GET's own `opStatus` reports, AND that opStatus
-        // must say `found`. A definitive 204 (`planner` null) is
-        // structurally incompatible with `found` ever being true (see
-        // pullPlanner's own doc), so it correctly resolves to `false` here
-        // without needing to special-case it. Independent of
-        // hydrationSucceeded/daysWriteFailed/primaryPersistSucceeded above
-        // — a valid GET response is conclusive about the beacon's fate
-        // regardless of whether this pull's OWN local writes succeeded.
-        if (activeUserIdRef.current && pendingBeaconOpId) {
-          const beaconAccepted =
-            planner?.opStatus?.opId === pendingBeaconOpId && planner?.opStatus?.found === true;
-          void resolveConfirmedSnapshotAfterBeacon(
-            activeUserIdRef.current,
-            activeProfileIdRef.current,
-            pendingBeaconOpId,
-            beaconAccepted,
-            planner?.revision ?? null,
-            planner
-          );
-        }
+        // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
+        // MOVED to the top of this `.then()`, before winner selection — see
+        // that block's own doc for why. Nothing beacon-related happens here
+        // anymore.
 
         // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
         // DURABLE confirmed baseline for whichever domain(s) this pull
