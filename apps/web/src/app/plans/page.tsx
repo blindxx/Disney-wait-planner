@@ -829,11 +829,15 @@ export default function PlansPage() {
 
   // Auth session — used to trigger cloud pull on sign-in
   const { status: sessionStatus } = useSession();
-  // Tracks whether the user made a local edit after the current pull started.
-  // Reset to false each time a new pull begins; set to true on any mutation.
-  // The pull callback checks this before applying cloud state so it never
-  // overwrites edits that happened while the GET was in flight.
-  const localEditRef = useRef(false);
+  // SH.2 — Conflict Domains: split from a single combined localEditRef into
+  // one ref per synced domain (plans/items, days), so a local edit to one
+  // domain only protects that domain from stale cloud hydration and does
+  // not unnecessarily block the other. Both reset to false each time a new
+  // pull begins; each is set to true only by a mutation to its own domain.
+  // The pull callback checks each independently before applying that
+  // domain's cloud state.
+  const localPlansEditRef = useRef(false);
+  const localDaysEditRef = useRef(false);
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
   // Gate: set by import pipelines (processImportText) to signal that the
@@ -1106,9 +1110,9 @@ export default function PlansPage() {
         // reorder this tab doesn't yet know about.
         const isGenuineChange = next.join(",") !== daysRef.current.join(",");
         // setDays is itself gated on isGenuineChange — not just the
-        // localEditRef assignment further down — because a separate,
-        // pre-existing effect (`useEffect(() => { ...; localEditRef.current
-        // = true; }, [days, initialized])`) marks localEditRef on ANY
+        // localDaysEditRef assignment further down — because a separate,
+        // pre-existing effect (`useEffect(() => { ...; localDaysEditRef.current
+        // = true; }, [days, initialized])`) marks localDaysEditRef on ANY
         // `days` state change, by reference, regardless of content. `next`
         // is always a fresh array from loadDays() even when its content is
         // identical to daysRef.current, so calling setDays(next)
@@ -1132,19 +1136,22 @@ export default function PlansPage() {
           setActiveDayId(next[0]);
           saveActiveDayId(next[0], activeDayKeyRef.current);
         }
-        // Only mark this a local edit — and thus block this tab's own
-        // in-flight initial pull from applying its cloud snapshot — when the
-        // other tab's write actually introduced an order this tab didn't
-        // already have. A no-op-relative-to-this-tab write (isGenuineChange
-        // === false) carries no real conflict to protect against, so it must
-        // not block an otherwise-valid pending pull's plans/items from
-        // applying. A genuine reorder still sets this exactly as before —
-        // real cross-tab reorder protection is unchanged. This only ever
-        // fires for writes from OTHER tabs (the tab that wrote the key never
-        // receives its own 'storage' event), so it can never mark this tab's
-        // own pull-applied write as if it were an external edit.
+        // Only mark the days domain as locally edited — and thus block this
+        // tab's own in-flight initial pull from applying its cloud days[]
+        // order — when the other tab's write actually introduced an order
+        // this tab didn't already have. A no-op-relative-to-this-tab write
+        // (isGenuineChange === false) carries no real conflict to protect
+        // against, so it must not block an otherwise-valid pending pull's
+        // days from applying. A genuine reorder still sets this exactly as
+        // before — real cross-tab reorder protection is unchanged. This
+        // deliberately only ever sets localDaysEditRef, not
+        // localPlansEditRef: a days-only cross-tab write must not block an
+        // otherwise-valid pending pull's cloud plans from applying. This
+        // only ever fires for writes from OTHER tabs (the tab that wrote the
+        // key never receives its own 'storage' event), so it can never mark
+        // this tab's own pull-applied write as if it were an external edit.
         if (isGenuineChange) {
-          localEditRef.current = true;
+          localDaysEditRef.current = true;
         }
       }
     }
@@ -1382,36 +1389,40 @@ export default function PlansPage() {
   }, [items, initialized]);
 
   // Persist to localStorage on every items mutation (after initial load).
-  // Also marks localEditRef so any in-flight pull sees the edit and skips
-  // overwriting it. Kept separate from the sync effect so that syncReady
-  // state changes don't trigger localEditRef (only real items changes do).
+  // Also marks localPlansEditRef so any in-flight pull sees the edit and
+  // skips overwriting it — scoped to the plans domain only, so it never
+  // blocks an unrelated in-flight cloud days[] application. Kept separate
+  // from the sync effect so that syncReady state changes don't trigger
+  // localPlansEditRef (only real items changes do).
   useEffect(() => {
     if (!initialized) return;
-    localEditRef.current = true;
+    localPlansEditRef.current = true;
     saveToStorage(items, planKeyRef.current);
   }, [items, initialized]);
 
   // Phase 11.2 Codex fix — mirror the items effect above for `days`: mark
-  // localEditRef so any in-flight authenticated pull sees a days[] change
-  // (Move Up/Down, Add/Remove/Duplicate Day, restore, clear-all reset, etc.)
-  // that happened while the pull was pending and skips applying a
-  // now-stale cloud order over it. Every days-mutating call site already
-  // persists via saveDays() inline at its own call site (unlike items,
-  // which centralizes persistence in the effect above) — this effect only
-  // needs to set the flag, driven purely by "did `days` change", the same
-  // state-driven approach the items effect already uses. This deliberately
-  // does NOT distinguish a user-driven days[] change from the cloud-pull's
-  // own authoritative-replace setDays: that call also flows through this
-  // same effect, exactly mirroring how the items effect already treats a
-  // cloud-applied setItems as marking localEditRef too. This is harmless —
-  // localEditRef is only ever read once, synchronously, at the very start
-  // of the next pull's own .then() callback, and that next pull always
-  // resets it to false before starting — so a stray `true` left over from
-  // a just-completed pull's own state update is cleared before it could
-  // ever cause a false guard.
+  // localDaysEditRef so any in-flight authenticated pull sees a days[]
+  // change (Move Up/Down, Add/Remove/Duplicate Day, restore, clear-all
+  // reset, etc.) that happened while the pull was pending and skips
+  // applying a now-stale cloud order over it. SH.2 — this is a separate ref
+  // from localPlansEditRef precisely so a days-only change never blocks an
+  // otherwise-valid in-flight cloud plans application, and vice versa. Every
+  // days-mutating call site already persists via saveDays() inline at its
+  // own call site (unlike items, which centralizes persistence in the
+  // effect above) — this effect only needs to set the flag, driven purely
+  // by "did `days` change", the same state-driven approach the items effect
+  // already uses. This deliberately does NOT distinguish a user-driven
+  // days[] change from the cloud-pull's own authoritative-replace setDays:
+  // that call also flows through this same effect, exactly mirroring how
+  // the items effect already treats a cloud-applied setItems as marking
+  // localPlansEditRef too. This is harmless — localDaysEditRef is only ever
+  // read once, synchronously, at the very start of the next pull's own
+  // .then() callback, and that next pull always resets it to false before
+  // starting — so a stray `true` left over from a just-completed pull's own
+  // state update is cleared before it could ever cause a false guard.
   useEffect(() => {
     if (!initialized) return;
-    localEditRef.current = true;
+    localDaysEditRef.current = true;
   }, [days, initialized]);
 
   // Schedule a debounced cloud push after every items OR days change, but
@@ -1464,11 +1475,15 @@ export default function PlansPage() {
     // that resolves after the flag is set will be ignored, preventing stale
     // cloud data from overwriting local state mid-auth-transition.
     let cancelled = false;
-    // Reset the local-edit guard so the upcoming pull starts with a clean slate.
-    // If the user edits anything (items OR days[] — Move Up/Down, Add/Remove/
-    // Duplicate Day, etc.) while the pull is in flight, localEditRef flips
-    // back to true and we skip applying the cloud result.
-    localEditRef.current = false;
+    // Reset both domain local-edit guards so the upcoming pull starts with a
+    // clean slate. If the user edits plan items while the pull is in
+    // flight, localPlansEditRef flips back to true and cloud plans are
+    // skipped; if the user edits/reorders days[] while the pull is in
+    // flight, localDaysEditRef flips back to true and cloud days are
+    // skipped. These are independent: an edit to one domain never blocks
+    // applying the other domain's cloud result (SH.2 — Conflict Domains).
+    localPlansEditRef.current = false;
+    localDaysEditRef.current = false;
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
@@ -1487,29 +1502,62 @@ export default function PlansPage() {
         // hydrationSucceeded pattern used for the plans/lightning dataset
         // writes and Lightning's own checked days[] hydration write.
         let daysWriteFailed = false;
-        // Only apply cloud data if no local edits occurred while the pull was
-        // in flight. Either way, open the sync gate so edits can push.
-        if (!localEditRef.current && cloud) {
+        // SH.2 — cloudItems/cloudDayIds are derived once (pure, no state
+        // writes) whenever a valid cloud plans payload exists, independent
+        // of whether localPlansEditRef blocks applying them to `items`
+        // below. The days-domain merge further down needs cloudDayIds even
+        // when local plans win the plans-domain conflict, so a day
+        // referenced only by an as-yet-unapplied cloud item still gets
+        // represented in the days list.
+        let cloudItems: PlanItem[] | null = null;
+        let cloudDayIds: string[] = [];
+        if (cloud) {
           // Phase 8.0.1 — normalize dayIds from cloud before applying to state.
-          const cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
+          cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
+          cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
+        }
+        // Plans domain: only apply cloud items if no local plans edits
+        // occurred while the pull was in flight. Either way, the sync gate
+        // still opens below so edits can push.
+        if (!localPlansEditRef.current && cloudItems) {
           reseedNextId(cloudItems);
           setItems(cloudItems);
-          // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
-          // authoritative on pull, exactly like cloudItems is for `items`
-          // above: it reflects the pushing device's actual persisted order,
-          // so it replaces local state outright rather than being merged
-          // into it. Any item dayIds not present in it (e.g. items added on
-          // a device whose own days[] hadn't yet synced) are appended using
-          // the same deterministic daySort fallback used everywhere else for
-          // previously-unknown IDs.
-          //
-          // Older cloud payloads omit `days` entirely (legacy — synced
-          // before this fix, or from a device that had no local order to
-          // send). In that case fall back to the pre-existing behavior:
-          // `prev`'s persisted order is preserved exactly and only day IDs
-          // not already known are appended — never overwritten just because
-          // this particular payload lacks a synced order.
-          const cloudDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
+          // Phase 7.3.6: if no explicit session context exists, allow the
+          // items-watcher to re-run inference once on the authoritative cloud
+          // dataset. The mount-time inference ran on stale local plans; the
+          // cloud pull is the definitive source for this page load.
+          if (!readSessionContext(resortKeyRef.current, parkKeyRef.current).exists) {
+            contextInferredRef.current = false;
+            // If the cloud pull cleared all items, this page is effectively in
+            // a fresh-import-ready state. Reset the mount-count guard so that
+            // a subsequent import correctly triggers inference.
+            if (cloudItems.length === 0) {
+              initialItemCountRef.current = 0;
+            }
+          }
+        }
+        // Days domain: gated independently of the plans-domain guard above
+        // — a local days[] edit/reorder protects cloud days from applying
+        // even when cloud plans just applied, and vice versa. Requires
+        // `cloud` (a valid combined planner payload) since there is nothing
+        // authoritative to reconcile against otherwise.
+        //
+        // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
+        // authoritative on pull, exactly like cloudItems is for `items`
+        // above: it reflects the pushing device's actual persisted order,
+        // so it replaces local state outright rather than being merged
+        // into it. Any item dayIds not present in it (e.g. items added on
+        // a device whose own days[] hadn't yet synced) are appended using
+        // the same deterministic daySort fallback used everywhere else for
+        // previously-unknown IDs.
+        //
+        // Older cloud payloads omit `days` entirely (legacy — synced
+        // before this fix, or from a device that had no local order to
+        // send). In that case fall back to the pre-existing behavior:
+        // `prev`'s persisted order is preserved exactly and only day IDs
+        // not already known are appended — never overwritten just because
+        // this particular payload lacks a synced order.
+        if (!localDaysEditRef.current && cloud) {
           const cloudDaysOrder = planner?.days;
           if (cloudDaysOrder && cloudDaysOrder.length > 0) {
             // Codex fix — computed and written synchronously here, NOT
@@ -1521,13 +1569,14 @@ export default function PlansPage() {
             // below — an earlier version of this fix had exactly that bug.
             // Reading `days` directly here (instead of a functional prev)
             // is safe specifically because we're inside the
-            // !localEditRef.current branch: every days[] mutation anywhere
-            // in this component (Move Up/Down, Add/Remove/Duplicate Day,
-            // restore, clear-all, and this same path) flows through
-            // setDays, and the sibling effect that marks
-            // localEditRef.current = true fires on every such change — so
-            // localEditRef.current === false here guarantees `days` has not
-            // changed since this pull started, i.e. it IS the fresh value.
+            // !localDaysEditRef.current branch: every days[] mutation
+            // anywhere in this component (Move Up/Down, Add/Remove/
+            // Duplicate Day, restore, clear-all, and this same path) flows
+            // through setDays, and the sibling effect that marks
+            // localDaysEditRef.current = true fires on every such change —
+            // so localDaysEditRef.current === false here guarantees `days`
+            // has not changed since this pull started, i.e. it IS the
+            // fresh value.
             const extra = cloudDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
             const next = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
             if (next.join(",") !== days.join(",")) {
@@ -1577,19 +1626,6 @@ export default function PlansPage() {
               saveDays(next, daysKeyRef.current);
               return next;
             });
-          }
-          // Phase 7.3.6: if no explicit session context exists, allow the
-          // items-watcher to re-run inference once on the authoritative cloud
-          // dataset. The mount-time inference ran on stale local plans; the
-          // cloud pull is the definitive source for this page load.
-          if (!readSessionContext(resortKeyRef.current, parkKeyRef.current).exists) {
-            contextInferredRef.current = false;
-            // If the cloud pull cleared all items, this page is effectively in
-            // a fresh-import-ready state. Reset the mount-count guard so that
-            // a subsequent import correctly triggers inference.
-            if (cloudItems.length === 0) {
-              initialItemCountRef.current = 0;
-            }
           }
         }
         // Phase 7.6.3 — Sync Hydration Safety: hydrate lightning into localStorage
