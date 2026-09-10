@@ -37,7 +37,17 @@ Reviewers should check any changes affecting:
  *                                                       server revision AND
  *                                                       serialized across
  *                                                       tabs (async — see
- *                                                       its own doc)
+ *                                                       its own doc); fails
+ *                                                       safe (no-op) if the
+ *                                                       Web Locks API is
+ *                                                       unavailable
+ *   getLocalContentOwner(profileId)                  — read which identity
+ *                                                       this profile's raw
+ *                                                       local content is
+ *                                                       currently attributed
+ *                                                       to (see its own doc)
+ *   setLocalContentOwner(profileId, userId)          — record that
+ *                                                       attribution
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -101,6 +111,19 @@ Reviewers should check any changes affecting:
  * the read-compute-write sequence that applies it is itself atomic; see
  * commitConfirmedBaseline()'s own doc for why a plain read-then-write is
  * NOT atomic across tabs, and how the Web Locks API closes that gap.
+ * Codex P1 fix (5th round) — re-audited and hardened to FAIL SAFE (skip
+ * the commit entirely) when the Locks API is unavailable, rather than
+ * fall back to the unserialized sequence — see commitConfirmedBaseline's
+ * own doc for why a "graceful" fallback there would silently reintroduce
+ * the exact regression this mechanism exists to prevent.
+ *
+ * Codex P1 fix (5th round) — identity-scoping the BASELINE side of a
+ * conflict decision (3rd round) is not sufficient on its own: the
+ * CANDIDATE side (a fresh read of plans/lightning/days localStorage)
+ * carries no identity attribution at all. See getLocalContentOwner()'s own
+ * doc below for the authenticated-conflict-session boundary that closes
+ * this — every conflict decision now verifies the candidate belongs to
+ * the SAME authenticated context as the baseline before trusting it.
  *
  * Either way, the record is:
  *   • NEVER a fresh read of the current plans/lightning/days storage keys
@@ -152,6 +175,91 @@ function syncStatusKeyForProfile(profileId: string): string {
 
 function syncErrorKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:lastError`;
+}
+
+/**
+ * Returns the localStorage key for a profile's "local content owner"
+ * marker — see getLocalContentOwner()/setLocalContentOwner() below (Codex
+ * P1, 5th round).
+ */
+function localContentOwnerKeyForProfile(profileId: string): string {
+  return `dwp:sync:${profileId}:localContentOwner`;
+}
+
+/**
+ * SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT SESSION
+ * boundary. "For every SH.2 conflict decision, the baseline and local
+ * candidate MUST belong to the same authenticated conflict context."
+ * getConfirmedSnapshot()/commitConfirmedBaseline() already scope the
+ * BASELINE side of every conflict decision by identity (userId+profileId).
+ * Nothing, until this fix, scoped the CANDIDATE side: a fresh read of
+ * plans/lightning/days localStorage carries no identity attribution at
+ * all — it is whatever bytes are sitting under this profile's key,
+ * regardless of which account last wrote them.
+ *
+ * Root cause this closes — account A can leave this profile's local
+ * content in localStorage; if account B then signs in WITHOUT a page
+ * remount (so B's pull effect runs against the SAME long-lived component
+ * instance A's did), B's conflict decision compares a fresh "current" read
+ * of that same, still-loaded storage against B's OWN baseline. Two
+ * distinct baseline tiers can both be fooled by this:
+ *   • The page-local FALLBACK ref (used when B has no confirmed snapshot
+ *     yet in this browser) — A's leftover content simply becomes B's
+ *     apparent "local edit" the moment current is compared against it.
+ *   • A REAL, correctly userId-scoped confirmed snapshot for B (e.g. B
+ *     used this exact browser before A did) — A's leftover content still
+ *     differs from B's own last-confirmed state, so the comparison STILL
+ *     reports "changed", even though B never touched anything this
+ *     session. Identity-scoping the baseline alone (3rd round) does not
+ *     protect against a mismatched CANDIDATE.
+ * Either way, the foreign content gets classified as "this identity's own
+ * unsynced winner" and can overwrite this identity's real cloud state on
+ * the very next push.
+ *
+ * getLocalContentOwner(profileId) / setLocalContentOwner(profileId, userId)
+ * are a small, explicit, per-profile durable marker recording which
+ * identity's conflict session most recently established ownership of this
+ * profile's local content. This is deliberately NOT a rescoping of the
+ * plans/lightning/days storage keys themselves — their schema, key names,
+ * and content are completely unchanged; this is one extra pointer used
+ * purely to answer "does the content currently in this profile's storage
+ * belong to the identity now asking about it" before any conflict
+ * decision trusts a fresh read of that storage as candidate evidence. A
+ * null/absent marker (a profile that has never been authenticated-tagged
+ * before) is trusted for ANY identity — this is what preserves local-first
+ * adoption for anonymous → first sign-in, and for a fresh profile's very
+ * first authenticated use: there is no "other identity" to have owned it.
+ * Only a marker naming a DIFFERENT, KNOWN identity is a mismatch.
+ *
+ * See each page's auth-transition effect for how this is consulted (read
+ * BEFORE being overwritten with the newly-resolved identity, so a
+ * transition's own mismatch verdict reflects who owned the content going
+ * INTO the transition) and how a mismatch is handled (every domain's
+ * "current" read for that pull's conflict decision is substituted with
+ * this pull's own frozen baseline, so it can never be misread as a local
+ * edit — see the pull effect's own doc for the full substitution rule).
+ */
+export function getLocalContentOwner(profileId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(localContentOwnerKeyForProfile(profileId));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * See getLocalContentOwner()'s own doc for the full contract. `userId`
+ * null is a no-op (defensive only — callers only invoke this from the
+ * "authenticated" branch of their auth-transition effect, where a real
+ * identity is expected; there is no legitimate reason to tag ownership as
+ * "no one").
+ */
+export function setLocalContentOwner(profileId: string, userId: string | null): void {
+  if (typeof window === "undefined" || userId === null) return;
+  try {
+    localStorage.setItem(localContentOwnerKeyForProfile(profileId), userId);
+  } catch {}
 }
 
 /**
@@ -256,19 +364,29 @@ function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string)
  * rather than merely "less likely to race": there is no unserialized
  * window left to race in, not a smaller one.
  *
- * Falls back to the unserialized sequence directly when `navigator.locks`
- * is unavailable (older browsers, or a non-secure context — Locks API
- * requires a secure context) — revision gating still rejects any commit
- * that is stale RELATIVE TO WHAT THIS TAB HAPPENED TO READ, which remains
- * correct for the (overwhelmingly common) single-tab case; only the
- * genuinely-simultaneous-cross-tab-write race is unprotected in that
- * fallback tier, a known and documented residual gap in environments
- * lacking the primitive this fix depends on.
+ * Codex P1 fix (5th round) — re-audited whether falling back to the
+ * unserialized sequence when `navigator.locks` is unavailable was an
+ * acceptable trade-off for a CORRECTNESS invariant. It is not: "graceful
+ * degradation" here means silently reintroducing the exact cross-tab
+ * revision-regression bug the lock exists to close, with no signal to the
+ * user or caller that the safety property no longer holds. A regressed
+ * confirmed baseline is strictly WORSE than no confirmed baseline at all —
+ * a later pull would trust the stale, wrongly-"confirmed" snapshot instead
+ * of correctly falling back to the (already-hardened) fallback-baseline
+ * tier. This function therefore now FAILS SAFE: when `navigator.locks` is
+ * unavailable (older browsers, or a non-secure context — Locks API
+ * requires a secure context), it does NOT commit anything, rather than
+ * commit through an unprotected path that could regress. The practical
+ * effect in that environment is that confirmed-baseline hardening simply
+ * never activates — every pull falls back to the pre-confirmation
+ * baseline/ownership-tag tiers (see getLocalContentOwner()'s own doc),
+ * which is a known, narrower, and strictly safer degradation than
+ * knowingly permitting a monotonic-revision invariant to be violated.
  *
- * Best-effort: a write failure (quota, private-mode) or a Locks API
- * rejection is swallowed, matching the tier of every other confirmed-state
- * write in this module — it simply means the next pull falls back to
- * whatever was confirmed before.
+ * Best-effort otherwise: a write failure (quota, private-mode) or a Locks
+ * API rejection is swallowed, matching the tier of every other
+ * confirmed-state write in this module — it simply means the next pull
+ * falls back to whatever was confirmed before.
  *
  * Call this AFTER persistence for the accepted domain(s) has already
  * succeeded — never speculatively before a write is known to have landed
@@ -286,30 +404,25 @@ export async function commitConfirmedBaseline(
 ): Promise<void> {
   if (typeof window === "undefined") return;
   if (!accepted.plans && !accepted.lightning && !accepted.days) return;
-  const commitOnce = (): void => {
-    const current = getConfirmedSnapshot(userId, profileId);
-    const next = nextConfirmedBaseline(current, revision, accepted);
-    if (!next) return; // rejected — not newer than what's already confirmed
-    localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
-  };
   const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-  if (locks) {
-    try {
-      await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
-        try {
-          commitOnce();
-        } catch {}
-      });
-      return;
-    } catch {
-      // Locks API present but the request itself failed unexpectedly (should
-      // not happen in practice) — fall through to the unserialized path
-      // below rather than silently dropping the commit.
-    }
-  }
+  // Codex P1 fix (5th round) — fail safe: no lock, no commit. See this
+  // function's own doc above for why an unserialized fallback is never an
+  // acceptable substitute for atomicity here.
+  if (!locks) return;
   try {
-    commitOnce();
-  } catch {}
+    await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
+      try {
+        const current = getConfirmedSnapshot(userId, profileId);
+        const next = nextConfirmedBaseline(current, revision, accepted);
+        if (!next) return; // rejected — not newer than what's already confirmed
+        localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
+      } catch {}
+    });
+  } catch {
+    // Locks API present but the request itself failed unexpectedly — the
+    // commit is simply dropped (best-effort tier), never retried through an
+    // unprotected path.
+  }
 }
 
 // ── Sync state observer ───────────────────────────────────────────────────────

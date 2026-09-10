@@ -30,6 +30,8 @@ import {
   cancelScheduledSync,
   getConfirmedSnapshot,
   commitConfirmedBaseline,
+  getLocalContentOwner,
+  setLocalContentOwner,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -723,25 +725,16 @@ export default function LightningPage() {
     // branch. Mirrors plans/page.tsx exactly — see its own detailed doc.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const resolvedUserId = (session?.user as any)?.id ?? session?.user?.email ?? null;
-    // SH.2 architecture (Codex P1, 4th round) — AUTHENTICATED CONFLICT
-    // SESSION invariant: rebase the page-local FALLBACK baselines from a
-    // fresh localStorage read whenever the authenticated identity actually
-    // CHANGES (a real account switch, not the null → first-identity
-    // sign-in transition). Mirrors plans/page.tsx exactly — see its own
-    // detailed doc for the full root-cause explanation and why the
-    // null-previous case is deliberately excluded (preserves local-first
-    // sign-in behavior). A confirmed snapshot for the new identity, when
-    // one exists, always takes priority over these refs regardless.
-    const previousUserId = activeUserIdRef.current;
-    if (previousUserId !== null && previousUserId !== resolvedUserId) {
-      itemsBaselineRef.current = migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
-      daysBaselineRef.current = loadKnownDays(daysKeyRef.current);
-      try {
-        plansRawBaselineRef.current = localStorage.getItem(plansKeyRef.current);
-      } catch {
-        plansRawBaselineRef.current = null;
-      }
-    }
+    // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
+    // SESSION boundary. Mirrors plans/page.tsx exactly — see its own
+    // detailed doc for the full root-cause explanation, why this
+    // supersedes the 4th round's previousUserId-based fallback-ref rebase
+    // (obsolete machinery, removed), and why a null/absent ownership
+    // marker is trusted (preserves local-first sign-in behavior).
+    const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
+    const contentOwnershipMismatch =
+      priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
+    setLocalContentOwner(activeProfileIdRef.current, resolvedUserId);
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     cancelScheduledSync();
@@ -784,9 +777,25 @@ export default function LightningPage() {
         // have been reset or never set at all. See pickWinningItems/
         // pickWinningDays/reconcilePlannerSnapshot in crossDayChecks.ts
         // (and their DEV_*_CASES) for the full model and its regression
-        // cases — mirrors plans/page.tsx exactly.
+        // cases — mirrors plans/page.tsx exactly. `currentItems`/
+        // `currentDays`/`currentPlansRaw` are the REAL on-disk values —
+        // always used for write-skip checks below, so a genuinely
+        // differing winner always actually overwrites whatever is really
+        // on disk (contaminated or not).
         const currentItems = migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
         const currentDays = loadKnownDays(daysKeyRef.current);
+        const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
+
+        // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
+        // SESSION substitution — mirrors plans/page.tsx exactly (see its
+        // own detailed doc). When this transition's ownership check found
+        // the raw content in storage attributed to a different, known
+        // identity, every "current" fed into a conflict decision below is
+        // forced to equal this pull's own frozen baseline instead of a
+        // real (possibly foreign-owned) read.
+        const itemsForComparison = contentOwnershipMismatch ? pullStartBaseline.items : currentItems;
+        const daysForComparison = contentOwnershipMismatch ? pullStartBaseline.days : currentDays;
+        const plansRawForComparison = contentOwnershipMismatch ? pullStartBaseline.plansRaw : currentPlansRaw;
 
         // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
         // (Plans) dataset's own local-vs-cloud CANDIDATE (winning items,
@@ -801,21 +810,20 @@ export default function LightningPage() {
         // reconciliation below (it needs the sanitized result, not the raw
         // cloud payload — see reconcilePlannerSnapshot's own doc), unlike
         // the 2nd round's version of this code which wrote here first.
-        const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
-        const plansChangedLocally = currentPlansRaw !== pullStartBaseline.plansRaw;
+        const plansChangedLocally = plansRawForComparison !== pullStartBaseline.plansRaw;
         const plansCandidateItems: unknown[] =
           !plansChangedLocally && planner?.plans
             ? (planner.plans.items as unknown[])
-            : parsePlansRawItems(currentPlansRaw);
+            : parsePlansRawItems(plansRawForComparison);
 
         const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
           pullStartBaseline.items,
-          currentItems,
+          itemsForComparison,
           cloudLightningItems
         );
         const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
           pullStartBaseline.days,
-          currentDays,
+          daysForComparison,
           cloudDaysOrder
         );
         // Structural reconciliation (Codex P1, 4th round) — reconciles

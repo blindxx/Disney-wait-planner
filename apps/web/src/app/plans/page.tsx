@@ -85,6 +85,8 @@ import {
   cancelScheduledSync,
   getConfirmedSnapshot,
   commitConfirmedBaseline,
+  getLocalContentOwner,
+  setLocalContentOwner,
 } from "@/lib/syncHelper";
 
 // Phase 9.0 — content type foundation
@@ -1574,52 +1576,40 @@ export default function PlansPage() {
     // branch runs.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const resolvedUserId = (session?.user as any)?.id ?? session?.user?.email ?? null;
-    // SH.2 architecture (Codex P1, 4th round) — AUTHENTICATED CONFLICT
-    // SESSION invariant: when the authenticated identity actually CHANGES
-    // (a real account switch — activeUserIdRef.current was a DIFFERENT,
-    // known identity, not merely "never signed in this mount"), the
-    // page-local FALLBACK baselines (itemsBaselineRef/daysBaselineRef/
-    // lightningRawBaselineRef) must be rebased from a fresh localStorage
-    // read RIGHT NOW, before this identity's own pull can classify
-    // anything. Root cause this closes: these refs are only ever updated
-    // afterward by a cloud-won pull resolution (or at mount) — without
-    // this rebase they would keep whatever the PREVIOUS account's session
-    // last left them as, so this account's pull-start baseline could still
-    // be the OTHER account's stale content. Comparing a fresh "current"
-    // read against that stale, foreign-identity baseline could then
-    // misclassify the previous account's leftover local data as THIS
-    // account's own unsynced local edit — winning over (and overwriting)
-    // this account's real confirmed cloud state. Rebasing to "whatever is
-    // on this device right now" makes the fallback comparison mean "did
-    // local storage change since THIS identity's session began" instead.
+    // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
+    // SESSION boundary: "for every SH.2 conflict decision, the baseline
+    // and local candidate MUST belong to the same authenticated conflict
+    // context." getConfirmedSnapshot/commitConfirmedBaseline already scope
+    // the BASELINE side by identity (3rd round); nothing scoped the
+    // CANDIDATE side — a fresh read of plans/lightning/days localStorage
+    // carries NO identity attribution, so it can be a DIFFERENT account's
+    // still-loaded leftover content if this component never remounted
+    // between accounts. Comparing that content against EITHER this page's
+    // fallback ref OR even a real, correctly-scoped confirmed snapshot for
+    // THIS identity (e.g. this identity used this exact browser before a
+    // different one did) would misclassify the foreign content as this
+    // identity's own unsynced edit and let it win over — and overwrite —
+    // this identity's real cloud state. See getLocalContentOwner()'s own
+    // doc in syncHelper.ts for the full contract; captured here (read
+    // BEFORE being overwritten with the newly-resolved identity, so this
+    // transition's own verdict reflects who owned the content going INTO
+    // it) and consulted below to gate what the upcoming pull treats as
+    // "current" for its conflict decision (see the pull effect's own doc).
     //
-    // Deliberately NOT done on the null → first-identity transition (the
-    // condition below requires a previous NON-NULL identity): that
-    // transition is the intended local-first sign-in flow — a user who
-    // made local edits while signed out, then signs in, must have those
-    // pre-existing edits recognized as their own unsynced local win (the
-    // mount-time baseline is exactly what makes that comparison work).
-    // Rebasing there too would erase that signal and silently hand any
-    // pre-signin local edit to the cloud's state instead — the opposite of
-    // "preserve local-first sign-in behavior". A genuine account switch
-    // (A → B, or A → A after an intervening sign-out, compared against the
-    // still-lingering previous identity) is the only case rebased; a
-    // confirmed snapshot for the new identity (checked immediately after,
-    // in captureConfirmedSnapshotForPull) always takes priority over these
-    // fallback refs regardless, so switching BACK to an identity that has
-    // its own confirmed record is unaffected by this rebase either way.
-    const previousUserId = activeUserIdRef.current;
-    if (previousUserId !== null && previousUserId !== resolvedUserId) {
-      itemsBaselineRef.current = migrateDayIds(loadFromStorage(planKeyRef.current));
-      daysBaselineRef.current = loadDays(daysKeyRef.current);
-      try {
-        lightningRawBaselineRef.current = localStorage.getItem(
-          buildNamespacedKey(activeProfileIdRef.current, "lightning")
-        );
-      } catch {
-        lightningRawBaselineRef.current = null;
-      }
-    }
+    // This supersedes the 4th round's separate previousUserId-based
+    // fallback-ref rebase (obsolete machinery, removed): that heuristic
+    // only ever protected the fallback-ref tier, used only when no
+    // confirmed snapshot exists yet, and relied on an in-memory ref that
+    // resets to null on every page reload — missing exactly the
+    // reload-crossing case a durable, explicit ownership marker catches
+    // for free. A null/absent marker (never tagged) is trusted for ANY
+    // identity, preserving local-first adoption for anonymous → first
+    // sign-in and for a never-before-tagged profile's first authenticated
+    // use — only a marker naming a DIFFERENT, KNOWN identity is a mismatch.
+    const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
+    const contentOwnershipMismatch =
+      priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
+    setLocalContentOwner(activeProfileIdRef.current, resolvedUserId);
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     // Cancel any pending debounced push before starting the cloud pull so a
@@ -1675,9 +1665,39 @@ export default function PlansPage() {
         // have been reset or never set at all. See pickWinningItems/
         // pickWinningDays/reconcilePlannerSnapshot in crossDayChecks.ts
         // (and their DEV_*_CASES) for the full model and its regression
-        // cases.
+        // cases. `currentItems`/`currentDays`/`currentLightningRaw` are the
+        // REAL on-disk values — always used for write-skip checks below, so
+        // a genuinely differing winner always actually overwrites whatever
+        // is really on disk (contaminated or not).
         const currentItems = migrateDayIds(loadFromStorage(planKeyRef.current));
         const currentDays = loadDays(daysKeyRef.current);
+        const currentLightningRaw = localStorage.getItem(profileKeysForPull.lightning);
+
+        // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
+        // SESSION substitution: when this transition's ownership check
+        // (above) found the raw content in storage attributed to a
+        // DIFFERENT, known identity, none of the real reads above may be
+        // trusted as evidence of THIS identity's own local edit — doing so
+        // is exactly the misclassification Codex flagged. Every "current"
+        // fed into a conflict decision below is instead forced to equal
+        // THIS pull's own frozen baseline, so changedLocally computes to
+        // false deterministically for every domain: cloud wins outright
+        // wherever cloud has data (the actual overwrite this finding
+        // reported becomes impossible), and where cloud has no data
+        // either, the pull simply falls through to baseline's own value
+        // (this identity's real last-confirmed state, or an untouched
+        // fallback-ref value) instead of adopting the foreign content.
+        // Raw storage bytes themselves are never touched by this
+        // substitution — only what THIS pull treats as "current" for
+        // comparison purposes; the write-skip checks above/below still
+        // compare against the REAL on-disk values, so a resolved winner
+        // that legitimately differs from contaminated storage still
+        // actually overwrites it.
+        const itemsForComparison = contentOwnershipMismatch ? pullStartBaseline.items : currentItems;
+        const daysForComparison = contentOwnershipMismatch ? pullStartBaseline.days : currentDays;
+        const lightningRawForComparison = contentOwnershipMismatch
+          ? pullStartBaseline.lightningRaw
+          : currentLightningRaw;
 
         // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
         // (Lightning) dataset's own local-vs-cloud CANDIDATE (winning
@@ -1688,26 +1708,26 @@ export default function PlansPage() {
         // fresh raw read compared against pullStartBaseline.lightningRaw
         // (this pull's frozen causal baseline) tells whether Lightning
         // changed since this pull started.
-        const currentLightningRaw = localStorage.getItem(profileKeysForPull.lightning);
-        const lightningChangedLocally = currentLightningRaw !== pullStartBaseline.lightningRaw;
+        const lightningChangedLocally = lightningRawForComparison !== pullStartBaseline.lightningRaw;
         // The candidate Lightning items are whichever content would win
         // for that domain this pull: cloud's, if Lightning didn't change
         // locally AND a valid cloud payload exists; otherwise the current
-        // (preserved) local content. reconcilePlannerSnapshot below is
-        // what actually decides whether any of these survive sanitization.
+        // (preserved, or substituted-to-baseline) content. reconcilePlannerSnapshot
+        // below is what actually decides whether any of these survive
+        // sanitization.
         const lightningCandidateItems: unknown[] =
           !lightningChangedLocally && planner?.lightning
             ? (planner.lightning.items as unknown[])
-            : parseLightningRawItems(currentLightningRaw);
+            : parseLightningRawItems(lightningRawForComparison);
 
         const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
           pullStartBaseline.items,
-          currentItems,
+          itemsForComparison,
           cloudItems
         );
         const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
           pullStartBaseline.days,
-          currentDays,
+          daysForComparison,
           cloudDaysOrder
         );
         // Structural reconciliation (Codex P1, 4th round) — reconciles
