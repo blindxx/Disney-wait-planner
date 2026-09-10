@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, daySort } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, daySort, reduceSiblingPlansStale } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -504,6 +504,29 @@ export default function LightningPage() {
   // another tab during this same window. Reset to false at the start of
   // each pull, mirroring the domain refs.
   const crossTabPlansChangedRef = useRef(false);
+  // Codex P1 fix — tracks a PENDING cross-tab days[] MEMBERSHIP change (a
+  // day added/removed/duplicated by another tab, as opposed to a pure
+  // reorder) whose coupled Plans-domain write has not yet been observed.
+  // Remove Day writes `days` synchronously but its plans-item deletion is
+  // persisted slightly later (via the items-persist effect in the OTHER
+  // tab) — so this tab can receive the `days` membership event, and even
+  // have its own pull resolve, entirely BEFORE the corresponding `plans`
+  // storage event arrives. In that gap, `allPlans`/planDiscoveredDayIds
+  // below (read fresh from the shared plans key at pull-resolution time)
+  // can still reflect the OLD, pre-deletion plan items — so a removed day
+  // discovered only through that stale sibling snapshot must not be
+  // trusted as a legitimate addition to days[]. Set true the moment a
+  // genuine cross-tab days MEMBERSHIP change is observed (see the
+  // onStorage listener below); cleared only once the coupled `plans`
+  // storage event actually arrives (proof the sibling snapshot has caught
+  // up). Deliberately NOT reset at the start of a new pull cycle like the
+  // other conflict refs — "a new pull started" is not proof the sibling
+  // plans write has landed, and correctness here must not depend on
+  // enough wall-clock time having passed since the membership change
+  // (per Codex's explicit "do not rely on timing" requirement). A pure
+  // reorder never sets this — same-membership reorders don't invalidate
+  // sibling-derived day IDs.
+  const plansSiblingStaleForDaysRef = useRef(false);
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
 
@@ -702,7 +725,21 @@ export default function LightningPage() {
             // Plan-only dayIds — merged together with lightningDiscoveredDayIds
             // below so a fresh profile that hydrates cloud plans and Lightning
             // together resolves one consistent fallback order.
-            if (allPlans.length > 0) {
+            //
+            // Codex P1 fix — NOT collected while plansSiblingStaleForDaysRef
+            // is true. `allPlans` is read fresh from the shared plans key
+            // right here, but "fresh from storage right now" is not the
+            // same as "reflects a pending cross-tab days MEMBERSHIP change
+            // this tab already knows about" — Remove Day's plans-item
+            // deletion can be persisted by the other tab strictly later
+            // than its `days` write, so this read can still return the
+            // OLD, pre-deletion items even at this exact moment. Trusting
+            // those stale day IDs here would let the days-domain safety
+            // net below re-add a day another tab just removed. Lightning's
+            // OWN winning items (lightningDiscoveredDayIds above) are not
+            // subject to this — they come from this page's own protected
+            // domain, never from the suspect sibling snapshot.
+            if (allPlans.length > 0 && !plansSiblingStaleForDaysRef.current) {
               planDiscoveredDayIds = [...new Set(allPlans.map((it) => it.dayId))];
             }
           }
@@ -985,6 +1022,25 @@ export default function LightningPage() {
         // blocked.
         if (isGenuineChange) {
           localDaysEditRef.current = true;
+          // Codex P1 fix — a genuine cross-tab days[] change is either a
+          // pure REORDER (same day-ID set, different order) or a
+          // MEMBERSHIP change (a day was added/removed/duplicated by
+          // another tab — e.g. Plans' Remove/Add/Duplicate Day). Remove
+          // Day's plans-item deletion is persisted slightly later than its
+          // `days` write (via the OTHER tab's own items-persist effect),
+          // so this event can arrive — and this tab's pull can even
+          // resolve — before the coupled plans write does. Delegated to
+          // reduceSiblingPlansStale() (crossDayChecks.ts, with its own
+          // DEV_SIBLING_STALE_CASES) so the exact decision this listener
+          // makes is the same one those cases validate — not a
+          // hand-maintained duplicate of it. A pure reorder never changes
+          // membership, so it deliberately leaves the ref unchanged (see
+          // the reducer's own doc) — sibling-derived day IDs stay trusted
+          // for a reorder-only event.
+          plansSiblingStaleForDaysRef.current = reduceSiblingPlansStale(
+            plansSiblingStaleForDaysRef.current,
+            { type: "days", prevIds: knownDaysRef.current, nextIds: next }
+          );
         }
       }
       if (e.key === dayParksKeyRef.current) {
@@ -1003,6 +1059,20 @@ export default function LightningPage() {
         // overwriting that newer cross-tab edit with a possibly-stale
         // cloud snapshot.
         crossTabPlansChangedRef.current = true;
+        // Codex P1 fix — a fresh plans-key write from another tab is proof
+        // that this tab's sibling plans snapshot has caught up, so it is
+        // safe to trust plan-derived day IDs for additive days[]
+        // reconciliation again. Delegated to reduceSiblingPlansStale() (see
+        // the days-key listener above for the full rationale) — a "plans"
+        // event always clears the ref unconditionally, per the reducer's
+        // own rule: the writing tab's own writes to this key are strictly
+        // ordered, so any write observed after a days-membership change was
+        // set is causally at least as new as whatever plans-item change was
+        // coupled to it.
+        plansSiblingStaleForDaysRef.current = reduceSiblingPlansStale(
+          plansSiblingStaleForDaysRef.current,
+          { type: "plans" }
+        );
       }
       // Phase 11.0 review fix — reconcile this page's own Lightning items when
       // another tab (e.g. My Plans doing Remove Day) writes the active profile's

@@ -139,6 +139,126 @@ export const DEV_DAYS_MEMBERSHIP_CASES: Array<{
   },
 ];
 
+/**
+ * SH.2 Codex P1 fix — event shape fed into reduceSiblingPlansStale() below.
+ * "days" is a genuine cross-tab days[] storage event this tab observed
+ * (prevIds/nextIds are the known-days set immediately before/after it).
+ * "plans" is a cross-tab plans storage event this tab observed.
+ */
+export type SiblingStaleEvent =
+  | { type: "days"; prevIds: string[]; nextIds: string[] }
+  | { type: "plans" };
+
+/**
+ * SH.2 Codex P1 fix — pure state transition for whether Lightning should
+ * currently distrust sibling Plans-derived day IDs for additive days[]
+ * reconciliation. Used by lightning/page.tsx's cross-tab storage listeners
+ * (the actual, single source of truth for plansSiblingStaleForDaysRef —
+ * not a reimplementation kept in sync by hand) so the exact same decision
+ * logic exercised in production is what DEV_SIBLING_STALE_CASES below
+ * validates.
+ *
+ * Root cause this closes: Remove Day writes the shared `days` key
+ * synchronously but its coupled plans-item deletion is persisted slightly
+ * later, via the OTHER tab's own items-persist effect. So Lightning can
+ * observe the `days` MEMBERSHIP event — and even have its own pending
+ * pull resolve — entirely before the coupled `plans` event arrives. In
+ * that window, a fresh read of shared plans storage can still return the
+ * OLD, pre-deletion items, so the removed day must not be trusted as
+ * "discovered" via that stale sibling snapshot.
+ *
+ * Rules (a left fold over the observed event sequence, starting `false`):
+ *   - "days" event that is a genuine MEMBERSHIP change (isDaysMembershipChange)
+ *     → true (a pure reorder — same day-ID set — never sets this: it
+ *       doesn't invalidate sibling-derived day IDs).
+ *   - "plans" event → false (proof the sibling snapshot has caught up).
+ *   - Anything else → state unchanged.
+ * Once true, stays true until a "plans" event is observed — deliberately
+ * NOT time- or pull-cycle-bounded, since "a new pull started" or "some
+ * time passed" is not proof the sibling write landed (Codex: correctness
+ * must not depend on storage-event vs. network timing).
+ */
+export function reduceSiblingPlansStale(current: boolean, event: SiblingStaleEvent): boolean {
+  if (event.type === "plans") return false;
+  return current || isDaysMembershipChange(event.prevIds, event.nextIds);
+}
+
+/**
+ * Reference cases for reduceSiblingPlansStale() — Codex P1 (Lightning
+ * event-ordering) fix. Each case is an ordered event sequence (simulating
+ * the exact cross-tab storage-event arrival order Codex described) folded
+ * through reduceSiblingPlansStale starting from `false`; `expected` is the
+ * resulting staleness state at the point a pending pull would resolve
+ * (immediately after the listed events, before any further event).
+ * Run from Node:
+ *   import { DEV_SIBLING_STALE_CASES, reduceSiblingPlansStale } from "@/lib/crossDayChecks";
+ *   DEV_SIBLING_STALE_CASES.forEach(c => {
+ *     const got = c.events.reduce(reduceSiblingPlansStale, false);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_SIBLING_STALE_CASES: Array<{
+  name: string;
+  events: SiblingStaleEvent[];
+  expected: boolean;
+}> = [
+  {
+    name: "regression case A — Remove Day membership event arrives, pull resolves before the coupled plans event: sibling plan data must be distrusted",
+    events: [{ type: "days", prevIds: ["day-1", "day-2", "day-3"], nextIds: ["day-1", "day-3"] }],
+    expected: true,
+  },
+  {
+    name: "regression case B — the coupled plans event later arrives: sibling plan data is trusted again",
+    events: [
+      { type: "days", prevIds: ["day-1", "day-2", "day-3"], nextIds: ["day-1", "day-3"] },
+      { type: "plans" },
+    ],
+    expected: false,
+  },
+  {
+    name: "pure reorder — same day-ID set, only order differs: never distrusted, unrelated hydration must not be blocked",
+    events: [{ type: "days", prevIds: ["day-1", "day-2", "day-3"], nextIds: ["day-1", "day-3", "day-2"] }],
+    expected: false,
+  },
+  {
+    name: "Duplicate Day — membership grows (new day), same distrust-until-confirmed rule applies",
+    events: [{ type: "days", prevIds: ["day-1", "day-2"], nextIds: ["day-1", "day-2", "day-3"] }],
+    expected: true,
+  },
+  {
+    name: "Add Day (no items) — membership event alone still marks distrust even though nothing was actually resurrectable",
+    events: [{ type: "days", prevIds: ["day-1"], nextIds: ["day-1", "day-2"] }],
+    expected: true,
+  },
+  {
+    name: "no events at all — default trusted state",
+    events: [],
+    expected: false,
+  },
+  {
+    name: "plans event with no preceding days event — already trusted, stays trusted (idempotent)",
+    events: [{ type: "plans" }],
+    expected: false,
+  },
+  {
+    name: "two membership changes before the coupled plans event finally arrives — still distrusted until plans confirms",
+    events: [
+      { type: "days", prevIds: ["day-1", "day-2"], nextIds: ["day-1"] },
+      { type: "days", prevIds: ["day-1"], nextIds: ["day-1", "day-4"] },
+    ],
+    expected: true,
+  },
+  {
+    name: "membership change, then plans confirms, then a later pure reorder — reorder must not re-trigger distrust",
+    events: [
+      { type: "days", prevIds: ["day-1", "day-2"], nextIds: ["day-1"] },
+      { type: "plans" },
+      { type: "days", prevIds: ["day-1"], nextIds: ["day-1"] },
+    ],
+    expected: false,
+  },
+];
+
 export function resolveIdentityKey(name: string, aliases: Record<string, string>): string {
   const key = normalizeKey(stripAnnotations(name));
   const aliasTarget =
