@@ -10,15 +10,36 @@
  *   400: missing or invalid profileId
  *   401: not signed in
  *
- * PUT  /api/sync/planner?profileId=… — replace the planner blob for (user, profile)
+ * PUT  /api/sync/planner?profileId=… — merge-write the planner blob for (user, profile)
  * POST /api/sync/planner?profileId=… — same as PUT (supports navigator.sendBeacon on unload)
  *   200: { updatedAt: string }
- *   400: invalid JSON, malformed body, or missing/invalid profileId
+ *   400: invalid JSON, malformed body, structurally invalid/unrecognized
+ *        planner shape, or missing/invalid profileId
  *   401: not signed in
  *   413: payload exceeds size limit
  *
  * Phase 7.6: stores a combined Plans + Lightning payload per (user_id, profile_id).
  * The profile_id is user-supplied from the client's active local profile.
+ *
+ * SH.1 (Authoritative Planner Sync Core): PUT/POST no longer replace the
+ * stored row wholesale. The wire contract is unchanged (still the flat
+ * `{version:1, plans, lightning, days?}` shape — see syncPayload.ts) and a
+ * request that doesn't validate against it is now rejected outright (400)
+ * rather than being stored verbatim. What changed internally is the write
+ * itself: under the existing per-(user,profile) advisory lock, the
+ * currently-stored row is read and mergePlannerDomains() (syncPayload.ts)
+ * overlays only the domains the incoming request actually validates for —
+ * `plans`/`lightning` always (present-empty is an intentional clear), and
+ * `days` only when present and valid. Any other key already in the stored
+ * row — including a domain this server build has never heard of, such as a
+ * future SH.3 `dayMeta` written by a newer client — survives untouched,
+ * because the merge starts from the existing stored object rather than
+ * from a fixed list of fields to reconstruct. This generalizes and
+ * replaces the old bespoke "if incoming lacks `days`, read and re-splice
+ * existing `days`" block, and is what makes an old (pre-SH.1, or
+ * SH.1-but-pre-SH.3) client's GET -> local edit -> PUT cycle safe against
+ * erasing a domain it doesn't know exists, without needing this server
+ * build's code to know that domain's name either.
  *
  * Phase 7.6.1 legacy fallback: if no user_planner row exists, falls back to the
  * legacy user_plans table (Phase 7.2 plans-only data). The legacy payload is
@@ -27,13 +48,15 @@
  * Important: the legacy fallback only activates when profileId === "default".
  * Legacy data was never profile-scoped, so it belongs to the default profile
  * only. Non-default profiles skip the fallback and proceed directly to 204.
+ * Unchanged by SH.1: this path only ever runs when no user_planner row
+ * exists yet, so there is nothing for mergePlannerDomains() to preserve.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession, type Session } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { parseSyncedPlannerPayload } from "@/lib/syncPayload";
+import { mergePlannerDomains, parseSyncedPlannerPayload } from "@/lib/syncPayload";
 
 // 1 MB hard limit; realistic planner payloads are well under 100 KB.
 const MAX_BODY_BYTES = 1_000_000;
@@ -247,80 +270,65 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // SH.1 — reject anything that doesn't validate as a recognized planner
+  // shape BEFORE taking the lock or touching storage, rather than falling
+  // through to store it verbatim (the pre-SH.1 behavior — "any JSON-
+  // parseable body" was accepted as the new cloud truth, which is exactly
+  // the "structurally invalid writes must fail safely" gap this closes).
+  // Every legitimate caller (syncHelper's buildSyncedPlannerPayload, used
+  // by both the debounced push and the unload beacon) always produces a
+  // payload that validates here, so this only ever rejects genuinely
+  // invalid writes — no behavior change for any real client.
+  const incomingParsed = parseSyncedPlannerPayload(parsedBody);
+  if (!incomingParsed) {
+    return NextResponse.json({ error: "Invalid planner payload shape" }, { status: 400 });
+  }
+  const incomingRaw = parsedBody as Record<string, unknown>;
+
   const pool = getPool();
 
-  // Codex fix — legacy-writer days[] preservation, made atomic. A client
-  // running code from before the `days` addition (or a current client with
-  // nothing local to send) still pushes a valid combined-planner body that
-  // simply omits `days`. planner_json is stored/replaced wholesale below,
-  // so without this, such a write would silently erase a newer `days[]`
-  // already stored by another, up-to-date device for this same profile.
+  // SH.1 — generalized merge-on-write under the existing per-(user,profile)
+  // advisory lock, replacing the old bespoke "if incoming lacks `days`,
+  // read and re-splice existing `days`" block. See mergePlannerDomains()
+  // in syncPayload.ts for the full rationale — in short: the merge starts
+  // from whatever is currently stored (unknown keys included) and overlays
+  // only the domains this write's payload actually validates for, so a
+  // domain this server build has never heard of survives an old client's
+  // write without needing a matching bespoke preserve branch here.
   //
-  // The read-then-write (check existing days[], then INSERT/UPDATE) is a
-  // classic TOCTOU: two overlapping writers for the same (user, profile) —
-  // e.g. an old-format write and a concurrent new-format reorder — could
-  // each read the row before the other's write commits, so the "preserve
-  // existing days" writer could still clobber the order the other writer
-  // was in the middle of establishing. pg_advisory_xact_lock serializes
-  // all writers for the same (user_id, profile_id) pair for the duration of
-  // this transaction (released automatically on COMMIT/ROLLBACK): the
-  // second writer's lock acquisition blocks until the first's transaction
-  // commits, so by the time it runs its own SELECT it sees the first
-  // writer's already-committed row — closing the race without requiring a
-  // schema change or version bump.
-  //
-  // bodyToStore defaults to the raw incoming body unchanged — this only
-  // ever reshapes the write when the incoming payload both (a) parses as
-  // a valid combined-planner shape via the same client-side validation
-  // semantics (parseSyncedPlannerPayload), reused here rather than
-  // reimplemented, and (b) itself has no valid `days` (omitted, or present
-  // but malformed — both collapse to "no days" through that same parser).
-  // Anything else — an unrecognized shape, or one that already carries its
-  // own valid `days` — is stored exactly as received, preserving the
-  // existing "plans/lightning replacement unchanged" and "opaque
-  // planner_json" behavior for every other case.
+  // Locking is unchanged from the prior implementation: two independent
+  // 32-bit hash keys (userId, profileId) rather than a concatenated string
+  // (avoids a delimiter-collision edge case at the cost of a vanishingly
+  // rare cross-profile lock collision, which only costs extra
+  // serialization, never correctness). pg_advisory_xact_lock serializes
+  // all writers for the same (user_id, profile_id) pair for the duration
+  // of this transaction (released automatically on COMMIT/ROLLBACK), so
+  // the read below always sees the most recently committed row for this
+  // profile — no TOCTOU window between reading `existingRaw` and writing
+  // `bodyToStore`.
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    // Two independent 32-bit hash keys (userId, profileId) rather than a
-    // concatenated string — avoids a delimiter-collision edge case (e.g.
-    // userId "a" + profileId "b:c" hashing the same as userId "a:b" +
-    // profileId "c") at the cost of a vanishingly rare cross-profile lock
-    // collision, which only costs extra serialization, never correctness.
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
       userId,
       profileId,
     ]);
 
-    let bodyToStore = body;
-    const incoming = parseSyncedPlannerPayload(parsedBody);
-    if (incoming && !incoming.days) {
-      const { rows: existingRows } = await client.query<{ planner_json: string }>(
-        "SELECT planner_json FROM user_planner WHERE user_id = $1 AND profile_id = $2",
-        [userId, profileId]
-      );
-      if (existingRows.length > 0) {
-        let existingParsed: unknown;
-        try {
-          existingParsed = JSON.parse(existingRows[0].planner_json);
-        } catch {
-          existingParsed = null;
-        }
-        // Only ever preserves a genuinely VALID existing days[] (same
-        // sanitization the client already applies) — never blindly carries
-        // forward malformed existing data.
-        const existing = parseSyncedPlannerPayload(existingParsed);
-        if (existing?.days) {
-          // Merge into the raw parsed body (not the normalized `incoming`
-          // object) so plans/lightning are stored exactly as the client sent
-          // them — only the top-level `days` key is added.
-          bodyToStore = JSON.stringify({
-            ...(parsedBody as Record<string, unknown>),
-            days: existing.days,
-          });
-        }
+    const { rows: existingRows } = await client.query<{ planner_json: string }>(
+      "SELECT planner_json FROM user_planner WHERE user_id = $1 AND profile_id = $2",
+      [userId, profileId]
+    );
+    let existingRaw: unknown = null;
+    if (existingRows.length > 0) {
+      try {
+        existingRaw = JSON.parse(existingRows[0].planner_json);
+      } catch {
+        existingRaw = null; // corrupted existing row — nothing recoverable to preserve from it
       }
     }
+    const bodyToStore = JSON.stringify(
+      mergePlannerDomains(existingRaw, incomingRaw, incomingParsed)
+    );
 
     const { rows } = await client.query<{ updated_at: Date }>(
       `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at)

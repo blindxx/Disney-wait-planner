@@ -141,3 +141,161 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
     ...(days ? { days } : {}),
   };
 }
+
+// ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
+
+/**
+ * Optional domain keys: MAY be absent from an incoming write without that
+ * being an intentional clear (unlike `plans`/`lightning`, which
+ * parseSyncedPlannerPayload requires on every valid payload and which
+ * mergePlannerDomains() below therefore always takes from the incoming
+ * write, present-empty included — Clear All must actually clear the cloud
+ * copy, not be treated as "no opinion").
+ *
+ * SH.3 appends "dayMeta" | "dayParks" | "dayAutoFallbacks" here (plus a
+ * matching parseSyncedPlannerPayload extraction for each) to make them
+ * synced domains — no other change to mergePlannerDomains() is needed to
+ * support that: see the function's own doc for why.
+ */
+const OPTIONAL_DOMAIN_KEYS = ["days"] as const;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Compute the JSON-serializable object to persist for a validated planner
+ * write, given whatever is currently stored for this (user, profile).
+ *
+ * This is the generalized replacement for the old bespoke "if incoming
+ * lacks `days`, read existing `days` and splice it in" block that used to
+ * live in the PUT route. It is intentionally NOT built by starting from the
+ * incoming payload and splicing in known-preservable fields — that shape
+ * only protects domains this exact server build already knows the name of.
+ * Instead it starts from the EXISTING stored object (`existingRaw`, spread
+ * as-is, unknown keys included) and overlays only the domains the
+ * INCOMING payload actually validates for:
+ *
+ *   - `plans` / `lightning` — always overlaid unconditionally from
+ *     `incomingRaw` (parseSyncedPlannerPayload already guarantees both are
+ *     present and valid on any non-null `incomingParsed`), so a genuinely
+ *     empty push (e.g. Clear All) still clears the cloud copy — present
+ *     empty is a real, intentional value, never conflated with absent.
+ *   - Each key in OPTIONAL_DOMAIN_KEYS — overlaid from `incomingRaw` only
+ *     when `incomingParsed` has a defined value for it (present AND
+ *     valid); otherwise `base`'s existing value for that key (if any) is
+ *     left completely untouched by this function, simply because nothing
+ *     ever writes over it.
+ *   - Every other key already present in `base` — including a domain this
+ *     server build has never heard of (e.g. a future SH.3 `dayMeta` domain
+ *     written by a newer client, then this same profile receiving a write
+ *     from an old client whose payload structurally has no `dayMeta`
+ *     field at all) — survives untouched via the initial object spread.
+ *     This is what makes future-domain preservation NOT require a new
+ *     per-field branch here: the mechanism doesn't need to know a
+ *     domain's name to protect it, only the domains it's actively
+ *     overlaying need to be named.
+ *
+ * Pure and DB-agnostic — callers own reading `existingRaw` (already
+ * `JSON.parse`d, or null when no row exists / it failed to parse) under
+ * whatever locking they use; this function makes no I/O decisions.
+ */
+export function mergePlannerDomains(
+  existingRaw: unknown,
+  incomingRaw: Record<string, unknown>,
+  incomingParsed: SyncedPlannerPayload
+): Record<string, unknown> {
+  const base = isPlainObject(existingRaw) ? existingRaw : {};
+  const merged: Record<string, unknown> = { ...base, version: 1 };
+  merged.plans = incomingRaw.plans;
+  merged.lightning = incomingRaw.lightning;
+  for (const key of OPTIONAL_DOMAIN_KEYS) {
+    if (incomingParsed[key] !== undefined) {
+      merged[key] = incomingRaw[key];
+    }
+    // else: leave whatever `base` already had (or didn't have) for this
+    // key completely untouched — this is the "absent = preserve" rule,
+    // achieved by never writing the key rather than by looking up and
+    // re-splicing a preserved value.
+  }
+  return merged;
+}
+
+// ===== Dev-only validation (SH.1) =====
+
+/**
+ * Reference cases for mergePlannerDomains()'s absent/present/unknown-domain
+ * semantics — most importantly the "unknown future domain" case, which is
+ * the exact GET -> old-client -> PUT protection SH.1 exists to guarantee
+ * structurally rather than per-field.
+ *
+ * Run from Node (mirrors the DEV_PLAN_ALIAS_CASES convention in
+ * plansMatching.ts):
+ *   import { DEV_MERGE_CASES, mergePlannerDomains } from "@/lib/syncPayload";
+ *   DEV_MERGE_CASES.forEach(c => {
+ *     const got = mergePlannerDomains(c.existingRaw, c.incomingRaw, c.incomingParsed);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_MERGE_CASES: Array<{
+  name: string;
+  existingRaw: unknown;
+  incomingRaw: Record<string, unknown>;
+  incomingParsed: SyncedPlannerPayload;
+  expected: Record<string, unknown>;
+}> = [
+  {
+    name: "no existing row — fresh insert, days present",
+    existingRaw: null,
+    incomingRaw: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    incomingParsed: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    expected: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+  },
+  {
+    name: "days absent from incoming — preserved from existing",
+    existingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-2", "day-1"] },
+    incomingRaw: { version: 1, plans: { version: 1, items: ["new"] }, lightning: { version: 1, items: [] } },
+    incomingParsed: { version: 1, plans: { version: 1, items: ["new"] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: ["new"] }, lightning: { version: 1, items: [] }, days: ["day-2", "day-1"] },
+  },
+  {
+    name: "days present in incoming — replaces existing (intentional overwrite)",
+    existingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-2", "day-1"] },
+    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    incomingParsed: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+  },
+  {
+    name: "unknown future domain (dayMeta) in existing row survives an old-client write that omits it entirely",
+    existingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayMeta: { "day-1": { label: "Arrival" } },
+    },
+    incomingRaw: { version: 1, plans: { version: 1, items: ["x"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    incomingParsed: { version: 1, plans: { version: 1, items: ["x"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["x"] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayMeta: { "day-1": { label: "Arrival" } },
+    },
+  },
+  {
+    name: "plans/lightning present-empty is an intentional clear, not preserved",
+    existingRaw: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: ["old"] } },
+    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    incomingParsed: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "corrupted/malformed existing row treated as no base — no crash, no preserved data (nothing recoverable)",
+    existingRaw: [1, 2, 3],
+    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    incomingParsed: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+];
