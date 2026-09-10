@@ -1095,6 +1095,19 @@ export default function PlansPage() {
   // as activeDayKeyRef below) — never a live/dynamic profile lookup, so a
   // storage event for a DIFFERENT profile's days key (e.g. another tab has a
   // different active profile) is correctly ignored.
+  //
+  // SH.2 Codex P1 fix — also listen for this mounted profile's own `plans`
+  // key (planKeyRef, same mounted-profile-scoped-ref pattern as daysKeyRef).
+  // Previously this page had no cross-tab listener for its own items at
+  // all, so `itemsRef.current` could go stale relative to a newer dataset
+  // another tab just persisted (e.g. Remove Day deleting that day's
+  // items). The days-domain reconciliation's winning-dataset fallback
+  // (itemsRef.current, used whenever localPlansEditRef blocks a cloud
+  // apply) would then re-derive days[] from that STALE snapshot, silently
+  // re-appending a day — and reopening the sync gate to push that
+  // resurrected membership — even though the cloud-side race was already
+  // correctly blocked by localPlansEditRef. See the `planKeyRef.current`
+  // branch below for the fix.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
       const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
@@ -1106,6 +1119,46 @@ export default function PlansPage() {
         // rather than overwriting that newer cross-tab edit with a
         // possibly-stale cloud snapshot.
         crossTabLightningChangedRef.current = true;
+      }
+      if (e.key === planKeyRef.current) {
+        // Codex P1 fix — another tab just wrote this profile's shared
+        // Plans storage key (e.g. Remove/Add/Duplicate Day, or an ordinary
+        // item add/edit unrelated to any day operation). Refresh this
+        // tab's own `items` state — and, via the next render, itemsRef.
+        // current — from that newer persisted dataset. This is critical
+        // for the winning-dataset reconciliation in the pull's .then()
+        // callback below: whenever localPlansEditRef blocks a cloud apply,
+        // that reconciliation falls back to itemsRef.current as "the
+        // winning local dataset". Without this reload, that fallback would
+        // use THIS tab's STALE in-memory items — e.g. still containing a
+        // day's items another tab just deleted via Remove Day — and the
+        // days-domain safety net would then re-derive and re-append that
+        // already-removed day's ID into days[], resurrecting the exact
+        // membership the other tab's Remove Day just deleted, even though
+        // the cloud-side race was already correctly blocked.
+        //
+        // Mark the plans domain as locally edited so a still-in-flight
+        // pull does not apply a stale cloud items snapshot over what this
+        // tab just reloaded — mirrors the identical fix already applied to
+        // Lightning's own lightningKeyRef listener. Any other tab's write
+        // to this key is, by definition, an external change to this
+        // page's own domain, so this is marked unconditionally (no
+        // genuine-change comparison needed) — same reasoning as the
+        // same-tab items-persist effect, which already marks this ref on
+        // every items change without distinguishing content. This only
+        // ever fires for writes from OTHER tabs (the tab that wrote the
+        // key never receives its own 'storage' event), so it can never
+        // mark this tab's own pull-applied write as if it were external.
+        // migrateDayIds + reseedNextId mirror the exact same steps used to
+        // hydrate items everywhere else in this file (mount-time load,
+        // cloud-pull apply) — normalizes any malformed dayId before it can
+        // reach display/reconciliation logic, and advances nextId past any
+        // IDs in the reloaded set so a new item created in this tab right
+        // after this reload can never collide with one from the other tab.
+        const reloaded = migrateDayIds(loadFromStorage(planKeyRef.current));
+        reseedNextId(reloaded);
+        setItems(reloaded);
+        localPlansEditRef.current = true;
       }
       if (e.key === daysKeyRef.current) {
         // Refresh this tab's local day state to match what the other tab
@@ -1187,6 +1240,20 @@ export default function PlansPage() {
           // it deliberately leaves localPlansEditRef untouched — preserving
           // SH.2's guarantee that an unrelated cloud plans apply is not
           // blocked by a same-tab or cross-tab reorder alone.
+          //
+          // This is deliberately kept alongside the direct `planKeyRef`
+          // listener above rather than removed as redundant: the `days` key
+          // write for Remove Day happens synchronously in the handler,
+          // while the `plans` key write is deferred to the items-persist
+          // effect — so this tab's `days` event can arrive before its
+          // `plans` event. This inference guarantees localPlansEditRef is
+          // set the moment the (earlier-or-same) `days` event is observed,
+          // closing that ordering gap; the `planKeyRef` listener's job is
+          // the separate concern of making itemsRef.current's CONTENT
+          // correct once its own event does arrive. For Add Day (days-only,
+          // no items change) this inference sets localPlansEditRef
+          // slightly conservatively — harmless, since itemsRef.current
+          // already reflects accurate local items either way.
           if (isDaysMembershipChange(daysRef.current, next)) {
             localPlansEditRef.current = true;
           }
