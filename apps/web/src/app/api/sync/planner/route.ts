@@ -1,8 +1,10 @@
 /**
- * GET  /api/sync/planner?profileId=…&lastOpId=… — fetch the signed-in user's
- *   latest planner blob
+ * GET  /api/sync/planner?profileId=…&lastOpId=…&lastOpId=… — fetch the
+ *   signed-in user's latest planner blob. `lastOpId` may be repeated to
+ *   query MULTIPLE pending operations in one request (Codex P1, 9th round —
+ *   see below).
  *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string, revision: number,
- *          opStatus?: { opId: string; found: boolean; revision: number | null } }
+ *          opStatuses: Array<{ opId: string; found: boolean; revision: number | null }> }
  *   204: no usable planner payload available; this includes:
  *          • no row in user_planner and no legacy row in user_plans
  *          • user_planner row exists but planner_json is corrupt/unparseable
@@ -12,11 +14,22 @@
  *   400: missing or invalid profileId
  *   401: not signed in
  *
- * `lastOpId` (SH.2, Codex P1 7th/8th rounds) is OPTIONAL — when supplied,
- * the response also carries `opStatus`, an answer to "was the write tagged
- * with this opId ever accepted", looked up against the append-only
- * `user_planner_writes` table (see db-schema.sql and handleWrite's own doc
- * below).
+ * `lastOpId` (SH.2, Codex P1 7th/8th rounds; generalized to a repeatable
+ * param in the 9th) is OPTIONAL — when supplied one or more times, the
+ * response also carries `opStatuses`, one entry PER supplied opId, each an
+ * answer to "was the write tagged with this opId ever accepted", looked up
+ * against the append-only `user_planner_writes` table (see db-schema.sql
+ * and handleWrite's own doc below).
+ *
+ * Codex P1 fix (9th round) — the client's pending-operation set
+ * (syncHelper.ts's listPendingOps()) can legitimately hold MORE THAN ONE
+ * still-unresolved opId at once (multiple tabs unloading before either is
+ * resolved — see reconcilePendingOperations()'s own doc in syncHelper.ts
+ * for the full architecture). Rather than have the client guess which ONE
+ * to check (a "latest only" heuristic the round-9 directive explicitly
+ * forbids), this endpoint resolves EVERY supplied opId, unconditionally,
+ * in the SAME request/transaction — there is no picking, so there is
+ * nothing to get wrong.
  *
  * Codex P1 fix (8th round) — the 7th round's opStatus lookup ran as a
  * SEPARATE, UNLOCKED query, entirely independent of the per-(user,profile)
@@ -26,15 +39,16 @@
  * ran, so `found: false` could be returned even though the operation was, at
  * that very instant, in the process of being accepted — a false negative a
  * client could wrongly treat as conclusive proof of failure. The fix: when
- * `lastOpId` is supplied, the ENTIRE read (opStatus lookup + the
- * user_planner select + the legacy-migration fallback, whichever fires) now
- * runs inside ONE transaction holding the SAME `pg_advisory_xact_lock` used
- * by handleWrite — see getPlannerWithOpStatus() below. Any write already
- * IN PROGRESS for this (user, profile) is holding that same lock, so this
- * lookup simply waits for it to commit (or roll back) before proceeding,
- * and then sees its up-to-date, fully-committed result — never a
- * point-in-time snapshot torn mid-write. This makes `found` a DETERMINISTIC
- * fact as of a single consistent instant, not a racy unlocked read.
+ * one or more `lastOpId` are supplied, the ENTIRE read (every opStatus
+ * lookup + the user_planner select + the legacy-migration fallback,
+ * whichever fires) now runs inside ONE transaction holding the SAME
+ * `pg_advisory_xact_lock` used by handleWrite — see getPlannerWithOpStatus()
+ * below. Any write already IN PROGRESS for this (user, profile) is holding
+ * that same lock, so this lookup simply waits for it to commit (or roll
+ * back) before proceeding, and then sees its up-to-date, fully-committed
+ * result — never a point-in-time snapshot torn mid-write. This makes each
+ * `found` a DETERMINISTIC fact as of a single consistent instant, not a
+ * racy unlocked read.
  *
  * What this does NOT and cannot resolve: a write whose HTTP request has not
  * yet reached this server process at all (still queued in the browser, or
@@ -42,15 +56,15 @@
  * no lock, however placed, can make the server aware of a request it has
  * not received yet. `found: false` therefore still never means "will never
  * be accepted", only "not accepted as of this fully-serialized instant" —
- * see resolveConfirmedSnapshotAfterBeacon's own doc in syncHelper.ts for
- * why the client accordingly treats `found: false` as inconclusive (never
- * clearing its pending-beacon marker on it) and only `found: true` as
- * proof, rather than the server trying to manufacture a third "unresolved"
- * wire value for a fact it fundamentally cannot observe.
+ * see reconcilePendingOperations()'s own doc in syncHelper.ts for why the
+ * client accordingly treats `found: false` as inconclusive (never retiring
+ * that op's pending evidence on it) and only `found: true` as proof, rather
+ * than the server trying to manufacture a third "unresolved" wire value for
+ * a fact it fundamentally cannot observe.
  *
- * When `lastOpId` is omitted, GET is unaffected — the ordinary, unlocked
- * fast path (unchanged from prior rounds) is used, since there is no
- * pending operation to verify.
+ * When no `lastOpId` is supplied, GET is unaffected — the ordinary,
+ * unlocked fast path (unchanged from prior rounds) is used, since there is
+ * no pending operation to verify.
  *
  * PUT  /api/sync/planner?profileId=…&clientOpId=… — merge-write the planner
  *   blob for (user, profile)
@@ -197,6 +211,35 @@ function validateOpId(raw: string | null): string | null {
   return trimmed;
 }
 
+// Defensive cap — the client's pending-operation set is expected to stay
+// tiny in practice (bounded by how many tabs have unloaded with an
+// unresolved beacon since the last successful resolution), but this bounds
+// the query cost of a single GET against a malformed/abusive client rather
+// than relying on that expectation alone. Opts NOT sent (beyond the cap)
+// are simply left unresolved by THIS request — they remain in the client's
+// pending set and are retried on a later pull, exactly like any other
+// not-yet-resolved op (see reconcilePendingOperations' own doc in
+// syncHelper.ts).
+const MAX_LAST_OP_IDS = 25;
+
+/**
+ * Validates and de-duplicates the (possibly repeated) `lastOpId` query
+ * parameters, capping the result at MAX_LAST_OP_IDS.
+ */
+function validateOpIds(raw: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const entry of raw) {
+    const valid = validateOpId(entry);
+    if (valid && !seen.has(valid)) {
+      seen.add(valid);
+      result.push(valid);
+      if (result.length >= MAX_LAST_OP_IDS) break;
+    }
+  }
+  return result;
+}
+
 type OpStatus = { opId: string; found: boolean; revision: number | null };
 type Queryable = Pool | PoolClient;
 
@@ -232,32 +275,39 @@ async function lookupOpStatus(
 // ── GET ──────────────────────────────────────────────────────────────────────
 
 /**
- * The `lastOpId`-present path (Codex P1, 8th round). Runs the ENTIRE read —
- * opStatus lookup, the user_planner select, and the legacy-migration
- * fallback if it fires — inside ONE transaction holding the same
- * `pg_advisory_xact_lock` handleWrite uses for this (user, profile). See
- * this file's module doc for why: it eliminates the race where an unlocked
- * opStatus lookup could return `found: false` while the write that would
- * have made it `true` was still an in-progress, uncommitted transaction.
- * Structurally identical to the pre-8th-round unlocked fast path otherwise
- * — same three response tiers, same normalization/migration logic — just
- * fully serialized and with `opStatus` attached to every response tier
- * (never reachable on 204, since a write that recorded an opId always
- * also upserts a `user_planner` row in the SAME transaction — see
- * handleWrite's own doc).
+ * The `lastOpId`-present path (Codex P1, 8th round; generalized to multiple
+ * opIds in the 9th). Runs the ENTIRE read — every opStatus lookup, the
+ * user_planner select, and the legacy-migration fallback if it fires —
+ * inside ONE transaction holding the same `pg_advisory_xact_lock`
+ * handleWrite uses for this (user, profile). See this file's module doc
+ * for why: it eliminates the race where an unlocked opStatus lookup could
+ * return `found: false` while the write that would have made it `true` was
+ * still an in-progress, uncommitted transaction. Structurally identical to
+ * the pre-8th-round unlocked fast path otherwise — same three response
+ * tiers, same normalization/migration logic — just fully serialized and
+ * with `opStatuses` (one entry per requested opId) attached to every
+ * response tier (never reachable on 204, since a write that recorded an
+ * opId always also upserts a `user_planner` row in the SAME transaction —
+ * see handleWrite's own doc).
  */
 async function getPlannerWithOpStatus(
   pool: Pool,
   userId: string,
   profileId: string,
-  lastOpId: string
+  lastOpIds: string[]
 ): Promise<NextResponse> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [userId, profileId]);
 
-    const opStatus = await lookupOpStatus(client, userId, profileId, lastOpId);
+    // Codex P1 fix (9th round) — resolve EVERY requested opId, not just
+    // one; see this file's module doc for why there is no "pick one"
+    // heuristic here. All lookups run inside this SAME locked transaction.
+    const opStatuses: OpStatus[] = [];
+    for (const opId of lastOpIds) {
+      opStatuses.push(await lookupOpStatus(client, userId, profileId, opId));
+    }
 
     const { rows } = await client.query<{ planner_json: string; updated_at: Date; revision: string }>(
       "SELECT planner_json, updated_at, revision FROM user_planner WHERE user_id = $1 AND profile_id = $2",
@@ -276,7 +326,7 @@ async function getPlannerWithOpStatus(
           plannerJson,
           updatedAt: rows[0].updated_at.toISOString(),
           revision: Number(rows[0].revision),
-          opStatus,
+          opStatuses,
         });
       }
     }
@@ -328,7 +378,7 @@ async function getPlannerWithOpStatus(
               plannerJson: normalizedPlanner,
               updatedAt: legacyUpdatedAt.toISOString(),
               revision: Number(migratedRevision),
-              opStatus,
+              opStatuses,
             });
           }
           // Migration write unexpectedly returned nothing — fall through
@@ -338,13 +388,13 @@ async function getPlannerWithOpStatus(
           return NextResponse.json({
             plannerJson: normalizedPlanner,
             updatedAt: legacyUpdatedAt.toISOString(),
-            opStatus,
+            opStatuses,
           });
         }
       }
     }
 
-    // Neither table has data — definitively empty. opStatus.found is
+    // Neither table has data — definitively empty. Every opStatus.found is
     // structurally guaranteed false here (see this function's own doc).
     await client.query("COMMIT");
     return new NextResponse(null, { status: 204 });
@@ -367,17 +417,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!profileId) {
     return NextResponse.json({ error: "Missing or invalid profileId" }, { status: 400 });
   }
-  const lastOpId = validateOpId(req.nextUrl.searchParams.get("lastOpId"));
+  const lastOpIds = validateOpIds(req.nextUrl.searchParams.getAll("lastOpId"));
 
   const pool = getPool();
 
-  // Codex P1 fix (8th round) — route through the locked path whenever there
-  // is an operation to verify; see getPlannerWithOpStatus's own doc and
-  // this file's module doc for why the lookup itself must be lock-
-  // serialized against concurrent writes. An ordinary pull with no pending
-  // beacon (the common case) takes the unchanged, unlocked fast path below.
-  if (lastOpId) {
-    return getPlannerWithOpStatus(pool, userId, profileId, lastOpId);
+  // Codex P1 fix (8th round; generalized 9th) — route through the locked
+  // path whenever there is at least one operation to verify; see
+  // getPlannerWithOpStatus's own doc and this file's module doc for why the
+  // lookup itself must be lock-serialized against concurrent writes. An
+  // ordinary pull with no pending operations (the common case) takes the
+  // unchanged, unlocked fast path below.
+  if (lastOpIds.length > 0) {
+    return getPlannerWithOpStatus(pool, userId, profileId, lastOpIds);
   }
 
   // ── 1. Try new user_planner table first ──────────────────────────────────

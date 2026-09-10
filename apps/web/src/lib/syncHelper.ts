@@ -54,29 +54,37 @@ Reviewers should check any changes affecting:
  *                                                       (6th round; see
  *                                                       each page's pull
  *                                                       effect)
- *   getPendingBeaconOpId(userId, profileId)          — read the opId of a
- *                                                       still-unresolved
- *                                                       beacon left by a
- *                                                       prior unload, if any
- *                                                       (7th round; see its
- *                                                       own doc)
- *   await resolveConfirmedSnapshotAfterBeacon(userId, — resolve a pending
- *     profileId, resolvedOpId, beaconAccepted,            beacon's fate
- *     cloudRevision, cloudSnapshot)                       against a
- *                                                         just-fetched GET's
+ *   listPendingOps(userId, profileId)                — read ALL currently
+ *                                                       pending (unresolved
+ *                                                       or not-yet-durably-
+ *                                                       retired) unload
+ *                                                       beacon opIds for
+ *                                                       this identity (9th
+ *                                                       round; see its own
+ *                                                       doc — replaces the
+ *                                                       7th/8th rounds'
+ *                                                       single-opId
+ *                                                       getPendingBeaconOpId)
+ *   await reconcilePendingOperations(userId,          — resolve EVERY
+ *     profileId, opStatuses, cloudRevision,              pending op this
+ *     cloudSnapshot)                                     SAME GET response
+ *                                                         reported on
+ *                                                         against a
  *                                                         server-verified
- *                                                         opStatus, then
- *                                                         (only when
- *                                                         accepted) clear
- *                                                         pendingBeaconOpId
- *                                                         (7th/8th rounds;
- *                                                         see its own doc —
- *                                                         MUST be awaited
- *                                                         and its result
- *                                                         folded into this
- *                                                         pull's baseline
- *                                                         BEFORE winner
- *                                                         selection)
+ *                                                         fact each, and
+ *                                                         retire ONLY the
+ *                                                         ones whose
+ *                                                         confirmed-baseline
+ *                                                         promotion is
+ *                                                         DURABLY confirmed
+ *                                                         to have succeeded
+ *                                                         (9th round; see
+ *                                                         its own doc — MUST
+ *                                                         be awaited and its
+ *                                                         effect folded into
+ *                                                         this pull's
+ *                                                         baseline BEFORE
+ *                                                         winner selection)
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -91,17 +99,29 @@ Reviewers should check any changes affecting:
  *                                                         profile, mutated
  *                                                         ONLY under
  *                                                         withConfirmedSnapshotLock
- *   dwp:sync:{userId}:{profileId}:pendingBeaconOpId    — the opId of the
- *                                                         MOST RECENT
- *                                                         unresolved beacon
- *                                                         for this user+
- *                                                         profile, if any
- *                                                         (7th round) —
- *                                                         deliberately a
- *                                                         SEPARATE, UNLOCKED
- *                                                         key; see the
- *                                                         module doc above
- *                                                         for why
+ *   dwp:sync:{userId}:{profileId}:pendingOp:{opId}     — ONE key PER
+ *                                                         still-pending
+ *                                                         unload beacon
+ *                                                         opId for this
+ *                                                         user+profile (9th
+ *                                                         round; see the
+ *                                                         "Pending
+ *                                                         operations"
+ *                                                         section below) —
+ *                                                         deliberately
+ *                                                         per-operation
+ *                                                         rather than a
+ *                                                         single mutable
+ *                                                         scalar or a
+ *                                                         compound
+ *                                                         set/array, so
+ *                                                         adding OR removing
+ *                                                         one op is a single
+ *                                                         unconditional
+ *                                                         key write/delete
+ *                                                         that can never
+ *                                                         race or clobber a
+ *                                                         DIFFERENT op's key
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
@@ -210,11 +230,39 @@ Reviewers should check any changes affecting:
  * round (pending-beacon state read-modify-written unlocked while confirmed
  * state used Web Locks). Now `pendingBeaconOpId` needs no read-modify-write
  * at all — it is a single opaque scalar, always fully overwritten by
- * whichever beacon fires last (last-write-wins is correct here: only the
- * MOST RECENT beacon's fate is worth tracking, since resolving it consumes
- * it and an in-between beacon's payload is superseded anyway) — and
- * `confirmed` remains exclusively mutated under the lock. No field is ever
- * touched by both a locked and an unlocked writer.
+ * whichever beacon fires last.
+ *
+ * Codex P1 fix (9th round) — the 7th/8th rounds' "last-write-wins, only the
+ * MOST RECENT beacon matters" assumption was itself a bug: it is a "latest
+ * only" timing heuristic the round-8 directive already warns against, and
+ * it actively DESTROYS evidence. If tab 1 registers pending beacon A and
+ * tab 2 later registers pending beacon B (both still genuinely unresolved),
+ * overwriting the single scalar key to B silently discards A — no pull will
+ * ever check A's fate again, even though A might still be sitting,
+ * unaccepted, in some queue. Separately, the 8th round's
+ * resolveConfirmedSnapshotAfterBeacon() cleared the pending marker BEFORE
+ * confirming that the paired confirmed-baseline promotion had durably
+ * succeeded — if Web Locks were unavailable, or the lock request failed, or
+ * the promotion was itself rejected as stale, the marker was already gone
+ * while the baseline it was supposed to gate remained un-promoted, again
+ * losing the evidence needed to retry later.
+ *
+ * Both bugs share one cause: treating "pending operations" as a single
+ * mutable slot instead of a durable, per-operation SET. The fix replaces
+ * `pendingBeaconOpId` with one INDEPENDENT localStorage key PER pending
+ * opId (`dwp:sync:{userId}:{profileId}:pendingOp:{opId}` — see the "Pending
+ * operations" section below). Registering a new op is then a pure,
+ * unconditional single-key write — no read of any existing set required,
+ * so it can never race or clobber a DIFFERENT op's key, satisfying the
+ * cross-tab requirement without any lock at all. Retiring an op is a pure,
+ * unconditional single-key delete, gated on the SAME op's confirmed-
+ * baseline promotion having been PROVEN to run to completion under
+ * withConfirmedSnapshotLock (see its updated return contract and
+ * reconcilePendingOperations() below) — never before. `confirmed` remains
+ * exclusively mutated under the lock; each pending-op key is exclusively
+ * mutated by plain, unconditional, single-key writes/deletes. No field is
+ * ever touched by both a locked and an unlocked writer, and no two
+ * DIFFERENT operations' evidence ever shares a key.
  *
  * Either way, the record is:
  *   • NEVER a fresh read of the current plans/lightning/days storage keys
@@ -468,9 +516,9 @@ function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string)
  * SH.2 architecture (Codex P1, 4th round; scope narrowed back to just the
  * confirmed snapshot in the 7th round) — the SINGLE critical section every
  * mutation of a (userId, profileId)'s confirmed snapshot goes through:
- * commitConfirmedBaseline() and resolveConfirmedSnapshotAfterBeacon() (both
- * below) are thin wrappers around this, passing a pure `mutate` function
- * that computes the next snapshot from the current one (or null to signal
+ * commitConfirmedBaseline() and reconcilePendingOperations() (both below)
+ * are thin wrappers around this, passing a pure `mutate` function that
+ * computes the next snapshot from the current one (or null to signal
  * "no change" — see below).
  *
  * Codex P1 fix (4th round) — the read, compute, and write here form a
@@ -519,37 +567,60 @@ function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string)
  * return never triggers a write — this is what makes "reject, keep
  * whatever is already stored" and "there was never anything to store"
  * indistinguishable in effect, which is correct here since neither case
- * ever needs `confirmedSnapshot`'s key to change. Errors thrown by
- * `mutate` or the write itself are swallowed (best-effort tier, matching
- * every other confirmed-state write in this module) — the caller learns
- * nothing back from a failure except that the mutation silently didn't
- * happen.
+ * ever needs `confirmedSnapshot`'s key to change.
+ *
+ * Codex P1 fix (9th round) — RETURN CONTRACT for callers that need to know
+ * whether the mutation actually ran (reconcilePendingOperations() below is
+ * exactly such a caller: retiring a pending op's evidence must never happen
+ * before its paired promotion is PROVEN to have run to completion under
+ * this lock). Returns:
+ *   • `undefined` — did NOT run under the lock at all: no Web Locks API
+ *     (SSR, older browser, non-secure context), or the `locks.request()`
+ *     call itself failed, or `mutate`/the write threw inside the locked
+ *     section. The caller must treat this as "unknown — nothing was
+ *     durably established," never as a successful no-op.
+ *   • the resulting `ConfirmedPlannerSnapshot | null` — the lock WAS
+ *     acquired and `mutate` DID run to completion: either a NEW value was
+ *     computed and durably written (returned here), or `mutate` returned
+ *     `null` (no change needed — `current` is returned instead, itself
+ *     still a fully valid, freshly-read value, e.g. because a CONCURRENT
+ *     commit already advanced confirmed past what this call would have
+ *     written — see nextConfirmedBaseline's own doc). Either way the
+ *     caller can trust this return value as an accurate post-lock read.
+ * commitConfirmedBaseline() (below) simply awaits and discards this value
+ * (an ordinary cloud-won-domain commit has no follow-on evidence to
+ * retire); reconcilePendingOperations() inspects it directly.
  */
 async function withConfirmedSnapshotLock(
   userId: string,
   profileId: string,
   mutate: (current: ConfirmedPlannerSnapshot | null) => ConfirmedPlannerSnapshot | null
-): Promise<void> {
-  if (typeof window === "undefined") return;
+): Promise<ConfirmedPlannerSnapshot | null | undefined> {
+  if (typeof window === "undefined") return undefined;
   const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
   // Codex P1 fix (5th round) — fail safe: no lock, no mutation. See this
   // function's own doc above for why an unserialized fallback is never an
   // acceptable substitute for atomicity here.
-  if (!locks) return;
+  if (!locks) return undefined;
   try {
-    await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
+    return await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
       try {
         const current = getConfirmedSnapshot(userId, profileId);
         const next = mutate(current);
         if (next) {
           localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
+          return next;
         }
-      } catch {}
+        return current;
+      } catch {
+        return undefined;
+      }
     });
   } catch {
     // Locks API present but the request itself failed unexpectedly — the
     // mutation is simply dropped (best-effort tier), never retried through
     // an unprotected path.
+    return undefined;
   }
 }
 
@@ -582,128 +653,157 @@ export async function commitConfirmedBaseline(
   );
 }
 
-// ── Pending beacon opId (separate, UNLOCKED key — see module doc, 7th round) ────
+// ── Pending operations (one UNLOCKED key PER opId — see module doc, 9th round) ──
 
 /**
- * Returns the localStorage key tracking the opId of the MOST RECENT
- * still-unresolved beacon for a given (userId, profileId) pair (Codex P1,
- * 7th round). Deliberately NOT part of the confirmed-snapshot record and
- * deliberately NOT lock-protected — see the module doc's 7th-round
- * paragraph for the full rationale: it is a single opaque scalar that only
- * ever needs a plain overwrite (registerUnloadSync, on queueing a beacon)
- * or a plain clear (resolveConfirmedSnapshotAfterBeacon, once a later pull
- * conclusively resolves it), never a read-modify-write, so there is no
- * compound operation here for a lock to protect.
+ * SH.2 architecture (Codex P1, 9th round) — PENDING UNLOAD OPERATIONS ARE
+ * DURABLE UNRESOLVED FACTS, one per client-generated opId, tracked
+ * independently. Replaces the 7th/8th rounds' single mutable
+ * `pendingBeaconOpId` scalar — see the module doc's 9th-round paragraph for
+ * the full root-cause analysis of why a single slot (and clearing it before
+ * promotion was proven durable) both lost operation evidence.
+ *
+ * The key is namespaced PER opId: `dwp:sync:{userId}:{profileId}:pendingOp:{opId}`.
+ * This is the entire mechanism that makes registration and retirement
+ * race-free without any lock:
+ *   • Registering op X (addPendingOp, called from registerUnloadSync's
+ *     beforeunload handler, which cannot reliably await a lock) is ONE
+ *     unconditional `setItem` on X's OWN key — no read of any other op's
+ *     state, no read of X's own prior state either (there is nothing
+ *     meaningful to merge; a duplicate registration of the same opId is
+ *     just the same value written again). Two tabs registering DIFFERENT
+ *     opIds touch DIFFERENT keys — physically impossible to race.
+ *   • Retiring op X (removePendingOp, called only from
+ *     reconcilePendingOperations() below, only after X's confirmed-baseline
+ *     promotion is durably confirmed) is ONE unconditional `removeItem` on
+ *     X's OWN key — it cannot ever touch, corrupt, or accidentally clear a
+ *     DIFFERENT still-pending op Y's key, unlike a compare-and-clear (or
+ *     any read-modify-write) against a single shared scalar or a compound
+ *     set/array value would.
+ * `listPendingOps` reads the CURRENT full set by scanning localStorage for
+ * this prefix — a plain, unlocked enumeration is safe here because each
+ * entry's own presence/absence is independently, atomically true or false
+ * at any instant; there is no cross-entry invariant a scan could observe
+ * "half-updated".
  */
-function pendingBeaconOpIdKeyForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:pendingBeaconOpId`;
+const PENDING_OP_PREFIX_TEMPLATE = (userId: string, profileId: string): string =>
+  `dwp:sync:${userId}:${profileId}:pendingOp:`;
+
+function pendingOpKeyForIdentity(userId: string, profileId: string, opId: string): string {
+  return `${PENDING_OP_PREFIX_TEMPLATE(userId, profileId)}${opId}`;
 }
 
 /**
- * Read the opId of a still-unresolved beacon for this user + profile, if
- * any — see each page's pull effect for how this is read BEFORE a pull's
- * fetch (to pass as `lastOpId`) and resolveConfirmedSnapshotAfterBeacon()
- * below for how it is cleared once resolved.
+ * Read every currently-pending unload-beacon opId for this user + profile —
+ * see each page's pull effect for how this is read BEFORE a pull's fetch
+ * (to pass as `lastOpIds`) and reconcilePendingOperations() below for how
+ * an individual entry is retired once its promotion durably succeeds.
+ * Order is not meaningful (see reconcilePendingOperations' own doc for why
+ * no ordering assumption is needed — every accepted op in a pull's response
+ * resolves against the SAME server-current snapshot/revision).
  */
-export function getPendingBeaconOpId(userId: string, profileId: string): string | null {
-  if (typeof window === "undefined") return null;
+export function listPendingOps(userId: string, profileId: string): string[] {
+  if (typeof window === "undefined") return [];
   try {
-    return localStorage.getItem(pendingBeaconOpIdKeyForIdentity(userId, profileId));
+    const prefix = PENDING_OP_PREFIX_TEMPLATE(userId, profileId);
+    const opIds: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(prefix)) {
+        opIds.push(key.slice(prefix.length));
+      }
+    }
+    return opIds;
   } catch {
-    return null;
+    return [];
   }
 }
 
-function setPendingBeaconOpId(userId: string, profileId: string, opId: string): void {
+function addPendingOp(userId: string, profileId: string, opId: string): void {
   try {
-    localStorage.setItem(pendingBeaconOpIdKeyForIdentity(userId, profileId), opId);
+    localStorage.setItem(pendingOpKeyForIdentity(userId, profileId, opId), opId);
   } catch {}
 }
 
-function clearPendingBeaconOpId(userId: string, profileId: string): void {
+function removePendingOp(userId: string, profileId: string, opId: string): void {
   try {
-    localStorage.removeItem(pendingBeaconOpIdKeyForIdentity(userId, profileId));
+    localStorage.removeItem(pendingOpKeyForIdentity(userId, profileId, opId));
   } catch {}
 }
 
 /**
- * SH.2 architecture (Codex P1, 7th round; hardened 8th round) — BEACON
- * UNCERTAINTY resolution via server-verified operation identity. Call this
- * after EVERY successful pull (a genuinely resolved GET — never from a
- * `.catch()` branch, which teaches nothing about a pending beacon's fate)
- * for the SAME (userId, profileId) the pull was for, passing:
- *   • `beaconAccepted` — computed by the caller as
- *     `pendingOpId !== null && opStatus?.opId === pendingOpId && opStatus.found === true`,
- *     where `pendingOpId` is what getPendingBeaconOpId() returned BEFORE
- *     this pull's fetch started, and `opStatus` is this SAME GET response's
- *     own server-verified fact (see pullPlanner()'s own doc). This is a
- *     direct fact query, never inferred from content comparison or timing.
+ * SH.2 architecture (Codex P1, 7th–9th rounds) — BEACON UNCERTAINTY
+ * resolution via server-verified operation identity, generalized to a
+ * pending-operation SET. Call this after EVERY successful pull (a
+ * genuinely resolved GET — never from a `.catch()` branch, which teaches
+ * nothing about any pending op's fate) for the SAME (userId, profileId) the
+ * pull was for, passing:
+ *   • `opStatuses` — this SAME GET response's own server-verified fact for
+ *     EVERY opId this pull queried (see pullPlanner()'s own doc) — one
+ *     entry per opId in `listPendingOps()`'s result at the time this pull's
+ *     fetch started. Never inferred from content comparison or timing.
  *   • `cloudRevision`/`cloudSnapshot` — this SAME GET response's own
  *     revision/snapshot (both null for a 204/unparseable response).
  *
- * Delegates to resolveConfirmedAfterBeacon() (syncPayload.ts) for the
- * actual decision — see its own doc for the full accepted/superseded/
- * failed contract — under the SAME lock commitConfirmedBaseline() uses, so
- * this can never race it into a regressed confirmed snapshot.
+ * DETERMINISTIC MULTI-OP POLICY — every op this pull queried is resolved,
+ * unconditionally, every pull; there is no "pick the latest" or "pick the
+ * oldest" heuristic to get wrong, because there is nothing to pick: all of
+ * them are checked. All ops found `accepted` in the SAME pull share the
+ * SAME target: THIS GET response's own current `cloudSnapshot`/
+ * `cloudRevision` (there is only ever one row per (user, profile) —
+ * op-specific revisions are a ledger fact used only to answer "accepted or
+ * not", never to select which content to adopt). This is what lets an
+ * older accepted op (e.g. opA, server revision 5) retire safely once a
+ * newer op (opB, revision 6) has ALSO been accepted and this pull's own GET
+ * reports the row at revision 6: promoting confirmed to revision 6 (via
+ * resolveConfirmedAfterBeacon(), which routes through the existing
+ * monotonic nextConfirmedBaseline() gate) is what BOTH opA's and opB's
+ * "accepted" status resolve into — opA's own promotion attempt, if it were
+ * separately tried against revision 6, would simply be rejected as stale
+ * by nextConfirmedBaseline() and reduce to "already subsumed", which
+ * withConfirmedSnapshotLock's return contract (see its own doc) reports
+ * identically to "just wrote it" — a REAL server revision fact, never a
+ * client ordering assumption, is what proves the older op is subsumed.
  *
- * Codex P1 fix (8th round) — TWO further corrections:
+ * REMOVE-AFTER-PROMOTION RULE (fixes Codex P1 finding #1 from the 9th
+ * round): an accepted op's pending entry is retired ONLY when
+ * withConfirmedSnapshotLock's return value (see its own doc) is NOT
+ * `undefined` — i.e. the lock was actually acquired and the mutation
+ * (write, or a proven-already-subsumed no-op) ran to completion. If Web
+ * Locks are unavailable, or the lock request fails, or an internal error
+ * occurs, the return is `undefined` and EVERY accepted op from this pull is
+ * left pending for a later pull to retry — never retired speculatively
+ * ahead of durable proof. An op the server reports as NOT found (not yet
+ * accepted) is never touched either way, positively or negatively — it
+ * simply remains pending, exactly matching "an unaccepted/not-yet-seen op
+ * remains pending".
  *
- * (1) MUST BE AWAITED AND ACTED ON BEFORE THIS PULL SELECTS WINNERS. The
- * 7th round called this only at the very END of the pull effect, after
- * plans/lightning/days winners had already been chosen against the
- * FROZEN pre-fetch `pullStartBaseline`. If this pull's beacon was in fact
- * accepted — and, per the GET response's own opStatus, has already been
- * folded into (or superseded within) the cloud state this SAME GET
- * returned — using the stale pre-fetch baseline for winner selection could
- * classify this device's own already-accepted local content as a "local
- * edit" relative to that stale baseline, letting it be re-pushed over a
- * newer cloud write the GET already revealed. The caller MUST now: await
- * this function, then (only when `beaconAccepted` is true) re-derive the
- * pull's EFFECTIVE baseline from a FRESH getConfirmedSnapshot() call
- * (mirroring captureConfirmedSnapshotForPull()'s own transformation) and
- * use THAT for every winner-selection comparison this pull performs — see
- * each page's pull effect for the exact sequencing. When Web Locks are
- * unavailable, this promotion silently no-ops (see
- * withConfirmedSnapshotLock's own fail-safe doc) and a fresh
- * getConfirmedSnapshot() read simply reproduces the SAME value
- * `pullStartBaseline` already had — safe, and requires no special-casing
- * by the caller.
- *
- * (2) NEVER CLEARS `pendingBeaconOpId` ON `beaconAccepted === false`. A
- * `false` answer (see route.ts's GET doc) is NOT proof the beacon will
- * never be accepted — even under the 8th round's now-lock-serialized
- * server lookup, a beacon whose HTTP request has not yet reached the
- * server at all is indistinguishable, at lookup time, from one that will
- * never arrive. Clearing the marker on an inconclusive `false` would
- * permanently foreclose ever re-checking it: if that SAME beacon commits
- * moments later (after this pull's GET already ran), a LATER pull with no
- * opId left to check would fall back to ordinary reconciliation, which —
- * if this device's local storage still holds exactly the beacon's own
- * content — could misclassify it as a fresh unsynced edit and re-push it
- * over whatever newer state has since landed. Only `beaconAccepted ===
- * true` (the one fact this architecture can actually prove) ever clears
- * it; a beacon that truly never arrives simply leaves its opId in place
- * indefinitely (harmless — every subsequent pull re-checks it for free)
- * until either it is eventually found accepted, or a NEW beacon overwrites
- * the key outright (setPendingBeaconOpId is last-write-wins, so only the
- * MOST RECENT beacon's fate is ever worth tracking).
+ * The promotion attempt itself runs at most ONCE per pull (not once per
+ * accepted op) since — per the policy above — every accepted op in one
+ * pull shares the same target; its single result is then applied to
+ * retire every accepted-and-found op from `opStatuses` together. This is
+ * both simpler and correct.
  */
-export async function resolveConfirmedSnapshotAfterBeacon(
+export async function reconcilePendingOperations(
   userId: string,
   profileId: string,
-  resolvedOpId: string,
-  beaconAccepted: boolean,
+  opStatuses: OpStatus[],
   cloudRevision: number | null,
   cloudSnapshot: SyncedPlannerPayload | null
 ): Promise<void> {
-  if (!beaconAccepted) return;
-  if (typeof window !== "undefined" && getPendingBeaconOpId(userId, profileId) === resolvedOpId) {
-    clearPendingBeaconOpId(userId, profileId);
-  }
+  const acceptedOpIds = opStatuses.filter((s) => s.found).map((s) => s.opId);
+  if (acceptedOpIds.length === 0) return;
   if (typeof window === "undefined") return;
-  await withConfirmedSnapshotLock(userId, profileId, (current) =>
-    resolveConfirmedAfterBeacon(current, beaconAccepted, cloudRevision, cloudSnapshot)
+  const result = await withConfirmedSnapshotLock(userId, profileId, (current) =>
+    resolveConfirmedAfterBeacon(current, true, cloudRevision, cloudSnapshot)
   );
+  // `undefined` means the lock was never acquired / the mutation never ran
+  // to completion — durable proof does not exist, so every accepted op
+  // from this pull stays pending rather than being retired speculatively.
+  if (result === undefined) return;
+  for (const opId of acceptedOpIds) {
+    removePendingOp(userId, profileId, opId);
+  }
 }
 
 // ── Sync state observer ───────────────────────────────────────────────────────
@@ -754,10 +854,10 @@ let currentSyncProfileId = "default";
 
 /**
  * The authenticated user id that sync is currently targeting, used to
- * scope confirmed-baseline commits (Codex P1, 3rd round) and pending-beacon
- * opId marking (Codex P1, 6th/7th rounds) — see confirmedSnapshotKeyForIdentity's
- * and pendingBeaconOpIdKeyForIdentity's own docs. null while signed out or
- * before the session has resolved; doPush()
+ * scope confirmed-baseline commits (Codex P1, 3rd round) and pending-op
+ * registration (Codex P1, 6th/7th/9th rounds) — see
+ * confirmedSnapshotKeyForIdentity's and pendingOpKeyForIdentity's own docs.
+ * null while signed out or before the session has resolved; doPush()
  * and registerUnloadSync() both skip their respective identity-scoped
  * writes entirely when null (neither ever guesses an identity).
  * Updated by setSyncUserId().
@@ -839,17 +939,28 @@ function parseOpStatus(raw: unknown): OpStatus | null {
   return { opId: r.opId, found: r.found, revision };
 }
 
+function parseOpStatuses(raw: unknown): OpStatus[] {
+  if (!Array.isArray(raw)) return [];
+  const parsed: OpStatus[] = [];
+  for (const entry of raw) {
+    const status = parseOpStatus(entry);
+    if (status) parsed.push(status);
+  }
+  return parsed;
+}
+
 /**
  * Pull the latest combined planner blob for the signed-in user + profile.
  *
- * `lastOpId` (Codex P1, 7th round) is OPTIONAL — pass the pending beacon's
- * opId (getPendingBeaconOpId()) when one exists, so the server can attach a
- * conclusive `opStatus` (see api/sync/planner/route.ts's GET doc) to this
- * SAME response. Omit (or pass null/undefined) for an ordinary pull with no
- * pending beacon to resolve.
+ * `lastOpIds` (Codex P1, 7th round; generalized to a set in the 9th) is
+ * OPTIONAL — pass the FULL current pending-operation set (listPendingOps())
+ * when non-empty, so the server can attach a conclusive `opStatuses` entry
+ * (see api/sync/planner/route.ts's GET doc) for EACH one to this SAME
+ * response. Omit (or pass an empty array) for an ordinary pull with no
+ * pending operations to resolve.
  *
  * Returns:
- *   SyncedPlannerPayload & { revision: number | null; opStatus: OpStatus | null } —
+ *   SyncedPlannerPayload & { revision: number | null; opStatuses: OpStatus[] } —
  *     a valid combined planner payload was parsed. `revision` is the
  *     server-authoritative ordering value for this exact response (see
  *     api/sync/planner/route.ts's module doc) — null only if the server
@@ -858,22 +969,22 @@ function parseOpStatus(raw: unknown): OpStatus | null {
  *     "cannot safely advance the confirmed baseline from this response"
  *     and skip the commitConfirmedBaseline() call entirely for it — never
  *     substitute 0 or any other sentinel, which could wrongly compare as
- *     "older" or, worse, coincidentally valid. `opStatus` is null when
- *     `lastOpId` was not supplied, or the server response omitted/
- *     malformed it (defensive).
+ *     "older" or, worse, coincidentally valid. `opStatuses` is `[]` when
+ *     `lastOpIds` was not supplied/empty, or the server response omitted/
+ *     malformed it (defensive) — callers should treat a missing entry for
+ *     a queried opId the same as `found: false` for it (still pending).
  *   null — no usable planner payload could be parsed; this includes: 204
  *     No Content (nothing stored yet), a payload that failed JSON parsing
  *     or shape validation in parseSyncedPlannerPayload(), or a legacy
  *     plans-only response that could not be normalized into the combined
- *     shape. A 204 specifically is itself a CONCLUSIVE "opId was never
- *     accepted" answer whenever `lastOpId` was supplied — a write that
- *     records an opId always also upserts a `user_planner` row in the SAME
- *     transaction (see handleWrite in api/sync/planner/route.ts), so 204
- *     (no row in user_planner at all) is structurally incompatible with
- *     that opId having been accepted. Callers may safely treat a null
- *     pullPlanner() result as `beaconAccepted = false` unconditionally,
- *     without needing to inspect a (nonexistent, since 204 has no body)
- *     opStatus.
+ *     shape. A 204 specifically is itself a CONCLUSIVE "none of the queried
+ *     opIds were ever accepted" answer — a write that records an opId
+ *     always also upserts a `user_planner` row in the SAME transaction (see
+ *     handleWrite in api/sync/planner/route.ts), so 204 (no row in
+ *     user_planner at all) is structurally incompatible with ANY opId
+ *     having been accepted. Callers may safely treat a null pullPlanner()
+ *     result as "no queried op was accepted" unconditionally, without
+ *     needing to inspect (nonexistent, since 204 has no body) opStatuses.
  *
  * Throws on:
  *   non-OK HTTP responses (401, 5xx, etc.)
@@ -884,22 +995,24 @@ function parseOpStatus(raw: unknown): OpStatus | null {
  */
 export async function pullPlanner(
   profileId: string,
-  lastOpId?: string | null
-): Promise<(SyncedPlannerPayload & { revision: number | null; opStatus: OpStatus | null }) | null> {
-  const url = lastOpId
-    ? `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&lastOpId=${encodeURIComponent(lastOpId)}`
-    : `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`;
+  lastOpIds?: string[]
+): Promise<(SyncedPlannerPayload & { revision: number | null; opStatuses: OpStatus[] }) | null> {
+  const params = new URLSearchParams({ profileId });
+  for (const opId of lastOpIds ?? []) {
+    params.append("lastOpId", opId);
+  }
+  const url = `/api/sync/planner?${params.toString()}`;
   const res = await fetch(url, { credentials: "include" });
   // Definitively empty — no planner stored for this user+profile yet
   if (res.status === 204) return null;
   // Any other non-OK status is a real failure; let it throw
   if (!res.ok) throw new Error(`sync/planner GET ${res.status}`);
-  const data = (await res.json()) as { plannerJson?: unknown; revision?: unknown; opStatus?: unknown };
+  const data = (await res.json()) as { plannerJson?: unknown; revision?: unknown; opStatuses?: unknown };
   const parsed = parseSyncedPlannerPayload(data.plannerJson ?? null);
   if (!parsed) return null;
   const revision = typeof data.revision === "number" && Number.isFinite(data.revision) ? data.revision : null;
-  const opStatus = parseOpStatus(data.opStatus);
-  return { ...parsed, revision, opStatus };
+  const opStatuses = parseOpStatuses(data.opStatuses);
+  return { ...parsed, revision, opStatuses };
 }
 
 /**
@@ -963,15 +1076,19 @@ function generateOpId(): string {
  * (generateOpId() above) sent as a QUERY PARAMETER on the beacon URL (never
  * a body field — see api/sync/planner/route.ts's doc for why a body field
  * would trip the unknown-domain-key rejection), and record ONLY that opId
- * — a single opaque scalar under its OWN independent key
- * (setPendingBeaconOpId) — never the payload itself, and never merged with
- * `confirmed`. This is a plain, unconditional overwrite: no read of the
- * current value is needed at all, so there is no compound
- * read-modify-write left for a lock to protect. The next successful pull
- * for this SAME (userId, profileId) resolves the uncertainty conclusively
- * against the server's own GET response — see
- * resolveConfirmedSnapshotAfterBeacon's own doc and each page's pull
- * effect for where that happens.
+ * — never the payload itself, and never merged with `confirmed`.
+ *
+ * Codex P1 fix (9th round) — record it via addPendingOp(), which writes
+ * this opId under its OWN independent key (see the "Pending operations"
+ * section's doc) rather than overwriting a single shared scalar. This is
+ * still a plain, unconditional single-key write — no read of any existing
+ * value needed, so there is no compound read-modify-write left for a lock
+ * to protect — but it no longer discards a DIFFERENT, still-unresolved
+ * beacon's evidence the way overwriting one shared slot did. The next
+ * successful pull for this SAME (userId, profileId) resolves EVERY
+ * currently-pending op (this one included) conclusively against the
+ * server's own GET response — see reconcilePendingOperations()'s own doc
+ * and each page's pull effect for where that happens.
  */
 export function registerUnloadSync(): () => void {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
@@ -996,7 +1113,7 @@ export function registerUnloadSync(): () => void {
       new Blob([body], { type: "application/json" })
     );
     if (queued && userId) {
-      setPendingBeaconOpId(userId, profileId, opId);
+      addPendingOp(userId, profileId, opId);
     }
   };
 

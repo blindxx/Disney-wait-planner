@@ -87,8 +87,8 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
-  getPendingBeaconOpId,
-  resolveConfirmedSnapshotAfterBeacon,
+  listPendingOps,
+  reconcilePendingOperations,
 } from "@/lib/syncHelper";
 
 // Phase 9.0 — content type foundation
@@ -1687,17 +1687,20 @@ export default function PlansPage() {
     // `.then()` re-derives an `effectiveBaseline` from the freshly-promoted
     // confirmed snapshot instead — see that block's own doc.
     const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
-    // SH.2 architecture (Codex P1, 7th round) — read any still-unresolved
-    // beacon's opId BEFORE this pull's fetch starts, so it can be passed as
-    // `lastOpId` and resolved against THIS SAME GET response's own
-    // server-verified opStatus (see pullPlanner's and
-    // resolveConfirmedSnapshotAfterBeacon's own docs in syncHelper.ts).
-    // null when no beacon is currently pending for this identity (the
-    // common case) — pullPlanner() omits the query param entirely then.
-    const pendingBeaconOpId = activeUserIdRef.current
-      ? getPendingBeaconOpId(activeUserIdRef.current, activeProfileIdRef.current)
-      : null;
-    void pullPlanner(activeProfileIdRef.current, pendingBeaconOpId)
+    // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
+    // 9th) — read the FULL set of still-pending unload-beacon opIds BEFORE
+    // this pull's fetch starts, so ALL of them can be passed as `lastOpIds`
+    // and resolved against THIS SAME GET response's own server-verified
+    // `opStatuses` (see pullPlanner's and reconcilePendingOperations' own
+    // docs in syncHelper.ts). `[]` when nothing is currently pending for
+    // this identity (the common case) — pullPlanner() omits the query
+    // params entirely then. Deliberately NOT just the most recent one — see
+    // reconcilePendingOperations' own doc for why a "latest only" pick
+    // would silently lose evidence of a still-unresolved older op.
+    const pendingOpIds = activeUserIdRef.current
+      ? listPendingOps(activeUserIdRef.current, activeProfileIdRef.current)
+      : [];
+    void pullPlanner(activeProfileIdRef.current, pendingOpIds)
       .then(async (planner) => {
         if (cancelled) return;
         // Extract the plans portion from the combined planner payload.
@@ -1718,33 +1721,26 @@ export default function PlansPage() {
         }
         const cloudDaysOrder = planner?.days;
 
-        // SH.2 architecture (Codex P1, 8th round) — PULL ORDER: resolve any
-        // pending beacon's fate against THIS SAME GET response BEFORE any
-        // winner is selected. `beaconAccepted` is a direct, server-verified
-        // fact (never inferred from content comparison or timing): the SAME
-        // opId this pull looked up (`pendingBeaconOpId`, read before the
-        // fetch) must match what THIS GET's own `opStatus` reports, AND
-        // that opStatus must say `found`. A definitive 204 (`planner` null)
-        // is structurally incompatible with `found` ever being true (see
-        // pullPlanner's own doc), so it correctly resolves to `false` here
-        // without needing to special-case it. See
-        // resolveConfirmedSnapshotAfterBeacon's own doc in syncHelper.ts for
-        // why this must be AWAITED and folded into this pull's baseline
-        // HERE, before winner selection, rather than only recorded at the
-        // end (7th round) — the 7th-round ordering let a stale pre-fetch
-        // baseline classify this device's own just-accepted content as an
-        // unsynced local edit and re-push it over cloud state this SAME GET
-        // had already revealed as newer.
-        const beaconAccepted =
-          pendingBeaconOpId !== null &&
-          planner?.opStatus?.opId === pendingBeaconOpId &&
-          planner?.opStatus?.found === true;
-        if (activeUserIdRef.current && pendingBeaconOpId) {
-          await resolveConfirmedSnapshotAfterBeacon(
+        // SH.2 architecture (Codex P1, 8th round; generalized 9th) — PULL
+        // ORDER: resolve EVERY pending op's fate against THIS SAME GET
+        // response BEFORE any winner is selected. `opStatuses` is a direct,
+        // server-verified fact per op (never inferred from content
+        // comparison or timing) — a definitive 204 (`planner` null) is
+        // structurally incompatible with any `found` ever being true (see
+        // pullPlanner's own doc), so `anyAccepted` correctly resolves to
+        // `false` here without needing to special-case it. See
+        // reconcilePendingOperations' own doc in syncHelper.ts for why this
+        // must be AWAITED and folded into this pull's baseline HERE, before
+        // winner selection, AND for the exact remove-after-promotion rule
+        // that keeps an op pending until its confirmed-baseline promotion
+        // is durably proven — never speculatively retired ahead of that.
+        const opStatuses = planner?.opStatuses ?? [];
+        const anyAccepted = opStatuses.some((s) => s.found);
+        if (activeUserIdRef.current && pendingOpIds.length > 0) {
+          await reconcilePendingOperations(
             activeUserIdRef.current,
             activeProfileIdRef.current,
-            pendingBeaconOpId,
-            beaconAccepted,
+            opStatuses,
             planner?.revision ?? null,
             planner
           );
@@ -1753,20 +1749,20 @@ export default function PlansPage() {
         // await above was in flight — re-check before this stale pull
         // mutates anything further.
         if (cancelled) return;
-        // This pull's EFFECTIVE baseline for winner selection: when the
-        // beacon was just confirmed accepted, re-derive it from the
-        // NOW-updated confirmed snapshot (captureConfirmedSnapshotForPull
+        // This pull's EFFECTIVE baseline for winner selection: when at
+        // least one pending op was just confirmed accepted, re-derive it
+        // from the NOW-updated confirmed snapshot (captureConfirmedSnapshotForPull
         // reads getConfirmedSnapshot() fresh) rather than the frozen
         // pre-fetch `pullStartBaseline` — so a domain this device already
         // got acknowledged for is never mistaken for a fresh local edit
         // relative to a now-stale baseline. Falls back to
         // `pullStartBaseline` unchanged whenever no promotion happened (no
-        // beacon was pending, it wasn't accepted, or Web Locks were
-        // unavailable so the promotion silently no-op'd — re-reading
-        // confirmed in that case just reproduces the SAME value
-        // `pullStartBaseline` already had, so no special-casing is needed
-        // here either way).
-        const effectiveBaseline = beaconAccepted
+        // op was pending, none was accepted, or Web Locks were unavailable/
+        // the promotion couldn't be durably proven — see
+        // reconcilePendingOperations' own doc — re-reading confirmed in
+        // that case just reproduces the SAME value `pullStartBaseline`
+        // already had, so no special-casing is needed here either way).
+        const effectiveBaseline = anyAccepted
           ? captureConfirmedSnapshotForPull(contentOwnershipMismatch)
           : pullStartBaseline;
 

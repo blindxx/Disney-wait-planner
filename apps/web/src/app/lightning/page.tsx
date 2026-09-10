@@ -32,8 +32,8 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
-  getPendingBeaconOpId,
-  resolveConfirmedSnapshotAfterBeacon,
+  listPendingOps,
+  reconcilePendingOperations,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -780,13 +780,14 @@ export default function LightningPage() {
     // actually uses: mirrors plans/page.tsx exactly, see `effectiveBaseline`
     // below.
     const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
-    // SH.2 architecture (Codex P1, 7th round) — read any still-unresolved
-    // beacon's opId BEFORE this pull's fetch starts. Mirrors
-    // plans/page.tsx exactly — see its own doc.
-    const pendingBeaconOpId = activeUserIdRef.current
-      ? getPendingBeaconOpId(activeUserIdRef.current, activeProfileIdRef.current)
-      : null;
-    void pullPlanner(activeProfileIdRef.current, pendingBeaconOpId)
+    // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
+    // 9th) — read the FULL set of still-pending unload-beacon opIds BEFORE
+    // this pull's fetch starts. Mirrors plans/page.tsx exactly — see its
+    // own doc.
+    const pendingOpIds = activeUserIdRef.current
+      ? listPendingOps(activeUserIdRef.current, activeProfileIdRef.current)
+      : [];
+    void pullPlanner(activeProfileIdRef.current, pendingOpIds)
       .then(async (planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
@@ -802,20 +803,17 @@ export default function LightningPage() {
         }
         const cloudDaysOrder = planner?.days;
 
-        // SH.2 architecture (Codex P1, 8th round) — PULL ORDER: resolve any
-        // pending beacon's fate against THIS SAME GET response BEFORE any
-        // winner is selected. Mirrors plans/page.tsx exactly — see its own
-        // detailed doc for the full rationale.
-        const beaconAccepted =
-          pendingBeaconOpId !== null &&
-          planner?.opStatus?.opId === pendingBeaconOpId &&
-          planner?.opStatus?.found === true;
-        if (activeUserIdRef.current && pendingBeaconOpId) {
-          await resolveConfirmedSnapshotAfterBeacon(
+        // SH.2 architecture (Codex P1, 8th round; generalized 9th) — PULL
+        // ORDER: resolve EVERY pending op's fate against THIS SAME GET
+        // response BEFORE any winner is selected. Mirrors plans/page.tsx
+        // exactly — see its own detailed doc for the full rationale.
+        const opStatuses = planner?.opStatuses ?? [];
+        const anyAccepted = opStatuses.some((s) => s.found);
+        if (activeUserIdRef.current && pendingOpIds.length > 0) {
+          await reconcilePendingOperations(
             activeUserIdRef.current,
             activeProfileIdRef.current,
-            pendingBeaconOpId,
-            beaconAccepted,
+            opStatuses,
             planner?.revision ?? null,
             planner
           );
@@ -826,7 +824,7 @@ export default function LightningPage() {
         if (cancelled) return;
         // This pull's EFFECTIVE baseline for winner selection — mirrors
         // plans/page.tsx exactly.
-        const effectiveBaseline = beaconAccepted
+        const effectiveBaseline = anyAccepted
           ? captureConfirmedSnapshotForPull(contentOwnershipMismatch)
           : pullStartBaseline;
 
