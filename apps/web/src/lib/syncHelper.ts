@@ -27,13 +27,37 @@ Reviewers should check any changes affecting:
  *   pullPlanner(profileId)       — fetch combined cloud planner on sign-in
  *   registerUnloadSync()         — best-effort beacon push on page unload
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
+ *   getConfirmedSnapshot(profileId) — read the exact last-pushed-and-accepted
+ *                                     payload for a profile (see below)
  *
  * localStorage keys:
- *   dwp:sync:{profileId}:lastSyncedAt — ISO timestamp of last successful push
+ *   dwp:sync:{profileId}:lastSyncedAt      — ISO timestamp of last successful push
+ *   dwp:sync:{profileId}:confirmedSnapshot — the exact SyncedPlannerPayload body
+ *                                             of the last successful push
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
  * so no payload needs to be passed through the call chain.
+ *
+ * ── Cloud-confirmed local snapshot contract (SH.2) ──────────────────────────
+ *
+ * "What exact local snapshot is cloud-confirmed for this profile?" —
+ * answered by getConfirmedSnapshot(profileId): the literal request body
+ * doPush() sent on this profile's most recent SUCCESSFUL PUT, stored
+ * verbatim under confirmedSnapshotKeyForProfile(profileId) the moment the
+ * 200 response is observed (see doPush() below). It is:
+ *   • NEVER a fresh read of the current plans/lightning/days storage keys —
+ *     those are mutable and may already hold a newer, still-unpushed edit
+ *     by the time the response arrives.
+ *   • NEVER dependent on response timing — it is written once, atomically,
+ *     from the same `body` string that was actually transmitted, not
+ *     reconstructed from whatever happens to be on disk afterwards.
+ *   • NEVER dependent on which tab performed the push — localStorage is
+ *     shared across same-origin tabs, so any tab for this profile reads
+ *     the identical value via a plain fresh read of the same durable key.
+ * Consumers (plans/page.tsx, lightning/page.tsx) treat this as the single
+ * source of truth for "was my current local content already accepted by
+ * the cloud" — see resyncConfirmedBaselines() in each page.
  */
 
 import { buildNamespacedKey } from "./profileStorage";
@@ -59,6 +83,38 @@ function syncStatusKeyForProfile(profileId: string): string {
 
 function syncErrorKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:lastError`;
+}
+
+/** Returns the localStorage key for the last cloud-confirmed pushed snapshot for a profile. */
+export function confirmedSnapshotKeyForProfile(profileId: string): string {
+  return `dwp:sync:${profileId}:confirmedSnapshot`;
+}
+
+// ── Confirmed snapshot ────────────────────────────────────────────────────────
+
+/**
+ * Read the exact SyncedPlannerPayload this profile's most recent successful
+ * push actually sent — see the module doc's "Cloud-confirmed local snapshot
+ * contract" above. Returns null when this profile has never had a
+ * successful push (fresh profile, always-offline, never signed in) or the
+ * stored value is missing/corrupt — callers must treat null as "nothing to
+ * compare against yet", not as an error.
+ *
+ * Safe to call from any tab: this is a plain localStorage read of a key
+ * that is durable (survives reloads) and shared (every same-origin tab for
+ * this browser sees the identical value), so it needs no message-passing
+ * or event subscription to be correct — only a re-read at the moment the
+ * caller wants an answer.
+ */
+export function getConfirmedSnapshot(profileId: string): SyncedPlannerPayload | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(confirmedSnapshotKeyForProfile(profileId));
+    if (!raw) return null;
+    return parseSyncedPlannerPayload(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
 }
 
 // ── Sync state observer ───────────────────────────────────────────────────────
@@ -373,6 +429,15 @@ async function doPush(): Promise<void> {
       // prevent the status transition and event dispatch below.
       try {
         localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
+      } catch {}
+      // SH.2 architecture — record the EXACT payload this request just sent
+      // as the new cloud-confirmed snapshot, using the same `body` string
+      // that was transmitted (never a fresh re-read of the mutable plans/
+      // lightning/days storage keys, which may already hold a newer edit
+      // made after this push started). Best-effort, same tier as the
+      // timestamp write above — see getConfirmedSnapshot()'s own doc.
+      try {
+        localStorage.setItem(confirmedSnapshotKeyForProfile(profileId), body);
       } catch {}
       // Status writes are best-effort; event dispatch MUST always execute.
       try {

@@ -406,3 +406,62 @@ export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
     expectedUnknown: ["dayParks", "dayAutoFallbacks"],
   },
 ];
+
+/**
+ * Reference cases for parseSyncedPlannerPayload() — SH.2's cloud-confirmed
+ * snapshot contract (see syncHelper.ts's getConfirmedSnapshot) now depends
+ * on this function to validate the stored confirmedSnapshot value before
+ * any page trusts it as a baseline, so its accept/reject/sanitize behavior
+ * is pinned here explicitly. Run from Node:
+ *   import { DEV_PARSE_SYNCED_PAYLOAD_CASES, parseSyncedPlannerPayload } from "@/lib/syncPayload";
+ *   DEV_PARSE_SYNCED_PAYLOAD_CASES.forEach(c => {
+ *     const got = parseSyncedPlannerPayload(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
+  name: string;
+  raw: unknown;
+  expected: SyncedPlannerPayload | null;
+}> = [
+  {
+    name: "valid full payload with days — parses as-is",
+    raw: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: ["l"] }, days: ["day-1", "day-2"] },
+    expected: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: ["l"] }, days: ["day-1", "day-2"] },
+  },
+  {
+    name: "valid payload without days — days omitted from result",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "wrong version — rejected",
+    raw: { version: 2, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "missing plans — rejected",
+    raw: { version: 1, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "lightning.items not an array — rejected",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: "nope" } },
+    expected: null,
+  },
+  {
+    name: "non-object raw — rejected",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+  {
+    name: "malformed days entries — sanitized, not rejected (plans/lightning still valid)",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["not-a-day", "day-2"] },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1", "day-2"] },
+  },
+];
