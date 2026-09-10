@@ -32,7 +32,7 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
-  listPendingOps,
+  selectPendingOpBatch,
   reconcilePendingOperations,
 } from "@/lib/syncHelper";
 import {
@@ -781,11 +781,11 @@ export default function LightningPage() {
     // below.
     const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
     // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
-    // 9th) — read the FULL set of still-pending unload-beacon opIds BEFORE
-    // this pull's fetch starts. Mirrors plans/page.tsx exactly — see its
-    // own doc.
+    // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
+    // batch of still-pending unload-beacon opIds BEFORE this pull's fetch
+    // starts. Mirrors plans/page.tsx exactly — see its own doc.
     const pendingOpIds = activeUserIdRef.current
-      ? listPendingOps(activeUserIdRef.current, activeProfileIdRef.current)
+      ? selectPendingOpBatch(activeUserIdRef.current, activeProfileIdRef.current)
       : [];
     void pullPlanner(activeProfileIdRef.current, pendingOpIds)
       .then(async (planner) => {
@@ -974,17 +974,39 @@ export default function LightningPage() {
         // push — potentially overwriting valid cloud state.
         let hydrationSucceeded = true;
         // Codex P1 fix (1st round) — tracks specifically whether THIS pull
-        // just wrote cloud's Plans data (distinct from hydrationSucceeded,
-        // which also stays true when the write was correctly SKIPPED
-        // because Plans won locally) — only a real, successful cloud write
-        // is eligible to advance Plans' confirmed baseline below.
+        // just wrote CLOUD-SOURCED Plans data (distinct from
+        // hydrationSucceeded, which also stays true when the write was
+        // correctly SKIPPED because the reconciled winner already matches
+        // on-disk content) — only a real, successful cloud-derived write is
+        // eligible to advance Plans' confirmed baseline below.
         let plansHydrationWritten = false;
-        if (typeof window !== "undefined" && planner?.plans && !plansChangedLocally) {
-          const plansRawToWrite = JSON.stringify({ version: planner.plans.version, items: winningPlansItems });
+        // Codex P1 fix (10th round) — COHERENT PULL COMMIT: mirrors
+        // plans/page.tsx's own Lightning-sibling fix exactly — see its
+        // detailed doc. This write is UNCONDITIONAL on whether
+        // `planner?.plans` existed at all; persistence depends ONLY on
+        // whether the reconciled winningPlansItems actually differs from
+        // what's really on disk (`currentPlansRaw`, a real fresh read taken
+        // earlier). The previous `planner?.plans &&` gate let a 204/no-
+        // cloud-plans account-ownership-transfer pull compute a correct,
+        // B-safe, intentionally-empty winningPlansItems via reconciliation
+        // and then SKIP writing it, leaving the PREVIOUS identity's foreign
+        // Plans bytes on disk while `hydrationSucceeded` wrongly reported
+        // success — letting ownership transfer with foreign sibling bytes
+        // still present (Codex finding #1). `version` is a fixed schema
+        // constant, never derived from whether cloud happened to supply
+        // this domain.
+        const winningPlansRawToWrite = JSON.stringify({ version: 1, items: winningPlansItems });
+        if (winningPlansRawToWrite !== currentPlansRaw) {
           try {
-            localStorage.setItem(profileKeysForPull.plans, plansRawToWrite);
-            plansRawBaselineRef.current = plansRawToWrite;
-            plansHydrationWritten = true;
+            localStorage.setItem(profileKeysForPull.plans, winningPlansRawToWrite);
+            plansRawBaselineRef.current = winningPlansRawToWrite;
+            // Only a write BOTH cloud-sourced AND not superseded by a local
+            // edit is eligible to advance Plans' own confirmed baseline as
+            // "the cloud's accepted state" — see plans/page.tsx's mirrored
+            // doc for the full rationale.
+            if (!plansChangedLocally && planner?.plans) {
+              plansHydrationWritten = true;
+            }
           } catch {
             hydrationSucceeded = false;
           }
@@ -1032,16 +1054,19 @@ export default function LightningPage() {
         }
 
         // Same-tab writes do not fire a storage event, so refresh
-        // planDayItems/allPlanItems explicitly now whenever a cloud Plans
-        // payload existed at all. Reads fresh from the storage KEY (not
-        // from `planner.plans` directly) either way, so this correctly
-        // reflects whichever data is actually in storage — the cloud
-        // snapshot just written above, or the foreign tab's newer edit
-        // that write was skipped to protect.
-        if (typeof window !== "undefined" && planner?.plans) {
-          setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
-          setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
-        }
+        // planDayItems/allPlanItems explicitly after every pull. Reads
+        // fresh from the storage KEY (not from `planner.plans` directly),
+        // so this correctly reflects whichever data is actually in storage
+        // — the cloud snapshot just written above, the foreign tab's newer
+        // edit that write was skipped to protect, or (Codex P1, 10th round)
+        // the reconciled B-safe/empty content this pull just wrote on a
+        // 204/no-cloud-plans ownership transfer. Unconditional on
+        // `planner?.plans` now — gating this UI refresh on cloud's presence
+        // let it keep showing a previous identity's stale cross-referenced
+        // plan items even after the underlying storage was correctly
+        // overwritten.
+        setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
+        setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
         // Codex fix — a failed authoritative days[] write (daysWriteFailed)
         // keeps the gate closed exactly like a failed plans-hydration write
         // already does, so a stale locally-persisted order can never be

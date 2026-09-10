@@ -87,7 +87,7 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
-  listPendingOps,
+  selectPendingOpBatch,
   reconcilePendingOperations,
 } from "@/lib/syncHelper";
 
@@ -1688,17 +1688,20 @@ export default function PlansPage() {
     // confirmed snapshot instead — see that block's own doc.
     const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
     // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
-    // 9th) — read the FULL set of still-pending unload-beacon opIds BEFORE
-    // this pull's fetch starts, so ALL of them can be passed as `lastOpIds`
-    // and resolved against THIS SAME GET response's own server-verified
-    // `opStatuses` (see pullPlanner's and reconcilePendingOperations' own
-    // docs in syncHelper.ts). `[]` when nothing is currently pending for
-    // this identity (the common case) — pullPlanner() omits the query
-    // params entirely then. Deliberately NOT just the most recent one — see
-    // reconcilePendingOperations' own doc for why a "latest only" pick
-    // would silently lose evidence of a still-unresolved older op.
+    // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
+    // batch of still-pending unload-beacon opIds BEFORE this pull's fetch
+    // starts, so they can be passed as `lastOpIds` and resolved against
+    // THIS SAME GET response's own server-verified `opStatuses` (see
+    // pullPlanner's and reconcilePendingOperations' own docs in
+    // syncHelper.ts). `[]` when nothing is currently pending for this
+    // identity (the common case) — pullPlanner() omits the query params
+    // entirely then. Deliberately NOT just the most recent one, and
+    // deliberately NOT always the same leading subset when the pending set
+    // exceeds the server's per-pull cap — see selectPendingOpBatch's own
+    // doc for why an unrotated truncation would starve ops beyond the cap
+    // forever if the earlier ones never resolve (Codex P1, 10th round).
     const pendingOpIds = activeUserIdRef.current
-      ? listPendingOps(activeUserIdRef.current, activeProfileIdRef.current)
+      ? selectPendingOpBatch(activeUserIdRef.current, activeProfileIdRef.current)
       : [];
     void pullPlanner(activeProfileIdRef.current, pendingOpIds)
       .then(async (planner) => {
@@ -1970,11 +1973,11 @@ export default function PlansPage() {
         // treat as empty data on the next push — potentially overwriting valid cloud state.
         let hydrationSucceeded = true;
         // Codex P1 fix (1st round) — tracks specifically whether THIS pull
-        // just wrote cloud's Lightning data (distinct from
+        // just wrote CLOUD-SOURCED Lightning data (distinct from
         // hydrationSucceeded, which also stays true when the write was
-        // correctly SKIPPED because Lightning won locally) — only a real,
-        // successful cloud write is eligible to advance Lightning's
-        // confirmed baseline below.
+        // correctly SKIPPED because the reconciled winner already matches
+        // on-disk content) — only a real, successful cloud-derived write is
+        // eligible to advance Lightning's confirmed baseline below.
         let lightningHydrationWritten = false;
         // Codex P1 fix (4th round) — writes the RECONCILED/sanitized
         // winningLightningItems (from reconcilePlannerSnapshot above), not
@@ -1985,15 +1988,45 @@ export default function PlansPage() {
         // storage just because it was still present in the raw cloud
         // payload — that was the actual gap (days[] correctly excluded the
         // day, but the orphaned item itself was written through verbatim).
-        if (typeof window !== "undefined" && planner?.lightning && !lightningChangedLocally) {
-          const lightningRawToWrite = JSON.stringify({
-            version: planner.lightning.version,
-            items: winningLightningItems,
-          });
+        //
+        // Codex P1 fix (10th round) — COHERENT PULL COMMIT: this write is
+        // now UNCONDITIONAL on whether `planner?.lightning` existed at all
+        // — persistence depends ONLY on whether the reconciled
+        // winningLightningItems actually differs from what's really on
+        // disk (`currentLightningRaw`, read earlier as a REAL fresh read),
+        // mirroring the exact pattern the primary (Plans) domain's own
+        // write above already uses. The previous `planner?.lightning &&`
+        // gate meant a 204/no-cloud-lightning pull (the exact shape of an
+        // account-ownership transfer with nothing yet pushed for the new
+        // identity) could compute a correct, B-safe, intentionally-empty
+        // winningLightningItems via reconciliation and then SKIP writing it
+        // — leaving the PREVIOUS identity's foreign Lightning bytes on disk
+        // untouched, which `hydrationSucceeded` would then wrongly report
+        // as "succeeded" (nothing was attempted, so nothing could fail),
+        // letting ownership transfer and syncReady reopen with foreign
+        // sibling bytes still present, eligible to leak into the new
+        // account on the very next push (Codex finding #1). `version` is a
+        // fixed schema constant (matches lightning/page.tsx's own literal
+        // for this exact shape), never derived from whether cloud happened
+        // to supply this domain.
+        const winningLightningRawToWrite = JSON.stringify({
+          version: 1,
+          items: winningLightningItems,
+        });
+        if (winningLightningRawToWrite !== currentLightningRaw) {
           try {
-            localStorage.setItem(profileKeysForPull.lightning, lightningRawToWrite);
-            lightningRawBaselineRef.current = lightningRawToWrite;
-            lightningHydrationWritten = true;
+            localStorage.setItem(profileKeysForPull.lightning, winningLightningRawToWrite);
+            lightningRawBaselineRef.current = winningLightningRawToWrite;
+            // Only a write BOTH cloud-sourced (planner actually had
+            // Lightning data) AND not superseded by a local edit is
+            // eligible to advance Lightning's own confirmed baseline as
+            // "the cloud's accepted state" — a locally-won or ownership-
+            // substituted-to-empty write still needs to durably land (that
+            // is what this whole block now guarantees), but must never be
+            // mistaken for something the SERVER is known to have accepted.
+            if (!lightningChangedLocally && planner?.lightning) {
+              lightningHydrationWritten = true;
+            }
             // Invalidate crossDayChecks so Lightning duplicates recompute
             // immediately without waiting for a plan/day state change.
             setLightningVersion((v) => v + 1);

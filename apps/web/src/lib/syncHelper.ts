@@ -65,6 +65,23 @@ Reviewers should check any changes affecting:
  *                                                       7th/8th rounds'
  *                                                       single-opId
  *                                                       getPendingBeaconOpId)
+ *   selectPendingOpBatch(userId, profileId, maxBatch) — the BOUNDED, FAIRLY
+ *                                                       ROTATED subset of
+ *                                                       listPendingOps()'s
+ *                                                       result to actually
+ *                                                       query THIS pull
+ *                                                       (10th round; see its
+ *                                                       own doc) — call this
+ *                                                       instead of
+ *                                                       listPendingOps()
+ *                                                       directly when
+ *                                                       building a pull's
+ *                                                       `lastOpIds`, so a
+ *                                                       pending set larger
+ *                                                       than the server's
+ *                                                       cap still guarantees
+ *                                                       every op is
+ *                                                       eventually queried
  *   await reconcilePendingOperations(userId,          — resolve EVERY
  *     profileId, opStatuses, cloudRevision,              pending op this
  *     cloudSnapshot)                                     SAME GET response
@@ -122,6 +139,22 @@ Reviewers should check any changes affecting:
  *                                                         that can never
  *                                                         race or clobber a
  *                                                         DIFFERENT op's key
+ *   dwp:sync:{userId}:{profileId}:pendingOpCursor      — the ROTATION
+ *                                                         CURSOR
+ *                                                         selectPendingOpBatch()
+ *                                                         uses to guarantee
+ *                                                         every pending op
+ *                                                         is eventually
+ *                                                         queried even when
+ *                                                         the set exceeds
+ *                                                         the server's
+ *                                                         per-pull cap (10th
+ *                                                         round; see its own
+ *                                                         doc) — a single
+ *                                                         opaque opId,
+ *                                                         unconditionally
+ *                                                         overwritten, no
+ *                                                         lock needed
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
@@ -313,6 +346,11 @@ export interface OpStatus {
 const MAX_SYNC_BYTES = 500_000;
 // Debounce window: wait this long after the last mutation before pushing.
 const DEBOUNCE_MS = 3_000;
+// Codex P1 fix (10th round) — the largest pending-op batch a single pull
+// will query. MUST match api/sync/planner/route.ts's own MAX_LAST_OP_IDS
+// cap — see selectPendingOpBatch()'s own doc for why a cap this small
+// still guarantees every op is eventually queried via rotation.
+const MAX_PENDING_OPS_PER_PULL = 25;
 
 // ── Last-synced key helpers ────────────────────────────────────────────────────
 
@@ -729,6 +767,98 @@ function removePendingOp(userId: string, profileId: string, opId: string): void 
   try {
     localStorage.removeItem(pendingOpKeyForIdentity(userId, profileId, opId));
   } catch {}
+}
+
+/**
+ * Returns the localStorage key for the ROTATION CURSOR that
+ * selectPendingOpBatch() (below) uses to guarantee eventual fairness
+ * across pulls when the pending-op set exceeds MAX_PENDING_OPS_PER_PULL —
+ * see that function's own doc (Codex P1, 10th round).
+ */
+function pendingOpCursorKeyForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:pendingOpCursor`;
+}
+
+/**
+ * SH.2 architecture (Codex P1, 10th round) — PENDING-OP FAIRNESS. The
+ * server bounds a single GET's opStatus lookups to MAX_LAST_OP_IDS (25 —
+ * see route.ts's module doc) to keep query cost bounded regardless of how
+ * many operations have accumulated. Round 9 correctly never drops
+ * unresolved evidence (an op the server reports `found: false` stays
+ * pending indefinitely — see reconcilePendingOperations' own doc), but
+ * simply sending `listPendingOps()`'s result UNTRUNCATED (or truncated by
+ * always taking the same leading slice) means: if the pending set exceeds
+ * 25 and the first 25 never resolve (e.g. their beacons genuinely never
+ * arrived), every later op is STARVED — never queried, ever, no matter how
+ * many pulls happen, because the same leading 25 always crowd out
+ * everything after them. This is what Codex flagged.
+ *
+ * The fix is a durable ROTATION CURSOR (`dwp:sync:{userId}:{profileId}:pendingOpCursor`,
+ * a single opId — the LAST one included in the most recently selected
+ * batch), advanced every time truncation actually happens. Each call:
+ *   1. Reads the FULL current pending set (listPendingOps() — always a
+ *      fresh scan, so concurrently-added ops from another tab are always
+ *      visible and immediately eligible for rotation, never lost).
+ *   2. If the set already fits within `maxBatch`, returns it as-is —
+ *      untouched, and the cursor is left alone (nothing to rotate).
+ *   3. Otherwise, locates the cursor's opId in the CURRENT set. If found,
+ *      the batch starts at the NEXT position after it (wrapping around to
+ *      the start past the end) — this is what guarantees progress: each
+ *      oversized pull covers a DIFFERENT `maxBatch`-sized window than the
+ *      last, so within `ceil(N / maxBatch)` pulls every op in an N-sized
+ *      set has been included in at least one batch, and the cycle simply
+ *      repeats indefinitely as pulls continue.
+ *   4. If the cursor's opId is NOT found (it was retired since the last
+ *      pull, or this is the very first oversized pull), the batch starts
+ *      from the beginning — a safe, simple fallback: it never corrupts
+ *      anything (there is no shared mutable structure to corrupt, just a
+ *      single opaque resume marker), and the eventual-fairness guarantee
+ *      still holds from a fresh start, so this is a graceful degradation,
+ *      never a bug. This is also EXACTLY why "resolving/removing one op
+ *      cannot corrupt the traversal state": removing the op the cursor
+ *      currently points at just resets rotation to the beginning next
+ *      time, never throws, never skips the rest of the set, never leaves
+ *      it in some invalid position (there is no "position" — only an
+ *      opaque opId that either matches something in the current set or
+ *      doesn't).
+ *   5. Writes the new cursor (the LAST opId in the just-selected batch) —
+ *      a plain, unconditional single-key overwrite, matching every other
+ *      pending-op write in this module: no lock needed, since correctness
+ *      here only requires EVENTUAL rotation, not exact cross-tab
+ *      coordination — if two tabs race this write, the practical effect is
+ *      simply that one tab's chosen starting point "wins" for the next
+ *      pull, which is still a valid, safe rotation state (never a
+ *      correctness violation, only a possibly slightly less optimal
+ *      cadence for that one cycle).
+ *
+ * Duplicate opIds are structurally impossible here (each pending op has
+ * its own key — see listPendingOps' own doc), so there is nothing extra to
+ * guard against for that requirement. Request/URL size stays bounded
+ * regardless of total pending-set size, since the returned batch is always
+ * capped at `maxBatch`.
+ */
+export function selectPendingOpBatch(
+  userId: string,
+  profileId: string,
+  maxBatch: number = MAX_PENDING_OPS_PER_PULL
+): string[] {
+  if (typeof window === "undefined") return [];
+  const allOpIds = listPendingOps(userId, profileId);
+  if (allOpIds.length <= maxBatch) return allOpIds;
+  let cursor: string | null = null;
+  try {
+    cursor = localStorage.getItem(pendingOpCursorKeyForIdentity(userId, profileId));
+  } catch {}
+  const cursorIndex = cursor !== null ? allOpIds.indexOf(cursor) : -1;
+  const start = cursorIndex === -1 ? 0 : (cursorIndex + 1) % allOpIds.length;
+  const batch: string[] = [];
+  for (let i = 0; i < maxBatch; i++) {
+    batch.push(allOpIds[(start + i) % allOpIds.length]);
+  }
+  try {
+    localStorage.setItem(pendingOpCursorKeyForIdentity(userId, profileId), batch[batch.length - 1]);
+  } catch {}
+  return batch;
 }
 
 /**

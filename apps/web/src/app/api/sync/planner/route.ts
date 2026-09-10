@@ -220,6 +220,18 @@ function validateOpId(raw: string | null): string | null {
 // pending set and are retried on a later pull, exactly like any other
 // not-yet-resolved op (see reconcilePendingOperations' own doc in
 // syncHelper.ts).
+//
+// Codex P1 fix (10th round) — this cap alone is NOT what guarantees every
+// op eventually gets queried: if the client always sent the SAME leading
+// slice of an oversized pending set, ops beyond this cap would starve
+// forever whenever the earlier ones stay unresolved (found: false is never
+// dropped — see reconcilePendingOperations' own doc). Fairness across
+// pulls is the CLIENT's responsibility (syncHelper.ts's
+// selectPendingOpBatch(), a rotating window over the full pending set) —
+// this server-side constant exists only to bound per-request cost and is
+// intentionally kept equal to selectPendingOpBatch's own default batch
+// size, so the client never sends more than this endpoint will actually
+// process.
 const MAX_LAST_OP_IDS = 25;
 
 /**
