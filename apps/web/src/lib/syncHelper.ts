@@ -31,10 +31,13 @@ Reviewers should check any changes affecting:
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
  *   getConfirmedSnapshot(userId, profileId)          — read the current
  *                                                       confirmed baseline
- *   commitConfirmedBaseline(userId, profileId,       — advance specific
+ *   await commitConfirmedBaseline(userId, profileId, — advance specific
  *     revision, accepted)                              domain(s) of that
  *                                                       baseline, gated by
- *                                                       server revision
+ *                                                       server revision AND
+ *                                                       serialized across
+ *                                                       tabs (async — see
+ *                                                       its own doc)
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -93,6 +96,11 @@ Reviewers should check any changes affecting:
  *     order converge on the same final confirmed state — whichever
  *     server-committed LATER (higher revision), never whichever response
  *     happened to arrive at this tab last.
+ *
+ * Codex P1 fix (4th round) — revision ordering above is only correct if
+ * the read-compute-write sequence that applies it is itself atomic; see
+ * commitConfirmedBaseline()'s own doc for why a plain read-then-write is
+ * NOT atomic across tabs, and how the Web Locks API closes that gap.
  *
  * Either way, the record is:
  *   • NEVER a fresh read of the current plans/lightning/days storage keys
@@ -190,6 +198,19 @@ export function getConfirmedSnapshot(userId: string, profileId: string): Confirm
 }
 
 /**
+ * The Web Locks API name a commit for this (userId, profileId) pair
+ * acquires before its read-compute-write sequence — see
+ * commitConfirmedBaseline()'s own doc (Codex P1, 4th round) for why this
+ * is needed. Scoped identically to confirmedSnapshotKeyForIdentity so
+ * commits for a DIFFERENT (userId, profileId) pair never contend with each
+ * other, only concurrent commits for the SAME pair (the only case where
+ * regression is even possible).
+ */
+function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot:lock`;
+}
+
+/**
  * Advance the confirmed baseline for whichever domain(s) a pull (or push —
  * see doPush() below) just determined were cloud-won AND successfully
  * persisted, gated by the server-issued `revision` that produced them —
@@ -199,20 +220,61 @@ export function getConfirmedSnapshot(userId: string, profileId: string): Confirm
  *
  * Reads the CURRENT confirmed record fresh (via getConfirmedSnapshot,
  * never a value the caller captured earlier) so this can never clobber a
- * domain — or regress a revision — some OTHER concurrent commit (a push,
- * or another tab's own pull/push) already advanced further than the caller
- * knows about; only the domain(s) present in `accepted` are ever
+ * domain some OTHER concurrent commit already advanced further than the
+ * caller knows about; only the domain(s) present in `accepted` are ever
  * overwritten, and only when `revision` is strictly newer than whatever is
- * already confirmed. Best-effort: a write failure here (quota,
- * private-mode) is swallowed, matching the tier of every other
- * confirmed-state write in this module — it simply means the next pull
- * falls back to whatever was confirmed before.
+ * already confirmed.
+ *
+ * Codex P1 fix (4th round) — the read (getConfirmedSnapshot), compute
+ * (nextConfirmedBaseline), and write (localStorage.setItem) here form a
+ * single compound operation whose correctness depends on nothing else
+ * changing the SAME durable record in between. Within one tab that's
+ * automatic (JS is single-threaded and nothing here awaits mid-sequence),
+ * but ACROSS TABS it is not: two tabs can each call this function at
+ * effectively the same wall-clock moment, both read the SAME "current"
+ * value before either has written, both independently compute a `next`
+ * that looks valid relative to that shared stale read, and then both
+ * write — whichever write lands LAST wins outright, even if its own
+ * revision is the OLDER of the two (a plain read-then-write sequence has
+ * no way to detect that a newer write landed in the gap between this
+ * tab's own read and write). Per-revision gating alone (nextConfirmedBaseline)
+ * closes this only when the two commits' reads are serialized relative to
+ * each other — it cannot substitute for actual serialization.
+ *
+ * The fix is to make the whole read-compute-write sequence a single
+ * critical section, serialized across every tab of this origin, using the
+ * Web Locks API (`navigator.locks`) — the browser primitive built
+ * specifically for coordinating access to a shared resource (here,
+ * localStorage) across tabs/workers: `navigator.locks.request(name, fn)`
+ * queues concurrent requests for the same `name` and runs `fn` for only
+ * one requester at a time, in every tab, with no window for two `fn`
+ * bodies to interleave. Under the lock, whichever commit's critical
+ * section runs SECOND always re-reads the OTHER's just-written value as
+ * `current` and correctly rejects if it isn't newer — so the final result
+ * is deterministic (the max revision seen) regardless of which tab's
+ * request was queued first, which is exactly what makes this "atomic"
+ * rather than merely "less likely to race": there is no unserialized
+ * window left to race in, not a smaller one.
+ *
+ * Falls back to the unserialized sequence directly when `navigator.locks`
+ * is unavailable (older browsers, or a non-secure context — Locks API
+ * requires a secure context) — revision gating still rejects any commit
+ * that is stale RELATIVE TO WHAT THIS TAB HAPPENED TO READ, which remains
+ * correct for the (overwhelmingly common) single-tab case; only the
+ * genuinely-simultaneous-cross-tab-write race is unprotected in that
+ * fallback tier, a known and documented residual gap in environments
+ * lacking the primitive this fix depends on.
+ *
+ * Best-effort: a write failure (quota, private-mode) or a Locks API
+ * rejection is swallowed, matching the tier of every other confirmed-state
+ * write in this module — it simply means the next pull falls back to
+ * whatever was confirmed before.
  *
  * Call this AFTER persistence for the accepted domain(s) has already
  * succeeded — never speculatively before a write is known to have landed
  * ("failed persistence must not advance the baseline").
  */
-export function commitConfirmedBaseline(
+export async function commitConfirmedBaseline(
   userId: string,
   profileId: string,
   revision: number,
@@ -221,14 +283,32 @@ export function commitConfirmedBaseline(
     lightning?: { version: number; items: unknown[] };
     days?: string[];
   }
-): void {
+): Promise<void> {
   if (typeof window === "undefined") return;
   if (!accepted.plans && !accepted.lightning && !accepted.days) return;
-  try {
+  const commitOnce = (): void => {
     const current = getConfirmedSnapshot(userId, profileId);
     const next = nextConfirmedBaseline(current, revision, accepted);
     if (!next) return; // rejected — not newer than what's already confirmed
     localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
+  };
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (locks) {
+    try {
+      await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
+        try {
+          commitOnce();
+        } catch {}
+      });
+      return;
+    } catch {
+      // Locks API present but the request itself failed unexpectedly (should
+      // not happen in practice) — fall through to the unserialized path
+      // below rather than silently dropping the commit.
+    }
+  }
+  try {
+    commitOnce();
   } catch {}
 }
 
@@ -607,7 +687,7 @@ async function doPush(): Promise<void> {
               ? responseData.revision
               : null;
           if (revision !== null) {
-            commitConfirmedBaseline(userId, profileId, revision, {
+            await commitConfirmedBaseline(userId, profileId, revision, {
               plans: payload.plans,
               lightning: payload.lightning,
               days: payload.days,

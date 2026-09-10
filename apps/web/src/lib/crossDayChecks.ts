@@ -84,7 +84,7 @@ function parseDayNumLocal(dayId: string): number {
  * ID forever (Codex finding). This function itself makes no such
  * assumption — it is a pure, stateless snapshot comparison, always
  * recomputed fresh against the CURRENT baseline/winning days[] for a
- * single pull (see reconcileItemsWithDays below), never accumulated into
+ * single pull (see reconcilePlannerSnapshot below), never accumulated into
  * a persistent set. If day-3 is removed then re-added before the next
  * comparison, `nextDayIds` simply contains day-3 again and it is not
  * reported as removed relative to that comparison.
@@ -95,50 +95,20 @@ export function removedDayIds(prevDayIds: string[], nextDayIds: string[]): strin
 }
 
 /**
- * SH.2 architecture (Codex P1, 2nd round) — extract the distinct dayId
- * values referenced by a raw, untyped item array (e.g. a cloud payload's
- * `plans.items`/`lightning.items`, before either page's own normalization
- * runs). Shared by plans/page.tsx and lightning/page.tsx so each page can
- * discover which days the SIBLING dataset's surviving content needs,
- * without either page needing the other's item typing — an entry missing
- * a string `dayId` is simply skipped, never defaulted, since this is only
- * ever used to find EXTRA days to protect, not to reconstruct items.
+ * Extracts a raw, untyped item's `dayId`, or undefined when it's missing,
+ * non-string, or the entry itself isn't an object — used by
+ * reconcilePlannerSnapshot() below to filter/discover days from the
+ * SIBLING dataset, which neither page ever types (it only ever touches
+ * `dayId`). Never defaults a missing dayId — an item lacking one is simply
+ * exempt from both the removed-day filter and day-discovery, never
+ * silently coerced to "day-1" (that normalization is each domain's OWN
+ * loader's job, not this cross-dataset reconciliation step's).
  */
-export function extractDayIdsFromRawItems(items: unknown[]): string[] {
-  const ids = new Set<string>();
-  for (const it of items) {
-    if (it && typeof it === "object" && typeof (it as Record<string, unknown>).dayId === "string") {
-      ids.add((it as Record<string, unknown>).dayId as string);
-    }
-  }
-  return [...ids];
+function rawItemDayId(it: unknown): string | undefined {
+  return it && typeof it === "object" && typeof (it as Record<string, unknown>).dayId === "string"
+    ? ((it as Record<string, unknown>).dayId as string)
+    : undefined;
 }
-
-/**
- * Reference cases for extractDayIdsFromRawItems(). Run from Node:
- *   import { DEV_EXTRACT_DAY_IDS_CASES, extractDayIdsFromRawItems } from "@/lib/crossDayChecks";
- *   DEV_EXTRACT_DAY_IDS_CASES.forEach(c => {
- *     const got = extractDayIdsFromRawItems(c.items);
- *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
- *   });
- */
-export const DEV_EXTRACT_DAY_IDS_CASES: Array<{
-  name: string;
-  items: unknown[];
-  expected: string[];
-}> = [
-  { name: "empty array — no ids", items: [], expected: [] },
-  {
-    name: "duplicate dayIds collapse to distinct set, first-seen order",
-    items: [{ dayId: "day-2" }, { dayId: "day-1" }, { dayId: "day-2" }],
-    expected: ["day-2", "day-1"],
-  },
-  {
-    name: "malformed entries (missing/non-string dayId, non-object) are skipped, not defaulted",
-    items: [{ dayId: "day-1" }, { dayId: 5 }, "not-an-object", null, {}, { dayId: "day-3" }],
-    expected: ["day-1", "day-3"],
-  },
-];
 
 /** Order-and-content-sensitive equality for two days[] snapshots. */
 function daysArraysEqual(a: string[], b: string[]): boolean {
@@ -247,86 +217,82 @@ export const DEV_PICK_WINNING_ITEMS_CASES: Array<{
 ];
 
 /**
- * SH.2 architecture — structural reconciliation. Given the winning items
- * for one pull (already chosen by pickWinningItems, which also reports
- * whether they won because LOCAL storage differed from the pull-start
- * baseline), the winning days[] (already chosen by pickWinningDays), and
- * the days[] baseline those days[] were compared against, returns items
- * sanitized to only reference days present in the (possibly extended)
- * returned days[].
+ * SH.2 architecture (Codex P1, 4th round) — structural reconciliation over
+ * the domains that will ACTUALLY be persisted: this page's own typed item
+ * domain (`primary`) AND the sibling page's raw item domain (`sibling`),
+ * reconciled together against ONE shared removed-day computation, so a day
+ * dropped by the winning days[] can never leave an orphaned item behind in
+ * EITHER dataset's actually-persisted storage.
  *
- * Codex P1 fix — `itemsChangedLocally` (pickWinningItems' own verdict for
- * `items`) is what lets this function tell apart the two cases that used
- * to be conflated under one blanket "day missing from winningDays means
- * removed" rule:
+ * Root cause this closes: the previous model (reconcileItemsWithDays)
+ * only ever sanitized the CALLER's own `items` array; the sibling
+ * dataset's surviving content was represented merely as a list of
+ * "discovered day IDs" used to EXTEND winningDays, never as the actual
+ * item array a caller could sanitize and write back. A day legitimately
+ * removed by winningDays was therefore correctly excluded from the final
+ * days[] list, but the sibling's own raw localStorage payload — hydrated
+ * or left untouched verbatim by the caller — still contained the item
+ * that referenced it: an orphan (item.dayId ∉ days[]) that the derived
+ * days[] list itself never revealed. This function fixes that by taking
+ * the sibling's actual candidate items as input and returning its
+ * SANITIZED items alongside the primary's — callers now persist BOTH,
+ * closing the gap structurally rather than patching the symptom.
  *
- *   - itemsChangedLocally === true: `items` is this pull's LOCALLY
- *     winning set — a real, possibly still-unpushed local edit. It must
- *     NEVER be discarded merely because the INDEPENDENTLY-decided days
- *     winner happens to omit a day it references (e.g. days won from a
- *     cloud snapshot — or an unrelated device's state — that simply
- *     doesn't know about this locally-edited day yet). Every day these
- *     items reference is trusted outright and reconciled into the
- *     returned days[] (appended when missing, never reordering or
- *     removing existing entries) — this is what actually closes "a
- *     locally winning Plans/Lightning item got deleted because
- *     cloud-winning days[] removed its day".
- *   - itemsChangedLocally === false: `items` is cloud-sourced, or is the
- *     unchanged-local fallback (no local edit AND no valid cloud payload)
- *     — either way it is NOT evidence of a fresh local decision to keep
- *     referencing a day. A day present in `daysBaseline` but absent from
- *     `winningDays` is then authoritatively removed for this pull, and
- *     any such item is dropped — a stale cloud/local snapshot must never
- *     resurrect a day a local (or already-synced) removal dropped. A day
- *     NOT in `daysBaseline` at all (never known before this pull) is
- *     still legitimate new-day evidence either way, appended to the
- *     returned days[].
+ * `primary`/`sibling` are each `{ items, changedLocally }` — `changedLocally`
+ * is that domain's own pickWinningItems() verdict for the items being fed
+ * in (already-typed for primary, opaque unknown[] for sibling — neither
+ * page ever needs the other's item typing, only `dayId`). Same two-way
+ * trust rule as before, now applied structurally to EACH domain's actual
+ * items rather than to one items array plus one derived day-id list:
  *
- * Codex P1 fix (2nd round) — `extraDiscoveredDayIds`/`extraChangedLocally`
- * let the SIBLING dataset (Lightning's day IDs, from Plans' own pull, or
- * vice versa) participate in days reconciliation with the IDENTICAL
- * two-way trust rule as `items` above, but evaluated INDEPENDENTLY: a
- * page's own items winning locally must never automatically launder a
- * STALE sibling snapshot's day references too, and — the case this round
- * closes — a page preserving a genuinely newer LOCAL sibling edit (it
- * skipped overwriting the sibling's storage this pull because the sibling
- * changed since baseline) must not have that preserved sibling item
- * orphaned merely because its OWN items happened to win from cloud.
- * `extraChangedLocally` is that sibling's own verdict: true when the
- * sibling dataset being fed in is itself the locally-winning/preserved
- * one (its day IDs are trusted outright, appended unconditionally, exactly
- * like a locally-winning `items` set); false when it is cloud-sourced or
- * unchanged-stale (its day IDs are subject to the SAME removed-day filter
- * as non-locally-winning `items` — a stale sibling reference can never
- * resurrect a day a local removal dropped). Every persisted item from
- * EITHER dataset that survives into the final snapshot ends up covered:
- * `items`' own days via `itemsChangedLocally`, the sibling's via
- * `extraChangedLocally` — resolved once, together, not layered as a
- * separate pass.
+ *   - changedLocally === true: this domain's items are the pull's LOCALLY
+ *     winning set — a real, possibly still-unpushed edit (in EITHER
+ *     dataset). Trusted outright, never filtered by the removed-day set;
+ *     every day referenced is reconciled into the returned days[]
+ *     (appended when missing, never reordering/removing existing
+ *     entries).
+ *   - changedLocally === false: this domain's items are cloud-sourced, or
+ *     the unchanged-local fallback — not evidence of a fresh local
+ *     decision to keep referencing a day. Any item whose dayId is in
+ *     `daysBaseline` but absent from `winningDays` is authoritatively
+ *     removed for this pull and filtered OUT of the returned item array
+ *     itself (not merely omitted from days[]) — a stale cloud/local
+ *     snapshot, in either dataset, can never resurrect a day a local (or
+ *     already-synced) removal dropped, and can never leave that day's
+ *     item behind as an orphan either.
+ *
+ * A day NOT in `daysBaseline` at all (never known before this pull) is
+ * still legitimate new-day evidence from either domain, appended to the
+ * returned days[] regardless of that domain's changedLocally verdict.
  */
-export function reconcileItemsWithDays<T extends { dayId: string }>(
-  items: T[],
-  itemsChangedLocally: boolean,
+export function reconcilePlannerSnapshot<P extends { dayId: string }>(
+  primary: { items: P[]; changedLocally: boolean },
+  sibling: { items: unknown[]; changedLocally: boolean },
   daysBaseline: string[],
-  winningDays: string[],
-  extraDiscoveredDayIds: string[] = [],
-  extraChangedLocally: boolean = false
-): { items: T[]; days: string[] } {
+  winningDays: string[]
+): { items: P[]; siblingItems: unknown[]; days: string[] } {
   const removed = new Set(removedDayIds(daysBaseline, winningDays));
-  const sanitizedItems = itemsChangedLocally
-    ? items
-    : removed.size === 0
-      ? items
-      : items.filter((it) => !removed.has(it.dayId));
-  const trustedExtra = extraChangedLocally
-    ? extraDiscoveredDayIds
-    : extraDiscoveredDayIds.filter((id) => !removed.has(id));
+  const sanitizedPrimary =
+    primary.changedLocally || removed.size === 0
+      ? primary.items
+      : primary.items.filter((it) => !removed.has(it.dayId));
+  const sanitizedSibling =
+    sibling.changedLocally || removed.size === 0
+      ? sibling.items
+      : sibling.items.filter((it) => {
+          const id = rawItemDayId(it);
+          return id === undefined || !removed.has(id);
+        });
   const knownDays = new Set(winningDays);
-  const discovered = [
-    ...new Set([...sanitizedItems.map((it) => it.dayId), ...trustedExtra]),
-  ].filter((id) => !knownDays.has(id));
+  const discoveredIds = new Set<string>();
+  for (const it of sanitizedPrimary) discoveredIds.add(it.dayId);
+  for (const it of sanitizedSibling) {
+    const id = rawItemDayId(it);
+    if (id) discoveredIds.add(id);
+  }
+  const discovered = [...discoveredIds].filter((id) => !knownDays.has(id));
   const days = discovered.length > 0 ? [...winningDays, ...discovered.sort(daySort)] : winningDays;
-  return { items: sanitizedItems, days };
+  return { items: sanitizedPrimary, siblingItems: sanitizedSibling, days };
 }
 
 /**
@@ -405,135 +371,137 @@ export const DEV_DAYS_RECONCILIATION_CASES: Array<{
 ];
 
 /**
- * Reference cases for reconcileItemsWithDays() — the structural
- * reconciliation step that closes two Codex findings without any
- * tombstone: (1) a removed day resurrected via a stale sibling/cloud item
- * snapshot, and (2) a LOCALLY winning item wrongly deleted merely because
- * the independently-decided days winner omitted its day. Run from Node:
- *   import { DEV_RECONCILE_ITEMS_CASES, reconcileItemsWithDays } from "@/lib/crossDayChecks";
- *   DEV_RECONCILE_ITEMS_CASES.forEach(c => {
- *     const got = reconcileItemsWithDays(c.items, c.itemsChangedLocally, c.daysBaseline, c.winningDays, c.extraDiscoveredDayIds, c.extraChangedLocally);
+ * Reference cases for reconcilePlannerSnapshot() — the structural
+ * reconciliation step (4th round) that closes three Codex findings without
+ * any tombstone: (1) a removed day resurrected via a stale sibling/cloud
+ * item snapshot, (2) a LOCALLY winning item wrongly deleted merely because
+ * the independently-decided days winner omitted its day, and (3) a stale
+ * sibling item surviving in the sibling's OWN persisted storage even after
+ * its day is correctly dropped from the derived days[] list. Run from Node:
+ *   import { DEV_RECONCILE_PLANNER_SNAPSHOT_CASES, reconcilePlannerSnapshot } from "@/lib/crossDayChecks";
+ *   DEV_RECONCILE_PLANNER_SNAPSHOT_CASES.forEach(c => {
+ *     const got = reconcilePlannerSnapshot(c.primary, c.sibling, c.daysBaseline, c.winningDays);
  *     ...
  *   });
  */
-export const DEV_RECONCILE_ITEMS_CASES: Array<{
+export const DEV_RECONCILE_PLANNER_SNAPSHOT_CASES: Array<{
   name: string;
-  items: Array<{ dayId: string }>;
-  itemsChangedLocally: boolean;
+  primary: { items: Array<{ dayId: string }>; changedLocally: boolean };
+  sibling: { items: unknown[]; changedLocally: boolean };
   daysBaseline: string[];
   winningDays: string[];
-  extraDiscoveredDayIds?: string[];
-  extraChangedLocally?: boolean;
-  expectedItemDayIds: string[];
+  expectedPrimaryDayIds: string[];
+  expectedSiblingDayIds: string[];
   expectedDays: string[];
 }> = [
   {
-    name: "regression — stale (non-locally-winning) item snapshot still references a day the winning days[] already removed: dropped, not re-added",
-    items: [{ dayId: "day-1" }, { dayId: "day-2" }, { dayId: "day-2" }],
-    itemsChangedLocally: false,
+    name: "regression — stale (non-locally-winning) primary item snapshot still references a day the winning days[] already removed: dropped, not re-added",
+    primary: { items: [{ dayId: "day-1" }, { dayId: "day-2" }, { dayId: "day-2" }], changedLocally: false },
+    sibling: { items: [], changedLocally: false },
     daysBaseline: ["day-1", "day-2", "day-3"],
     winningDays: ["day-1", "day-3"],
-    expectedItemDayIds: ["day-1"],
+    expectedPrimaryDayIds: ["day-1"],
+    expectedSiblingDayIds: [],
     expectedDays: ["day-1", "day-3"],
   },
   {
-    name: "legitimate new day (items not locally winning): winning items reference a day cloud omitted — appended, not dropped",
-    items: [{ dayId: "day-1" }, { dayId: "day-4" }],
-    itemsChangedLocally: false,
+    name: "legitimate new day (primary not locally winning): winning items reference a day cloud omitted — appended, not dropped",
+    primary: { items: [{ dayId: "day-1" }, { dayId: "day-4" }], changedLocally: false },
+    sibling: { items: [], changedLocally: false },
     daysBaseline: ["day-1"],
     winningDays: ["day-1"],
-    expectedItemDayIds: ["day-1", "day-4"],
+    expectedPrimaryDayIds: ["day-1", "day-4"],
+    expectedSiblingDayIds: [],
     expectedDays: ["day-1", "day-4"],
   },
   {
-    name: "sibling-discovered day ID also subject to the same removed-day filter when neither items nor the sibling won locally",
-    items: [{ dayId: "day-1" }],
-    itemsChangedLocally: false,
+    name: "Codex P1 (4th round) — stale (non-locally-winning) SIBLING items referencing a removed day are filtered from the actual sibling item array, not merely excluded from days[]",
+    primary: { items: [{ dayId: "day-1" }], changedLocally: false },
+    sibling: { items: [{ dayId: "day-2" }, { dayId: "day-5" }], changedLocally: false },
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1"],
-    extraDiscoveredDayIds: ["day-2", "day-5"],
-    extraChangedLocally: false,
-    expectedItemDayIds: ["day-1"],
+    expectedPrimaryDayIds: ["day-1"],
+    expectedSiblingDayIds: ["day-5"],
     expectedDays: ["day-1", "day-5"],
   },
   {
-    name: "day removed then recreated with the same ID before this pull — no longer treated as removed, items trusted",
-    items: [{ dayId: "day-3" }],
-    itemsChangedLocally: false,
+    name: "day removed then recreated with the same ID before this pull — no longer treated as removed, primary items trusted",
+    primary: { items: [{ dayId: "day-3" }], changedLocally: false },
+    sibling: { items: [], changedLocally: false },
     daysBaseline: ["day-1", "day-2", "day-3"],
     winningDays: ["day-1", "day-2", "day-3"],
-    expectedItemDayIds: ["day-3"],
+    expectedPrimaryDayIds: ["day-3"],
+    expectedSiblingDayIds: [],
     expectedDays: ["day-1", "day-2", "day-3"],
   },
   {
-    name: "nothing to reconcile — items already fully consistent with winningDays",
-    items: [{ dayId: "day-1" }, { dayId: "day-2" }],
-    itemsChangedLocally: false,
+    name: "nothing to reconcile — both datasets already fully consistent with winningDays",
+    primary: { items: [{ dayId: "day-1" }, { dayId: "day-2" }], changedLocally: false },
+    sibling: { items: [{ dayId: "day-1" }], changedLocally: false },
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1", "day-2"],
-    expectedItemDayIds: ["day-1", "day-2"],
+    expectedPrimaryDayIds: ["day-1", "day-2"],
+    expectedSiblingDayIds: ["day-1"],
     expectedDays: ["day-1", "day-2"],
   },
   {
-    name: "Codex P1 — locally winning item survives even though cloud-winning days[] removed its day (day reconciled back in)",
-    items: [{ dayId: "day-1" }, { dayId: "day-5" }],
-    itemsChangedLocally: true,
+    name: "Codex P1 — locally winning primary item survives even though cloud-winning days[] removed its day (day reconciled back in)",
+    primary: { items: [{ dayId: "day-1" }, { dayId: "day-5" }], changedLocally: true },
+    sibling: { items: [], changedLocally: false },
     daysBaseline: ["day-1", "day-5"],
     winningDays: ["day-1"],
-    expectedItemDayIds: ["day-1", "day-5"],
+    expectedPrimaryDayIds: ["day-1", "day-5"],
+    expectedSiblingDayIds: [],
     expectedDays: ["day-1", "day-5"],
   },
   {
-    name: "Codex P1 — locally winning items untouched by removal reconcile cleanly against locally-won days too",
-    items: [{ dayId: "day-1" }, { dayId: "day-3" }],
-    itemsChangedLocally: true,
-    daysBaseline: ["day-1", "day-2", "day-3"],
-    winningDays: ["day-1", "day-3"],
-    expectedItemDayIds: ["day-1", "day-3"],
-    expectedDays: ["day-1", "day-3"],
-  },
-  {
-    name: "Codex P1 (2nd round) — a STALE (non-locally-winning) sibling day reference is NOT trusted merely because OWN items happened to win locally",
-    items: [{ dayId: "day-1" }],
-    itemsChangedLocally: true,
+    name: "Codex P1 (2nd round) — a STALE (non-locally-winning) sibling day reference is NOT trusted merely because primary happened to win locally: filtered from the sibling's own items",
+    primary: { items: [{ dayId: "day-1" }], changedLocally: true },
+    sibling: { items: [{ dayId: "day-2" }], changedLocally: false },
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1"],
-    extraDiscoveredDayIds: ["day-2"],
-    extraChangedLocally: false,
-    expectedItemDayIds: ["day-1"],
+    expectedPrimaryDayIds: ["day-1"],
+    expectedSiblingDayIds: [],
     expectedDays: ["day-1"],
   },
   {
-    name: "Codex P1 (2nd round) — a preserved LOCALLY-winning sibling item is not orphaned when OWN items are cloud-sourced (Plans preserves newer local Lightning while cloud days omit its day)",
-    items: [{ dayId: "day-1" }],
-    itemsChangedLocally: false,
+    name: "Codex P1 (2nd round) — a preserved LOCALLY-winning sibling item is not orphaned when primary is cloud-sourced (e.g. Plans preserves newer local Lightning while cloud days omit its day)",
+    primary: { items: [{ dayId: "day-1" }], changedLocally: false },
+    sibling: { items: [{ dayId: "day-2" }], changedLocally: true },
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1"],
-    extraDiscoveredDayIds: ["day-2"],
-    extraChangedLocally: true,
-    expectedItemDayIds: ["day-1"],
+    expectedPrimaryDayIds: ["day-1"],
+    expectedSiblingDayIds: ["day-2"],
     expectedDays: ["day-1", "day-2"],
   },
   {
     name: "Codex P1 (2nd round) — both item datasets survive locally: final days cover both coherently",
-    items: [{ dayId: "day-1" }, { dayId: "day-3" }],
-    itemsChangedLocally: true,
+    primary: { items: [{ dayId: "day-1" }, { dayId: "day-3" }], changedLocally: true },
+    sibling: { items: [{ dayId: "day-4" }], changedLocally: true },
     daysBaseline: ["day-1", "day-3", "day-4"],
     winningDays: ["day-1", "day-3"],
-    extraDiscoveredDayIds: ["day-4"],
-    extraChangedLocally: true,
-    expectedItemDayIds: ["day-1", "day-3"],
+    expectedPrimaryDayIds: ["day-1", "day-3"],
+    expectedSiblingDayIds: ["day-4"],
     expectedDays: ["day-1", "day-3", "day-4"],
   },
   {
     name: "local day removal wins while a preserved-local sibling is ALSO stale relative to it — removal still survives (sibling's own preservation doesn't launder a day IT doesn't actually reference)",
-    items: [{ dayId: "day-1" }],
-    itemsChangedLocally: true,
+    primary: { items: [{ dayId: "day-1" }], changedLocally: true },
+    sibling: { items: [], changedLocally: true },
     daysBaseline: ["day-1", "day-2"],
     winningDays: ["day-1"],
-    extraDiscoveredDayIds: [],
-    extraChangedLocally: true,
-    expectedItemDayIds: ["day-1"],
+    expectedPrimaryDayIds: ["day-1"],
+    expectedSiblingDayIds: [],
+    expectedDays: ["day-1"],
+  },
+  {
+    name: "Codex P1 (4th round) — malformed sibling entry (missing dayId) survives untouched, never treated as a match against the removed set",
+    primary: { items: [{ dayId: "day-1" }], changedLocally: false },
+    sibling: { items: [{ notDayId: "oops" }, "not-an-object", null], changedLocally: false },
+    daysBaseline: ["day-1", "day-2"],
+    winningDays: ["day-1"],
+    expectedPrimaryDayIds: ["day-1"],
+    expectedSiblingDayIds: [],
     expectedDays: ["day-1"],
   },
 ];
