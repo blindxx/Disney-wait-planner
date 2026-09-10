@@ -43,7 +43,7 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, inferDayPark, isDaysMembershipChange } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, inferDayPark, removedDayIds, confirmRemovedDayIds } from "@/lib/crossDayChecks";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
@@ -847,6 +847,23 @@ export default function PlansPage() {
   // cross-tab Lightning edit made in another tab during this same window.
   // Reset to false at the start of each pull, mirroring the domain refs.
   const crossTabLightningChangedRef = useRef(false);
+  // Codex P1 fix (Add Day false-positive) — day IDs a genuine cross-tab
+  // days[] event told this tab were REMOVED (via removedDayIds()), pending
+  // independent content confirmation from a fresh plans snapshot. Day IDs
+  // are never reused (see handleAddDay/handleDuplicateDay's "max suffix +
+  // 1" rule), so once a day is known removed it can never legitimately
+  // reappear — items/days referencing an ID in this set are permanently
+  // filtered out of any winning dataset (cloud or local), regardless of
+  // whether independent confirmation has arrived yet. Entries are cleared
+  // via confirmRemovedDayIds() once a fresh plans read genuinely no longer
+  // references them (see the planKeyRef listener below) — not merely
+  // because SOME plans event arrived (a third tab's unrelated/stale write
+  // must not falsely confirm another tab's still-pending removal).
+  // Deliberately does NOT track pure additions (Add Day/Duplicate Day):
+  // unlike a removal, a newly-added day's absence from a stale plans
+  // snapshot is expected and benign, never evidence of staleness — see
+  // removedDayIds()'s own doc in crossDayChecks.ts.
+  const recentlyRemovedDayIdsRef = useRef<Set<string>>(new Set());
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
   // Gate: set by import pipelines (processImportText) to signal that the
@@ -1159,6 +1176,19 @@ export default function PlansPage() {
         reseedNextId(reloaded);
         setItems(reloaded);
         localPlansEditRef.current = true;
+        // Codex P2-equivalent fix — confirm any pending removed-day IDs
+        // against this FRESH read's actual content: a removed day ID is
+        // only cleared from recentlyRemovedDayIdsRef when this genuinely
+        // current snapshot no longer references it, not merely because
+        // SOME plans write was observed (which could be this same key
+        // written by a third, unrelated tab with its own stale copy).
+        if (recentlyRemovedDayIdsRef.current.size > 0) {
+          const stillPending = confirmRemovedDayIds(
+            [...recentlyRemovedDayIdsRef.current],
+            reloaded.map((it) => it.dayId)
+          );
+          recentlyRemovedDayIdsRef.current = new Set(stillPending);
+        }
       }
       if (e.key === daysKeyRef.current) {
         // Refresh this tab's local day state to match what the other tab
@@ -1220,42 +1250,32 @@ export default function PlansPage() {
         // this tab's own pull-applied write as if it were an external edit.
         if (isGenuineChange) {
           localDaysEditRef.current = true;
-          // Codex P1 fix — a genuine cross-tab days[] change is either a
-          // pure REORDER (same set of day IDs, different order — e.g. Move
-          // Up/Down) or a MEMBERSHIP change (a day was added/removed/
-          // duplicated — e.g. Remove Day, Add Day, Duplicate Day). Remove
-          // Day in particular deletes that day's plan items in the SAME
-          // handler that shrinks `days`, so a membership change structurally
-          // implies the shared plans/items storage may have changed too.
-          // Detected via isDaysMembershipChange() (see crossDayChecks.ts,
-          // with its own DEV_DAYS_MEMBERSHIP_CASES) by comparing the day-ID
-          // SET (not the order) before vs. after: a reorder keeps the same
-          // set, a membership change does not. Only a membership change
-          // also marks localPlansEditRef — this protects the plans domain
-          // from a still-in-flight pull applying a stale cloud items
-          // snapshot (which would still contain the removed day's items)
-          // and then persisting that stale snapshot back over the newer
-          // shared plans storage the other tab just wrote, resurrecting
-          // items it just deleted. A pure reorder never touches items, so
-          // it deliberately leaves localPlansEditRef untouched — preserving
-          // SH.2's guarantee that an unrelated cloud plans apply is not
-          // blocked by a same-tab or cross-tab reorder alone.
-          //
-          // This is deliberately kept alongside the direct `planKeyRef`
-          // listener above rather than removed as redundant: the `days` key
-          // write for Remove Day happens synchronously in the handler,
-          // while the `plans` key write is deferred to the items-persist
-          // effect — so this tab's `days` event can arrive before its
-          // `plans` event. This inference guarantees localPlansEditRef is
-          // set the moment the (earlier-or-same) `days` event is observed,
-          // closing that ordering gap; the `planKeyRef` listener's job is
-          // the separate concern of making itemsRef.current's CONTENT
-          // correct once its own event does arrive. For Add Day (days-only,
-          // no items change) this inference sets localPlansEditRef
-          // slightly conservatively — harmless, since itemsRef.current
-          // already reflects accurate local items either way.
-          if (isDaysMembershipChange(daysRef.current, next)) {
-            localPlansEditRef.current = true;
+          // Codex P1 fix (Add Day false-positive) — a genuine cross-tab
+          // days[] change is either a pure REORDER (same day-ID set,
+          // different order — e.g. Move Up/Down) or a MEMBERSHIP change (a
+          // day was added and/or removed — e.g. Remove Day, Add Day,
+          // Duplicate Day). A previous fix here inferred "plans may have
+          // changed too" from ANY membership change (add OR remove) and
+          // set localPlansEditRef accordingly — but Add Day only ever
+          // touches `days` (see handleAddDay: no setItems call at all), so
+          // that inference incorrectly marked the plans domain dirty for
+          // the rest of this pull cycle even though nothing about plans
+          // ever changed, unnecessarily blocking a legitimate cloud plans
+          // apply (Codex P1). Only a REMOVAL is unambiguous evidence a
+          // coupled plans-item deletion may be in flight (Remove Day
+          // deletes that day's items in the SAME handler that shrinks
+          // `days`) — a day ID, once removed, can never legitimately
+          // reappear (see removedDayIds()'s own doc in crossDayChecks.ts),
+          // so removed IDs are tracked and permanently filtered out of any
+          // winning item/day-ID set below, with no separate
+          // localPlansEditRef coupling needed. Duplicate Day (a pure
+          // addition from this diff's perspective, but one that DOES also
+          // copy items) is protected instead by the fresh-read comparison
+          // in the pull's .then() callback below, which — unlike a
+          // preemptive flag set here — needs no prediction about whether
+          // items changed at all.
+          for (const removedId of removedDayIds(daysRef.current, next)) {
+            recentlyRemovedDayIdsRef.current.add(removedId);
           }
         }
       }
@@ -1593,6 +1613,13 @@ export default function PlansPage() {
     // write observed before this pull started never leaks into this pull's
     // hydration decision.
     crossTabLightningChangedRef.current = false;
+    // recentlyRemovedDayIdsRef is deliberately NOT reset here, unlike the
+    // refs above — "a new pull cycle started" is not proof a pending
+    // removal's coupled plans write has landed, so resetting it here would
+    // reintroduce exactly the timing dependency this fix exists to avoid.
+    // Its entries only ever clear via confirmRemovedDayIds() against
+    // actual fresh plans content (see the planKeyRef listener above), and
+    // are otherwise permanently safe to keep (day IDs are never reused).
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
@@ -1619,39 +1646,88 @@ export default function PlansPage() {
           // Phase 8.0.1 — normalize dayIds from cloud before applying to state.
           cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
         }
-        // Plans domain: only apply cloud items if no local plans edits
-        // occurred while the pull was in flight. Either way, the sync gate
-        // still opens below so edits can push.
-        if (!localPlansEditRef.current && cloudItems) {
-          reseedNextId(cloudItems);
-          setItems(cloudItems);
+        // Codex P1 fix — day IDs recentlyRemovedDayIdsRef already knows are
+        // gone are filtered out of ANY candidate dataset below, unconditionally.
+        // Safe regardless of source (cloud or local): day IDs are never
+        // reused (see removedDayIds()'s doc in crossDayChecks.ts), so a
+        // removed ID can never legitimately reappear in either. This is
+        // what keeps days[] resurrection-proof even in the narrowest
+        // ordering window, independent of which branch below ends up
+        // winning.
+        const excludeRemoved = (list: PlanItem[]): PlanItem[] =>
+          recentlyRemovedDayIdsRef.current.size === 0
+            ? list
+            : list.filter((it) => !recentlyRemovedDayIdsRef.current.has(it.dayId));
+        // Codex P1 fix (Duplicate Day protection without blocking Add Day)
+        // — a fresh, synchronous read of local plans storage RIGHT NOW
+        // always reflects the true current persisted value, completely
+        // bypassing any 'storage' event-processing delay. Comparing it
+        // (content-wise, after the same removed-day filtering) against
+        // itemsRef.current — this tab's own last-known state — tells
+        // whether ANOTHER tab's write has already landed in storage, even
+        // if this tab hasn't yet processed the corresponding 'storage'
+        // event for it (e.g. Duplicate Day's items-persist-effect write,
+        // whose coupled `days` event this tab may have already processed
+        // moments earlier). When it has, that freshly-read content is
+        // PROVABLY newer than this pull's own cloud snapshot (which
+        // cannot possibly reflect a write this tab's own localStorage
+        // doesn't even have yet) and must be preferred over it. This is
+        // content evidence, not "a plans event was already processed" —
+        // it closes the Duplicate Day ordering gap without needing to
+        // predict "will plans change" at days-event time (which Add Day
+        // and Duplicate Day are indistinguishable for), and without
+        // permanently blocking Add Day: Add Day never writes plans at
+        // all, so this fresh read is always identical to itemsRef.current
+        // for it, and this branch is simply never taken.
+        const freshLocalItems = excludeRemoved(migrateDayIds(loadFromStorage(planKeyRef.current)));
+        const freshLocalDiffersFromKnown =
+          JSON.stringify(freshLocalItems) !== JSON.stringify(excludeRemoved(itemsRef.current));
+        let winningPlanItems: PlanItem[];
+        let appliedNewItems = false;
+        if (freshLocalDiffersFromKnown) {
+          winningPlanItems = freshLocalItems;
+          reseedNextId(winningPlanItems);
+          setItems(winningPlanItems);
+          appliedNewItems = true;
+        } else if (!localPlansEditRef.current && cloudItems) {
+          // Plans domain: only apply cloud items if no local plans edits
+          // occurred while the pull was in flight (and no fresher local
+          // write was just detected above). Either way, the sync gate
+          // still opens below so edits can push.
+          winningPlanItems = excludeRemoved(cloudItems);
+          reseedNextId(winningPlanItems);
+          setItems(winningPlanItems);
+          appliedNewItems = true;
+        } else {
+          // Codex P1 #2 fix — the days-domain safety net below must
+          // reconcile against whichever plans item dataset actually WON
+          // this pull's conflict decision, not always the cloud snapshot.
+          // Here that's the CURRENT local items, read via itemsRef
+          // (always up to date within this same tab, unlike a stale
+          // closure) rather than the `items` state captured when this
+          // effect was created. Sourcing this from cloudItems
+          // unconditionally would let a day referenced only by winning
+          // local items get dropped from days[] whenever local plans won,
+          // violating the invariant that every persisted item's dayId
+          // belongs to persisted days[].
+          winningPlanItems = excludeRemoved(itemsRef.current);
+        }
+        if (appliedNewItems) {
           // Phase 7.3.6: if no explicit session context exists, allow the
-          // items-watcher to re-run inference once on the authoritative cloud
-          // dataset. The mount-time inference ran on stale local plans; the
-          // cloud pull is the definitive source for this page load.
+          // items-watcher to re-run inference once on the authoritative
+          // dataset just applied. The mount-time inference ran on stale
+          // local plans; this is the definitive source for this page load.
           if (!readSessionContext(resortKeyRef.current, parkKeyRef.current).exists) {
             contextInferredRef.current = false;
-            // If the cloud pull cleared all items, this page is effectively in
-            // a fresh-import-ready state. Reset the mount-count guard so that
-            // a subsequent import correctly triggers inference.
-            if (cloudItems.length === 0) {
+            // If the applied dataset cleared all items, this page is
+            // effectively in a fresh-import-ready state. Reset the
+            // mount-count guard so that a subsequent import correctly
+            // triggers inference.
+            if (winningPlanItems.length === 0) {
               initialItemCountRef.current = 0;
             }
           }
         }
-        // Codex P1 #2 fix — the days-domain safety net below must reconcile
-        // against whichever plans item dataset actually WON this pull's
-        // conflict decision, not always the cloud snapshot. When cloud
-        // plans applied (above), that's cloudItems; when local plans won
-        // (localPlansEditRef.current) — or there was no valid cloud payload
-        // to apply at all — the winning dataset is the CURRENT local items,
-        // read via itemsRef (always up to date, unlike a stale closure)
-        // rather than the `items` state captured when this effect was
-        // created. Sourcing this from cloudItems unconditionally would let
-        // a day referenced only by winning local items get dropped from
-        // days[] whenever local plans won, violating the invariant that
-        // every persisted item's dayId belongs to persisted days[].
-        const winningPlanItems = !localPlansEditRef.current && cloudItems ? cloudItems : itemsRef.current;
         const winningItemDayIds = [...new Set(winningPlanItems.map((it) => it.dayId))];
         // Days domain: gated independently of the plans-domain guard above
         // — a local days[] edit/reorder protects cloud days from applying

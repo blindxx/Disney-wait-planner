@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, daySort, reduceSiblingPlansStale } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, daySort, removedDayIds, confirmRemovedDayIds } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -504,29 +504,41 @@ export default function LightningPage() {
   // another tab during this same window. Reset to false at the start of
   // each pull, mirroring the domain refs.
   const crossTabPlansChangedRef = useRef(false);
-  // Codex P1 fix — tracks a PENDING cross-tab days[] MEMBERSHIP change (a
-  // day added/removed/duplicated by another tab, as opposed to a pure
-  // reorder) whose coupled Plans-domain write has not yet been observed.
-  // Remove Day writes `days` synchronously but its plans-item deletion is
-  // persisted slightly later (via the items-persist effect in the OTHER
-  // tab) — so this tab can receive the `days` membership event, and even
-  // have its own pull resolve, entirely BEFORE the corresponding `plans`
-  // storage event arrives. In that gap, `allPlans`/planDiscoveredDayIds
-  // below (read fresh from the shared plans key at pull-resolution time)
-  // can still reflect the OLD, pre-deletion plan items — so a removed day
-  // discovered only through that stale sibling snapshot must not be
-  // trusted as a legitimate addition to days[]. Set true the moment a
-  // genuine cross-tab days MEMBERSHIP change is observed (see the
-  // onStorage listener below); cleared only once the coupled `plans`
-  // storage event actually arrives (proof the sibling snapshot has caught
-  // up). Deliberately NOT reset at the start of a new pull cycle like the
-  // other conflict refs — "a new pull started" is not proof the sibling
-  // plans write has landed, and correctness here must not depend on
-  // enough wall-clock time having passed since the membership change
-  // (per Codex's explicit "do not rely on timing" requirement). A pure
-  // reorder never sets this — same-membership reorders don't invalidate
+  // Codex P2 fix — day IDs a genuine cross-tab days[] event told this tab
+  // were REMOVED (via removedDayIds()), pending independent CONTENT
+  // confirmation from a fresh Plans snapshot — not merely "a plans event
+  // was observed". Remove Day writes `days` synchronously but its
+  // plans-item deletion is persisted slightly later (via the items-persist
+  // effect in the OTHER tab) — so this tab can receive the `days`
+  // membership event, and even have its own pull resolve, entirely BEFORE
+  // the corresponding `plans` storage event arrives. In that gap,
+  // `allPlans`/planDiscoveredDayIds below (read fresh from the shared
+  // plans key at pull-resolution time) can still reflect the OLD,
+  // pre-deletion plan items, so a removed day discovered only through
+  // that stale sibling snapshot must not be trusted as a legitimate
+  // addition to days[].
+  //
+  // A previous version of this fix cleared staleness on ANY observed
+  // `plans`-key event, which is wrong with 3+ tabs: an unrelated/stale
+  // plans write from a THIRD tab can arrive before the removing tab's own
+  // coupled write, falsely "confirming" a removal that hasn't actually
+  // been reflected yet (Codex P2). Entries here instead clear only via
+  // confirmRemovedDayIds() — content evidence that a freshly-read plans
+  // snapshot genuinely no longer references the day — never merely
+  // because some plans write happened. Day IDs are never reused (see
+  // removedDayIds()'s own doc in crossDayChecks.ts), so a pending entry
+  // is always safe to keep — there is no "wait forever" cost, and no
+  // separate handling is needed for pure additions (Add Day/Duplicate
+  // Day): a newly-added day's absence from a stale plans snapshot is
+  // expected and benign, never evidence of staleness, so nothing is ever
+  // tracked here for it. Deliberately NOT reset at the start of a new
+  // pull cycle like the other conflict refs — "a new pull started" is not
+  // proof the sibling plans write has landed, and correctness here must
+  // not depend on enough wall-clock time having passed since the
+  // membership change (Codex: do not rely on timing). A pure reorder
+  // never adds anything here — same-membership reorders don't invalidate
   // sibling-derived day IDs.
-  const plansSiblingStaleForDaysRef = useRef(false);
+  const pendingRemovedDayIdsRef = useRef<Set<string>>(new Set());
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
 
@@ -722,25 +734,49 @@ export default function LightningPage() {
             setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
             const allPlans = loadAllPlanItems(profileKeysForPull.plans);
             setAllPlanItems(allPlans);
+            // Codex P2 fix — this is itself a fresh read of the current
+            // persisted plans snapshot, so it's a valid opportunity to
+            // confirm (or fail to confirm) any day IDs still pending in
+            // pendingRemovedDayIdsRef: cleared only when THIS content
+            // genuinely no longer references them, never merely because
+            // some plans data was read (an unrelated/third-tab snapshot
+            // that still contains a pending-removed day's items must
+            // leave it pending — see confirmRemovedDayIds()'s doc).
+            if (pendingRemovedDayIdsRef.current.size > 0) {
+              pendingRemovedDayIdsRef.current = new Set(
+                confirmRemovedDayIds(
+                  [...pendingRemovedDayIdsRef.current],
+                  allPlans.map((it) => it.dayId)
+                )
+              );
+            }
             // Plan-only dayIds — merged together with lightningDiscoveredDayIds
             // below so a fresh profile that hydrates cloud plans and Lightning
             // together resolves one consistent fallback order.
             //
-            // Codex P1 fix — NOT collected while plansSiblingStaleForDaysRef
-            // is true. `allPlans` is read fresh from the shared plans key
-            // right here, but "fresh from storage right now" is not the
-            // same as "reflects a pending cross-tab days MEMBERSHIP change
-            // this tab already knows about" — Remove Day's plans-item
-            // deletion can be persisted by the other tab strictly later
-            // than its `days` write, so this read can still return the
-            // OLD, pre-deletion items even at this exact moment. Trusting
-            // those stale day IDs here would let the days-domain safety
-            // net below re-add a day another tab just removed. Lightning's
-            // OWN winning items (lightningDiscoveredDayIds above) are not
-            // subject to this — they come from this page's own protected
-            // domain, never from the suspect sibling snapshot.
-            if (allPlans.length > 0 && !plansSiblingStaleForDaysRef.current) {
-              planDiscoveredDayIds = [...new Set(allPlans.map((it) => it.dayId))];
+            // Codex P1/P2 fix — any day ID still pending in
+            // pendingRemovedDayIdsRef (per the confirmation just above) is
+            // excluded here. `allPlans` is read fresh from the shared
+            // plans key right here, but "fresh from storage right now" is
+            // not the same as "reflects a pending cross-tab days
+            // MEMBERSHIP change this tab already knows about" — Remove
+            // Day's plans-item deletion can be persisted by the other tab
+            // strictly later than its `days` write, so this read can
+            // still return the OLD, pre-deletion items even at this exact
+            // moment. Trusting those stale day IDs here would let the
+            // days-domain safety net below re-add a day another tab just
+            // removed. Lightning's OWN winning items
+            // (lightningDiscoveredDayIds above) are not subject to this —
+            // they come from this page's own protected domain, never from
+            // the suspect sibling snapshot.
+            if (allPlans.length > 0) {
+              planDiscoveredDayIds = [
+                ...new Set(
+                  allPlans
+                    .map((it) => it.dayId)
+                    .filter((id) => !pendingRemovedDayIdsRef.current.has(id))
+                ),
+              ];
             }
           }
         }
@@ -1022,25 +1058,26 @@ export default function LightningPage() {
         // blocked.
         if (isGenuineChange) {
           localDaysEditRef.current = true;
-          // Codex P1 fix — a genuine cross-tab days[] change is either a
+          // Codex P2 fix — a genuine cross-tab days[] change is either a
           // pure REORDER (same day-ID set, different order) or a
-          // MEMBERSHIP change (a day was added/removed/duplicated by
-          // another tab — e.g. Plans' Remove/Add/Duplicate Day). Remove
-          // Day's plans-item deletion is persisted slightly later than its
-          // `days` write (via the OTHER tab's own items-persist effect),
-          // so this event can arrive — and this tab's pull can even
-          // resolve — before the coupled plans write does. Delegated to
-          // reduceSiblingPlansStale() (crossDayChecks.ts, with its own
-          // DEV_SIBLING_STALE_CASES) so the exact decision this listener
-          // makes is the same one those cases validate — not a
-          // hand-maintained duplicate of it. A pure reorder never changes
-          // membership, so it deliberately leaves the ref unchanged (see
-          // the reducer's own doc) — sibling-derived day IDs stay trusted
-          // for a reorder-only event.
-          plansSiblingStaleForDaysRef.current = reduceSiblingPlansStale(
-            plansSiblingStaleForDaysRef.current,
-            { type: "days", prevIds: knownDaysRef.current, nextIds: next }
-          );
+          // MEMBERSHIP change (a day was added and/or removed by another
+          // tab — e.g. Plans' Remove/Add/Duplicate Day). Only a REMOVAL
+          // (via removedDayIds() — crossDayChecks.ts, with its own
+          // DEV_REMOVED_DAY_IDS_CASES) is tracked: a day ID, once removed,
+          // can never legitimately reappear (IDs are never reused), so it
+          // is unambiguous, permanently-safe evidence that sibling
+          // plan-derived day IDs referencing it may be stale. A pure
+          // ADDITION (Add Day/Duplicate Day — indistinguishable from each
+          // other by this diff alone) is NOT tracked here: an added day's
+          // absence from a stale plans snapshot is expected and benign,
+          // never evidence of staleness (Codex: "plans missing an ADDED
+          // day is NOT evidence Plans storage is stale"). A pure reorder
+          // never removes anything, so it deliberately adds nothing here —
+          // sibling-derived day IDs stay fully trusted for a reorder-only
+          // event.
+          for (const removedId of removedDayIds(knownDaysRef.current, next)) {
+            pendingRemovedDayIdsRef.current.add(removedId);
+          }
         }
       }
       if (e.key === dayParksKeyRef.current) {
@@ -1052,27 +1089,31 @@ export default function LightningPage() {
       if (e.key === plansKeyRef.current) {
         // Plans changed — re-infer using current active day.
         setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, safeActiveDayIdRef.current));
-        setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
+        const freshAllPlans = loadAllPlanItems(plansKeyRef.current);
+        setAllPlanItems(freshAllPlans);
         // Codex P1 fix — another tab just wrote this profile's shared Plans
         // storage key. Mark it so this tab's in-flight pull (if any) skips
         // its own unconditional Plans-hydration write below rather than
         // overwriting that newer cross-tab edit with a possibly-stale
         // cloud snapshot.
         crossTabPlansChangedRef.current = true;
-        // Codex P1 fix — a fresh plans-key write from another tab is proof
-        // that this tab's sibling plans snapshot has caught up, so it is
-        // safe to trust plan-derived day IDs for additive days[]
-        // reconciliation again. Delegated to reduceSiblingPlansStale() (see
-        // the days-key listener above for the full rationale) — a "plans"
-        // event always clears the ref unconditionally, per the reducer's
-        // own rule: the writing tab's own writes to this key are strictly
-        // ordered, so any write observed after a days-membership change was
-        // set is causally at least as new as whatever plans-item change was
-        // coupled to it.
-        plansSiblingStaleForDaysRef.current = reduceSiblingPlansStale(
-          plansSiblingStaleForDaysRef.current,
-          { type: "plans" }
-        );
+        // Codex P2 fix — confirm any pending removed-day IDs against THIS
+        // fresh read's actual content, not merely because a plans write
+        // was observed at all (the previous version of this fix cleared
+        // unconditionally here, which is wrong with 3+ tabs: an
+        // unrelated/stale plans write from a THIRD tab could arrive before
+        // the removing tab's own coupled write and falsely "confirm" a
+        // removal that isn't actually reflected yet). confirmRemovedDayIds()
+        // only drops a pending ID once this genuinely current snapshot no
+        // longer references it — see its own doc in crossDayChecks.ts.
+        if (pendingRemovedDayIdsRef.current.size > 0) {
+          pendingRemovedDayIdsRef.current = new Set(
+            confirmRemovedDayIds(
+              [...pendingRemovedDayIdsRef.current],
+              freshAllPlans.map((it) => it.dayId)
+            )
+          );
+        }
       }
       // Phase 11.0 review fix — reconcile this page's own Lightning items when
       // another tab (e.g. My Plans doing Remove Day) writes the active profile's

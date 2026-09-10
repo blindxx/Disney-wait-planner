@@ -68,194 +68,163 @@ function parseDayNumLocal(dayId: string): number {
 }
 
 /**
- * SH.2 Codex P1 fix — distinguishes a pure days[] REORDER (same set of day
- * IDs, different order — e.g. Move Up/Down) from a MEMBERSHIP change (a day
- * was added and/or removed — e.g. Remove Day, Add Day, Duplicate Day).
+ * SH.2 Codex P1 fix (Add Day false-positive) — returns the day IDs present
+ * in `prevDayIds` but absent from `nextDayIds`: the days a genuine
+ * cross-tab days[] change actually REMOVED. Empty for a pure REORDER
+ * (same set, different order — e.g. Move Up/Down) and empty for a PURE
+ * ADDITION (Add Day, or Duplicate Day's new day-ID — day IDs are never
+ * reused, see handleAddDay/handleDuplicateDay's "max suffix + 1" rule, so
+ * a brand-new ID can never itself be "removed").
  *
- * Used by plans/page.tsx's cross-tab days[] storage listener to decide
- * whether a genuine cross-tab days[] change also implies the shared
- * plans/items storage may have changed: Remove Day deletes that day's plan
- * items in the same handler that shrinks `days`, so a membership change
- * observed from another tab means this tab's own in-flight pull must not
- * apply a stale cloud items snapshot (which would still contain the
- * removed day's items) and persist it back over the other tab's newer
- * plans storage, resurrecting items it just deleted. A pure reorder never
- * touches items, so it must NOT trigger this coupling — doing so would
- * unnecessarily block an otherwise-valid cloud plans apply, regressing the
- * SH.2 guarantee that unrelated conflict domains stay independent.
+ * Both plans/page.tsx and lightning/page.tsx use this — not the broader
+ * "did the day-ID SET change at all" check a previous SH.2 fix used — to
+ * decide what needs protecting from a cross-tab days[] event. Only a
+ * REMOVAL is unambiguous evidence that a coupled plans-item deletion may
+ * be in flight (Remove Day deletes that day's items in the same handler
+ * that shrinks `days`): a day ID, once removed, can never legitimately
+ * reappear, so removed IDs can be filtered out of any item/day-ID set
+ * permanently and safely, with no "wait for confirmation" needed. A pure
+ * ADDITION (Add Day: no items ever coming; Duplicate Day: items ARE
+ * coming, but indistinguishable from Add Day by this diff alone) is
+ * NOT treated as evidence of a plans change here — using set-membership
+ * change as that evidence (the previous approach) let Add Day incorrectly
+ * mark the plans domain dirty forever (for this pull cycle), since no
+ * plans event ever follows it to clear that mark.
  */
-export function isDaysMembershipChange(prevDayIds: string[], nextDayIds: string[]): boolean {
-  if (prevDayIds.length !== nextDayIds.length) return true;
+export function removedDayIds(prevDayIds: string[], nextDayIds: string[]): string[] {
   const nextSet = new Set(nextDayIds);
-  if (prevDayIds.some((id) => !nextSet.has(id))) return true;
-  const prevSet = new Set(prevDayIds);
-  return nextDayIds.some((id) => !prevSet.has(id));
+  return prevDayIds.filter((id) => !nextSet.has(id));
 }
 
 /**
- * Reference cases for isDaysMembershipChange() — Codex P1 #1 fix. Run from
- * Node (mirrors the DEV_PLAN_ALIAS_CASES convention in plansMatching.ts):
- *   import { DEV_DAYS_MEMBERSHIP_CASES, isDaysMembershipChange } from "@/lib/crossDayChecks";
- *   DEV_DAYS_MEMBERSHIP_CASES.forEach(c => {
- *     const got = isDaysMembershipChange(c.prev, c.next);
- *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ * SH.2 Codex P1 fix — given a set of day IDs already known-removed (but
+ * whose coupled plans-item deletion hasn't yet been independently
+ * confirmed) and a FRESH read of the day IDs actually referenced by the
+ * current persisted plans/Lightning-sibling snapshot, returns the subset
+ * that remains unconfirmed: a removed day ID is confirmed (dropped from
+ * the result) only when the fresh snapshot no longer references it at
+ * all. An unrelated snapshot that still contains it — e.g., a third tab's
+ * own stale write, landing after the removal but before the removing
+ * tab's own coupled plans write — leaves it pending rather than falsely
+ * clearing it. This is content evidence, not event identity: "a plans
+ * storage event happened" is not proof of anything by itself; "the
+ * current persisted plans content is actually compatible with the newer
+ * days membership" is.
+ */
+export function confirmRemovedDayIds(pending: string[], freshReferencedDayIds: string[]): string[] {
+  const freshSet = new Set(freshReferencedDayIds);
+  return pending.filter((id) => freshSet.has(id));
+}
+
+/**
+ * Reference cases for removedDayIds() + confirmRemovedDayIds() — Codex P1
+ * (Add Day false-positive) and Codex P2 (sibling staleness must clear on
+ * content, not event identity) fixes. Run from Node:
+ *   import { DEV_REMOVED_DAY_IDS_CASES, removedDayIds, confirmRemovedDayIds } from "@/lib/crossDayChecks";
+ *   DEV_REMOVED_DAY_IDS_CASES.forEach(c => {
+ *     const got = removedDayIds(c.prev, c.next);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expectedRemoved) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_DAYS_MEMBERSHIP_CASES: Array<{
+export const DEV_REMOVED_DAY_IDS_CASES: Array<{
   name: string;
   prev: string[];
   next: string[];
-  expected: boolean;
+  expectedRemoved: string[];
 }> = [
   {
     name: "identical order — no change at all",
     prev: ["day-1", "day-2"],
     next: ["day-1", "day-2"],
-    expected: false,
+    expectedRemoved: [],
   },
   {
-    name: "pure reorder — Move Up/Down swaps two days, same set (regression case B)",
+    name: "pure reorder — Move Up/Down swaps two days, same set",
     prev: ["day-1", "day-2", "day-3"],
     next: ["day-1", "day-3", "day-2"],
-    expected: false,
+    expectedRemoved: [],
   },
   {
-    name: "day removed — Remove Day shrinks the set (regression case A)",
-    prev: ["day-1", "day-2", "day-3"],
-    next: ["day-1", "day-3"],
-    expected: true,
+    name: "Add Day — pure addition, no removed days (regression case 1: must not block plans hydration)",
+    prev: ["day-1"],
+    next: ["day-1", "day-2"],
+    expectedRemoved: [],
   },
   {
-    name: "day added — Add Day/Duplicate Day grows the set",
+    name: "Duplicate Day — pure addition (from the days[] diff's perspective), no removed days",
     prev: ["day-1", "day-2"],
     next: ["day-1", "day-2", "day-3"],
-    expected: true,
+    expectedRemoved: [],
   },
   {
-    name: "same length, different set — swap-in-place edge case (length check alone is insufficient)",
+    name: "Remove Day (populated) — day-2 removed (regression case 3: stays distrusted until confirmed)",
     prev: ["day-1", "day-2", "day-3"],
-    next: ["day-1", "day-2", "day-4"],
-    expected: true,
+    next: ["day-1", "day-3"],
+    expectedRemoved: ["day-2"],
+  },
+  {
+    name: "Remove Day (empty day) — same removedDayIds result regardless of whether the day had items (regression case 7)",
+    prev: ["day-1", "day-2", "day-3"],
+    next: ["day-1", "day-3"],
+    expectedRemoved: ["day-2"],
+  },
+  {
+    name: "multiple removals in one event",
+    prev: ["day-1", "day-2", "day-3", "day-4"],
+    next: ["day-1", "day-4"],
+    expectedRemoved: ["day-2", "day-3"],
   },
 ];
 
 /**
- * SH.2 Codex P1 fix — event shape fed into reduceSiblingPlansStale() below.
- * "days" is a genuine cross-tab days[] storage event this tab observed
- * (prevIds/nextIds are the known-days set immediately before/after it).
- * "plans" is a cross-tab plans storage event this tab observed.
- */
-export type SiblingStaleEvent =
-  | { type: "days"; prevIds: string[]; nextIds: string[] }
-  | { type: "plans" };
-
-/**
- * SH.2 Codex P1 fix — pure state transition for whether Lightning should
- * currently distrust sibling Plans-derived day IDs for additive days[]
- * reconciliation. Used by lightning/page.tsx's cross-tab storage listeners
- * (the actual, single source of truth for plansSiblingStaleForDaysRef —
- * not a reimplementation kept in sync by hand) so the exact same decision
- * logic exercised in production is what DEV_SIBLING_STALE_CASES below
- * validates.
- *
- * Root cause this closes: Remove Day writes the shared `days` key
- * synchronously but its coupled plans-item deletion is persisted slightly
- * later, via the OTHER tab's own items-persist effect. So Lightning can
- * observe the `days` MEMBERSHIP event — and even have its own pending
- * pull resolve — entirely before the coupled `plans` event arrives. In
- * that window, a fresh read of shared plans storage can still return the
- * OLD, pre-deletion items, so the removed day must not be trusted as
- * "discovered" via that stale sibling snapshot.
- *
- * Rules (a left fold over the observed event sequence, starting `false`):
- *   - "days" event that is a genuine MEMBERSHIP change (isDaysMembershipChange)
- *     → true (a pure reorder — same day-ID set — never sets this: it
- *       doesn't invalidate sibling-derived day IDs).
- *   - "plans" event → false (proof the sibling snapshot has caught up).
- *   - Anything else → state unchanged.
- * Once true, stays true until a "plans" event is observed — deliberately
- * NOT time- or pull-cycle-bounded, since "a new pull started" or "some
- * time passed" is not proof the sibling write landed (Codex: correctness
- * must not depend on storage-event vs. network timing).
- */
-export function reduceSiblingPlansStale(current: boolean, event: SiblingStaleEvent): boolean {
-  if (event.type === "plans") return false;
-  return current || isDaysMembershipChange(event.prevIds, event.nextIds);
-}
-
-/**
- * Reference cases for reduceSiblingPlansStale() — Codex P1 (Lightning
- * event-ordering) fix. Each case is an ordered event sequence (simulating
- * the exact cross-tab storage-event arrival order Codex described) folded
- * through reduceSiblingPlansStale starting from `false`; `expected` is the
- * resulting staleness state at the point a pending pull would resolve
- * (immediately after the listed events, before any further event).
- * Run from Node:
- *   import { DEV_SIBLING_STALE_CASES, reduceSiblingPlansStale } from "@/lib/crossDayChecks";
- *   DEV_SIBLING_STALE_CASES.forEach(c => {
- *     const got = c.events.reduce(reduceSiblingPlansStale, false);
- *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ * Reference cases for confirmRemovedDayIds() — Codex P2 fix. Run from Node:
+ *   import { DEV_CONFIRM_REMOVED_CASES, confirmRemovedDayIds } from "@/lib/crossDayChecks";
+ *   DEV_CONFIRM_REMOVED_CASES.forEach(c => {
+ *     const got = confirmRemovedDayIds(c.pending, c.freshReferencedDayIds);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_SIBLING_STALE_CASES: Array<{
+export const DEV_CONFIRM_REMOVED_CASES: Array<{
   name: string;
-  events: SiblingStaleEvent[];
-  expected: boolean;
+  pending: string[];
+  freshReferencedDayIds: string[];
+  expected: string[];
 }> = [
   {
-    name: "regression case A — Remove Day membership event arrives, pull resolves before the coupled plans event: sibling plan data must be distrusted",
-    events: [{ type: "days", prevIds: ["day-1", "day-2", "day-3"], nextIds: ["day-1", "day-3"] }],
-    expected: true,
+    name: "regression case 4 — the actual post-removal plans dataset arrives (day-2 genuinely absent): confirmed, cleared",
+    pending: ["day-2"],
+    freshReferencedDayIds: ["day-1", "day-3"],
+    expected: [],
   },
   {
-    name: "regression case B — the coupled plans event later arrives: sibling plan data is trusted again",
-    events: [
-      { type: "days", prevIds: ["day-1", "day-2", "day-3"], nextIds: ["day-1", "day-3"] },
-      { type: "plans" },
-    ],
-    expected: false,
+    name: "regression case 5 — three-tab case: an unrelated plans write that still contains the removed day's items must NOT clear it",
+    pending: ["day-2"],
+    freshReferencedDayIds: ["day-1", "day-2", "day-3"],
+    expected: ["day-2"],
   },
   {
-    name: "pure reorder — same day-ID set, only order differs: never distrusted, unrelated hydration must not be blocked",
-    events: [{ type: "days", prevIds: ["day-1", "day-2", "day-3"], nextIds: ["day-1", "day-3", "day-2"] }],
-    expected: false,
+    name: "regression case 6 — after the unrelated write, the correct plans event finally arrives without day-2: now clears",
+    pending: ["day-2"],
+    freshReferencedDayIds: ["day-1", "day-3"],
+    expected: [],
   },
   {
-    name: "Duplicate Day — membership grows (new day), same distrust-until-confirmed rule applies",
-    events: [{ type: "days", prevIds: ["day-1", "day-2"], nextIds: ["day-1", "day-2", "day-3"] }],
-    expected: true,
+    name: "multiple pending, only one confirmed by this particular fresh snapshot",
+    pending: ["day-2", "day-5"],
+    freshReferencedDayIds: ["day-1", "day-5"],
+    expected: ["day-5"],
   },
   {
-    name: "Add Day (no items) — membership event alone still marks distrust even though nothing was actually resurrectable",
-    events: [{ type: "days", prevIds: ["day-1"], nextIds: ["day-1", "day-2"] }],
-    expected: true,
+    name: "empty pending set — no-op",
+    pending: [],
+    freshReferencedDayIds: ["day-1", "day-2"],
+    expected: [],
   },
   {
-    name: "no events at all — default trusted state",
-    events: [],
-    expected: false,
-  },
-  {
-    name: "plans event with no preceding days event — already trusted, stays trusted (idempotent)",
-    events: [{ type: "plans" }],
-    expected: false,
-  },
-  {
-    name: "two membership changes before the coupled plans event finally arrives — still distrusted until plans confirms",
-    events: [
-      { type: "days", prevIds: ["day-1", "day-2"], nextIds: ["day-1"] },
-      { type: "days", prevIds: ["day-1"], nextIds: ["day-1", "day-4"] },
-    ],
-    expected: true,
-  },
-  {
-    name: "membership change, then plans confirms, then a later pure reorder — reorder must not re-trigger distrust",
-    events: [
-      { type: "days", prevIds: ["day-1", "day-2"], nextIds: ["day-1"] },
-      { type: "plans" },
-      { type: "days", prevIds: ["day-1"], nextIds: ["day-1"] },
-    ],
-    expected: false,
+    name: "empty fresh snapshot (e.g. all plans cleared) — confirms everything pending",
+    pending: ["day-2", "day-3"],
+    freshReferencedDayIds: [],
+    expected: [],
   },
 ];
 
