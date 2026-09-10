@@ -142,6 +142,172 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
   };
 }
 
+// ===== CLIENT-SIDE CONFIRMED-BASELINE COMMIT (SH.2) =====
+
+/**
+ * SH.2 architecture — a domain's confirmed baseline represents "the state
+ * currently accepted as synchronized for this domain", not merely "the
+ * last successful PUT payload". A PUSH is one way a domain becomes
+ * accepted; a PULL that hydrates cloud data into local storage (because
+ * local hadn't changed) is another, equally valid way — both must be able
+ * to advance the same confirmed record, per-domain, independently.
+ *
+ * Computes the new confirmed snapshot to commit, merging forward from
+ * `currentConfirmed` (read FRESH at commit time by the caller — never a
+ * frozen pull-start snapshot, so this can never revert a domain some
+ * OTHER concurrent commit already advanced further than this one knows
+ * about). Only the domains present in `accepted` are replaced; every
+ * domain NOT present keeps whatever `currentConfirmed` already has for it,
+ * completely untouched — this is what lets a caller commit just the
+ * domain(s) it actually determined were cloud-won AND successfully
+ * persisted this pull, while a locally-won domain's prior confirmation
+ * status is left exactly as it was (see the pull effects in
+ * plans/page.tsx and lightning/page.tsx for the per-domain conditions).
+ *
+ * `currentConfirmed` null (nothing confirmed yet for this profile) starts
+ * from an empty base rather than failing — a profile's first-ever
+ * confirmation can originate from a pull's cloud-hydration just as validly
+ * as from a push.
+ */
+export function nextConfirmedBaseline(
+  currentConfirmed: SyncedPlannerPayload | null,
+  accepted: {
+    plans?: { version: number; items: unknown[] };
+    lightning?: { version: number; items: unknown[] };
+    days?: string[];
+  }
+): SyncedPlannerPayload {
+  const base: SyncedPlannerPayload = currentConfirmed ?? {
+    version: 1,
+    plans: { version: 1, items: [] },
+    lightning: { version: 1, items: [] },
+  };
+  const days = accepted.days ?? base.days;
+  return {
+    version: 1,
+    plans: accepted.plans ?? base.plans,
+    lightning: accepted.lightning ?? base.lightning,
+    ...(days ? { days } : {}),
+  };
+}
+
+/**
+ * Reference cases for nextConfirmedBaseline() — the per-domain merge rule
+ * that closes the Codex P1 "cloud-hydrated state can be misclassified as
+ * an unsynced local edit by a later pull" finding: a pull-accepted domain
+ * must durably advance the SAME confirmed record a push would, without
+ * ever touching a domain it didn't itself resolve this pull. Run from
+ * Node:
+ *   import { DEV_NEXT_CONFIRMED_BASELINE_CASES, nextConfirmedBaseline } from "@/lib/syncPayload";
+ *   DEV_NEXT_CONFIRMED_BASELINE_CASES.forEach(c => {
+ *     const got = nextConfirmedBaseline(c.currentConfirmed, c.accepted);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_NEXT_CONFIRMED_BASELINE_CASES: Array<{
+  name: string;
+  currentConfirmed: SyncedPlannerPayload | null;
+  accepted: {
+    plans?: { version: number; items: unknown[] };
+    lightning?: { version: number; items: unknown[] };
+    days?: string[];
+  };
+  expected: SyncedPlannerPayload;
+}> = [
+  {
+    name: "nothing confirmed yet, plans accepted from a pull — starts a fresh confirmed record",
+    currentConfirmed: null,
+    accepted: { plans: { version: 1, items: ["p1"] } },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: [] },
+    },
+  },
+  {
+    name: "plans accepted — lightning and days untouched, keep whatever was already confirmed",
+    currentConfirmed: {
+      version: 1,
+      plans: { version: 1, items: ["old"] },
+      lightning: { version: 1, items: ["ll1"] },
+      days: ["day-1", "day-2"],
+    },
+    accepted: { plans: { version: 1, items: ["new"] } },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["new"] },
+      lightning: { version: 1, items: ["ll1"] },
+      days: ["day-1", "day-2"],
+    },
+  },
+  {
+    name: "days accepted alone (e.g. days-only cloud win) — plans/lightning untouched",
+    currentConfirmed: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: ["ll1"] },
+      days: ["day-1"],
+    },
+    accepted: { days: ["day-1", "day-2"] },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: ["ll1"] },
+      days: ["day-1", "day-2"],
+    },
+  },
+  {
+    name: "lightning accepted via the OPPOSITE page's own hydration write (Plans committing Lightning's baseline)",
+    currentConfirmed: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: ["stale"] },
+    },
+    accepted: { lightning: { version: 1, items: ["fresh"] } },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: ["fresh"] },
+    },
+  },
+  {
+    name: "all three accepted together (a clean, fully cloud-sourced pull) — whole record replaced",
+    currentConfirmed: {
+      version: 1,
+      plans: { version: 1, items: ["old"] },
+      lightning: { version: 1, items: ["old"] },
+      days: ["day-1"],
+    },
+    accepted: {
+      plans: { version: 1, items: ["new"] },
+      lightning: { version: 1, items: ["new"] },
+      days: ["day-1", "day-2"],
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["new"] },
+      lightning: { version: 1, items: ["new"] },
+      days: ["day-1", "day-2"],
+    },
+  },
+  {
+    name: "nothing accepted (all domains won locally this pull) — currentConfirmed passes through byte-identical",
+    currentConfirmed: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: ["ll1"] },
+      days: ["day-1"],
+    },
+    accepted: {},
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["p1"] },
+      lightning: { version: 1, items: ["ll1"] },
+      days: ["day-1"],
+    },
+  },
+];
+
 // ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
 
 /**

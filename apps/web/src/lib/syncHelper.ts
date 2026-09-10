@@ -27,13 +27,15 @@ Reviewers should check any changes affecting:
  *   pullPlanner(profileId)       — fetch combined cloud planner on sign-in
  *   registerUnloadSync()         — best-effort beacon push on page unload
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
- *   getConfirmedSnapshot(profileId) — read the exact last-pushed-and-accepted
- *                                     payload for a profile (see below)
+ *   getConfirmedSnapshot(profileId)    — read the current per-domain
+ *                                        confirmed baseline for a profile
+ *   commitConfirmedBaseline(profileId, — advance specific domain(s) of that
+ *     accepted)                          baseline after a pull accepts them
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt      — ISO timestamp of last successful push
- *   dwp:sync:{profileId}:confirmedSnapshot — the exact SyncedPlannerPayload body
- *                                             of the last successful push
+ *   dwp:sync:{profileId}:confirmedSnapshot — the current per-domain confirmed
+ *                                             baseline (see below)
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
@@ -42,26 +44,50 @@ Reviewers should check any changes affecting:
  * ── Cloud-confirmed local snapshot contract (SH.2) ──────────────────────────
  *
  * "What exact local snapshot is cloud-confirmed for this profile?" —
- * answered by getConfirmedSnapshot(profileId): the literal request body
- * doPush() sent on this profile's most recent SUCCESSFUL PUT, stored
- * verbatim under confirmedSnapshotKeyForProfile(profileId) the moment the
- * 200 response is observed (see doPush() below). It is:
- *   • NEVER a fresh read of the current plans/lightning/days storage keys —
- *     those are mutable and may already hold a newer, still-unpushed edit
- *     by the time the response arrives.
- *   • NEVER dependent on response timing — it is written once, atomically,
- *     from the same `body` string that was actually transmitted, not
- *     reconstructed from whatever happens to be on disk afterwards.
- *   • NEVER dependent on which tab performed the push — localStorage is
- *     shared across same-origin tabs, so any tab for this profile reads
- *     the identical value via a plain fresh read of the same durable key.
+ * answered by getConfirmedSnapshot(profileId). A domain's confirmed value
+ * represents "the state currently accepted as synchronized for this
+ * domain" — NOT merely "the last successful PUT payload". It advances two
+ * ways, both writing the SAME durable key:
+ *   • doPush() (below) writes the literal request body of every
+ *     SUCCESSFUL push, verbatim, the moment the 200 response is observed.
+ *   • commitConfirmedBaseline() (below) is called by a page's pull effect
+ *     after a pull resolves, for whichever domain(s) it determined were
+ *     cloud-won AND successfully persisted this pull — a domain a pull
+ *     hydrates from cloud is just as validly "confirmed" as one a push
+ *     just sent, and must advance the SAME record so a LATER pull never
+ *     misclassifies that already-hydrated state as an unsynced local edit
+ *     (Codex P1). It reads the CURRENT confirmed record fresh (never a
+ *     frozen pull-start snapshot) and replaces only the domain(s) passed
+ *     in, leaving every other domain's confirmation exactly as it was —
+ *     so it can never let an older write clobber a domain some OTHER
+ *     concurrent commit (a push, or another tab's pull) already advanced
+ *     further than this one knows about.
+ * Either way, the record is:
+ *   • NEVER a fresh read of the current plans/lightning/days storage keys
+ *     at the moment of commit — those are mutable and may already hold a
+ *     newer, still-unaccepted edit; only the EXACT value this pull (or
+ *     push) determined was accepted is ever written.
+ *   • NEVER dependent on response/resolution timing — each commit writes
+ *     once, atomically, from the exact accepted value, never reconstructed
+ *     from whatever happens to be on disk afterwards.
+ *   • NEVER dependent on which tab performed the push or pull —
+ *     localStorage is shared across same-origin tabs, so any tab for this
+ *     profile reads the identical value via a plain fresh read of the same
+ *     durable key.
  * Consumers (plans/page.tsx, lightning/page.tsx) treat this as the single
  * source of truth for "was my current local content already accepted by
- * the cloud" — see resyncConfirmedBaselines() in each page.
+ * the cloud" — see captureConfirmedSnapshotForPull() in each page for how
+ * a pull's OWN immutable baseline is frozen from it, and each page's pull
+ * effect for how commitConfirmedBaseline() is called afterward.
  */
 
 import { buildNamespacedKey } from "./profileStorage";
-import { buildSyncedPlannerPayload, parseSyncedPlannerPayload, type SyncedPlannerPayload } from "./syncPayload";
+import {
+  buildSyncedPlannerPayload,
+  parseSyncedPlannerPayload,
+  nextConfirmedBaseline,
+  type SyncedPlannerPayload,
+} from "./syncPayload";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -115,6 +141,42 @@ export function getConfirmedSnapshot(profileId: string): SyncedPlannerPayload | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Advance the confirmed baseline for whichever domain(s) a pull just
+ * determined were cloud-won AND successfully persisted — see the module
+ * doc's "Cloud-confirmed local snapshot contract" above and
+ * nextConfirmedBaseline()'s own doc in syncPayload.ts for the merge rule.
+ *
+ * Reads the CURRENT confirmed record fresh (via getConfirmedSnapshot,
+ * never a value the caller captured earlier) so this can never clobber a
+ * domain some OTHER concurrent commit — a push, or another tab's own pull
+ * — already advanced further than the caller knows about; only the
+ * domain(s) present in `accepted` are ever overwritten. Best-effort: a
+ * write failure here (quota, private-mode) is swallowed, matching the
+ * tier of every other confirmed-state write in this module — it simply
+ * means the next pull falls back to whatever was confirmed before.
+ *
+ * Call this AFTER persistence for the accepted domain(s) has already
+ * succeeded — never speculatively before a write is known to have landed
+ * ("failed persistence must not advance the baseline").
+ */
+export function commitConfirmedBaseline(
+  profileId: string,
+  accepted: {
+    plans?: { version: number; items: unknown[] };
+    lightning?: { version: number; items: unknown[] };
+    days?: string[];
+  }
+): void {
+  if (typeof window === "undefined") return;
+  if (!accepted.plans && !accepted.lightning && !accepted.days) return;
+  try {
+    const current = getConfirmedSnapshot(profileId);
+    const next = nextConfirmedBaseline(current, accepted);
+    localStorage.setItem(confirmedSnapshotKeyForProfile(profileId), JSON.stringify(next));
+  } catch {}
 }
 
 // ── Sync state observer ───────────────────────────────────────────────────────

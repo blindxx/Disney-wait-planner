@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, pickWinningDays, pickWinningItems, reconcileItemsWithDays } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, pickWinningDays, pickWinningItems, reconcileItemsWithDays, extractDayIdsFromRawItems } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -28,6 +28,7 @@ import {
   registerUnloadSync,
   cancelScheduledSync,
   getConfirmedSnapshot,
+  commitConfirmedBaseline,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -719,6 +720,44 @@ export default function LightningPage() {
         const currentItems = migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
         const currentDays = loadKnownDays(daysKeyRef.current);
 
+        // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
+        // (Plans) dataset's own local-vs-cloud verdict EARLY, and perform
+        // its hydration write NOW (moved up from its old later position),
+        // so days[] can be reconciled below against whichever Plans
+        // content actually survives into this pull's final snapshot — not
+        // just Lightning's own items. Same baseline-comparison model as
+        // Lightning's own domains: a fresh raw read compared against
+        // pullStartBaseline.plansRaw (this pull's frozen causal baseline)
+        // tells whether Plans changed since this pull started.
+        let hydrationSucceeded = true;
+        // Codex P1 fix (1st round) — tracks specifically whether THIS pull
+        // just wrote cloud's Plans data (distinct from hydrationSucceeded,
+        // which also stays true when the write was correctly SKIPPED
+        // because Plans won locally) — only a real, successful cloud write
+        // is eligible to advance Plans' confirmed baseline below.
+        let plansHydrationWritten = false;
+        const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
+        const plansChangedLocally = currentPlansRaw !== pullStartBaseline.plansRaw;
+        if (typeof window !== "undefined" && planner?.plans && !plansChangedLocally) {
+          const plansRawToWrite = JSON.stringify(planner.plans);
+          try {
+            localStorage.setItem(profileKeysForPull.plans, plansRawToWrite);
+            plansRawBaselineRef.current = plansRawToWrite;
+            plansHydrationWritten = true;
+          } catch {
+            hydrationSucceeded = false;
+          }
+        }
+        // The dayIds days[] must protect are whichever Plans content
+        // actually ends up persisted this pull: cloud's (just written
+        // above), or the current (preserved) local content — reading
+        // fresh from the storage KEY either way correctly reflects
+        // whichever is actually there now.
+        const plansDiscoveredDayIds =
+          plansHydrationWritten && planner?.plans
+            ? extractDayIdsFromRawItems(planner.plans.items as unknown[])
+            : loadAllPlanItems(profileKeysForPull.plans).map((it) => it.dayId);
+
         const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
           pullStartBaseline.items,
           currentItems,
@@ -729,23 +768,28 @@ export default function LightningPage() {
           currentDays,
           cloudDaysOrder
         );
-        // Structural reconciliation — Codex P1 fix (#1 of this round):
-        // itemsChangedLocally is passed through so a LOCALLY winning
-        // Lightning item is never discarded merely because the
-        // independently-decided days winner omits its day (it's
-        // reconciled back into winningDays instead); only a
-        // non-locally-winning (cloud or unchanged-local) item is subject
-        // to the removed-day filter — which is what still closes Codex
-        // finding #3 from an earlier round (Lightning re-adding a removed
-        // day before the coupled deletion here happened to land): that
-        // removal is detected from the days[] baseline/winner diff alone,
-        // applied only to items that did NOT win locally — see
+        // Structural reconciliation — Codex P1 fixes: itemsChangedLocally
+        // is passed through so a LOCALLY winning Lightning item is never
+        // discarded merely because the independently-decided days winner
+        // omits its day (it's reconciled back into winningDays instead);
+        // only a non-locally-winning (cloud or unchanged-local) item is
+        // subject to the removed-day filter — which is what still closes
+        // Codex finding #3 from an earlier round (Lightning re-adding a
+        // removed day before the coupled deletion here happened to land).
+        // plansDiscoveredDayIds/plansChangedLocally give the SAME two-way
+        // treatment to the surviving Plans dataset (2nd round fix): a
+        // preserved, locally-winning Plans item's day is trusted and
+        // reconciled in too, while a stale (cloud/unchanged) Plans
+        // snapshot's day references stay subject to the removed-day
+        // filter, unable to resurrect a day a local removal dropped — see
         // reconcileItemsWithDays's own doc.
         const { items: winningLightningItems, days: winningDays } = reconcileItemsWithDays(
           itemsCandidate,
           itemsChangedLocally,
           pullStartBaseline.days,
-          daysCandidate
+          daysCandidate,
+          plansDiscoveredDayIds,
+          plansChangedLocally
         );
 
         // Only touch React state when the winning result actually differs
@@ -805,37 +849,17 @@ export default function LightningPage() {
           daysBaselineRef.current = winningDays;
         }
 
-        // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
-        // so sync pushes always include a complete dataset regardless of which page loads first.
-        // Phase 7.6.4 — Hydration Guard: only open syncReady when the opposite-dataset
-        // write succeeds. A failed write leaves the key missing, which syncHelper would
-        // treat as empty data on the next push — potentially overwriting valid cloud state.
-        let hydrationSucceeded = true;
+        // Phase 7.6.3 — Sync Hydration Safety: the Plans hydration write
+        // itself already happened above (moved earlier so days[]
+        // reconciliation could see its result — see Codex P1, 2nd round).
+        // Same-tab writes do not fire a storage event, so refresh
+        // planDayItems/allPlanItems explicitly now whenever a cloud Plans
+        // payload existed at all. Reads fresh from the storage KEY (not
+        // from `planner.plans` directly) either way, so this correctly
+        // reflects whichever data is actually in storage — the cloud
+        // snapshot just written above, or the foreign tab's newer edit
+        // that write was skipped to protect.
         if (typeof window !== "undefined" && planner?.plans) {
-          // SH.2 architecture — same baseline-comparison model, applied to
-          // the opposite (Plans) dataset: a fresh raw read compared against
-          // pullStartBaseline.plansRaw (this pull's frozen causal baseline,
-          // not a mutable ref — see Codex P1 #2) tells whether another tab
-          // wrote a genuinely newer Plans edit since this pull started —
-          // skip the unconditional overwrite below if so, rather than
-          // reverting that edit with a possibly-stale cloud snapshot.
-          const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
-          const plansChangedLocally = currentPlansRaw !== pullStartBaseline.plansRaw;
-          if (!plansChangedLocally) {
-            const plansRawToWrite = JSON.stringify(planner.plans);
-            try {
-              localStorage.setItem(profileKeysForPull.plans, plansRawToWrite);
-              plansRawBaselineRef.current = plansRawToWrite;
-            } catch {
-              hydrationSucceeded = false;
-            }
-          }
-          // Same-tab writes do not fire a storage event, so refresh
-          // planDayItems/allPlanItems explicitly now. Reads fresh from the
-          // storage KEY (not from `planner.plans` directly) either way, so
-          // this correctly reflects whichever data is actually in storage —
-          // the cloud snapshot just written above, or the foreign tab's
-          // newer edit that write was skipped to protect.
           setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
           setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
         }
@@ -844,6 +868,39 @@ export default function LightningPage() {
         // already does, so a stale locally-persisted order can never be
         // pushed back over the cloud's actual value.
         if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
+
+        // SH.2 architecture (Codex P1, 1st round) — commit the DURABLE
+        // confirmed baseline for whichever domain(s) this pull determined
+        // were cloud-won AND successfully persisted. This is what makes a
+        // pull-hydrated domain just as "confirmed" as a pushed one, so a
+        // LATER pull's captureConfirmedSnapshotForPull() never
+        // misclassifies it as an unsynced local edit — see
+        // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
+        // domains are simply omitted: their prior confirmation status is
+        // left untouched, exactly matching this pull's own conflict
+        // decision (never "retroactively" changed by a later event).
+        const acceptedForBaseline: {
+          plans?: { version: number; items: unknown[] };
+          lightning?: { version: number; items: unknown[] };
+          days?: string[];
+        } = {};
+        if (itemsCloudWon) {
+          acceptedForBaseline.lightning = { version: 1, items: winningLightningItems };
+        }
+        if (plansHydrationWritten && planner?.plans) {
+          acceptedForBaseline.plans = planner.plans;
+        }
+        // Days is committed only when winningDays is ENTIRELY cloud-derived
+        // — own items cloud-won, Plans didn't win locally either (so no
+        // locally-sourced day could have been folded into the
+        // reconciliation step above), days itself didn't win locally, and
+        // the write actually succeeded. Mirrors the daysBaselineRef
+        // fallback-tier condition just above, now also accounting for the
+        // sibling dataset.
+        if (itemsCloudWon && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
+          acceptedForBaseline.days = winningDays;
+        }
+        commitConfirmedBaseline(activeProfileIdRef.current, acceptedForBaseline);
       })
       .catch(() => {
         if (cancelled) return;
