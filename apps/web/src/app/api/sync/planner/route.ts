@@ -13,8 +13,11 @@
  * PUT  /api/sync/planner?profileId=… — merge-write the planner blob for (user, profile)
  * POST /api/sync/planner?profileId=… — same as PUT (supports navigator.sendBeacon on unload)
  *   200: { updatedAt: string }
- *   400: invalid JSON, malformed body, structurally invalid/unrecognized
- *        planner shape, or missing/invalid profileId
+ *   400: invalid JSON, malformed body, structurally invalid planner shape,
+ *        an otherwise-valid payload carrying a top-level domain this
+ *        server build doesn't recognize (see findUnknownDomainKeys in
+ *        syncPayload.ts — never silently dropped with a 200), or
+ *        missing/invalid profileId
  *   401: not signed in
  *   413: payload exceeds size limit
  *
@@ -56,7 +59,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession, type Session } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { mergePlannerDomains, parseSyncedPlannerPayload } from "@/lib/syncPayload";
+import { findUnknownDomainKeys, mergePlannerDomains, parseSyncedPlannerPayload } from "@/lib/syncPayload";
 
 // 1 MB hard limit; realistic planner payloads are well under 100 KB.
 const MAX_BODY_BYTES = 1_000_000;
@@ -284,6 +287,26 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid planner payload shape" }, { status: 400 });
   }
   const incomingRaw = parsedBody as Record<string, unknown>;
+
+  // Codex P2 fix — a payload can validate the known shape above (it has
+  // valid plans/lightning/days) while ALSO carrying a top-level key this
+  // server build doesn't recognize as any domain (e.g. a newer client
+  // running code ahead of this deployment). mergePlannerDomains() only
+  // ever copies specifically-named keys into what it stores, so such a
+  // key would previously be silently dropped while the request still
+  // returned 200 — a write must never succeed while discarding part of
+  // what it was asked to persist. Reject explicitly instead, before the
+  // lock is taken and before any row is read or written, so an
+  // unrecognized write has zero effect on stored data. This only ever
+  // affects a client ahead of this server's known domains; the identical
+  // write succeeds once a later phase recognizes that domain.
+  const unknownDomains = findUnknownDomainKeys(incomingRaw);
+  if (unknownDomains.length > 0) {
+    return NextResponse.json(
+      { error: "Unrecognized planner domain(s) in payload", domains: unknownDomains },
+      { status: 400 }
+    );
+  }
 
   const pool = getPool();
 

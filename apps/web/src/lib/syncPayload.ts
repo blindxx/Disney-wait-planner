@@ -159,8 +159,53 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
  */
 const OPTIONAL_DOMAIN_KEYS = ["days"] as const;
 
+/**
+ * Every top-level key a SH.1 server build recognizes: the `version`
+ * control field plus every domain (required or optional). Used only by
+ * findUnknownDomainKeys() below — mergePlannerDomains() itself never
+ * consults this, since it only ever reads specific named keys off
+ * `incomingRaw` and was therefore never at risk of leaking an unknown key
+ * into storage; the risk was the opposite (see findUnknownDomainKeys doc).
+ */
+const KNOWN_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set<string>([
+  "version",
+  "plans",
+  "lightning",
+  ...OPTIONAL_DOMAIN_KEYS,
+]);
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/**
+ * Codex P2 fix — returns the top-level keys in `incomingRaw` that this
+ * server build does not recognize as any known domain or control field.
+ *
+ * mergePlannerDomains() correctly preserves an unknown domain ALREADY
+ * present in a stored row (its merge base is the existing row, spread
+ * as-is), but that is a different direction from this check: a domain
+ * arriving for the FIRST TIME in the current write, under a key this
+ * server build has never heard of, has no schema to validate against and
+ * is never copied into `merged` by mergePlannerDomains() (which only ever
+ * reads specific known keys off `incomingRaw`) — so before this fix, such
+ * a write validated successfully (parseSyncedPlannerPayload only checks
+ * version/plans/lightning/days) and was silently persisted MINUS that
+ * key, while still returning 200. A write must never succeed while
+ * discarding part of what it was asked to persist.
+ *
+ * The caller rejects the whole write (400) when this returns any keys,
+ * rather than guessing at how to safely store an unvalidated shape under
+ * an unrecognized name — there is no schema for this server build to
+ * check it against, so silently accepting it would reopen the same
+ * "store anything JSON-parseable" gap SH.1 closed for the payload as a
+ * whole, just scoped to unknown keys instead. Once a later phase adds a
+ * domain to KNOWN_TOP_LEVEL_KEYS (and OPTIONAL_DOMAIN_KEYS), the
+ * identical write is recognized and persisted normally — no client-side
+ * change required.
+ */
+export function findUnknownDomainKeys(incomingRaw: Record<string, unknown>): string[] {
+  return Object.keys(incomingRaw).filter((k) => !KNOWN_TOP_LEVEL_KEYS.has(k));
 }
 
 /**
@@ -297,5 +342,67 @@ export const DEV_MERGE_CASES: Array<{
     incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
     incomingParsed: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
     expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+];
+
+/**
+ * Reference cases for findUnknownDomainKeys() — the Codex P2 fix. These
+ * exercise the opposite direction from DEV_MERGE_CASES' "unknown future
+ * domain" case: here the unrecognized domain arrives in THIS write (a
+ * newer client talking to an older/current server build) rather than
+ * already sitting in a previously-stored row. The route rejects (400)
+ * whenever this returns a non-empty list, before mergePlannerDomains() is
+ * ever called — so a payload that reaches mergePlannerDomains() in
+ * production is always already known to contain zero unknown top-level
+ * keys, which is why DEV_MERGE_CASES doesn't need its own "reject" cases.
+ *
+ * Run from Node:
+ *   import { DEV_UNKNOWN_DOMAIN_CASES, findUnknownDomainKeys } from "@/lib/syncPayload";
+ *   DEV_UNKNOWN_DOMAIN_CASES.forEach(c => {
+ *     const got = findUnknownDomainKeys(c.incomingRaw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expectedUnknown) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
+  name: string;
+  incomingRaw: Record<string, unknown>;
+  expectedUnknown: string[];
+}> = [
+  {
+    name: "known-only payload (version + plans + lightning + days) — nothing unknown",
+    incomingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+    },
+    expectedUnknown: [],
+  },
+  {
+    name: "known-only payload without optional days — still nothing unknown",
+    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expectedUnknown: [],
+  },
+  {
+    name: "newer-client payload carrying an unrecognized extension domain — must be flagged, never silently dropped",
+    incomingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayMeta: { "day-1": { label: "Arrival" } },
+    },
+    expectedUnknown: ["dayMeta"],
+  },
+  {
+    name: "multiple unrecognized domains in one write — all flagged",
+    incomingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      dayParks: { "day-1": "DISNEYLAND_PARK" },
+      dayAutoFallbacks: {},
+    },
+    expectedUnknown: ["dayParks", "dayAutoFallbacks"],
   },
 ];
