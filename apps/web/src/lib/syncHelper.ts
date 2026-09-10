@@ -47,14 +47,35 @@ Reviewers should check any changes affecting:
  *                                                       currently attributed
  *                                                       to (see its own doc)
  *   setLocalContentOwner(profileId, userId)          — record that
- *                                                       attribution
+ *                                                       attribution — ONLY
+ *                                                       after a pull's final
+ *                                                       coherent snapshot is
+ *                                                       durably persisted
+ *                                                       (6th round; see
+ *                                                       each page's pull
+ *                                                       effect)
+ *   await resolvePendingBeaconAfterPull(userId,      — resolve a possibly-
+ *     profileId, cloudRevision, cloudSnapshot)          beaconed local
+ *                                                       snapshot against a
+ *                                                       just-fetched GET
+ *                                                       response (6th round;
+ *                                                       see its own doc)
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
  *                                                         last successful push
- *   dwp:sync:{userId}:{profileId}:confirmedSnapshot    — the current
- *                                                         confirmed baseline
- *                                                         (see below)
+ *   dwp:sync:{profileId}:localContentOwner             — see
+ *                                                         getLocalContentOwner's
+ *                                                         own doc
+ *   dwp:sync:{userId}:{profileId}:state                — the consolidated
+ *                                                         sync identity state
+ *                                                         for this user+
+ *                                                         profile — confirmed
+ *                                                         baseline AND any
+ *                                                         pending beacon (see
+ *                                                         SyncIdentityState in
+ *                                                         syncPayload.ts and
+ *                                                         the section below)
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
@@ -89,7 +110,7 @@ Reviewers should check any changes affecting:
  * nextConfirmedBaseline() (syncPayload.ts), which both commit paths above
  * delegate to:
  *   • Identity scope: the storage key is keyed by BOTH userId and
- *     profileId (confirmedSnapshotKeyForIdentity below) — "profile" is a
+ *     profileId (syncIdentityStateKeyForIdentity below) — "profile" is a
  *     LOCAL, per-device concept independent of which cloud account is
  *     signed in, so a bare profileId key would let account B, signing in
  *     after account A signs out on the same device/profile, read (and
@@ -125,6 +146,22 @@ Reviewers should check any changes affecting:
  * this — every conflict decision now verifies the candidate belongs to
  * the SAME authenticated context as the baseline before trusting it.
  *
+ * Codex P1 fix (6th round) — TWO further gaps: (1) the 5th round's
+ * ownership marker was written at the START of an auth transition, before
+ * the pull it was meant to describe had even resolved — a failed or
+ * cancelled pull left ownership relabeled to the new identity anyway, so a
+ * LATER session for that identity would trust the PREVIOUS identity's
+ * still-unreplaced bytes as its own. getLocalContentOwner()'s own doc
+ * below now documents the corrected durable boundary: ownership transfers
+ * ONLY after a pull's final coherent snapshot is actually persisted (see
+ * each page's pull effect). (2) sendBeacon() can durably persist a newer
+ * server snapshot without ever returning its revision, so the confirmed
+ * baseline could be stuck stale indefinitely relative to what the server
+ * actually has. See SyncIdentityState/resolveSyncIdentityStateAfterPull
+ * (syncPayload.ts) and resolvePendingBeaconAfterPull (below) for how a
+ * beaconed-but-unconfirmed snapshot is tracked and reconciled against the
+ * next successful pull's own GET response.
+ *
  * Either way, the record is:
  *   • NEVER a fresh read of the current plans/lightning/days storage keys
  *     at the moment of commit — those are mutable and may already hold a
@@ -149,10 +186,12 @@ import { buildNamespacedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
-  parseConfirmedPlannerSnapshot,
+  parseSyncIdentityState,
   nextConfirmedBaseline,
+  resolveSyncIdentityStateAfterPull,
   type SyncedPlannerPayload,
   type ConfirmedPlannerSnapshot,
+  type SyncIdentityState,
 } from "./syncPayload";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -231,13 +270,41 @@ function localContentOwnerKeyForProfile(profileId: string): string {
  * first authenticated use: there is no "other identity" to have owned it.
  * Only a marker naming a DIFFERENT, KNOWN identity is a mismatch.
  *
- * See each page's auth-transition effect for how this is consulted (read
+ * See each page's auth-transition effect for how this is CONSULTED (read
  * BEFORE being overwritten with the newly-resolved identity, so a
  * transition's own mismatch verdict reflects who owned the content going
  * INTO the transition) and how a mismatch is handled (every domain's
  * "current" read for that pull's conflict decision is substituted with
  * this pull's own frozen baseline, so it can never be misread as a local
  * edit — see the pull effect's own doc for the full substitution rule).
+ *
+ * Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY. setLocalContentOwner()
+ * must NEVER be called at the START of an auth transition, before the
+ * pull it describes has resolved — doing so is exactly the bug Codex
+ * flagged: a failed or cancelled pull would leave ownership relabeled to
+ * the new identity while the profile's raw bytes are still the PREVIOUS
+ * identity's, unreplaced. A LATER session for the new identity would then
+ * see its OWN name on the marker (no mismatch detected) and wrongly trust
+ * — and potentially push — the previous identity's leftover content as its
+ * own confirmed-eligible local candidate.
+ *
+ * The corrected boundary: each page calls setLocalContentOwner() ONLY at
+ * the END of its pull effect's `.then()`, and ONLY when ALL of the
+ * following hold —
+ *   (a) the pull was not cancelled/superseded (the pre-existing `cancelled`
+ *       flag, checked as this callback's first statement, already
+ *       guarantees this — a stale pull's callback returns before reaching
+ *       ownership logic at all);
+ *   (b) the pull did not throw (a `.catch()` branch never calls this);
+ *   (c) this pull's own hydration/day writes succeeded (the SAME
+ *       `hydrationSucceeded && !daysWriteFailed` condition that already
+ *       gates `setSyncReady(true)` — a persistence failure means the local
+ *       snapshot is not yet the coherent, durable one this identity should
+ *       be credited with).
+ * Only once all three hold has "the final coherent local snapshot" this
+ * pull computed actually landed on disk (or been confirmed to already
+ * match, requiring no write) — exactly the moment ownership is safe to
+ * establish or reaffirm.
  */
 export function getLocalContentOwner(profileId: string): string | null {
   if (typeof window === "undefined") return null;
@@ -249,11 +316,13 @@ export function getLocalContentOwner(profileId: string): string | null {
 }
 
 /**
- * See getLocalContentOwner()'s own doc for the full contract. `userId`
- * null is a no-op (defensive only — callers only invoke this from the
- * "authenticated" branch of their auth-transition effect, where a real
- * identity is expected; there is no legitimate reason to tag ownership as
- * "no one").
+ * See getLocalContentOwner()'s own doc for the full contract, especially
+ * the DURABLE TRANSFER BOUNDARY (6th round) — call this ONLY after a
+ * pull's final coherent snapshot has actually been persisted, never
+ * speculatively at transition start. `userId` null is a no-op (defensive
+ * only — callers only invoke this from the "authenticated" branch of their
+ * auth-transition effect, where a real identity is expected; there is no
+ * legitimate reason to tag ownership as "no one").
  */
 export function setLocalContentOwner(profileId: string, userId: string | null): void {
   if (typeof window === "undefined" || userId === null) return;
@@ -263,30 +332,40 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
 }
 
 /**
- * Returns the localStorage key for the confirmed planner snapshot for a
- * given (userId, profileId) pair. Codex P1 fix (3rd round) — keyed by BOTH:
- * "profile" is a LOCAL, per-device concept (e.g. a family member slot)
- * entirely independent of which cloud account is signed in, so a
+ * Returns the localStorage key for the CONSOLIDATED sync identity state for
+ * a given (userId, profileId) pair — see SyncIdentityState's own doc in
+ * syncPayload.ts (Codex P1, 6th round) for why `confirmed` and
+ * `pendingBeacon` are stored together under one key, read-compute-written
+ * as one atomic unit. Codex P1 fix (3rd round, carried forward) — keyed by
+ * BOTH: "profile" is a LOCAL, per-device concept (e.g. a family member
+ * slot) entirely independent of which cloud account is signed in, so a
  * profileId-only key would let a DIFFERENT account, signing into the same
  * profile slot on the same browser, read (and potentially build on) the
  * previous account's confirmed record. userId is resolved the same way the
  * server does (session.user.id, falling back to email) — see each page's
  * auth-transition effect for where this is read from useSession().
+ *
+ * Renamed from the pre-6th-round confirmedSnapshotKeyForIdentity (which
+ * stored a bare ConfirmedPlannerSnapshot at
+ * `dwp:sync:{userId}:{profileId}:confirmedSnapshot`) — the stored SHAPE
+ * changed, not just this function's name, so a value written under the OLD
+ * key name is never misread as this new shape. Any pre-existing confirmed
+ * snapshot simply degrades to "nothing confirmed yet" (parseSyncIdentityState
+ * treats an unrecognized value as null) and is re-established on the next
+ * successful pull/push — exactly the same safe, already-hardened fallback
+ * path a genuinely fresh profile's first confirmation takes.
  */
-export function confirmedSnapshotKeyForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot`;
+function syncIdentityStateKeyForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:state`;
 }
 
-// ── Confirmed snapshot ────────────────────────────────────────────────────────
+// ── Sync identity state (confirmed snapshot + pending beacon) ──────────────────
 
 /**
- * Read the current ConfirmedPlannerSnapshot (revision + planner state) for
- * this authenticated user + profile — see the module doc's "Cloud-confirmed
- * local snapshot contract" above. Returns null when nothing has ever been
- * confirmed for this exact (userId, profileId) pair (fresh profile,
- * always-offline, never signed in, or a DIFFERENT account previously used
- * this profile slot) or the stored value is missing/corrupt — callers must
- * treat null as "nothing to compare against yet", not as an error.
+ * Read the current SyncIdentityState for this authenticated user + profile
+ * — see its own doc in syncPayload.ts. Never null: an absent/corrupt
+ * stored value degrades to `{ confirmed: null, pendingBeacon: null }`,
+ * exactly like a fresh profile's first-ever read.
  *
  * Safe to call from any tab: this is a plain localStorage read of a key
  * that is durable (survives reloads) and shared (every same-origin tab for
@@ -294,28 +373,127 @@ export function confirmedSnapshotKeyForIdentity(userId: string, profileId: strin
  * or event subscription to be correct — only a re-read at the moment the
  * caller wants an answer.
  */
-export function getConfirmedSnapshot(userId: string, profileId: string): ConfirmedPlannerSnapshot | null {
-  if (typeof window === "undefined") return null;
+export function getSyncIdentityState(userId: string, profileId: string): SyncIdentityState {
+  const EMPTY: SyncIdentityState = { confirmed: null, pendingBeacon: null };
+  if (typeof window === "undefined") return EMPTY;
   try {
-    const raw = localStorage.getItem(confirmedSnapshotKeyForIdentity(userId, profileId));
-    if (!raw) return null;
-    return parseConfirmedPlannerSnapshot(JSON.parse(raw) as unknown);
+    const raw = localStorage.getItem(syncIdentityStateKeyForIdentity(userId, profileId));
+    if (!raw) return EMPTY;
+    return parseSyncIdentityState(JSON.parse(raw) as unknown) ?? EMPTY;
   } catch {
-    return null;
+    return EMPTY;
   }
 }
 
 /**
- * The Web Locks API name a commit for this (userId, profileId) pair
- * acquires before its read-compute-write sequence — see
- * commitConfirmedBaseline()'s own doc (Codex P1, 4th round) for why this
- * is needed. Scoped identically to confirmedSnapshotKeyForIdentity so
- * commits for a DIFFERENT (userId, profileId) pair never contend with each
- * other, only concurrent commits for the SAME pair (the only case where
- * regression is even possible).
+ * Read just the confirmed baseline (revision + planner state) for this
+ * authenticated user + profile — see the module doc's "Cloud-confirmed
+ * local snapshot contract" above. Returns null when nothing has ever been
+ * confirmed for this exact (userId, profileId) pair (fresh profile,
+ * always-offline, never signed in, or a DIFFERENT account previously used
+ * this profile slot) or the stored value is missing/corrupt — callers must
+ * treat null as "nothing to compare against yet", not as an error.
  */
-function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot:lock`;
+export function getConfirmedSnapshot(userId: string, profileId: string): ConfirmedPlannerSnapshot | null {
+  return getSyncIdentityState(userId, profileId).confirmed;
+}
+
+/**
+ * The Web Locks API name a mutation of this (userId, profileId) pair's
+ * sync identity state acquires before its read-compute-write sequence —
+ * see withSyncIdentityStateLock()'s own doc (Codex P1, 4th/6th rounds) for
+ * why this is needed. Scoped identically to syncIdentityStateKeyForIdentity
+ * so mutations for a DIFFERENT (userId, profileId) pair never contend with
+ * each other, only concurrent mutations for the SAME pair (the only case
+ * where regression is even possible).
+ */
+function syncIdentityStateLockNameForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:state:lock`;
+}
+
+/**
+ * SH.2 architecture (Codex P1, 4th round, generalized 6th round) — the
+ * SINGLE critical section every mutation of a (userId, profileId)'s sync
+ * identity state goes through: commitConfirmedBaseline() and
+ * resolvePendingBeaconAfterPull() (both below) are thin wrappers around
+ * this, passing a pure `mutate` function that computes the next state from
+ * the current one. Consolidating both callers onto one locked
+ * read-compute-write primitive is what makes `confirmed` and
+ * `pendingBeacon` genuinely ONE atomic unit (see SyncIdentityState's own
+ * doc in syncPayload.ts) rather than two independently-racing writers of
+ * the same key.
+ *
+ * Codex P1 fix (4th round) — the read, compute, and write here form a
+ * single compound operation whose correctness depends on nothing else
+ * changing the SAME durable record in between. Within one tab that's
+ * automatic (JS is single-threaded and nothing here awaits mid-sequence),
+ * but ACROSS TABS it is not: two tabs can each call this function at
+ * effectively the same wall-clock moment, both read the SAME "current"
+ * value before either has written, both independently compute a `next`
+ * that looks valid relative to that shared stale read, and then both
+ * write — whichever write lands LAST wins outright, even if it should have
+ * lost (a plain read-then-write sequence has no way to detect that a
+ * different write landed in the gap between this tab's own read and
+ * write). The fix is to make the whole read-compute-write sequence a
+ * single critical section, serialized across every tab of this origin,
+ * using the Web Locks API (`navigator.locks`) — `navigator.locks.request(name, fn)`
+ * queues concurrent requests for the same `name` and runs `fn` for only one
+ * requester at a time, in every tab, with no window for two `fn` bodies to
+ * interleave. Under the lock, whichever mutation runs SECOND always
+ * re-reads the OTHER's just-written value as `current`, so the final
+ * result is deterministic regardless of which tab's request was queued
+ * first — there is no unserialized window left to race in, not a smaller
+ * one.
+ *
+ * Codex P1 fix (5th round) — re-audited whether falling back to an
+ * unserialized sequence when `navigator.locks` is unavailable was an
+ * acceptable trade-off for a CORRECTNESS invariant. It is not: "graceful
+ * degradation" here means silently reintroducing the exact cross-tab
+ * regression the lock exists to close, with no signal that the safety
+ * property no longer holds. This function therefore FAILS SAFE: when
+ * `navigator.locks` is unavailable (older browsers, or a non-secure
+ * context — Locks API requires a secure context), it does NOT mutate
+ * anything, rather than mutate through an unprotected path that could
+ * regress. The practical effect in that environment is that
+ * confirmed-baseline/pending-beacon hardening simply never activates —
+ * every pull falls back to the pre-confirmation baseline/ownership-tag
+ * tiers (see getLocalContentOwner()'s own doc), a known, narrower, and
+ * strictly safer degradation than knowingly permitting the monotonic-
+ * revision invariant to be violated.
+ *
+ * `mutate` receives the CURRENT state fresh (never a value the caller
+ * captured earlier) and must return the next state to persist — it may
+ * return the SAME object (or an equal one) to signal "no change needed";
+ * this function does not special-case that, since writing an unchanged
+ * value back is harmless. Errors thrown by `mutate` or the write itself
+ * are swallowed (best-effort tier, matching every other confirmed-state
+ * write in this module) — the caller learns nothing back from a failure
+ * except that the mutation silently didn't happen.
+ */
+async function withSyncIdentityStateLock(
+  userId: string,
+  profileId: string,
+  mutate: (current: SyncIdentityState) => SyncIdentityState
+): Promise<void> {
+  if (typeof window === "undefined") return;
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  // Codex P1 fix (5th round) — fail safe: no lock, no mutation. See this
+  // function's own doc above for why an unserialized fallback is never an
+  // acceptable substitute for atomicity here.
+  if (!locks) return;
+  try {
+    await locks.request(syncIdentityStateLockNameForIdentity(userId, profileId), () => {
+      try {
+        const current = getSyncIdentityState(userId, profileId);
+        const next = mutate(current);
+        localStorage.setItem(syncIdentityStateKeyForIdentity(userId, profileId), JSON.stringify(next));
+      } catch {}
+    });
+  } catch {
+    // Locks API present but the request itself failed unexpectedly — the
+    // mutation is simply dropped (best-effort tier), never retried through
+    // an unprotected path.
+  }
 }
 
 /**
@@ -324,69 +502,9 @@ function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string)
  * persisted, gated by the server-issued `revision` that produced them —
  * see the module doc's "Cloud-confirmed local snapshot contract" above and
  * nextConfirmedBaseline()'s own doc in syncPayload.ts for the full merge +
- * revision-ordering rule.
- *
- * Reads the CURRENT confirmed record fresh (via getConfirmedSnapshot,
- * never a value the caller captured earlier) so this can never clobber a
- * domain some OTHER concurrent commit already advanced further than the
- * caller knows about; only the domain(s) present in `accepted` are ever
- * overwritten, and only when `revision` is strictly newer than whatever is
- * already confirmed.
- *
- * Codex P1 fix (4th round) — the read (getConfirmedSnapshot), compute
- * (nextConfirmedBaseline), and write (localStorage.setItem) here form a
- * single compound operation whose correctness depends on nothing else
- * changing the SAME durable record in between. Within one tab that's
- * automatic (JS is single-threaded and nothing here awaits mid-sequence),
- * but ACROSS TABS it is not: two tabs can each call this function at
- * effectively the same wall-clock moment, both read the SAME "current"
- * value before either has written, both independently compute a `next`
- * that looks valid relative to that shared stale read, and then both
- * write — whichever write lands LAST wins outright, even if its own
- * revision is the OLDER of the two (a plain read-then-write sequence has
- * no way to detect that a newer write landed in the gap between this
- * tab's own read and write). Per-revision gating alone (nextConfirmedBaseline)
- * closes this only when the two commits' reads are serialized relative to
- * each other — it cannot substitute for actual serialization.
- *
- * The fix is to make the whole read-compute-write sequence a single
- * critical section, serialized across every tab of this origin, using the
- * Web Locks API (`navigator.locks`) — the browser primitive built
- * specifically for coordinating access to a shared resource (here,
- * localStorage) across tabs/workers: `navigator.locks.request(name, fn)`
- * queues concurrent requests for the same `name` and runs `fn` for only
- * one requester at a time, in every tab, with no window for two `fn`
- * bodies to interleave. Under the lock, whichever commit's critical
- * section runs SECOND always re-reads the OTHER's just-written value as
- * `current` and correctly rejects if it isn't newer — so the final result
- * is deterministic (the max revision seen) regardless of which tab's
- * request was queued first, which is exactly what makes this "atomic"
- * rather than merely "less likely to race": there is no unserialized
- * window left to race in, not a smaller one.
- *
- * Codex P1 fix (5th round) — re-audited whether falling back to the
- * unserialized sequence when `navigator.locks` is unavailable was an
- * acceptable trade-off for a CORRECTNESS invariant. It is not: "graceful
- * degradation" here means silently reintroducing the exact cross-tab
- * revision-regression bug the lock exists to close, with no signal to the
- * user or caller that the safety property no longer holds. A regressed
- * confirmed baseline is strictly WORSE than no confirmed baseline at all —
- * a later pull would trust the stale, wrongly-"confirmed" snapshot instead
- * of correctly falling back to the (already-hardened) fallback-baseline
- * tier. This function therefore now FAILS SAFE: when `navigator.locks` is
- * unavailable (older browsers, or a non-secure context — Locks API
- * requires a secure context), it does NOT commit anything, rather than
- * commit through an unprotected path that could regress. The practical
- * effect in that environment is that confirmed-baseline hardening simply
- * never activates — every pull falls back to the pre-confirmation
- * baseline/ownership-tag tiers (see getLocalContentOwner()'s own doc),
- * which is a known, narrower, and strictly safer degradation than
- * knowingly permitting a monotonic-revision invariant to be violated.
- *
- * Best-effort otherwise: a write failure (quota, private-mode) or a Locks
- * API rejection is swallowed, matching the tier of every other
- * confirmed-state write in this module — it simply means the next pull
- * falls back to whatever was confirmed before.
+ * revision-ordering rule. `pendingBeacon` (if any) is left completely
+ * untouched by this call — only resolvePendingBeaconAfterPull() below ever
+ * changes it, since only a fresh GET response can conclusively resolve it.
  *
  * Call this AFTER persistence for the accepted domain(s) has already
  * succeeded — never speculatively before a write is known to have landed
@@ -404,25 +522,37 @@ export async function commitConfirmedBaseline(
 ): Promise<void> {
   if (typeof window === "undefined") return;
   if (!accepted.plans && !accepted.lightning && !accepted.days) return;
-  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-  // Codex P1 fix (5th round) — fail safe: no lock, no commit. See this
-  // function's own doc above for why an unserialized fallback is never an
-  // acceptable substitute for atomicity here.
-  if (!locks) return;
-  try {
-    await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
-      try {
-        const current = getConfirmedSnapshot(userId, profileId);
-        const next = nextConfirmedBaseline(current, revision, accepted);
-        if (!next) return; // rejected — not newer than what's already confirmed
-        localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
-      } catch {}
-    });
-  } catch {
-    // Locks API present but the request itself failed unexpectedly — the
-    // commit is simply dropped (best-effort tier), never retried through an
-    // unprotected path.
-  }
+  await withSyncIdentityStateLock(userId, profileId, (current) => {
+    const next = nextConfirmedBaseline(current.confirmed, revision, accepted);
+    return next ? { confirmed: next, pendingBeacon: current.pendingBeacon } : current;
+  });
+}
+
+/**
+ * SH.2 architecture (Codex P1, 6th round) — BEACON UNCERTAINTY resolution.
+ * Call this after EVERY successful pull (a genuinely resolved GET — never
+ * from a `.catch()` branch, which teaches nothing about a pending beacon's
+ * fate) for the SAME (userId, profileId) the pull was for, passing the
+ * GET's own `revision`/parsed snapshot (both null for a definitive 204).
+ *
+ * Delegates to resolveSyncIdentityStateAfterPull() (syncPayload.ts) for the
+ * actual decision — see its own doc for the full delivered/undelivered
+ * contract — under the SAME lock every other sync-identity-state mutation
+ * uses, so this can never race commitConfirmedBaseline() for the same
+ * identity into an inconsistent combination of `confirmed`/`pendingBeacon`.
+ * Safe (and expected) to call even when no pendingBeacon exists — it is
+ * then a harmless no-op pass-through of `confirmed`.
+ */
+export async function resolvePendingBeaconAfterPull(
+  userId: string,
+  profileId: string,
+  cloudRevision: number | null,
+  cloudSnapshot: SyncedPlannerPayload | null
+): Promise<void> {
+  if (typeof window === "undefined") return;
+  await withSyncIdentityStateLock(userId, profileId, (current) =>
+    resolveSyncIdentityStateAfterPull(current, cloudRevision, cloudSnapshot)
+  );
 }
 
 // ── Sync state observer ───────────────────────────────────────────────────────
@@ -472,11 +602,12 @@ let inFlight = false;
 let currentSyncProfileId = "default";
 
 /**
- * The authenticated user id that sync is currently targeting, used solely
- * to scope confirmed-baseline commits (Codex P1, 3rd round) — see
- * confirmedSnapshotKeyForIdentity's own doc. null while signed out or
- * before the session has resolved; doPush() skips the confirmed-baseline
- * commit step entirely when null (it never guesses an identity).
+ * The authenticated user id that sync is currently targeting, used to
+ * scope confirmed-baseline commits (Codex P1, 3rd round) and pending-beacon
+ * marking (Codex P1, 6th round) — see syncIdentityStateKeyForIdentity's own
+ * doc. null while signed out or before the session has resolved; doPush()
+ * and registerUnloadSync() both skip their respective identity-scoped
+ * writes entirely when null (neither ever guesses an identity).
  * Updated by setSyncUserId().
  */
 let currentSyncUserId: string | null = null;
@@ -610,6 +741,35 @@ export async function pullPlans(): Promise<{
  * Uses navigator.sendBeacon so the request outlives the page.
  * Reads planner data from localStorage at unload time (always current).
  * Returns a cleanup function; call it in useEffect cleanup.
+ *
+ * Codex P1 fix (6th round) — BEACON UNCERTAINTY. sendBeacon()'s boolean
+ * return only means "the browser accepted this for background delivery",
+ * never "the server received and persisted it" — by the time any response
+ * would arrive, this page is already gone, so there is no revision to read
+ * back the way doPush() gets one. Treating a queued beacon as silently
+ * equivalent to "nothing happened" is what let a beacon-persisted newer
+ * server snapshot go unrecognized by this device's own confirmed baseline
+ * (Codex finding): the NEXT session would still compare against the OLD
+ * confirmed revision and could misclassify or even overwrite the
+ * server-authoritative state the beacon itself just established.
+ *
+ * The fix: when sendBeacon() reports the request was queued, record the
+ * EXACT payload just queued as this identity's `pendingBeacon` (see
+ * SyncIdentityState's own doc in syncPayload.ts) — never a revision (none
+ * exists to record) and never a client timestamp. The next successful pull
+ * for this SAME (userId, profileId) resolves the uncertainty conclusively
+ * against the server's own GET response — see resolvePendingBeaconAfterPull's
+ * own doc and each page's pull effect for where that happens.
+ *
+ * This write is deliberately a SYNCHRONOUS, direct read-merge-write — NOT
+ * routed through withSyncIdentityStateLock(), unlike every other mutation
+ * of this record. beforeunload cannot reliably await async work (
+ * navigator.locks.request always returns a Promise, even for a synchronous
+ * callback) before the page is torn down; skipping the lock here trades an
+ * astronomically unlikely same-instant cross-tab race — self-healing on
+ * either side's next pull regardless — for actually guaranteeing the
+ * pending marker gets written at all, which is the one property this whole
+ * mechanism depends on.
  */
 export function registerUnloadSync(): () => void {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
@@ -623,14 +783,22 @@ export function registerUnloadSync(): () => void {
       debounceTimer = null;
     }
     const profileId = currentSyncProfileId;
+    const userId = currentSyncUserId;
     const payload = buildPayloadFromStorage(profileId);
     if (!payload) return;
     const body = JSON.stringify(payload);
     if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
-    navigator.sendBeacon(
+    const queued = navigator.sendBeacon(
       `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`,
       new Blob([body], { type: "application/json" })
     );
+    if (queued && userId) {
+      try {
+        const current = getSyncIdentityState(userId, profileId);
+        const next: SyncIdentityState = { confirmed: current.confirmed, pendingBeacon: payload };
+        localStorage.setItem(syncIdentityStateKeyForIdentity(userId, profileId), JSON.stringify(next));
+      } catch {}
+    }
   };
 
   window.addEventListener("beforeunload", handler);

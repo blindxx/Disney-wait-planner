@@ -87,6 +87,7 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
+  resolvePendingBeaconAfterPull,
 } from "@/lib/syncHelper";
 
 // Phase 9.0 — content type foundation
@@ -1606,10 +1607,21 @@ export default function PlansPage() {
     // identity, preserving local-first adoption for anonymous → first
     // sign-in and for a never-before-tagged profile's first authenticated
     // use — only a marker naming a DIFFERENT, KNOWN identity is a mismatch.
+    //
+    // Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY: the WRITE that
+    // establishes/reaffirms ownership under `resolvedUserId` is deliberately
+    // NOT here. Writing it now, before the pull below has even started,
+    // was itself a Codex finding: a failed or cancelled pull would leave
+    // ownership relabeled to `resolvedUserId` while this profile's raw
+    // bytes are still whoever owned it before — unreplaced. A LATER
+    // session for `resolvedUserId` would then see its OWN name on the
+    // marker (no mismatch) and wrongly trust that leftover content as its
+    // own. See getLocalContentOwner()'s own doc in syncHelper.ts for the
+    // exact three-part condition; the write itself happens at the END of
+    // this pull's `.then()` below, only once all three hold.
     const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
     const contentOwnershipMismatch =
       priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
-    setLocalContentOwner(activeProfileIdRef.current, resolvedUserId);
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     // Cancel any pending debounced push before starting the cloud pull so a
@@ -1860,6 +1872,39 @@ export default function PlansPage() {
         // write already does, so a stale locally-persisted order can never
         // be pushed back over the cloud's actual value.
         if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
+
+        // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
+        // BOUNDARY: only NOW — after this pull genuinely resolved
+        // (`cancelled` already checked above), and only when its own
+        // hydration/day writes succeeded — is the local snapshot this
+        // identity should be credited with actually the coherent, durable
+        // one on disk. See getLocalContentOwner's own doc in syncHelper.ts
+        // for the full three-part condition and why writing this any
+        // earlier (e.g. at transition start) let a failed/cancelled pull
+        // relabel ownership without ever replacing the previous identity's
+        // bytes.
+        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed) {
+          setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
+        }
+
+        // SH.2 architecture (Codex P1, 6th round) — BEACON UNCERTAINTY:
+        // resolve any pendingBeacon left by a prior sendBeacon() against
+        // THIS pull's own GET response — see resolvePendingBeaconAfterPull's
+        // own doc in syncHelper.ts for the full delivered/undelivered
+        // contract. Independent of hydrationSucceeded/daysWriteFailed above
+        // (a valid GET response is conclusive about the beacon's fate
+        // regardless of whether this pull's OWN local writes succeeded) —
+        // `planner` is passed directly as the cloud snapshot (null for a
+        // definitive 204, matching resolveSyncIdentityStateAfterPull's
+        // contract for "the beacon conclusively did not persist anything").
+        if (activeUserIdRef.current) {
+          void resolvePendingBeaconAfterPull(
+            activeUserIdRef.current,
+            activeProfileIdRef.current,
+            planner?.revision ?? null,
+            planner
+          );
+        }
 
         // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
         // DURABLE confirmed baseline for whichever domain(s) this pull

@@ -32,6 +32,7 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
+  resolvePendingBeaconAfterPull,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -731,10 +732,15 @@ export default function LightningPage() {
     // supersedes the 4th round's previousUserId-based fallback-ref rebase
     // (obsolete machinery, removed), and why a null/absent ownership
     // marker is trusted (preserves local-first sign-in behavior).
+    //
+    // Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY: the ownership
+    // WRITE is deliberately NOT here — see getLocalContentOwner's own doc
+    // in syncHelper.ts and plans/page.tsx's mirrored comment. It happens at
+    // the END of this pull's `.then()` below, only once the pull genuinely
+    // resolved AND its own hydration/day writes succeeded.
     const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
     const contentOwnershipMismatch =
       priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
-    setLocalContentOwner(activeProfileIdRef.current, resolvedUserId);
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     cancelScheduledSync();
@@ -963,6 +969,25 @@ export default function LightningPage() {
         // already does, so a stale locally-persisted order can never be
         // pushed back over the cloud's actual value.
         if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
+
+        // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
+        // BOUNDARY. Mirrors plans/page.tsx exactly — see its own detailed
+        // comment and getLocalContentOwner's doc in syncHelper.ts.
+        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed) {
+          setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
+        }
+
+        // SH.2 architecture (Codex P1, 6th round) — BEACON UNCERTAINTY.
+        // Mirrors plans/page.tsx exactly — see its own detailed comment and
+        // resolvePendingBeaconAfterPull's doc in syncHelper.ts.
+        if (activeUserIdRef.current) {
+          void resolvePendingBeaconAfterPull(
+            activeUserIdRef.current,
+            activeProfileIdRef.current,
+            planner?.revision ?? null,
+            planner
+          );
+        }
 
         // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
         // DURABLE confirmed baseline for whichever domain(s) this pull

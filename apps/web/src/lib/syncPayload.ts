@@ -329,6 +329,25 @@ export function nextConfirmedBaseline(
 }
 
 /**
+ * Order-independent equality for two SyncedPlannerPayload values —
+ * compares each domain's own fields explicitly rather than relying on
+ * JSON.stringify key order (which happens to be consistent for values
+ * produced by this module's own builder/parser, but this function makes no
+ * assumption about that). Used by resolveSyncIdentityStateAfterPull()
+ * (Codex P1, 6th round) to decide whether a pending beacon's payload
+ * matches what a subsequent GET reports the server actually has.
+ */
+export function syncedPlannerPayloadsEqual(a: SyncedPlannerPayload, b: SyncedPlannerPayload): boolean {
+  return (
+    a.plans.version === b.plans.version &&
+    JSON.stringify(a.plans.items) === JSON.stringify(b.plans.items) &&
+    a.lightning.version === b.lightning.version &&
+    JSON.stringify(a.lightning.items) === JSON.stringify(b.lightning.items) &&
+    JSON.stringify(a.days ?? null) === JSON.stringify(b.days ?? null)
+  );
+}
+
+/**
  * Reference cases for nextConfirmedBaseline() — the per-domain,
  * revision-gated merge rule that closes two Codex P1 findings: (1) a
  * pull-accepted domain must durably advance the SAME confirmed record a
@@ -532,6 +551,288 @@ export const DEV_NEXT_CONFIRMED_BASELINE_CASES: Array<{
         days: ["day-1"],
       },
     },
+  },
+];
+
+// ===== PER-(USER,PROFILE) SYNC IDENTITY STATE (SH.2, Codex P1 6th round) =====
+
+/**
+ * SH.2 architecture (Codex P1, 6th round) — the CONSOLIDATED durable record
+ * for one (userId, profileId) conflict session: everything this identity's
+ * pull/push logic needs to know about its relationship with the server,
+ * stored under ONE key (see syncHelper.ts's syncIdentityStateKeyForIdentity)
+ * and read-compute-written as ONE atomic unit (see
+ * syncHelper.ts's commitConfirmedBaseline/resolvePendingBeaconAfterPull,
+ * both delegating to the same Web-Locks-protected critical section).
+ *
+ * Root cause this consolidation closes — `confirmed` and a "was a beacon
+ * sent for this identity" fact are NOT independent pieces of state: a
+ * beacon's outcome can only ever be resolved BY comparing it against a
+ * fresh cloud read and then, if it matches, folding it INTO `confirmed`.
+ * Keeping them as two separate, independently-read/written localStorage
+ * keys invites exactly the class of bug Codex flagged for `sendBeacon`:
+ * metadata (a "pending" marker, or `confirmed` itself) getting out of sync
+ * with the durable state it is supposed to describe, because nothing
+ * enforced that the two pieces of state could only change together. This
+ * type/its accompanying functions make "pending beacon" and "confirmed"
+ * two fields of the SAME record, updated by the SAME function, under the
+ * SAME lock, so it is structurally impossible to have one advance without
+ * the other being considered.
+ *
+ * `pendingBeacon` deliberately carries NO revision — sendBeacon() never
+ * gives the caller one (see registerUnloadSync() in syncHelper.ts); it is
+ * ONLY the exact SyncedPlannerPayload that was queued for delivery. It
+ * must never be treated as confirmed on its own — see
+ * resolveSyncIdentityStateAfterPull() below for the only path that can
+ * promote it into `confirmed`, and only using a REAL, freshly-fetched
+ * server revision, never a fabricated one.
+ *
+ * NOT consolidated here: the "local content owner" marker (see
+ * getLocalContentOwner() in syncHelper.ts) is deliberately a SEPARATE,
+ * profileId-ONLY-scoped key, not folded into this (userId, profileId)-
+ * scoped record — its entire purpose is to be checkable BEFORE knowing
+ * which of possibly several accounts' state this profile's raw storage
+ * currently belongs to; folding it into a per-identity record would make
+ * it impossible to read without already knowing (or guessing) the right
+ * identity to key it by, defeating its purpose.
+ */
+export interface SyncIdentityState {
+  confirmed: ConfirmedPlannerSnapshot | null;
+  pendingBeacon: SyncedPlannerPayload | null;
+}
+
+/**
+ * Parse and validate a raw unknown value as a SyncIdentityState. Returns
+ * null if the shape is missing or invalid — callers treat null exactly
+ * like `{ confirmed: null, pendingBeacon: null }` (nothing confirmed yet,
+ * nothing pending). Each field is validated independently and
+ * independently degrades to null on its own malformed value — a corrupted
+ * `pendingBeacon` must never take down an otherwise-valid `confirmed`
+ * record, and vice versa.
+ */
+export function parseSyncIdentityState(raw: unknown): SyncIdentityState | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const confirmed = "confirmed" in r ? parseConfirmedPlannerSnapshot(r.confirmed) : null;
+  const pendingBeacon = "pendingBeacon" in r ? parseSyncedPlannerPayload(r.pendingBeacon) : null;
+  return { confirmed, pendingBeacon };
+}
+
+/**
+ * Reference cases for parseSyncIdentityState(). Run from Node:
+ *   import { DEV_PARSE_SYNC_IDENTITY_STATE_CASES, parseSyncIdentityState } from "@/lib/syncPayload";
+ *   DEV_PARSE_SYNC_IDENTITY_STATE_CASES.forEach(c => {
+ *     const got = parseSyncIdentityState(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_SYNC_IDENTITY_STATE_CASES: Array<{
+  name: string;
+  raw: unknown;
+  expected: SyncIdentityState | null;
+}> = [
+  {
+    name: "both fields present and valid",
+    raw: {
+      confirmed: { revision: 4, snapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["b"] }, lightning: { version: 1, items: [] } },
+    },
+    expected: {
+      confirmed: { revision: 4, snapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["b"] }, lightning: { version: 1, items: [] } },
+    },
+  },
+  {
+    name: "both fields absent — valid, both null",
+    raw: {},
+    expected: { confirmed: null, pendingBeacon: null },
+  },
+  {
+    name: "confirmed absent, pendingBeacon present",
+    raw: { pendingBeacon: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } } },
+    expected: { confirmed: null, pendingBeacon: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } } },
+  },
+  {
+    name: "corrupted confirmed does not take down a valid pendingBeacon",
+    raw: {
+      confirmed: { revision: "not-a-number", snapshot: {} },
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["b"] }, lightning: { version: 1, items: [] } },
+    },
+    expected: { confirmed: null, pendingBeacon: { version: 1, plans: { version: 1, items: ["b"] }, lightning: { version: 1, items: [] } } },
+  },
+  {
+    name: "corrupted pendingBeacon does not take down a valid confirmed",
+    raw: {
+      confirmed: { revision: 2, snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: { version: 2 },
+    },
+    expected: { confirmed: { revision: 2, snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } } }, pendingBeacon: null },
+  },
+  {
+    name: "non-object raw — rejected outright",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected outright",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+];
+
+/**
+ * SH.2 architecture (Codex P1, 6th round) — resolves any pendingBeacon
+ * uncertainty (see SyncIdentityState's own doc) against a JUST-FETCHED
+ * GET response for the SAME (userId, profileId), and returns the next
+ * SyncIdentityState to persist. Pure — the caller (syncHelper.ts's
+ * resolvePendingBeaconAfterPull) owns reading `current` fresh and writing
+ * the result back under the SAME lock as any other confirmed-baseline
+ * commit, so this can never race a concurrent commit any differently than
+ * nextConfirmedBaseline() already doesn't.
+ *
+ * Call this ONLY after a pull's GET has genuinely SUCCEEDED (a thrown
+ * fetch/network error teaches nothing about the beacon's fate — leave
+ * `pendingBeacon` untouched for the next successful attempt to resolve).
+ * `cloudRevision`/`cloudSnapshot` are BOTH null for a definitive 204 (no
+ * planner stored at all for this user+profile yet) — that is itself a
+ * conclusive answer (nothing reached the server), so pendingBeacon is
+ * still resolved (cleared), never left dangling.
+ *
+ * Two outcomes, matching the two REQUIRED cases this closes:
+ *   • The beacon reached the server: `current.pendingBeacon` is
+ *     byte-for-byte the SAME payload the GET just returned. This is
+ *     conclusive proof the beacon was received and persisted — promote it
+ *     to `confirmed` using `cloudRevision`, the ONLY server-authoritative
+ *     ordering signal that exists (never a client timestamp, never
+ *     fabricated) — routed through nextConfirmedBaseline() so this can
+ *     never regress a revision some OTHER concurrent commit already
+ *     advanced past (e.g. a normal push that landed between the beacon and
+ *     this pull).
+ *   • The beacon did NOT reach the server (no pendingBeacon existed, or it
+ *     differs from what the GET reports — meaning it silently failed, or
+ *     it was reached but has since been superseded by something newer):
+ *     `confirmed` is left completely untouched. The caller's ORDINARY
+ *     pickWinningItems/pickWinningDays comparison (current local storage
+ *     vs whatever `confirmed` already says) decides the rest, exactly as
+ *     it would for any other unresolved local edit — this is what
+ *     "preserve the legitimate local unsynced state and allow it to push"
+ *     means structurally: no special-casing, just not letting a stale
+ *     `pendingBeacon` linger to be wrongly trusted by a LATER pull.
+ *
+ * Either way, `pendingBeacon` is always cleared: a successful GET is
+ * always a conclusive enough signal to stop treating the beacon as
+ * "unresolved" — there is nothing further a THIRD pull could learn from
+ * re-checking the same stale pendingBeacon value against a newer GET.
+ */
+export function resolveSyncIdentityStateAfterPull(
+  current: SyncIdentityState | null,
+  cloudRevision: number | null,
+  cloudSnapshot: SyncedPlannerPayload | null
+): SyncIdentityState {
+  const pendingBeacon = current?.pendingBeacon ?? null;
+  const confirmed = current?.confirmed ?? null;
+  const beaconReachedServer =
+    pendingBeacon !== null && cloudSnapshot !== null && syncedPlannerPayloadsEqual(pendingBeacon, cloudSnapshot);
+  if (!beaconReachedServer || cloudRevision === null || cloudSnapshot === null) {
+    return { confirmed, pendingBeacon: null };
+  }
+  const promoted = nextConfirmedBaseline(confirmed, cloudRevision, {
+    plans: cloudSnapshot.plans,
+    lightning: cloudSnapshot.lightning,
+    days: cloudSnapshot.days,
+  });
+  return { confirmed: promoted ?? confirmed, pendingBeacon: null };
+}
+
+/**
+ * Reference cases for resolveSyncIdentityStateAfterPull() — the two
+ * REQUIRED beacon-resolution cases (delivered / not delivered), plus the
+ * edge cases around them. Run from Node:
+ *   import { DEV_RESOLVE_PENDING_BEACON_CASES, resolveSyncIdentityStateAfterPull } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_PENDING_BEACON_CASES.forEach(c => {
+ *     const got = resolveSyncIdentityStateAfterPull(c.current, c.cloudRevision, c.cloudSnapshot);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_PENDING_BEACON_CASES: Array<{
+  name: string;
+  current: SyncIdentityState | null;
+  cloudRevision: number | null;
+  cloudSnapshot: SyncedPlannerPayload | null;
+  expected: SyncIdentityState;
+}> = [
+  {
+    name: "no pendingBeacon at all — ordinary pull, confirmed passes through untouched",
+    current: { confirmed: { revision: 3, snapshot: { version: 1, plans: { version: 1, items: ["p3"] }, lightning: { version: 1, items: [] } } }, pendingBeacon: null },
+    cloudRevision: 3,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["p3"] }, lightning: { version: 1, items: [] } },
+    expected: { confirmed: { revision: 3, snapshot: { version: 1, plans: { version: 1, items: ["p3"] }, lightning: { version: 1, items: [] } } }, pendingBeacon: null },
+  },
+  {
+    name: "required — beacon reached server: pendingBeacon matches the GET, promoted to confirmed at the real revision",
+    current: {
+      confirmed: { revision: 4, snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    },
+    cloudRevision: 5,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      confirmed: { revision: 5, snapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: null,
+    },
+  },
+  {
+    name: "required — beacon did NOT reach server: cloud differs from pendingBeacon, confirmed left untouched (local S2 stays unsynced, free to push)",
+    current: {
+      confirmed: { revision: 4, snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    },
+    cloudRevision: 4,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      confirmed: { revision: 4, snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: null,
+    },
+  },
+  {
+    name: "beacon matches cloud but a CONCURRENT commit already advanced past this revision — promotion rejected, confirmed keeps the newer value (never regresses)",
+    current: {
+      confirmed: { revision: 9, snapshot: { version: 1, plans: { version: 1, items: ["newer-from-elsewhere"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    },
+    cloudRevision: 5,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      confirmed: { revision: 9, snapshot: { version: 1, plans: { version: 1, items: ["newer-from-elsewhere"] }, lightning: { version: 1, items: [] } } },
+      pendingBeacon: null,
+    },
+  },
+  {
+    name: "definitive 204 (cloudRevision/cloudSnapshot both null) — beacon conclusively did not persist anything; pendingBeacon cleared, confirmed untouched",
+    current: {
+      confirmed: null,
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    },
+    cloudRevision: null,
+    cloudSnapshot: null,
+    expected: { confirmed: null, pendingBeacon: null },
+  },
+  {
+    name: "nothing at all yet (current null) and no cloud — resolves to the all-null identity state",
+    current: null,
+    cloudRevision: null,
+    cloudSnapshot: null,
+    expected: { confirmed: null, pendingBeacon: null },
+  },
+  {
+    name: "pendingBeacon present but this GET returned no revision (defensive — should not happen against this server build) — never promoted, cleared",
+    current: {
+      confirmed: null,
+      pendingBeacon: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    },
+    cloudRevision: null,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    expected: { confirmed: null, pendingBeacon: null },
   },
 ];
 
