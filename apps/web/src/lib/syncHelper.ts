@@ -54,12 +54,21 @@ Reviewers should check any changes affecting:
  *                                                       (6th round; see
  *                                                       each page's pull
  *                                                       effect)
- *   await resolvePendingBeaconAfterPull(userId,      — resolve a possibly-
- *     profileId, cloudRevision, cloudSnapshot)          beaconed local
- *                                                       snapshot against a
- *                                                       just-fetched GET
- *                                                       response (6th round;
- *                                                       see its own doc)
+ *   getPendingBeaconOpId(userId, profileId)          — read the opId of a
+ *                                                       still-unresolved
+ *                                                       beacon left by a
+ *                                                       prior unload, if any
+ *                                                       (7th round; see its
+ *                                                       own doc)
+ *   await resolveConfirmedSnapshotAfterBeacon(userId, — resolve a pending
+ *     profileId, beaconAccepted, cloudRevision,          beacon's fate
+ *     cloudSnapshot)                                     against a
+ *                                                         just-fetched GET's
+ *                                                         server-verified
+ *                                                         opStatus (7th
+ *                                                         round; see its own
+ *                                                         doc), then clear
+ *                                                         pendingBeaconOpId
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -67,15 +76,24 @@ Reviewers should check any changes affecting:
  *   dwp:sync:{profileId}:localContentOwner             — see
  *                                                         getLocalContentOwner's
  *                                                         own doc
- *   dwp:sync:{userId}:{profileId}:state                — the consolidated
- *                                                         sync identity state
+ *   dwp:sync:{userId}:{profileId}:confirmedSnapshot    — the durable
+ *                                                         confirmed
+ *                                                         ConfirmedPlannerSnapshot
  *                                                         for this user+
- *                                                         profile — confirmed
- *                                                         baseline AND any
- *                                                         pending beacon (see
- *                                                         SyncIdentityState in
- *                                                         syncPayload.ts and
- *                                                         the section below)
+ *                                                         profile, mutated
+ *                                                         ONLY under
+ *                                                         withConfirmedSnapshotLock
+ *   dwp:sync:{userId}:{profileId}:pendingBeaconOpId    — the opId of the
+ *                                                         MOST RECENT
+ *                                                         unresolved beacon
+ *                                                         for this user+
+ *                                                         profile, if any
+ *                                                         (7th round) —
+ *                                                         deliberately a
+ *                                                         SEPARATE, UNLOCKED
+ *                                                         key; see the
+ *                                                         module doc above
+ *                                                         for why
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
@@ -110,7 +128,7 @@ Reviewers should check any changes affecting:
  * nextConfirmedBaseline() (syncPayload.ts), which both commit paths above
  * delegate to:
  *   • Identity scope: the storage key is keyed by BOTH userId and
- *     profileId (syncIdentityStateKeyForIdentity below) — "profile" is a
+ *     profileId (confirmedSnapshotKeyForIdentity below) — "profile" is a
  *     LOCAL, per-device concept independent of which cloud account is
  *     signed in, so a bare profileId key would let account B, signing in
  *     after account A signs out on the same device/profile, read (and
@@ -157,10 +175,38 @@ Reviewers should check any changes affecting:
  * each page's pull effect). (2) sendBeacon() can durably persist a newer
  * server snapshot without ever returning its revision, so the confirmed
  * baseline could be stuck stale indefinitely relative to what the server
- * actually has. See SyncIdentityState/resolveSyncIdentityStateAfterPull
- * (syncPayload.ts) and resolvePendingBeaconAfterPull (below) for how a
- * beaconed-but-unconfirmed snapshot is tracked and reconciled against the
- * next successful pull's own GET response.
+ * actually has — the 6th round tracked this via a consolidated
+ * SyncIdentityState (confirmed + pendingBeacon in one record) and resolved
+ * it by comparing the pending payload's CONTENT against a later GET.
+ *
+ * Codex P1 fix (7th round) — the 6th round's content-comparison beacon
+ * resolution was unsound: `user_planner` keeps no history, so "beacon B
+ * failed" and "beacon B succeeded, then a newer write C superseded it" are
+ * OBSERVATIONALLY IDENTICAL from a single GET's content alone (both show
+ * "current cloud content differs from what B sent"). No client-side
+ * heuristic can tell them apart — the fix is a minimal SERVER-VERIFIABLE
+ * write-acknowledgment: a client-generated opaque `clientOpId`
+ * (crypto.randomUUID(), never a timestamp, never used for ordering) that
+ * the server durably records as accepted (see `user_planner_writes` in
+ * db-schema.sql), independent of the row's later content. A subsequent
+ * pull's GET, given the pending opId as `lastOpId`, gets back a conclusive
+ * `opStatus.found` fact from the server — see resolveConfirmedAfterBeacon()
+ * (syncPayload.ts) and resolveConfirmedSnapshotAfterBeacon() (below).
+ *
+ * This also required SEPARATING `pendingBeaconOpId` from `confirmed` onto
+ * its own, independent, UNLOCKED key (pendingBeaconOpIdKeyForIdentity
+ * below) — the 6th round's consolidation of both fields into one
+ * Web-Locks-protected record required registerUnloadSync()'s beforeunload
+ * write (which cannot reliably await a lock) to touch that SAME locked
+ * record, which is exactly the metadata race Codex flagged for the 7th
+ * round (pending-beacon state read-modify-written unlocked while confirmed
+ * state used Web Locks). Now `pendingBeaconOpId` needs no read-modify-write
+ * at all — it is a single opaque scalar, always fully overwritten by
+ * whichever beacon fires last (last-write-wins is correct here: only the
+ * MOST RECENT beacon's fate is worth tracking, since resolving it consumes
+ * it and an in-between beacon's payload is superseded anyway) — and
+ * `confirmed` remains exclusively mutated under the lock. No field is ever
+ * touched by both a locked and an unlocked writer.
  *
  * Either way, the record is:
  *   • NEVER a fresh read of the current plans/lightning/days storage keys
@@ -186,13 +232,24 @@ import { buildNamespacedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
-  parseSyncIdentityState,
+  parseConfirmedPlannerSnapshot,
   nextConfirmedBaseline,
-  resolveSyncIdentityStateAfterPull,
+  resolveConfirmedAfterBeacon,
   type SyncedPlannerPayload,
   type ConfirmedPlannerSnapshot,
-  type SyncIdentityState,
 } from "./syncPayload";
+
+/**
+ * The server's conclusive answer (see api/sync/planner/route.ts's GET
+ * handler) to "was the write tagged with this opId ever accepted" — see
+ * resolveConfirmedAfterBeacon()'s own doc in syncPayload.ts for the full
+ * decision this feeds into.
+ */
+export interface OpStatus {
+  opId: string;
+  found: boolean;
+  revision: number | null;
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -332,58 +389,33 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
 }
 
 /**
- * Returns the localStorage key for the CONSOLIDATED sync identity state for
- * a given (userId, profileId) pair — see SyncIdentityState's own doc in
- * syncPayload.ts (Codex P1, 6th round) for why `confirmed` and
- * `pendingBeacon` are stored together under one key, read-compute-written
- * as one atomic unit. Codex P1 fix (3rd round, carried forward) — keyed by
- * BOTH: "profile" is a LOCAL, per-device concept (e.g. a family member
- * slot) entirely independent of which cloud account is signed in, so a
- * profileId-only key would let a DIFFERENT account, signing into the same
- * profile slot on the same browser, read (and potentially build on) the
- * previous account's confirmed record. userId is resolved the same way the
- * server does (session.user.id, falling back to email) — see each page's
+ * Returns the localStorage key for the durable confirmed baseline
+ * (ConfirmedPlannerSnapshot) for a given (userId, profileId) pair. Codex P1
+ * fix (3rd round, carried forward) — keyed by BOTH: "profile" is a LOCAL,
+ * per-device concept (e.g. a family member slot) entirely independent of
+ * which cloud account is signed in, so a profileId-only key would let a
+ * DIFFERENT account, signing into the same profile slot on the same
+ * browser, read (and potentially build on) the previous account's
+ * confirmed record. userId is resolved the same way the server does
+ * (session.user.id, falling back to email) — see each page's
  * auth-transition effect for where this is read from useSession().
  *
- * Renamed from the pre-6th-round confirmedSnapshotKeyForIdentity (which
- * stored a bare ConfirmedPlannerSnapshot at
- * `dwp:sync:{userId}:{profileId}:confirmedSnapshot`) — the stored SHAPE
- * changed, not just this function's name, so a value written under the OLD
- * key name is never misread as this new shape. Any pre-existing confirmed
- * snapshot simply degrades to "nothing confirmed yet" (parseSyncIdentityState
- * treats an unrecognized value as null) and is re-established on the next
- * successful pull/push — exactly the same safe, already-hardened fallback
- * path a genuinely fresh profile's first confirmation takes.
+ * Codex P1 fix (7th round) — reverted the 6th round's consolidation of
+ * this record with `pendingBeacon` into one `:state` key (formerly
+ * SyncIdentityState). `pendingBeaconOpId` is now tracked completely
+ * independently (see pendingBeaconOpIdKeyForIdentity below) — see the
+ * module doc's 7th-round paragraph for why. A value written under the
+ * 6th round's `:state` key name is a DIFFERENT shape and is never misread
+ * as a bare ConfirmedPlannerSnapshot (parseConfirmedPlannerSnapshot
+ * requires a top-level `revision`, which that shape never had) — this key
+ * name reverts to the pre-6th-round name specifically so no stale `:state`
+ * value is ever read from here at all.
  */
-function syncIdentityStateKeyForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:state`;
+function confirmedSnapshotKeyForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot`;
 }
 
-// ── Sync identity state (confirmed snapshot + pending beacon) ──────────────────
-
-/**
- * Read the current SyncIdentityState for this authenticated user + profile
- * — see its own doc in syncPayload.ts. Never null: an absent/corrupt
- * stored value degrades to `{ confirmed: null, pendingBeacon: null }`,
- * exactly like a fresh profile's first-ever read.
- *
- * Safe to call from any tab: this is a plain localStorage read of a key
- * that is durable (survives reloads) and shared (every same-origin tab for
- * this browser sees the identical value), so it needs no message-passing
- * or event subscription to be correct — only a re-read at the moment the
- * caller wants an answer.
- */
-export function getSyncIdentityState(userId: string, profileId: string): SyncIdentityState {
-  const EMPTY: SyncIdentityState = { confirmed: null, pendingBeacon: null };
-  if (typeof window === "undefined") return EMPTY;
-  try {
-    const raw = localStorage.getItem(syncIdentityStateKeyForIdentity(userId, profileId));
-    if (!raw) return EMPTY;
-    return parseSyncIdentityState(JSON.parse(raw) as unknown) ?? EMPTY;
-  } catch {
-    return EMPTY;
-  }
-}
+// ── Confirmed snapshot (Web-Locks-protected) ────────────────────────────────────
 
 /**
  * Read just the confirmed baseline (revision + planner state) for this
@@ -393,35 +425,45 @@ export function getSyncIdentityState(userId: string, profileId: string): SyncIde
  * always-offline, never signed in, or a DIFFERENT account previously used
  * this profile slot) or the stored value is missing/corrupt — callers must
  * treat null as "nothing to compare against yet", not as an error.
+ *
+ * Safe to call from any tab: this is a plain localStorage read of a key
+ * that is durable (survives reloads) and shared (every same-origin tab for
+ * this browser sees the identical value), so it needs no message-passing
+ * or event subscription to be correct — only a re-read at the moment the
+ * caller wants an answer.
  */
 export function getConfirmedSnapshot(userId: string, profileId: string): ConfirmedPlannerSnapshot | null {
-  return getSyncIdentityState(userId, profileId).confirmed;
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(confirmedSnapshotKeyForIdentity(userId, profileId));
+    if (!raw) return null;
+    return parseConfirmedPlannerSnapshot(JSON.parse(raw) as unknown);
+  } catch {
+    return null;
+  }
 }
 
 /**
  * The Web Locks API name a mutation of this (userId, profileId) pair's
- * sync identity state acquires before its read-compute-write sequence —
- * see withSyncIdentityStateLock()'s own doc (Codex P1, 4th/6th rounds) for
- * why this is needed. Scoped identically to syncIdentityStateKeyForIdentity
- * so mutations for a DIFFERENT (userId, profileId) pair never contend with
+ * confirmed snapshot acquires before its read-compute-write sequence — see
+ * withConfirmedSnapshotLock()'s own doc (Codex P1, 4th/6th rounds) for why
+ * this is needed. Scoped identically to confirmedSnapshotKeyForIdentity so
+ * mutations for a DIFFERENT (userId, profileId) pair never contend with
  * each other, only concurrent mutations for the SAME pair (the only case
  * where regression is even possible).
  */
-function syncIdentityStateLockNameForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:state:lock`;
+function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot:lock`;
 }
 
 /**
- * SH.2 architecture (Codex P1, 4th round, generalized 6th round) — the
- * SINGLE critical section every mutation of a (userId, profileId)'s sync
- * identity state goes through: commitConfirmedBaseline() and
- * resolvePendingBeaconAfterPull() (both below) are thin wrappers around
- * this, passing a pure `mutate` function that computes the next state from
- * the current one. Consolidating both callers onto one locked
- * read-compute-write primitive is what makes `confirmed` and
- * `pendingBeacon` genuinely ONE atomic unit (see SyncIdentityState's own
- * doc in syncPayload.ts) rather than two independently-racing writers of
- * the same key.
+ * SH.2 architecture (Codex P1, 4th round; scope narrowed back to just the
+ * confirmed snapshot in the 7th round) — the SINGLE critical section every
+ * mutation of a (userId, profileId)'s confirmed snapshot goes through:
+ * commitConfirmedBaseline() and resolveConfirmedSnapshotAfterBeacon() (both
+ * below) are thin wrappers around this, passing a pure `mutate` function
+ * that computes the next snapshot from the current one (or null to signal
+ * "no change" — see below).
  *
  * Codex P1 fix (4th round) — the read, compute, and write here form a
  * single compound operation whose correctness depends on nothing else
@@ -455,25 +497,30 @@ function syncIdentityStateLockNameForIdentity(userId: string, profileId: string)
  * context — Locks API requires a secure context), it does NOT mutate
  * anything, rather than mutate through an unprotected path that could
  * regress. The practical effect in that environment is that
- * confirmed-baseline/pending-beacon hardening simply never activates —
- * every pull falls back to the pre-confirmation baseline/ownership-tag
- * tiers (see getLocalContentOwner()'s own doc), a known, narrower, and
- * strictly safer degradation than knowingly permitting the monotonic-
- * revision invariant to be violated.
+ * confirmed-baseline hardening simply never activates — every pull falls
+ * back to the pre-confirmation baseline/ownership-tag tiers (see
+ * getLocalContentOwner()'s own doc), a known, narrower, and strictly safer
+ * degradation than knowingly permitting the monotonic-revision invariant
+ * to be violated.
  *
- * `mutate` receives the CURRENT state fresh (never a value the caller
- * captured earlier) and must return the next state to persist — it may
- * return the SAME object (or an equal one) to signal "no change needed";
- * this function does not special-case that, since writing an unchanged
- * value back is harmless. Errors thrown by `mutate` or the write itself
- * are swallowed (best-effort tier, matching every other confirmed-state
- * write in this module) — the caller learns nothing back from a failure
- * except that the mutation silently didn't happen.
+ * `mutate` receives the CURRENT confirmed snapshot fresh (never a value the
+ * caller captured earlier) and must return the next snapshot to persist,
+ * or `null` to mean "nothing to persist" — either because there is
+ * genuinely no change (nextConfirmedBaseline rejected a stale/duplicate
+ * revision) or because `current` was already null and stays null. A `null`
+ * return never triggers a write — this is what makes "reject, keep
+ * whatever is already stored" and "there was never anything to store"
+ * indistinguishable in effect, which is correct here since neither case
+ * ever needs `confirmedSnapshot`'s key to change. Errors thrown by
+ * `mutate` or the write itself are swallowed (best-effort tier, matching
+ * every other confirmed-state write in this module) — the caller learns
+ * nothing back from a failure except that the mutation silently didn't
+ * happen.
  */
-async function withSyncIdentityStateLock(
+async function withConfirmedSnapshotLock(
   userId: string,
   profileId: string,
-  mutate: (current: SyncIdentityState) => SyncIdentityState
+  mutate: (current: ConfirmedPlannerSnapshot | null) => ConfirmedPlannerSnapshot | null
 ): Promise<void> {
   if (typeof window === "undefined") return;
   const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
@@ -482,11 +529,13 @@ async function withSyncIdentityStateLock(
   // acceptable substitute for atomicity here.
   if (!locks) return;
   try {
-    await locks.request(syncIdentityStateLockNameForIdentity(userId, profileId), () => {
+    await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
       try {
-        const current = getSyncIdentityState(userId, profileId);
+        const current = getConfirmedSnapshot(userId, profileId);
         const next = mutate(current);
-        localStorage.setItem(syncIdentityStateKeyForIdentity(userId, profileId), JSON.stringify(next));
+        if (next) {
+          localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
+        }
       } catch {}
     });
   } catch {
@@ -502,9 +551,7 @@ async function withSyncIdentityStateLock(
  * persisted, gated by the server-issued `revision` that produced them —
  * see the module doc's "Cloud-confirmed local snapshot contract" above and
  * nextConfirmedBaseline()'s own doc in syncPayload.ts for the full merge +
- * revision-ordering rule. `pendingBeacon` (if any) is left completely
- * untouched by this call — only resolvePendingBeaconAfterPull() below ever
- * changes it, since only a fresh GET response can conclusively resolve it.
+ * revision-ordering rule.
  *
  * Call this AFTER persistence for the accepted domain(s) has already
  * succeeded — never speculatively before a write is known to have landed
@@ -522,36 +569,107 @@ export async function commitConfirmedBaseline(
 ): Promise<void> {
   if (typeof window === "undefined") return;
   if (!accepted.plans && !accepted.lightning && !accepted.days) return;
-  await withSyncIdentityStateLock(userId, profileId, (current) => {
-    const next = nextConfirmedBaseline(current.confirmed, revision, accepted);
-    return next ? { confirmed: next, pendingBeacon: current.pendingBeacon } : current;
-  });
+  await withConfirmedSnapshotLock(userId, profileId, (current) =>
+    nextConfirmedBaseline(current, revision, accepted)
+  );
+}
+
+// ── Pending beacon opId (separate, UNLOCKED key — see module doc, 7th round) ────
+
+/**
+ * Returns the localStorage key tracking the opId of the MOST RECENT
+ * still-unresolved beacon for a given (userId, profileId) pair (Codex P1,
+ * 7th round). Deliberately NOT part of the confirmed-snapshot record and
+ * deliberately NOT lock-protected — see the module doc's 7th-round
+ * paragraph for the full rationale: it is a single opaque scalar that only
+ * ever needs a plain overwrite (registerUnloadSync, on queueing a beacon)
+ * or a plain clear (resolveConfirmedSnapshotAfterBeacon, once a later pull
+ * conclusively resolves it), never a read-modify-write, so there is no
+ * compound operation here for a lock to protect.
+ */
+function pendingBeaconOpIdKeyForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:pendingBeaconOpId`;
 }
 
 /**
- * SH.2 architecture (Codex P1, 6th round) — BEACON UNCERTAINTY resolution.
- * Call this after EVERY successful pull (a genuinely resolved GET — never
- * from a `.catch()` branch, which teaches nothing about a pending beacon's
- * fate) for the SAME (userId, profileId) the pull was for, passing the
- * GET's own `revision`/parsed snapshot (both null for a definitive 204).
- *
- * Delegates to resolveSyncIdentityStateAfterPull() (syncPayload.ts) for the
- * actual decision — see its own doc for the full delivered/undelivered
- * contract — under the SAME lock every other sync-identity-state mutation
- * uses, so this can never race commitConfirmedBaseline() for the same
- * identity into an inconsistent combination of `confirmed`/`pendingBeacon`.
- * Safe (and expected) to call even when no pendingBeacon exists — it is
- * then a harmless no-op pass-through of `confirmed`.
+ * Read the opId of a still-unresolved beacon for this user + profile, if
+ * any — see each page's pull effect for how this is read BEFORE a pull's
+ * fetch (to pass as `lastOpId`) and resolveConfirmedSnapshotAfterBeacon()
+ * below for how it is cleared once resolved.
  */
-export async function resolvePendingBeaconAfterPull(
+export function getPendingBeaconOpId(userId: string, profileId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(pendingBeaconOpIdKeyForIdentity(userId, profileId));
+  } catch {
+    return null;
+  }
+}
+
+function setPendingBeaconOpId(userId: string, profileId: string, opId: string): void {
+  try {
+    localStorage.setItem(pendingBeaconOpIdKeyForIdentity(userId, profileId), opId);
+  } catch {}
+}
+
+function clearPendingBeaconOpId(userId: string, profileId: string): void {
+  try {
+    localStorage.removeItem(pendingBeaconOpIdKeyForIdentity(userId, profileId));
+  } catch {}
+}
+
+/**
+ * SH.2 architecture (Codex P1, 7th round) — BEACON UNCERTAINTY resolution
+ * via server-verified operation identity. Call this after EVERY successful
+ * pull (a genuinely resolved GET — never from a `.catch()` branch, which
+ * teaches nothing about a pending beacon's fate) for the SAME
+ * (userId, profileId) the pull was for, passing:
+ *   • `beaconAccepted` — computed by the caller as
+ *     `pendingOpId !== null && opStatus?.opId === pendingOpId && opStatus.found === true`,
+ *     where `pendingOpId` is what getPendingBeaconOpId() returned BEFORE
+ *     this pull's fetch started, and `opStatus` is this SAME GET response's
+ *     own server-verified fact (see pullPlanner()'s own doc). This is a
+ *     direct fact query, never inferred from content comparison or timing.
+ *   • `cloudRevision`/`cloudSnapshot` — this SAME GET response's own
+ *     revision/snapshot (both null for a 204/unparseable response).
+ *
+ * Delegates to resolveConfirmedAfterBeacon() (syncPayload.ts) for the
+ * actual decision — see its own doc for the full accepted/superseded/
+ * failed contract — under the SAME lock commitConfirmedBaseline() uses, so
+ * this can never race it into a regressed confirmed snapshot. Always
+ * clears `pendingBeaconOpId` afterward (via the caller — see below):
+ * a successful GET is always conclusive enough to stop treating ANY
+ * previously-pending beacon as unresolved, matching from the 6th round.
+ *
+ * Safe to call with `beaconAccepted` false (including when no beacon was
+ * ever pending) — it is then a no-op that never touches the lock at all,
+ * since resolveConfirmedAfterBeacon() would just pass `current` through
+ * unchanged; skipping the lock entirely in that case is a pure
+ * optimization, not a correctness requirement.
+ *
+ * `resolvedOpId` is the opId THIS pull looked up (i.e. what
+ * getPendingBeaconOpId() returned before the pull's fetch started) — it is
+ * cleared only if it is STILL the stored value (a plain compare-and-clear,
+ * no lock needed since it's a single synchronous read+write): if a NEWER
+ * beacon overwrote pendingBeaconOpId while this pull's fetch was in
+ * flight (e.g. the tab is navigating away right as a pull resolves), that
+ * newer, still-genuinely-unresolved opId must survive for the NEXT pull to
+ * resolve, rather than being wiped out by this one's unconditional clear.
+ */
+export async function resolveConfirmedSnapshotAfterBeacon(
   userId: string,
   profileId: string,
+  resolvedOpId: string,
+  beaconAccepted: boolean,
   cloudRevision: number | null,
   cloudSnapshot: SyncedPlannerPayload | null
 ): Promise<void> {
-  if (typeof window === "undefined") return;
-  await withSyncIdentityStateLock(userId, profileId, (current) =>
-    resolveSyncIdentityStateAfterPull(current, cloudRevision, cloudSnapshot)
+  if (typeof window !== "undefined" && getPendingBeaconOpId(userId, profileId) === resolvedOpId) {
+    clearPendingBeaconOpId(userId, profileId);
+  }
+  if (typeof window === "undefined" || !beaconAccepted) return;
+  await withConfirmedSnapshotLock(userId, profileId, (current) =>
+    resolveConfirmedAfterBeacon(current, beaconAccepted, cloudRevision, cloudSnapshot)
   );
 }
 
@@ -604,8 +722,9 @@ let currentSyncProfileId = "default";
 /**
  * The authenticated user id that sync is currently targeting, used to
  * scope confirmed-baseline commits (Codex P1, 3rd round) and pending-beacon
- * marking (Codex P1, 6th round) — see syncIdentityStateKeyForIdentity's own
- * doc. null while signed out or before the session has resolved; doPush()
+ * opId marking (Codex P1, 6th/7th rounds) — see confirmedSnapshotKeyForIdentity's
+ * and pendingBeaconOpIdKeyForIdentity's own docs. null while signed out or
+ * before the session has resolved; doPush()
  * and registerUnloadSync() both skip their respective identity-scoped
  * writes entirely when null (neither ever guesses an identity).
  * Updated by setSyncUserId().
@@ -679,25 +798,49 @@ export function cancelScheduledSync(): void {
 
 // ── pullPlanner ───────────────────────────────────────────────────────────────
 
+function parseOpStatus(raw: unknown): OpStatus | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.opId !== "string" || typeof r.found !== "boolean") return null;
+  const revision = typeof r.revision === "number" && Number.isFinite(r.revision) ? r.revision : null;
+  return { opId: r.opId, found: r.found, revision };
+}
+
 /**
  * Pull the latest combined planner blob for the signed-in user + profile.
  *
+ * `lastOpId` (Codex P1, 7th round) is OPTIONAL — pass the pending beacon's
+ * opId (getPendingBeaconOpId()) when one exists, so the server can attach a
+ * conclusive `opStatus` (see api/sync/planner/route.ts's GET doc) to this
+ * SAME response. Omit (or pass null/undefined) for an ordinary pull with no
+ * pending beacon to resolve.
+ *
  * Returns:
- *   SyncedPlannerPayload & { revision: number | null } — a valid combined
- *     planner payload was parsed. `revision` is the server-authoritative
- *     ordering value for this exact response (see api/sync/planner/
- *     route.ts's module doc) — null only if the server response
- *     unexpectedly omitted it (defensive; should not happen against this
- *     server build). Callers must treat a null `revision` as "cannot
- *     safely advance the confirmed baseline from this response" and skip
- *     the commitConfirmedBaseline() call entirely for it — never
+ *   SyncedPlannerPayload & { revision: number | null; opStatus: OpStatus | null } —
+ *     a valid combined planner payload was parsed. `revision` is the
+ *     server-authoritative ordering value for this exact response (see
+ *     api/sync/planner/route.ts's module doc) — null only if the server
+ *     response unexpectedly omitted it (defensive; should not happen
+ *     against this server build). Callers must treat a null `revision` as
+ *     "cannot safely advance the confirmed baseline from this response"
+ *     and skip the commitConfirmedBaseline() call entirely for it — never
  *     substitute 0 or any other sentinel, which could wrongly compare as
- *     "older" or, worse, coincidentally valid.
+ *     "older" or, worse, coincidentally valid. `opStatus` is null when
+ *     `lastOpId` was not supplied, or the server response omitted/
+ *     malformed it (defensive).
  *   null — no usable planner payload could be parsed; this includes: 204
  *     No Content (nothing stored yet), a payload that failed JSON parsing
  *     or shape validation in parseSyncedPlannerPayload(), or a legacy
  *     plans-only response that could not be normalized into the combined
- *     shape
+ *     shape. A 204 specifically is itself a CONCLUSIVE "opId was never
+ *     accepted" answer whenever `lastOpId` was supplied — a write that
+ *     records an opId always also upserts a `user_planner` row in the SAME
+ *     transaction (see handleWrite in api/sync/planner/route.ts), so 204
+ *     (no row in user_planner at all) is structurally incompatible with
+ *     that opId having been accepted. Callers may safely treat a null
+ *     pullPlanner() result as `beaconAccepted = false` unconditionally,
+ *     without needing to inspect a (nonexistent, since 204 has no body)
+ *     opStatus.
  *
  * Throws on:
  *   non-OK HTTP responses (401, 5xx, etc.)
@@ -707,19 +850,23 @@ export function cancelScheduledSync(): void {
  * A thrown error must NOT reopen the push gate — cloud state is uncertain.
  */
 export async function pullPlanner(
-  profileId: string
-): Promise<(SyncedPlannerPayload & { revision: number | null }) | null> {
-  const url = `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`;
+  profileId: string,
+  lastOpId?: string | null
+): Promise<(SyncedPlannerPayload & { revision: number | null; opStatus: OpStatus | null }) | null> {
+  const url = lastOpId
+    ? `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&lastOpId=${encodeURIComponent(lastOpId)}`
+    : `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`;
   const res = await fetch(url, { credentials: "include" });
   // Definitively empty — no planner stored for this user+profile yet
   if (res.status === 204) return null;
   // Any other non-OK status is a real failure; let it throw
   if (!res.ok) throw new Error(`sync/planner GET ${res.status}`);
-  const data = (await res.json()) as { plannerJson?: unknown; revision?: unknown };
+  const data = (await res.json()) as { plannerJson?: unknown; revision?: unknown; opStatus?: unknown };
   const parsed = parseSyncedPlannerPayload(data.plannerJson ?? null);
   if (!parsed) return null;
   const revision = typeof data.revision === "number" && Number.isFinite(data.revision) ? data.revision : null;
-  return { ...parsed, revision };
+  const opStatus = parseOpStatus(data.opStatus);
+  return { ...parsed, revision, opStatus };
 }
 
 /**
@@ -735,6 +882,25 @@ export async function pullPlans(): Promise<{
 }
 
 // ── registerUnloadSync ────────────────────────────────────────────────────────
+
+/**
+ * Generates the opaque, client-side write-identity token
+ * (`clientOpId`/`lastOpId`) a beacon is tagged with — see the module doc's
+ * 7th-round paragraph and resolveConfirmedAfterBeacon()'s own doc in
+ * syncPayload.ts for why this must be a random, opaque, order-independent
+ * value, NEVER a timestamp: it is compared for exact equality against a
+ * server-recorded fact, never used to infer ordering. `crypto.randomUUID()`
+ * is used when available (all evergreen browsers); the fallback (older
+ * browsers lacking it, or a non-secure context) is a Math.random()-based
+ * string — acceptable because this value is never used for security, only
+ * as an opaque key the server echoes back verbatim in `opStatus.opId`.
+ */
+function generateOpId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `op-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 /**
  * Register a beforeunload handler that sends a best-effort POST beacon.
@@ -753,23 +919,26 @@ export async function pullPlans(): Promise<{
  * confirmed revision and could misclassify or even overwrite the
  * server-authoritative state the beacon itself just established.
  *
- * The fix: when sendBeacon() reports the request was queued, record the
- * EXACT payload just queued as this identity's `pendingBeacon` (see
- * SyncIdentityState's own doc in syncPayload.ts) — never a revision (none
- * exists to record) and never a client timestamp. The next successful pull
+ * Codex P1 fix (7th round) — the 6th round's fix recorded the beacon's
+ * PAYLOAD as `pendingBeacon` via a read-modify-write of the SAME record
+ * `confirmed` lived in, which is exactly what created the metadata race
+ * Codex flagged (that read-modify-write could never be routed through
+ * withConfirmedSnapshotLock — beforeunload cannot reliably await async
+ * work — so it ran unlocked against a record another tab's LOCKED commit
+ * could be updating at the same instant). The fix here is architectural,
+ * not a bigger lock: tag this beacon with a fresh, random `clientOpId`
+ * (generateOpId() above) sent as a QUERY PARAMETER on the beacon URL (never
+ * a body field — see api/sync/planner/route.ts's doc for why a body field
+ * would trip the unknown-domain-key rejection), and record ONLY that opId
+ * — a single opaque scalar under its OWN independent key
+ * (setPendingBeaconOpId) — never the payload itself, and never merged with
+ * `confirmed`. This is a plain, unconditional overwrite: no read of the
+ * current value is needed at all, so there is no compound
+ * read-modify-write left for a lock to protect. The next successful pull
  * for this SAME (userId, profileId) resolves the uncertainty conclusively
- * against the server's own GET response — see resolvePendingBeaconAfterPull's
- * own doc and each page's pull effect for where that happens.
- *
- * This write is deliberately a SYNCHRONOUS, direct read-merge-write — NOT
- * routed through withSyncIdentityStateLock(), unlike every other mutation
- * of this record. beforeunload cannot reliably await async work (
- * navigator.locks.request always returns a Promise, even for a synchronous
- * callback) before the page is torn down; skipping the lock here trades an
- * astronomically unlikely same-instant cross-tab race — self-healing on
- * either side's next pull regardless — for actually guaranteeing the
- * pending marker gets written at all, which is the one property this whole
- * mechanism depends on.
+ * against the server's own GET response — see
+ * resolveConfirmedSnapshotAfterBeacon's own doc and each page's pull
+ * effect for where that happens.
  */
 export function registerUnloadSync(): () => void {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
@@ -788,16 +957,13 @@ export function registerUnloadSync(): () => void {
     if (!payload) return;
     const body = JSON.stringify(payload);
     if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
+    const opId = generateOpId();
     const queued = navigator.sendBeacon(
-      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`,
+      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}`,
       new Blob([body], { type: "application/json" })
     );
     if (queued && userId) {
-      try {
-        const current = getSyncIdentityState(userId, profileId);
-        const next: SyncIdentityState = { confirmed: current.confirmed, pendingBeacon: payload };
-        localStorage.setItem(syncIdentityStateKeyForIdentity(userId, profileId), JSON.stringify(next));
-      } catch {}
+      setPendingBeaconOpId(userId, profileId, opId);
     }
   };
 

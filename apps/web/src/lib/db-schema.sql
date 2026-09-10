@@ -78,3 +78,31 @@ CREATE TABLE IF NOT EXISTS user_planner (
 -- already-deployed table, so this re-runnable ALTER is what actually picks
 -- up the new column on an existing database).
 ALTER TABLE user_planner ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
+
+-- SH.2 (Codex P1, 7th round) — append-only record of accepted writes,
+-- keyed by the CLIENT-SUPPLIED opaque operation id (see syncPayload.ts's
+-- module doc on server-verifiable write acknowledgment). `user_planner`
+-- above stores only the LATEST state per (user, profile) — no history — so
+-- a later query against it alone can never distinguish "this write never
+-- reached the server" from "this write reached the server, then a newer
+-- write superseded it": both look identical (the current row simply
+-- doesn't match what was sent). This table exists purely to answer "was
+-- client operation X ever accepted", independent of whatever the row looks
+-- like now. Populated only when a PUT/POST supplies an optional
+-- `clientOpId` query parameter (ordinary pushes that don't pass one are
+-- completely unaffected); queried only when a GET supplies a matching
+-- `lastOpId` query parameter. `client_op_id` is a client-generated random
+-- UUID (crypto.randomUUID() — see registerUnloadSync in syncHelper.ts),
+-- NEVER a timestamp and never used for ordering — `revision` (copied from
+-- the write that produced it) remains the only ordering signal. ON
+-- CONFLICT DO NOTHING at the insert site makes a retried write with the
+-- same opId idempotent. Deliberately unbounded/unpruned — see this
+-- feature's own round-7 report for the accepted operational tradeoff.
+CREATE TABLE IF NOT EXISTS user_planner_writes (
+  user_id       TEXT        NOT NULL,
+  profile_id    TEXT        NOT NULL,
+  client_op_id  TEXT        NOT NULL,
+  revision      BIGINT      NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, profile_id, client_op_id)
+);

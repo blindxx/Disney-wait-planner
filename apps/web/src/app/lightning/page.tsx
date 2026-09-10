@@ -32,7 +32,8 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
-  resolvePendingBeaconAfterPull,
+  getPendingBeaconOpId,
+  resolveConfirmedSnapshotAfterBeacon,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -590,7 +591,7 @@ export default function LightningPage() {
   // When no confirmed snapshot exists yet, falls back to
   // itemsBaselineRef/daysBaselineRef/plansRawBaselineRef — the mount-time
   // load, or a previous pull's own cloud-won resolution.
-  function captureConfirmedSnapshotForPull(): {
+  function captureConfirmedSnapshotForPull(contentOwnershipMismatch: boolean): {
     items: LightningItem[];
     days: string[];
     plansRaw: string | null;
@@ -602,6 +603,23 @@ export default function LightningPage() {
     const confirmed = activeUserIdRef.current
       ? getConfirmedSnapshot(activeUserIdRef.current, activeProfileIdRef.current)
       : null;
+    // SH.2 architecture (Codex P1, 7th round) — FOREIGN BYTES CAN NEVER
+    // BECOME A FALLBACK CANDIDATE. Mirrors plans/page.tsx's own doc for
+    // this exact fix — see there for the full rationale: a mismatch with
+    // no confirmed snapshot yet for THIS identity means
+    // itemsBaselineRef/daysBaselineRef/plansRawBaselineRef below still
+    // hold whatever the PREVIOUS identity's conflict session last saw,
+    // and trusting them (even only as a comparison baseline) lets that
+    // foreign content become indistinguishable from this identity's own
+    // local edit the moment cloud has no data for a domain. Returning
+    // NEUTRAL/EMPTY values instead (and overwriting the refs themselves)
+    // forecloses that.
+    if (!confirmed && contentOwnershipMismatch) {
+      itemsBaselineRef.current = [];
+      daysBaselineRef.current = ["day-1"];
+      plansRawBaselineRef.current = null;
+      return { items: [], days: ["day-1"], plansRaw: null };
+    }
     return {
       items: confirmed
         ? migrateLightningDayIds(confirmed.snapshot.lightning.items as LightningItem[])
@@ -758,8 +776,14 @@ export default function LightningPage() {
     // the GET is even issued (Codex P1 #2). `pullStartBaseline` is closed
     // over by `.then()` below and consulted there instead of any ref — see
     // captureConfirmedSnapshotForPull()'s own doc above.
-    const pullStartBaseline = captureConfirmedSnapshotForPull();
-    void pullPlanner(activeProfileIdRef.current)
+    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
+    // SH.2 architecture (Codex P1, 7th round) — read any still-unresolved
+    // beacon's opId BEFORE this pull's fetch starts. Mirrors
+    // plans/page.tsx exactly — see its own doc.
+    const pendingBeaconOpId = activeUserIdRef.current
+      ? getPendingBeaconOpId(activeUserIdRef.current, activeProfileIdRef.current)
+      : null;
+    void pullPlanner(activeProfileIdRef.current, pendingBeaconOpId)
       .then((planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
@@ -856,11 +880,30 @@ export default function LightningPage() {
             daysCandidate
           );
 
+        // SH.2 architecture (Codex P1, 7th round) — DURABLE-BEFORE-OWNERSHIP
+        // for THIS page's own PRIMARY domain (Lightning's own items).
+        // Mirrors plans/page.tsx's own doc for this exact fix — see there
+        // for the full rationale: `hydrationSucceeded`/`daysWriteFailed`
+        // below only ever tracked the SIBLING (Plans) domain's write, never
+        // this page's own primary write (previously routed only through
+        // setItems() + a separate, decoupled persist-effect whose success
+        // was never observed here). This performs the SAME durable write
+        // directly and synchronously, mirroring the sibling's own
+        // try/catch pattern just below, so failure is observable HERE.
+        let primaryPersistSucceeded = true;
         // Only touch React state when the winning result actually differs
         // from what's already there — avoids an unnecessary re-render/
         // persist-effect write on an ordinary no-conflict pull.
         if (JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
           setItems(winningLightningItems);
+          try {
+            localStorage.setItem(
+              lightningKeyRef.current,
+              JSON.stringify({ version: 1, items: winningLightningItems })
+            );
+          } catch {
+            primaryPersistSucceeded = false;
+          }
         }
         // Cloud "won" the items domain when local hadn't changed and a
         // valid cloud payload existed — safe to trust immediately as this
@@ -869,7 +912,12 @@ export default function LightningPage() {
         // exists in this branch).
         const itemsCloudWon = !itemsChangedLocally && cloudLightningItems !== null;
         if (itemsCloudWon) {
-          itemsBaselineRef.current = winningLightningItems;
+          // Codex P1 fix (7th round) — only trust winningLightningItems as
+          // the new fallback baseline when it is actually durably on disk
+          // (or needed no write at all). Mirrors plans/page.tsx.
+          if (primaryPersistSucceeded) {
+            itemsBaselineRef.current = winningLightningItems;
+          }
         }
 
         // Phase 7.6.3 — Sync Hydration Safety: hydrate Plans into
@@ -967,23 +1015,31 @@ export default function LightningPage() {
         // Codex fix — a failed authoritative days[] write (daysWriteFailed)
         // keeps the gate closed exactly like a failed plans-hydration write
         // already does, so a stale locally-persisted order can never be
-        // pushed back over the cloud's actual value.
-        if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
+        // pushed back over the cloud's actual value. Codex P1 fix (7th
+        // round) — also requires `primaryPersistSucceeded` (this page's own
+        // Lightning items write). Mirrors plans/page.tsx.
+        if (hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) setSyncReady(true);
 
         // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
         // BOUNDARY. Mirrors plans/page.tsx exactly — see its own detailed
-        // comment and getLocalContentOwner's doc in syncHelper.ts.
-        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed) {
+        // comment and getLocalContentOwner's doc in syncHelper.ts. Codex P1
+        // fix (7th round) — also requires `primaryPersistSucceeded`.
+        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
           setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
         }
 
-        // SH.2 architecture (Codex P1, 6th round) — BEACON UNCERTAINTY.
-        // Mirrors plans/page.tsx exactly — see its own detailed comment and
-        // resolvePendingBeaconAfterPull's doc in syncHelper.ts.
-        if (activeUserIdRef.current) {
-          void resolvePendingBeaconAfterPull(
+        // SH.2 architecture (Codex P1, 7th round) — BEACON UNCERTAINTY via
+        // SERVER-VERIFIABLE OPERATION IDENTITY. Mirrors plans/page.tsx
+        // exactly — see its own detailed comment and
+        // resolveConfirmedSnapshotAfterBeacon's doc in syncHelper.ts.
+        if (activeUserIdRef.current && pendingBeaconOpId) {
+          const beaconAccepted =
+            planner?.opStatus?.opId === pendingBeaconOpId && planner?.opStatus?.found === true;
+          void resolveConfirmedSnapshotAfterBeacon(
             activeUserIdRef.current,
             activeProfileIdRef.current,
+            pendingBeaconOpId,
+            beaconAccepted,
             planner?.revision ?? null,
             planner
           );
@@ -1009,7 +1065,10 @@ export default function LightningPage() {
           lightning?: { version: number; items: unknown[] };
           days?: string[];
         } = {};
-        if (itemsCloudWon) {
+        // Codex P1 fix (7th round) — also requires `primaryPersistSucceeded`:
+        // metadata must never advance ahead of the durable state it
+        // describes. Mirrors plans/page.tsx.
+        if (itemsCloudWon && primaryPersistSucceeded) {
           acceptedForBaseline.lightning = { version: 1, items: winningLightningItems };
         }
         if (plansHydrationWritten && planner?.plans) {
@@ -1028,7 +1087,7 @@ export default function LightningPage() {
         // the write actually succeeded. Mirrors the daysBaselineRef
         // fallback-tier condition just above, now also accounting for the
         // sibling dataset.
-        if (itemsCloudWon && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
+        if (itemsCloudWon && primaryPersistSucceeded && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
           acceptedForBaseline.days = winningDays;
         }
         if (activeUserIdRef.current && planner?.revision != null) {

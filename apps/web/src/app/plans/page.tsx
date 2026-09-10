@@ -87,7 +87,8 @@ import {
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
-  resolvePendingBeaconAfterPull,
+  getPendingBeaconOpId,
+  resolveConfirmedSnapshotAfterBeacon,
 } from "@/lib/syncHelper";
 
 // Phase 9.0 — content type foundation
@@ -938,7 +939,7 @@ export default function PlansPage() {
   // the pull effect's existing itemsCloudWon/daysCloudWon updates, which
   // are unchanged by this fix and remain this page's best assumption of
   // "known-safe local content" absent an actual confirmed push).
-  function captureConfirmedSnapshotForPull(): {
+  function captureConfirmedSnapshotForPull(contentOwnershipMismatch: boolean): {
     items: PlanItem[];
     days: string[];
     lightningRaw: string | null;
@@ -952,6 +953,40 @@ export default function PlansPage() {
     const confirmed = activeUserIdRef.current
       ? getConfirmedSnapshot(activeUserIdRef.current, activeProfileIdRef.current)
       : null;
+    // SH.2 architecture (Codex P1, 7th round) — FOREIGN BYTES CAN NEVER
+    // BECOME A FALLBACK CANDIDATE. A mismatch (this profile's raw storage
+    // is attributed to a DIFFERENT, known identity — see
+    // getLocalContentOwner's own doc) with no confirmed snapshot yet for
+    // THIS identity means itemsBaselineRef/daysBaselineRef/
+    // lightningRawBaselineRef below still hold whatever the PREVIOUS
+    // identity's conflict session last saw. Trusting them here — even only
+    // as a comparison baseline — lets that foreign content become
+    // indistinguishable from "this identity's own local edit" the moment
+    // cloud has no data for a domain (a 204, or that domain simply absent):
+    // this baseline AND the real on-disk "current" read the pull effect
+    // takes moments later would be the SAME foreign-tainted value, so
+    // changedLocally computes false and the tainted value is adopted
+    // outright as this identity's winner — eligible to be pushed the
+    // instant syncReady reopens, leaking account A's data into account B.
+    // Returning NEUTRAL/EMPTY values here instead (never the tainted refs)
+    // forecloses that: a domain with no cloud data now falls through to an
+    // empty baseline carrying no foreign content to leak. The refs
+    // themselves are overwritten immediately below too, so every OTHER
+    // reader of them (not just this pull) sees the same neutral state from
+    // this point on — a narrowly-scoped, deliberate exception to this
+    // file's general preference against destructive clears, accepted
+    // because leaking one account's planner data into another's is a
+    // strictly worse outcome than losing a window of this identity's own
+    // edits, which cannot exist yet in this exact branch: a mismatch is
+    // only ever detected once, at the very start of this auth transition,
+    // before this new identity has had any chance to write anything of its
+    // own into this profile's storage.
+    if (!confirmed && contentOwnershipMismatch) {
+      itemsBaselineRef.current = [];
+      daysBaselineRef.current = ["day-1"];
+      lightningRawBaselineRef.current = null;
+      return { items: [], days: ["day-1"], lightningRaw: null };
+    }
     return {
       items: confirmed
         ? migrateDayIds((confirmed.snapshot.plans.items as unknown[]).map(normalizePlanItem))
@@ -1647,8 +1682,18 @@ export default function PlansPage() {
     // nothing between now and pull resolution (a push confirming, another
     // tab writing storage) can change what this pull compares against.
     // See captureConfirmedSnapshotForPull()'s own doc above.
-    const pullStartBaseline = captureConfirmedSnapshotForPull();
-    void pullPlanner(activeProfileIdRef.current)
+    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
+    // SH.2 architecture (Codex P1, 7th round) — read any still-unresolved
+    // beacon's opId BEFORE this pull's fetch starts, so it can be passed as
+    // `lastOpId` and resolved against THIS SAME GET response's own
+    // server-verified opStatus (see pullPlanner's and
+    // resolveConfirmedSnapshotAfterBeacon's own docs in syncHelper.ts).
+    // null when no beacon is currently pending for this identity (the
+    // common case) — pullPlanner() omits the query param entirely then.
+    const pendingBeaconOpId = activeUserIdRef.current
+      ? getPendingBeaconOpId(activeUserIdRef.current, activeProfileIdRef.current)
+      : null;
+    void pullPlanner(activeProfileIdRef.current, pendingBeaconOpId)
       .then((planner) => {
         if (cancelled) return;
         // Extract the plans portion from the combined planner payload.
@@ -1764,12 +1809,40 @@ export default function PlansPage() {
             daysCandidate
           );
 
+        // SH.2 architecture (Codex P1, 7th round) — DURABLE-BEFORE-OWNERSHIP
+        // for THIS page's own PRIMARY domain. `hydrationSucceeded`/
+        // `daysWriteFailed` (declared above) only ever tracked the SIBLING
+        // (Lightning) domain's write and the days[] write — Plans' own
+        // items previously relied entirely on setItems() + a separate,
+        // decoupled persist-effect (further down this file) whose write
+        // success was never observed here. That effect's own
+        // localStorage.setItem() is wrapped in its own try/catch that
+        // swallows failures — so a cloud-won PRIMARY write could silently
+        // fail (quota, private-mode, security error) while syncReady still
+        // opened and ownership still transferred to this identity, exactly
+        // the gap Codex flagged (#3): ownership/metadata advancing before
+        // the durable state it is supposed to describe. This performs the
+        // SAME durable write directly and synchronously — mirroring the
+        // sibling (Lightning) hydration write's own pattern just below —
+        // so failure is observable HERE, before the gates that follow ever
+        // evaluate it. `primaryPersistSucceeded` stays true when no write
+        // was needed at all (winningPlanItems already matches on-disk
+        // state) — there is nothing to fail in that case.
+        let primaryPersistSucceeded = true;
         // Only touch React state when the winning result actually differs
         // from what's already there — avoids an unnecessary re-render/
         // persist-effect write on an ordinary no-conflict pull.
         if (JSON.stringify(winningPlanItems) !== JSON.stringify(itemsRef.current)) {
           reseedNextId(winningPlanItems);
           setItems(winningPlanItems);
+          try {
+            localStorage.setItem(
+              planKeyRef.current,
+              JSON.stringify({ version: SCHEMA_VERSION, items: winningPlanItems })
+            );
+          } catch {
+            primaryPersistSucceeded = false;
+          }
         }
         // Cloud "won" the items domain when local hadn't changed and a
         // valid cloud payload existed — safe to trust immediately as this
@@ -1778,7 +1851,15 @@ export default function PlansPage() {
         // exists in this branch).
         const itemsCloudWon = !itemsChangedLocally && cloudItems !== null;
         if (itemsCloudWon) {
-          itemsBaselineRef.current = winningPlanItems;
+          // Codex P1 fix (7th round) — only trust winningPlanItems as the
+          // new fallback baseline when it is actually durably on disk (or
+          // needed no write at all, since primaryPersistSucceeded defaults
+          // true when no write was attempted) — never point this ref at
+          // content that failed to persist, which would desynchronize it
+          // from the real on-disk value for the rest of this mount.
+          if (primaryPersistSucceeded) {
+            itemsBaselineRef.current = winningPlanItems;
+          }
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative
           // cloud dataset. The mount-time inference ran on stale local
@@ -1870,8 +1951,11 @@ export default function PlansPage() {
         // Codex fix — a failed authoritative days[] write (daysWriteFailed)
         // keeps the gate closed exactly like a failed lightning-hydration
         // write already does, so a stale locally-persisted order can never
-        // be pushed back over the cloud's actual value.
-        if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
+        // be pushed back over the cloud's actual value. Codex P1 fix (7th
+        // round) — also requires `primaryPersistSucceeded`: THIS page's own
+        // primary (Plans) domain write must have durably landed too, not
+        // just the sibling/days writes (see its own doc above).
+        if (hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) setSyncReady(true);
 
         // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
         // BOUNDARY: only NOW — after this pull genuinely resolved
@@ -1882,25 +1966,39 @@ export default function PlansPage() {
         // for the full three-part condition and why writing this any
         // earlier (e.g. at transition start) let a failed/cancelled pull
         // relabel ownership without ever replacing the previous identity's
-        // bytes.
-        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed) {
+        // bytes. Codex P1 fix (7th round) — also requires
+        // `primaryPersistSucceeded` (#3): ownership must never transfer
+        // before THIS page's own primary domain — not just the sibling's —
+        // is confirmed durably persisted.
+        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
           setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
         }
 
-        // SH.2 architecture (Codex P1, 6th round) — BEACON UNCERTAINTY:
-        // resolve any pendingBeacon left by a prior sendBeacon() against
-        // THIS pull's own GET response — see resolvePendingBeaconAfterPull's
-        // own doc in syncHelper.ts for the full delivered/undelivered
-        // contract. Independent of hydrationSucceeded/daysWriteFailed above
-        // (a valid GET response is conclusive about the beacon's fate
-        // regardless of whether this pull's OWN local writes succeeded) —
-        // `planner` is passed directly as the cloud snapshot (null for a
-        // definitive 204, matching resolveSyncIdentityStateAfterPull's
-        // contract for "the beacon conclusively did not persist anything").
-        if (activeUserIdRef.current) {
-          void resolvePendingBeaconAfterPull(
+        // SH.2 architecture (Codex P1, 7th round) — BEACON UNCERTAINTY via
+        // SERVER-VERIFIABLE OPERATION IDENTITY: resolve any pendingBeacon
+        // opId left by a prior sendBeacon() against THIS pull's own GET
+        // response — see resolveConfirmedSnapshotAfterBeacon's own doc in
+        // syncHelper.ts and resolveConfirmedAfterBeacon's own doc in
+        // syncPayload.ts for the full accepted/superseded/failed contract.
+        // `beaconAccepted` is a direct, server-verified fact (never
+        // inferred from content comparison or timing): the SAME opId this
+        // pull looked up (`pendingBeaconOpId`, read before the fetch) must
+        // match what THIS GET's own `opStatus` reports, AND that opStatus
+        // must say `found`. A definitive 204 (`planner` null) is
+        // structurally incompatible with `found` ever being true (see
+        // pullPlanner's own doc), so it correctly resolves to `false` here
+        // without needing to special-case it. Independent of
+        // hydrationSucceeded/daysWriteFailed/primaryPersistSucceeded above
+        // — a valid GET response is conclusive about the beacon's fate
+        // regardless of whether this pull's OWN local writes succeeded.
+        if (activeUserIdRef.current && pendingBeaconOpId) {
+          const beaconAccepted =
+            planner?.opStatus?.opId === pendingBeaconOpId && planner?.opStatus?.found === true;
+          void resolveConfirmedSnapshotAfterBeacon(
             activeUserIdRef.current,
             activeProfileIdRef.current,
+            pendingBeaconOpId,
+            beaconAccepted,
             planner?.revision ?? null,
             planner
           );
@@ -1927,7 +2025,11 @@ export default function PlansPage() {
           lightning?: { version: number; items: unknown[] };
           days?: string[];
         } = {};
-        if (itemsCloudWon) {
+        // Codex P1 fix (7th round) — also requires `primaryPersistSucceeded`:
+        // a cloud-won Plans domain whose durable write above failed must
+        // never be committed as confirmed — metadata must never advance
+        // ahead of the durable state it describes.
+        if (itemsCloudWon && primaryPersistSucceeded) {
           acceptedForBaseline.plans = { version: SCHEMA_VERSION, items: winningPlanItems };
         }
         if (lightningHydrationWritten && planner?.lightning) {
@@ -1946,7 +2048,7 @@ export default function PlansPage() {
         // the write actually succeeded. Mirrors the daysBaselineRef
         // fallback-tier condition just above, now also accounting for the
         // sibling dataset.
-        if (itemsCloudWon && !lightningChangedLocally && !daysChangedLocally && !daysWriteFailed) {
+        if (itemsCloudWon && primaryPersistSucceeded && !lightningChangedLocally && !daysChangedLocally && !daysWriteFailed) {
           acceptedForBaseline.days = winningDays;
         }
         if (activeUserIdRef.current && planner?.revision != null) {

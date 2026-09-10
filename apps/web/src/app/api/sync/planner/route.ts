@@ -1,6 +1,8 @@
 /**
- * GET  /api/sync/planner?profileId=… — fetch the signed-in user's latest planner blob
- *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string, revision: number }
+ * GET  /api/sync/planner?profileId=…&lastOpId=… — fetch the signed-in user's
+ *   latest planner blob
+ *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string, revision: number,
+ *          opStatus?: { opId: string; found: boolean; revision: number | null } }
  *   204: no usable planner payload available; this includes:
  *          • no row in user_planner and no legacy row in user_plans
  *          • user_planner row exists but planner_json is corrupt/unparseable
@@ -10,8 +12,26 @@
  *   400: missing or invalid profileId
  *   401: not signed in
  *
- * PUT  /api/sync/planner?profileId=… — merge-write the planner blob for (user, profile)
- * POST /api/sync/planner?profileId=… — same as PUT (supports navigator.sendBeacon on unload)
+ * `lastOpId` (SH.2, Codex P1 7th round) is OPTIONAL — when supplied, the
+ * response also carries `opStatus`, a conclusive, server-verified answer to
+ * "was the write tagged with this opId ever accepted", looked up against the
+ * append-only `user_planner_writes` table (see db-schema.sql and
+ * handleWrite's own doc below). This is independent of whichever of the
+ * three response paths below actually fires (main / legacy-concurrent-writer
+ * / legacy-self-heal) — it is a lookup against a completely separate table,
+ * keyed only by (userId, profileId, lastOpId), so it is computed once, up
+ * front, and attached to whichever response the rest of this handler
+ * produces. Never computed at all for the 204 path — nothing was found for
+ * this user+profile at all, so there is no planner state to report
+ * `opStatus` alongside (a caller with a pendingBeacon opId still gets a
+ * conclusive answer: `found` reflects the same "did user_planner_writes ever
+ * record this exact opId" fact regardless of whether user_planner itself
+ * currently has a row).
+ *
+ * PUT  /api/sync/planner?profileId=…&clientOpId=… — merge-write the planner
+ *   blob for (user, profile)
+ * POST /api/sync/planner?profileId=…&clientOpId=… — same as PUT (supports
+ *   navigator.sendBeacon on unload)
  *   200: { updatedAt: string, revision: number }
  *   400: invalid JSON, malformed body, structurally invalid planner shape,
  *        an otherwise-valid payload carrying a top-level domain this
@@ -20,6 +40,19 @@
  *        missing/invalid profileId
  *   401: not signed in
  *   413: payload exceeds size limit
+ *
+ * `clientOpId` (SH.2, Codex P1 7th round) is OPTIONAL and, when present, is
+ * always a QUERY parameter — NEVER a body field, since a body field would
+ * trip findUnknownDomainKeys' unknown-top-level-key rejection below. When
+ * supplied, this write's acceptance is durably recorded in
+ * `user_planner_writes` (ON CONFLICT DO NOTHING — a retried beacon carrying
+ * the same opId is idempotent) in the SAME transaction, under the SAME
+ * per-(user,profile) advisory lock, as the main upsert — so a later
+ * `lastOpId` GET lookup can never observe a write recorded as accepted that
+ * didn't actually land, or vice versa. An ordinary push that omits
+ * `clientOpId` (the debounced doPush() path) is completely unaffected — this
+ * table is populated only for callers that opt in by supplying one (today,
+ * only registerUnloadSync's beacon).
  *
  * SH.2 (Codex P1) — `revision` is a monotonically increasing integer
  * (backed by the `user_planner_revision_seq` Postgres sequence — see
@@ -99,6 +132,48 @@ function validateProfileId(raw: string | null): string | null {
   return trimmed;
 }
 
+/**
+ * Lightweight validation for an OPTIONAL client-supplied opId — accepts any
+ * non-empty, reasonably-bounded string (the client always sends a
+ * crypto.randomUUID(), but this endpoint has no reason to enforce that exact
+ * shape; it is stored and compared as an opaque string either way). Returns
+ * null for missing/empty/oversized values, which callers treat as "no opId
+ * supplied" rather than an error — both `lastOpId` (GET) and `clientOpId`
+ * (PUT/POST) are optional.
+ */
+function validateOpId(raw: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  return trimmed;
+}
+
+type OpStatus = { opId: string; found: boolean; revision: number | null };
+
+/**
+ * Look up whether `opId` was ever durably recorded as accepted for this
+ * (userId, profileId) — see user_planner_writes' own doc in db-schema.sql.
+ * Independent of, and unlocked relative to, whatever else this request does
+ * with `user_planner` — the two tables are queried separately, and this
+ * lookup's own correctness never depends on lock ordering against the main
+ * upsert/select paths, since `user_planner_writes` is append-only (a row,
+ * once inserted, is never updated or deleted).
+ */
+async function lookupOpStatus(
+  pool: ReturnType<typeof getPool>,
+  userId: string,
+  profileId: string,
+  opId: string
+): Promise<OpStatus> {
+  const { rows } = await pool.query<{ revision: string }>(
+    "SELECT revision FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
+    [userId, profileId, opId]
+  );
+  return rows.length > 0
+    ? { opId, found: true, revision: Number(rows[0].revision) }
+    : { opId, found: false, revision: null };
+}
+
 // ── GET ──────────────────────────────────────────────────────────────────────
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -112,8 +187,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (!profileId) {
     return NextResponse.json({ error: "Missing or invalid profileId" }, { status: 400 });
   }
+  const lastOpId = validateOpId(req.nextUrl.searchParams.get("lastOpId"));
 
   const pool = getPool();
+  const opStatus = lastOpId ? await lookupOpStatus(pool, userId, profileId, lastOpId) : undefined;
 
   // ── 1. Try new user_planner table first ──────────────────────────────────
   const { rows } = await pool.query<{ planner_json: string; updated_at: Date; revision: string }>(
@@ -133,6 +210,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         plannerJson,
         updatedAt: rows[0].updated_at.toISOString(),
         revision: Number(rows[0].revision),
+        ...(opStatus ? { opStatus } : {}),
       });
     }
   }
@@ -218,6 +296,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
                 plannerJson: freshParsed,
                 updatedAt: freshRows[0].updated_at.toISOString(),
                 revision: Number(freshRows[0].revision),
+                ...(opStatus ? { opStatus } : {}),
               });
             }
           }
@@ -245,6 +324,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
               plannerJson: normalizedPlanner,
               updatedAt: legacyUpdatedAt.toISOString(),
               revision: Number(migratedRevision),
+              ...(opStatus ? { opStatus } : {}),
             });
           }
         } catch {
@@ -257,6 +337,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({
           plannerJson: normalizedPlanner,
           updatedAt: legacyUpdatedAt.toISOString(),
+          ...(opStatus ? { opStatus } : {}),
         });
       }
     }
@@ -279,6 +360,7 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
   if (!profileId) {
     return NextResponse.json({ error: "Missing or invalid profileId" }, { status: 400 });
   }
+  const clientOpId = validateOpId(req.nextUrl.searchParams.get("clientOpId"));
 
   // Reject oversized payloads early using Content-Length if present
   const contentLength = req.headers.get("content-length");
@@ -400,6 +482,23 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
        RETURNING updated_at, revision`,
       [userId, profileId, bodyToStore]
     );
+
+    // SH.2 (Codex P1, 7th round) — durably record acceptance of this write
+    // under its client-supplied opId, in the SAME transaction/lock as the
+    // upsert above, so a later `lastOpId` GET lookup can never observe
+    // "accepted" without the write itself having actually landed (or vice
+    // versa). Skipped entirely when the caller didn't supply one — see
+    // user_planner_writes' own doc in db-schema.sql. ON CONFLICT DO NOTHING
+    // makes a retried beacon carrying the same opId idempotent rather than
+    // erroring on the primary key.
+    if (clientOpId) {
+      await client.query(
+        `INSERT INTO user_planner_writes (user_id, profile_id, client_op_id, revision)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id, profile_id, client_op_id) DO NOTHING`,
+        [userId, profileId, clientOpId, rows[0].revision]
+      );
+    }
 
     await client.query("COMMIT");
     return NextResponse.json({
