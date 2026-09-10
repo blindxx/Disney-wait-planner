@@ -1,6 +1,6 @@
 /**
  * GET  /api/sync/planner?profileId=… — fetch the signed-in user's latest planner blob
- *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string }
+ *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string, revision: number }
  *   204: no usable planner payload available; this includes:
  *          • no row in user_planner and no legacy row in user_plans
  *          • user_planner row exists but planner_json is corrupt/unparseable
@@ -12,7 +12,7 @@
  *
  * PUT  /api/sync/planner?profileId=… — merge-write the planner blob for (user, profile)
  * POST /api/sync/planner?profileId=… — same as PUT (supports navigator.sendBeacon on unload)
- *   200: { updatedAt: string }
+ *   200: { updatedAt: string, revision: number }
  *   400: invalid JSON, malformed body, structurally invalid planner shape,
  *        an otherwise-valid payload carrying a top-level domain this
  *        server build doesn't recognize (see findUnknownDomainKeys in
@@ -21,6 +21,23 @@
  *   401: not signed in
  *   413: payload exceeds size limit
  *
+ * SH.2 (Codex P1) — `revision` is a monotonically increasing integer
+ * (backed by the `user_planner_revision_seq` Postgres sequence — see
+ * db-schema.sql), assigned fresh on every successful write via
+ * `nextval()`. It is the AUTHORITATIVE ordering signal for this
+ * (user, profile) pair's planner state: strictly higher always means
+ * "written later", regardless of `updated_at`. `updated_at` uses `NOW()`,
+ * which is fixed at TRANSACTION START in Postgres — under the
+ * pg_advisory_xact_lock serialization below, a transaction that starts
+ * earlier but is blocked waiting for the lock can still commit its write
+ * AFTER a later-starting transaction that acquired the lock first, yet
+ * retain an EARLIER `updated_at` than the write it was actually applied
+ * after. `revision` has no such gap: it is only ever assigned at the
+ * moment a write actually executes (inside the locked section), so it is
+ * strictly ordered by actual commit order. Client code (syncHelper.ts)
+ * uses `revision`, never `updated_at` or response arrival order, to decide
+ * whether a push/pull response may advance the durable confirmed planner
+ * baseline for this (user, profile) pair.
  * Phase 7.6: stores a combined Plans + Lightning payload per (user_id, profile_id).
  * The profile_id is user-supplied from the client's active local profile.
  *
@@ -99,8 +116,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const pool = getPool();
 
   // ── 1. Try new user_planner table first ──────────────────────────────────
-  const { rows } = await pool.query<{ planner_json: string; updated_at: Date }>(
-    "SELECT planner_json, updated_at FROM user_planner WHERE user_id = $1 AND profile_id = $2",
+  const { rows } = await pool.query<{ planner_json: string; updated_at: Date; revision: string }>(
+    "SELECT planner_json, updated_at, revision FROM user_planner WHERE user_id = $1 AND profile_id = $2",
     [userId, profileId]
   );
 
@@ -115,6 +132,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({
         plannerJson,
         updatedAt: rows[0].updated_at.toISOString(),
+        revision: Number(rows[0].revision),
       });
     }
   }
@@ -179,8 +197,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           const { rows: freshRows } = await client.query<{
             planner_json: string;
             updated_at: Date;
+            revision: string;
           }>(
-            "SELECT planner_json, updated_at FROM user_planner WHERE user_id = $1 AND profile_id = $2",
+            "SELECT planner_json, updated_at, revision FROM user_planner WHERE user_id = $1 AND profile_id = $2",
             [userId, profileId]
           );
           if (freshRows.length > 0) {
@@ -198,22 +217,36 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
               return NextResponse.json({
                 plannerJson: freshParsed,
                 updatedAt: freshRows[0].updated_at.toISOString(),
+                revision: Number(freshRows[0].revision),
               });
             }
           }
           // Still genuinely missing/corrupted under the lock — safe to
           // write the legacy-migrated shape through. Uses DO UPDATE (not DO
           // NOTHING) so a pre-existing corrupted row is repaired in place —
-          // this is the self-heal path for corrupted rows.
-          await client.query(
-            `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at)
-             VALUES ($1, $2, $3, $4)
+          // this is the self-heal path for corrupted rows. Assigns a fresh
+          // `revision` via nextval() like every other write, so this
+          // migrated row participates in the same strict ordering as any
+          // other confirmed state for this (user, profile) pair.
+          const { rows: migratedRows } = await client.query<{ revision: string }>(
+            `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at, revision)
+             VALUES ($1, $2, $3, $4, nextval('user_planner_revision_seq'))
              ON CONFLICT (user_id, profile_id) DO UPDATE
                SET planner_json = EXCLUDED.planner_json,
-                   updated_at   = EXCLUDED.updated_at`,
+                   updated_at   = EXCLUDED.updated_at,
+                   revision     = EXCLUDED.revision
+             RETURNING revision`,
             [userId, profileId, normalizedJson, legacyUpdatedAt]
           );
+          const migratedRevision = migratedRows[0]?.revision;
           await client.query("COMMIT");
+          if (migratedRevision !== undefined) {
+            return NextResponse.json({
+              plannerJson: normalizedPlanner,
+              updatedAt: legacyUpdatedAt.toISOString(),
+              revision: Number(migratedRevision),
+            });
+          }
         } catch {
           await client.query("ROLLBACK").catch(() => {});
           // Best-effort — do not fail the read if migration write fails
@@ -353,18 +386,26 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
       mergePlannerDomains(existingRaw, incomingRaw, incomingParsed)
     );
 
-    const { rows } = await client.query<{ updated_at: Date }>(
-      `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at)
-       VALUES ($1, $2, $3, NOW())
+    // SH.2 (Codex P1) — `revision` is assigned via nextval() at the moment
+    // this write actually executes, under the advisory lock's
+    // serialization — see this file's module doc for why this is the
+    // authoritative ordering signal, not `updated_at`.
+    const { rows } = await client.query<{ updated_at: Date; revision: string }>(
+      `INSERT INTO user_planner (user_id, profile_id, planner_json, updated_at, revision)
+       VALUES ($1, $2, $3, NOW(), nextval('user_planner_revision_seq'))
        ON CONFLICT (user_id, profile_id) DO UPDATE
          SET planner_json = EXCLUDED.planner_json,
-             updated_at   = NOW()
-       RETURNING updated_at`,
+             updated_at   = NOW(),
+             revision     = EXCLUDED.revision
+       RETURNING updated_at, revision`,
       [userId, profileId, bodyToStore]
     );
 
     await client.query("COMMIT");
-    return NextResponse.json({ updatedAt: rows[0].updated_at.toISOString() });
+    return NextResponse.json({
+      updatedAt: rows[0].updated_at.toISOString(),
+      revision: Number(rows[0].revision),
+    });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;

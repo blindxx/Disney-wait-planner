@@ -23,19 +23,25 @@ Reviewers should check any changes affecting:
  *
  * Usage:
  *   setSyncProfileId(profileId)  — call on profile switch to retarget sync
+ *   setSyncUserId(userId)        — call on auth transition to retarget sync
+ *                                  (null when signed out/loading)
  *   scheduleSync()               — debounced push after any planner mutation
  *   pullPlanner(profileId)       — fetch combined cloud planner on sign-in
  *   registerUnloadSync()         — best-effort beacon push on page unload
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
- *   getConfirmedSnapshot(profileId)    — read the current per-domain
- *                                        confirmed baseline for a profile
- *   commitConfirmedBaseline(profileId, — advance specific domain(s) of that
- *     accepted)                          baseline after a pull accepts them
+ *   getConfirmedSnapshot(userId, profileId)          — read the current
+ *                                                       confirmed baseline
+ *   commitConfirmedBaseline(userId, profileId,       — advance specific
+ *     revision, accepted)                              domain(s) of that
+ *                                                       baseline, gated by
+ *                                                       server revision
  *
  * localStorage keys:
- *   dwp:sync:{profileId}:lastSyncedAt      — ISO timestamp of last successful push
- *   dwp:sync:{profileId}:confirmedSnapshot — the current per-domain confirmed
- *                                             baseline (see below)
+ *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
+ *                                                         last successful push
+ *   dwp:sync:{userId}:{profileId}:confirmedSnapshot    — the current
+ *                                                         confirmed baseline
+ *                                                         (see below)
  *
  * The synced payload (SyncedPlannerPayload) includes both plans and lightning
  * for the active profile. It is read fresh from localStorage at push time
@@ -43,37 +49,64 @@ Reviewers should check any changes affecting:
  *
  * ── Cloud-confirmed local snapshot contract (SH.2) ──────────────────────────
  *
- * "What exact local snapshot is cloud-confirmed for this profile?" —
- * answered by getConfirmedSnapshot(profileId). A domain's confirmed value
+ * "For authenticated user U and profile P, what exact planner snapshot is
+ * the newest server-confirmed state?" — answered by
+ * getConfirmedSnapshot(userId, profileId). A domain's confirmed value
  * represents "the state currently accepted as synchronized for this
  * domain" — NOT merely "the last successful PUT payload". It advances two
  * ways, both writing the SAME durable key:
- *   • doPush() (below) writes the literal request body of every
- *     SUCCESSFUL push, verbatim, the moment the 200 response is observed.
+ *   • doPush() (below) commits the literal request body of every
+ *     SUCCESSFUL push, gated by the server-issued `revision` in that
+ *     push's response.
  *   • commitConfirmedBaseline() (below) is called by a page's pull effect
  *     after a pull resolves, for whichever domain(s) it determined were
  *     cloud-won AND successfully persisted this pull — a domain a pull
  *     hydrates from cloud is just as validly "confirmed" as one a push
  *     just sent, and must advance the SAME record so a LATER pull never
  *     misclassifies that already-hydrated state as an unsynced local edit
- *     (Codex P1). It reads the CURRENT confirmed record fresh (never a
+ *     (Codex P1, 1st round), gated by the same pull's GET response
+ *     `revision`. It reads the CURRENT confirmed record fresh (never a
  *     frozen pull-start snapshot) and replaces only the domain(s) passed
  *     in, leaving every other domain's confirmation exactly as it was —
  *     so it can never let an older write clobber a domain some OTHER
  *     concurrent commit (a push, or another tab's pull) already advanced
  *     further than this one knows about.
+ *
+ * Codex P1 fix (3rd round) — TWO further guarantees, both enforced by
+ * nextConfirmedBaseline() (syncPayload.ts), which both commit paths above
+ * delegate to:
+ *   • Identity scope: the storage key is keyed by BOTH userId and
+ *     profileId (confirmedSnapshotKeyForIdentity below) — "profile" is a
+ *     LOCAL, per-device concept independent of which cloud account is
+ *     signed in, so a bare profileId key would let account B, signing in
+ *     after account A signs out on the same device/profile, read (and
+ *     potentially re-confirm) account A's leftover confirmed record. With
+ *     userId in the key, B's read is a DIFFERENT key A never touched —
+ *     B's own confirmed state (or lack thereof) is unaffected by A ever
+ *     having used this profile slot.
+ *   • Revision ordering: every commit carries the server-issued `revision`
+ *     that produced it (see api/sync/planner/route.ts's module doc for why
+ *     this — not `updated_at`, not response arrival order — is the only
+ *     authoritative ordering signal under concurrent writes). A commit
+ *     whose revision is <= the currently-confirmed revision is rejected
+ *     outright, so two concurrent pushes' responses arriving in EITHER
+ *     order converge on the same final confirmed state — whichever
+ *     server-committed LATER (higher revision), never whichever response
+ *     happened to arrive at this tab last.
+ *
  * Either way, the record is:
  *   • NEVER a fresh read of the current plans/lightning/days storage keys
  *     at the moment of commit — those are mutable and may already hold a
  *     newer, still-unaccepted edit; only the EXACT value this pull (or
  *     push) determined was accepted is ever written.
- *   • NEVER dependent on response/resolution timing — each commit writes
- *     once, atomically, from the exact accepted value, never reconstructed
- *     from whatever happens to be on disk afterwards.
+ *   • NEVER dependent on response/resolution timing — each commit is
+ *     gated by server-issued revision, never by when the response happened
+ *     to arrive or resolve.
  *   • NEVER dependent on which tab performed the push or pull —
  *     localStorage is shared across same-origin tabs, so any tab for this
- *     profile reads the identical value via a plain fresh read of the same
- *     durable key.
+ *     user+profile reads the identical value via a plain fresh read of the
+ *     same durable key, and converges on the same newest revision
+ *     regardless of which tab wrote it.
  * Consumers (plans/page.tsx, lightning/page.tsx) treat this as the single
  * source of truth for "was my current local content already accepted by
  * the cloud" — see captureConfirmedSnapshotForPull() in each page for how
@@ -85,8 +118,10 @@ import { buildNamespacedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
+  parseConfirmedPlannerSnapshot,
   nextConfirmedBaseline,
   type SyncedPlannerPayload,
+  type ConfirmedPlannerSnapshot,
 } from "./syncPayload";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -111,20 +146,31 @@ function syncErrorKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:lastError`;
 }
 
-/** Returns the localStorage key for the last cloud-confirmed pushed snapshot for a profile. */
-export function confirmedSnapshotKeyForProfile(profileId: string): string {
-  return `dwp:sync:${profileId}:confirmedSnapshot`;
+/**
+ * Returns the localStorage key for the confirmed planner snapshot for a
+ * given (userId, profileId) pair. Codex P1 fix (3rd round) — keyed by BOTH:
+ * "profile" is a LOCAL, per-device concept (e.g. a family member slot)
+ * entirely independent of which cloud account is signed in, so a
+ * profileId-only key would let a DIFFERENT account, signing into the same
+ * profile slot on the same browser, read (and potentially build on) the
+ * previous account's confirmed record. userId is resolved the same way the
+ * server does (session.user.id, falling back to email) — see each page's
+ * auth-transition effect for where this is read from useSession().
+ */
+export function confirmedSnapshotKeyForIdentity(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot`;
 }
 
 // ── Confirmed snapshot ────────────────────────────────────────────────────────
 
 /**
- * Read the exact SyncedPlannerPayload this profile's most recent successful
- * push actually sent — see the module doc's "Cloud-confirmed local snapshot
- * contract" above. Returns null when this profile has never had a
- * successful push (fresh profile, always-offline, never signed in) or the
- * stored value is missing/corrupt — callers must treat null as "nothing to
- * compare against yet", not as an error.
+ * Read the current ConfirmedPlannerSnapshot (revision + planner state) for
+ * this authenticated user + profile — see the module doc's "Cloud-confirmed
+ * local snapshot contract" above. Returns null when nothing has ever been
+ * confirmed for this exact (userId, profileId) pair (fresh profile,
+ * always-offline, never signed in, or a DIFFERENT account previously used
+ * this profile slot) or the stored value is missing/corrupt — callers must
+ * treat null as "nothing to compare against yet", not as an error.
  *
  * Safe to call from any tab: this is a plain localStorage read of a key
  * that is durable (survives reloads) and shared (every same-origin tab for
@@ -132,38 +178,44 @@ export function confirmedSnapshotKeyForProfile(profileId: string): string {
  * or event subscription to be correct — only a re-read at the moment the
  * caller wants an answer.
  */
-export function getConfirmedSnapshot(profileId: string): SyncedPlannerPayload | null {
+export function getConfirmedSnapshot(userId: string, profileId: string): ConfirmedPlannerSnapshot | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = localStorage.getItem(confirmedSnapshotKeyForProfile(profileId));
+    const raw = localStorage.getItem(confirmedSnapshotKeyForIdentity(userId, profileId));
     if (!raw) return null;
-    return parseSyncedPlannerPayload(JSON.parse(raw) as unknown);
+    return parseConfirmedPlannerSnapshot(JSON.parse(raw) as unknown);
   } catch {
     return null;
   }
 }
 
 /**
- * Advance the confirmed baseline for whichever domain(s) a pull just
- * determined were cloud-won AND successfully persisted — see the module
- * doc's "Cloud-confirmed local snapshot contract" above and
- * nextConfirmedBaseline()'s own doc in syncPayload.ts for the merge rule.
+ * Advance the confirmed baseline for whichever domain(s) a pull (or push —
+ * see doPush() below) just determined were cloud-won AND successfully
+ * persisted, gated by the server-issued `revision` that produced them —
+ * see the module doc's "Cloud-confirmed local snapshot contract" above and
+ * nextConfirmedBaseline()'s own doc in syncPayload.ts for the full merge +
+ * revision-ordering rule.
  *
  * Reads the CURRENT confirmed record fresh (via getConfirmedSnapshot,
  * never a value the caller captured earlier) so this can never clobber a
- * domain some OTHER concurrent commit — a push, or another tab's own pull
- * — already advanced further than the caller knows about; only the
- * domain(s) present in `accepted` are ever overwritten. Best-effort: a
- * write failure here (quota, private-mode) is swallowed, matching the
- * tier of every other confirmed-state write in this module — it simply
- * means the next pull falls back to whatever was confirmed before.
+ * domain — or regress a revision — some OTHER concurrent commit (a push,
+ * or another tab's own pull/push) already advanced further than the caller
+ * knows about; only the domain(s) present in `accepted` are ever
+ * overwritten, and only when `revision` is strictly newer than whatever is
+ * already confirmed. Best-effort: a write failure here (quota,
+ * private-mode) is swallowed, matching the tier of every other
+ * confirmed-state write in this module — it simply means the next pull
+ * falls back to whatever was confirmed before.
  *
  * Call this AFTER persistence for the accepted domain(s) has already
  * succeeded — never speculatively before a write is known to have landed
  * ("failed persistence must not advance the baseline").
  */
 export function commitConfirmedBaseline(
+  userId: string,
   profileId: string,
+  revision: number,
   accepted: {
     plans?: { version: number; items: unknown[] };
     lightning?: { version: number; items: unknown[] };
@@ -173,9 +225,10 @@ export function commitConfirmedBaseline(
   if (typeof window === "undefined") return;
   if (!accepted.plans && !accepted.lightning && !accepted.days) return;
   try {
-    const current = getConfirmedSnapshot(profileId);
-    const next = nextConfirmedBaseline(current, accepted);
-    localStorage.setItem(confirmedSnapshotKeyForProfile(profileId), JSON.stringify(next));
+    const current = getConfirmedSnapshot(userId, profileId);
+    const next = nextConfirmedBaseline(current, revision, accepted);
+    if (!next) return; // rejected — not newer than what's already confirmed
+    localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
   } catch {}
 }
 
@@ -225,6 +278,16 @@ let inFlight = false;
  */
 let currentSyncProfileId = "default";
 
+/**
+ * The authenticated user id that sync is currently targeting, used solely
+ * to scope confirmed-baseline commits (Codex P1, 3rd round) — see
+ * confirmedSnapshotKeyForIdentity's own doc. null while signed out or
+ * before the session has resolved; doPush() skips the confirmed-baseline
+ * commit step entirely when null (it never guesses an identity).
+ * Updated by setSyncUserId().
+ */
+let currentSyncUserId: string | null = null;
+
 // ── setSyncProfileId ──────────────────────────────────────────────────────────
 
 /**
@@ -239,6 +302,25 @@ export function setSyncProfileId(profileId: string): void {
   // Profile changed — cancel any pending work for the old profile.
   cancelScheduledSync();
   currentSyncProfileId = profileId;
+}
+
+// ── setSyncUserId ─────────────────────────────────────────────────────────────
+
+/**
+ * Set the authenticated user id that sync's confirmed-baseline commits
+ * should target — call this on every auth transition (each page's
+ * auth-transition effect, right where sessionStatus is read), passing
+ * `session?.user?.id ?? session?.user?.email ?? null` (the same resolution
+ * order the server uses — see getUserId() in api/sync/planner/route.ts).
+ * If the identity changes (including transitioning to/from null on
+ * sign-out/sign-in), any pending debounced push is cancelled first — a
+ * push scheduled under a PRIOR identity must never be allowed to commit a
+ * confirmed baseline under a NEW one, or vice versa.
+ */
+export function setSyncUserId(userId: string | null): void {
+  if (userId === currentSyncUserId) return;
+  cancelScheduledSync();
+  currentSyncUserId = userId;
 }
 
 // ── scheduleSync ──────────────────────────────────────────────────────────────
@@ -277,13 +359,21 @@ export function cancelScheduledSync(): void {
  * Pull the latest combined planner blob for the signed-in user + profile.
  *
  * Returns:
- *   SyncedPlannerPayload — a valid combined planner payload was parsed
- *   null                 — no usable planner payload could be parsed; this
- *                          includes: 204 No Content (nothing stored yet),
- *                          a payload that failed JSON parsing or shape
- *                          validation in parseSyncedPlannerPayload(), or
- *                          a legacy plans-only response that could not be
- *                          normalized into the combined shape
+ *   SyncedPlannerPayload & { revision: number | null } — a valid combined
+ *     planner payload was parsed. `revision` is the server-authoritative
+ *     ordering value for this exact response (see api/sync/planner/
+ *     route.ts's module doc) — null only if the server response
+ *     unexpectedly omitted it (defensive; should not happen against this
+ *     server build). Callers must treat a null `revision` as "cannot
+ *     safely advance the confirmed baseline from this response" and skip
+ *     the commitConfirmedBaseline() call entirely for it — never
+ *     substitute 0 or any other sentinel, which could wrongly compare as
+ *     "older" or, worse, coincidentally valid.
+ *   null — no usable planner payload could be parsed; this includes: 204
+ *     No Content (nothing stored yet), a payload that failed JSON parsing
+ *     or shape validation in parseSyncedPlannerPayload(), or a legacy
+ *     plans-only response that could not be normalized into the combined
+ *     shape
  *
  * Throws on:
  *   non-OK HTTP responses (401, 5xx, etc.)
@@ -292,15 +382,20 @@ export function cancelScheduledSync(): void {
  * Callers must catch to distinguish "unknown failure" from "known empty".
  * A thrown error must NOT reopen the push gate — cloud state is uncertain.
  */
-export async function pullPlanner(profileId: string): Promise<SyncedPlannerPayload | null> {
+export async function pullPlanner(
+  profileId: string
+): Promise<(SyncedPlannerPayload & { revision: number | null }) | null> {
   const url = `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`;
   const res = await fetch(url, { credentials: "include" });
   // Definitively empty — no planner stored for this user+profile yet
   if (res.status === 204) return null;
   // Any other non-OK status is a real failure; let it throw
   if (!res.ok) throw new Error(`sync/planner GET ${res.status}`);
-  const data = (await res.json()) as { plannerJson?: unknown };
-  return parseSyncedPlannerPayload(data.plannerJson ?? null);
+  const data = (await res.json()) as { plannerJson?: unknown; revision?: unknown };
+  const parsed = parseSyncedPlannerPayload(data.plannerJson ?? null);
+  if (!parsed) return null;
+  const revision = typeof data.revision === "number" && Number.isFinite(data.revision) ? data.revision : null;
+  return { ...parsed, revision };
 }
 
 /**
@@ -451,9 +546,11 @@ async function doPush(): Promise<void> {
     return;
   }
 
-  // Capture the profile at push-start so all writes target the originating
-  // profile unconditionally, even if the user switches profiles mid-flight.
+  // Capture the profile and user identity at push-start so all writes
+  // target the originating profile/identity unconditionally, even if the
+  // user switches profiles or signs into a different account mid-flight.
   const profileId = currentSyncProfileId;
+  const userId = currentSyncUserId;
 
   const payload = buildPayloadFromStorage(profileId);
   if (!payload) return;
@@ -492,15 +589,37 @@ async function doPush(): Promise<void> {
       try {
         localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
       } catch {}
-      // SH.2 architecture — record the EXACT payload this request just sent
-      // as the new cloud-confirmed snapshot, using the same `body` string
-      // that was transmitted (never a fresh re-read of the mutable plans/
-      // lightning/days storage keys, which may already hold a newer edit
-      // made after this push started). Best-effort, same tier as the
-      // timestamp write above — see getConfirmedSnapshot()'s own doc.
-      try {
-        localStorage.setItem(confirmedSnapshotKeyForProfile(profileId), body);
-      } catch {}
+      // SH.2 architecture (Codex P1, 3rd round) — commit the EXACT payload
+      // this request just sent as a CANDIDATE confirmed snapshot, gated by
+      // the server-issued `revision` in this response (never blind
+      // overwrite, never response-arrival order — see
+      // commitConfirmedBaseline's own doc). Requires a known userId: if
+      // this push somehow completed without one (should not happen, since
+      // scheduleSync() is only ever invoked while authenticated), there is
+      // no safe identity to commit under, so the confirmed-baseline step
+      // is skipped entirely — lastSyncedAt/status above still record the
+      // push's success for UI purposes regardless.
+      if (userId) {
+        try {
+          const responseData = (await res.json()) as { revision?: unknown };
+          const revision =
+            typeof responseData.revision === "number" && Number.isFinite(responseData.revision)
+              ? responseData.revision
+              : null;
+          if (revision !== null) {
+            commitConfirmedBaseline(userId, profileId, revision, {
+              plans: payload.plans,
+              lightning: payload.lightning,
+              days: payload.days,
+            });
+          }
+        } catch {
+          // Response body unreadable/malformed — cannot safely commit a
+          // confirmed baseline without a known revision; the push itself
+          // still succeeded (res.ok), only the local confirmation record
+          // is skipped this time.
+        }
+      }
       // Status writes are best-effort; event dispatch MUST always execute.
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");

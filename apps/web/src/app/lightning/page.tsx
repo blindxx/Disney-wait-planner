@@ -23,6 +23,7 @@ import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActivePro
 import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
+  setSyncUserId,
   scheduleSync,
   pullPlanner,
   registerUnloadSync,
@@ -444,6 +445,11 @@ export default function LightningPage() {
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   // Stable ref to the active profile id — used by sync effects.
   const activeProfileIdRef = useRef("default");
+  // SH.2 architecture (Codex P1, 3rd round) — stable ref to the currently
+  // authenticated user's identity, used ONLY to scope confirmed-baseline
+  // reads/writes. Mirrors plans/page.tsx exactly — see its own detailed
+  // doc for the full rationale.
+  const activeUserIdRef = useRef<string | null>(null);
   // Phase 8.3 — per-profile activeDayId key. Phase 9.4 — the day picker on this
   // page now also writes this key (handleSelectDay), shared with My Plans.
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
@@ -538,15 +544,17 @@ export default function LightningPage() {
   // re-derived at resolution time, never mutated for the lifetime of that
   // one pull.
   //
-  // Reads getConfirmedSnapshot(profileId) — the durable, profile-scoped
-  // record syncHelper's doPush() writes verbatim from the exact payload it
-  // just successfully sent — and, when one exists, uses it AS this pull's
-  // baseline outright: never a fresh read of the current plans/lightning/
-  // days storage keys (Codex P1 #1, fixed last round and preserved here).
-  // getConfirmedSnapshot() is a plain localStorage read of a key shared
-  // across every tab for this profile, so no cross-tab message-passing is
-  // needed — a DIFFERENT tab's confirmed push is visible here as soon as
-  // this function is called, with no separate listener required.
+  // Reads getConfirmedSnapshot(userId, profileId) — the durable,
+  // user+profile-scoped record syncHelper's doPush() (and this page's own
+  // pull-commit call below) write from the exact revision-gated payload
+  // most recently accepted as newest — and, when one exists, uses it AS
+  // this pull's baseline outright: never a fresh read of the current
+  // plans/lightning/days storage keys (Codex P1 #1, fixed last round and
+  // preserved here). getConfirmedSnapshot() is a plain localStorage read
+  // of a key shared across every tab for this exact user+profile pair, so
+  // no cross-tab message-passing is needed — a DIFFERENT tab's confirmed
+  // push is visible here as soon as this function is called, with no
+  // separate listener required.
   //
   // When no confirmed snapshot exists yet, falls back to
   // itemsBaselineRef/daysBaselineRef/plansRawBaselineRef — the mount-time
@@ -556,20 +564,26 @@ export default function LightningPage() {
     days: string[];
     plansRaw: string | null;
   } {
-    const confirmed = getConfirmedSnapshot(activeProfileIdRef.current);
+    // Codex P1 (3rd round) — no durable confirmation can be read without a
+    // known authenticated identity (see activeUserIdRef's own doc); falls
+    // back to the in-memory refs exactly as when no confirmed snapshot
+    // exists yet.
+    const confirmed = activeUserIdRef.current
+      ? getConfirmedSnapshot(activeUserIdRef.current, activeProfileIdRef.current)
+      : null;
     return {
       items: confirmed
-        ? migrateLightningDayIds(confirmed.lightning.items as LightningItem[])
+        ? migrateLightningDayIds(confirmed.snapshot.lightning.items as LightningItem[])
         : itemsBaselineRef.current,
-      days: confirmed?.days ?? daysBaselineRef.current,
-      plansRaw: confirmed ? JSON.stringify(confirmed.plans) : plansRawBaselineRef.current,
+      days: confirmed?.snapshot.days ?? daysBaselineRef.current,
+      plansRaw: confirmed ? JSON.stringify(confirmed.snapshot.plans) : plansRawBaselineRef.current,
     };
   }
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
 
   // Auth session — used to trigger cloud pull on sign-in.
-  const { status: sessionStatus } = useSession();
+  const { data: session, status: sessionStatus } = useSession();
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Same semantics as plans/page.tsx syncReady.
   const [syncReady, setSyncReady] = useState(false);
@@ -676,6 +690,13 @@ export default function LightningPage() {
     }
     // authenticated
     if (!loaded) return;
+    // SH.2 architecture (Codex P1, 3rd round) — resolve and record this
+    // session's authenticated identity BEFORE anything else in this
+    // branch. Mirrors plans/page.tsx exactly — see its own detailed doc.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const resolvedUserId = (session?.user as any)?.id ?? session?.user?.email ?? null;
+    activeUserIdRef.current = resolvedUserId;
+    setSyncUserId(resolvedUserId);
     cancelScheduledSync();
     let cancelled = false;
     // SH.2 architecture — no ref resets here. Winner selection for this
@@ -869,16 +890,21 @@ export default function LightningPage() {
         // pushed back over the cloud's actual value.
         if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
 
-        // SH.2 architecture (Codex P1, 1st round) — commit the DURABLE
-        // confirmed baseline for whichever domain(s) this pull determined
-        // were cloud-won AND successfully persisted. This is what makes a
-        // pull-hydrated domain just as "confirmed" as a pushed one, so a
-        // LATER pull's captureConfirmedSnapshotForPull() never
-        // misclassifies it as an unsynced local edit — see
+        // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
+        // DURABLE confirmed baseline for whichever domain(s) this pull
+        // determined were cloud-won AND successfully persisted. This is
+        // what makes a pull-hydrated domain just as "confirmed" as a
+        // pushed one, so a LATER pull's captureConfirmedSnapshotForPull()
+        // never misclassifies it as an unsynced local edit — see
         // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
         // domains are simply omitted: their prior confirmation status is
         // left untouched, exactly matching this pull's own conflict
         // decision (never "retroactively" changed by a later event).
+        // 3rd round: the commit is now identity-scoped (activeUserIdRef)
+        // and revision-gated — it's skipped entirely when we don't know
+        // which account this is for, or when the GET response carried no
+        // server revision, since an un-ordered commit could otherwise
+        // regress a newer confirmed snapshot written by a concurrent push.
         const acceptedForBaseline: {
           plans?: { version: number; items: unknown[] };
           lightning?: { version: number; items: unknown[] };
@@ -900,13 +926,27 @@ export default function LightningPage() {
         if (itemsCloudWon && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
           acceptedForBaseline.days = winningDays;
         }
-        commitConfirmedBaseline(activeProfileIdRef.current, acceptedForBaseline);
+        if (activeUserIdRef.current && planner?.revision != null) {
+          commitConfirmedBaseline(
+            activeUserIdRef.current,
+            activeProfileIdRef.current,
+            planner.revision,
+            acceptedForBaseline
+          );
+        }
       })
       .catch(() => {
         if (cancelled) return;
         // Cloud state is uncertain — keep push gate closed.
       });
     return () => { cancelled = true; };
+  // `session` is deliberately excluded: it changes identity on next-auth's
+  // periodic background revalidation even when the actual user id has not
+  // changed, and this effect must only re-run on genuine sessionStatus/
+  // loaded transitions — not on every such revalidation. The
+  // resolvedUserId read above is only ever consulted once sessionStatus is
+  // "authenticated", at which point `session` is guaranteed populated.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionStatus, loaded]);
 
   // Register a best-effort sendBeacon push on page unload.

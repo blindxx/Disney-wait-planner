@@ -145,6 +145,123 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
 // ===== CLIENT-SIDE CONFIRMED-BASELINE COMMIT (SH.2) =====
 
 /**
+ * SH.2 architecture — the durably-stored record of "the exact planner
+ * state most recently acknowledged by the server for this authenticated
+ * user + profile, ordered by server-authoritative revision" (see
+ * syncHelper.ts's confirmedSnapshotKeyForIdentity/getConfirmedSnapshot/
+ * commitConfirmedBaseline). `revision` is the server's
+ * `user_planner.revision` value (see api/sync/planner/route.ts) that
+ * produced `snapshot` — a monotonically increasing integer, NEVER a
+ * client timestamp or response-arrival-order proxy. Comparing two
+ * ConfirmedPlannerSnapshots' `revision` values is always meaningful for
+ * the SAME (user, profile) pair: strictly higher always means "the server
+ * accepted this write/read later", regardless of which tab or request
+ * observed it first (Codex P1, 3rd round).
+ */
+export interface ConfirmedPlannerSnapshot {
+  revision: number;
+  snapshot: SyncedPlannerPayload;
+}
+
+/**
+ * Parse and validate a raw unknown value as a ConfirmedPlannerSnapshot.
+ * Returns null if the shape is missing or invalid — callers treat null as
+ * "nothing confirmed yet", not as an error. A non-finite/non-numeric
+ * `revision` is rejected outright (never coerced to 0 or any other
+ * sentinel) since a malformed revision can never be safely compared.
+ */
+export function parseConfirmedPlannerSnapshot(raw: unknown): ConfirmedPlannerSnapshot | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  const snapshot = parseSyncedPlannerPayload(r.snapshot);
+  if (!snapshot) return null;
+  return { revision: r.revision, snapshot };
+}
+
+/**
+ * Reference cases for parseConfirmedPlannerSnapshot() — the gate every page
+ * consumer (getConfirmedSnapshot in syncHelper.ts) goes through before
+ * trusting a stored confirmedSnapshot localStorage value as a pull baseline
+ * or as nextConfirmedBaseline()'s `currentConfirmed` input. A malformed
+ * `revision` must be rejected outright (never coerced to 0) since
+ * nextConfirmedBaseline()'s whole ordering guarantee depends on comparing
+ * two genuine server-issued revisions — treating a corrupted record as
+ * revision 0 would make it look OLDER than everything, silently discarding
+ * a real confirmation instead of just refusing to trust the corrupted one.
+ * Run from Node:
+ *   import { DEV_PARSE_CONFIRMED_SNAPSHOT_CASES, parseConfirmedPlannerSnapshot } from "@/lib/syncPayload";
+ *   DEV_PARSE_CONFIRMED_SNAPSHOT_CASES.forEach(c => {
+ *     const got = parseConfirmedPlannerSnapshot(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_CONFIRMED_SNAPSHOT_CASES: Array<{
+  name: string;
+  raw: unknown;
+  expected: ConfirmedPlannerSnapshot | null;
+}> = [
+  {
+    name: "valid confirmed snapshot — parses as-is",
+    raw: {
+      revision: 12,
+      snapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
+    },
+    expected: {
+      revision: 12,
+      snapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
+    },
+  },
+  {
+    name: "revision 0 is a legitimate value, not treated as missing",
+    raw: {
+      revision: 0,
+      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    },
+    expected: {
+      revision: 0,
+      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    },
+  },
+  {
+    name: "missing revision — rejected, never coerced to 0",
+    raw: { snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } } },
+    expected: null,
+  },
+  {
+    name: "non-numeric revision — rejected",
+    raw: {
+      revision: "6",
+      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    },
+    expected: null,
+  },
+  {
+    name: "non-finite revision (NaN) — rejected",
+    raw: {
+      revision: NaN,
+      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    },
+    expected: null,
+  },
+  {
+    name: "revision valid but embedded snapshot invalid — whole record rejected",
+    raw: { revision: 3, snapshot: { version: 2, plans: {}, lightning: {} } },
+    expected: null,
+  },
+  {
+    name: "non-object raw — rejected",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+];
+
+/**
  * SH.2 architecture — a domain's confirmed baseline represents "the state
  * currently accepted as synchronized for this domain", not merely "the
  * last successful PUT payload". A PUSH is one way a domain becomes
@@ -164,146 +281,256 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
  * status is left exactly as it was (see the pull effects in
  * plans/page.tsx and lightning/page.tsx for the per-domain conditions).
  *
- * `currentConfirmed` null (nothing confirmed yet for this profile) starts
- * from an empty base rather than failing — a profile's first-ever
- * confirmation can originate from a pull's cloud-hydration just as validly
- * as from a push.
+ * Codex P1 fix (3rd round) — `revision` is the server-authoritative
+ * ordering signal for the response this `accepted` data came from (a
+ * push's PUT response, or a pull's GET response). Returns `null` — a
+ * REJECTION, applying nothing — whenever `currentConfirmed` already exists
+ * AND its `revision` is `>= revision`: an older (or duplicate) server
+ * write/read can never regress or redundantly re-apply a snapshot the
+ * confirmed record has already moved past, REGARDLESS of which order two
+ * concurrent responses happen to arrive in on the client (this is what
+ * makes the final confirmed state deterministic from server commit order
+ * alone, never response arrival order). The whole candidate commit is
+ * rejected atomically when stale — never partially applied — since
+ * `accepted`'s domains all describe ONE specific server response; a stale
+ * response teaches nothing new about ANY domain.
+ *
+ * `currentConfirmed` null (nothing confirmed yet for this profile) always
+ * accepts — a profile's first-ever confirmation can originate from a
+ * pull's cloud-hydration just as validly as from a push.
  */
 export function nextConfirmedBaseline(
-  currentConfirmed: SyncedPlannerPayload | null,
+  currentConfirmed: ConfirmedPlannerSnapshot | null,
+  revision: number,
   accepted: {
     plans?: { version: number; items: unknown[] };
     lightning?: { version: number; items: unknown[] };
     days?: string[];
   }
-): SyncedPlannerPayload {
-  const base: SyncedPlannerPayload = currentConfirmed ?? {
+): ConfirmedPlannerSnapshot | null {
+  if (currentConfirmed && revision <= currentConfirmed.revision) {
+    return null;
+  }
+  const baseSnapshot: SyncedPlannerPayload = currentConfirmed?.snapshot ?? {
     version: 1,
     plans: { version: 1, items: [] },
     lightning: { version: 1, items: [] },
   };
-  const days = accepted.days ?? base.days;
+  const days = accepted.days ?? baseSnapshot.days;
   return {
-    version: 1,
-    plans: accepted.plans ?? base.plans,
-    lightning: accepted.lightning ?? base.lightning,
-    ...(days ? { days } : {}),
+    revision,
+    snapshot: {
+      version: 1,
+      plans: accepted.plans ?? baseSnapshot.plans,
+      lightning: accepted.lightning ?? baseSnapshot.lightning,
+      ...(days ? { days } : {}),
+    },
   };
 }
 
 /**
- * Reference cases for nextConfirmedBaseline() — the per-domain merge rule
- * that closes the Codex P1 "cloud-hydrated state can be misclassified as
- * an unsynced local edit by a later pull" finding: a pull-accepted domain
- * must durably advance the SAME confirmed record a push would, without
- * ever touching a domain it didn't itself resolve this pull. Run from
- * Node:
+ * Reference cases for nextConfirmedBaseline() — the per-domain,
+ * revision-gated merge rule that closes two Codex P1 findings: (1) a
+ * pull-accepted domain must durably advance the SAME confirmed record a
+ * push would, without ever touching a domain it didn't itself resolve
+ * this pull; (2) an older server write's response arriving after a newer
+ * one must never regress the confirmed record, regardless of arrival
+ * order. Run from Node:
  *   import { DEV_NEXT_CONFIRMED_BASELINE_CASES, nextConfirmedBaseline } from "@/lib/syncPayload";
  *   DEV_NEXT_CONFIRMED_BASELINE_CASES.forEach(c => {
- *     const got = nextConfirmedBaseline(c.currentConfirmed, c.accepted);
+ *     const got = nextConfirmedBaseline(c.currentConfirmed, c.revision, c.accepted);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export const DEV_NEXT_CONFIRMED_BASELINE_CASES: Array<{
   name: string;
-  currentConfirmed: SyncedPlannerPayload | null;
+  currentConfirmed: ConfirmedPlannerSnapshot | null;
+  revision: number;
   accepted: {
     plans?: { version: number; items: unknown[] };
     lightning?: { version: number; items: unknown[] };
     days?: string[];
   };
-  expected: SyncedPlannerPayload;
+  expected: ConfirmedPlannerSnapshot | null;
 }> = [
   {
-    name: "nothing confirmed yet, plans accepted from a pull — starts a fresh confirmed record",
+    name: "nothing confirmed yet, plans accepted from a pull — starts a fresh confirmed record at that revision",
     currentConfirmed: null,
+    revision: 1,
     accepted: { plans: { version: 1, items: ["p1"] } },
     expected: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: [] },
+      revision: 1,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: [] },
+      },
     },
   },
   {
-    name: "plans accepted — lightning and days untouched, keep whatever was already confirmed",
+    name: "plans accepted at a newer revision — lightning and days untouched, keep whatever was already confirmed",
     currentConfirmed: {
-      version: 1,
-      plans: { version: 1, items: ["old"] },
-      lightning: { version: 1, items: ["ll1"] },
-      days: ["day-1", "day-2"],
+      revision: 5,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["old"] },
+        lightning: { version: 1, items: ["ll1"] },
+        days: ["day-1", "day-2"],
+      },
     },
+    revision: 6,
     accepted: { plans: { version: 1, items: ["new"] } },
     expected: {
-      version: 1,
-      plans: { version: 1, items: ["new"] },
-      lightning: { version: 1, items: ["ll1"] },
-      days: ["day-1", "day-2"],
+      revision: 6,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["new"] },
+        lightning: { version: 1, items: ["ll1"] },
+        days: ["day-1", "day-2"],
+      },
     },
   },
   {
-    name: "days accepted alone (e.g. days-only cloud win) — plans/lightning untouched",
+    name: "Codex P1 (3rd round) — an OLDER revision arriving after a newer one is confirmed is rejected outright (null), regardless of accepted content",
     currentConfirmed: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: ["ll1"] },
-      days: ["day-1"],
+      revision: 6,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["new-B"] },
+        lightning: { version: 1, items: [] },
+      },
     },
+    revision: 5,
+    accepted: { plans: { version: 1, items: ["stale-A"] } },
+    expected: null,
+  },
+  {
+    name: "Codex P1 (3rd round) — a DUPLICATE (equal) revision is also rejected, never re-applied",
+    currentConfirmed: {
+      revision: 6,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["B"] },
+        lightning: { version: 1, items: [] },
+      },
+    },
+    revision: 6,
+    accepted: { plans: { version: 1, items: ["B-again"] } },
+    expected: null,
+  },
+  {
+    name: "Codex P1 (3rd round) — responses arriving A(rev5) then B(rev6): B commits cleanly over A",
+    currentConfirmed: {
+      revision: 5,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["A"] },
+        lightning: { version: 1, items: [] },
+      },
+    },
+    revision: 6,
+    accepted: { plans: { version: 1, items: ["B"] } },
+    expected: {
+      revision: 6,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["B"] },
+        lightning: { version: 1, items: [] },
+      },
+    },
+  },
+  {
+    name: "days accepted alone at a newer revision (e.g. days-only cloud win) — plans/lightning untouched",
+    currentConfirmed: {
+      revision: 2,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: ["ll1"] },
+        days: ["day-1"],
+      },
+    },
+    revision: 3,
     accepted: { days: ["day-1", "day-2"] },
     expected: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: ["ll1"] },
-      days: ["day-1", "day-2"],
+      revision: 3,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: ["ll1"] },
+        days: ["day-1", "day-2"],
+      },
     },
   },
   {
     name: "lightning accepted via the OPPOSITE page's own hydration write (Plans committing Lightning's baseline)",
     currentConfirmed: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: ["stale"] },
+      revision: 4,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: ["stale"] },
+      },
     },
+    revision: 7,
     accepted: { lightning: { version: 1, items: ["fresh"] } },
     expected: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: ["fresh"] },
+      revision: 7,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: ["fresh"] },
+      },
     },
   },
   {
-    name: "all three accepted together (a clean, fully cloud-sourced pull) — whole record replaced",
+    name: "all three accepted together at a newer revision (a clean, fully cloud-sourced pull) — whole record replaced",
     currentConfirmed: {
-      version: 1,
-      plans: { version: 1, items: ["old"] },
-      lightning: { version: 1, items: ["old"] },
-      days: ["day-1"],
+      revision: 1,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["old"] },
+        lightning: { version: 1, items: ["old"] },
+        days: ["day-1"],
+      },
     },
+    revision: 9,
     accepted: {
       plans: { version: 1, items: ["new"] },
       lightning: { version: 1, items: ["new"] },
       days: ["day-1", "day-2"],
     },
     expected: {
-      version: 1,
-      plans: { version: 1, items: ["new"] },
-      lightning: { version: 1, items: ["new"] },
-      days: ["day-1", "day-2"],
+      revision: 9,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["new"] },
+        lightning: { version: 1, items: ["new"] },
+        days: ["day-1", "day-2"],
+      },
     },
   },
   {
-    name: "nothing accepted (all domains won locally this pull) — currentConfirmed passes through byte-identical",
+    name: "empty accepted at a newer revision — snapshot passes through byte-identical, only revision advances (callers normally skip this call entirely; pinned here for the pure function's own behavior)",
     currentConfirmed: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: ["ll1"] },
-      days: ["day-1"],
+      revision: 1,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: ["ll1"] },
+        days: ["day-1"],
+      },
     },
+    revision: 2,
     accepted: {},
     expected: {
-      version: 1,
-      plans: { version: 1, items: ["p1"] },
-      lightning: { version: 1, items: ["ll1"] },
-      days: ["day-1"],
+      revision: 2,
+      snapshot: {
+        version: 1,
+        plans: { version: 1, items: ["p1"] },
+        lightning: { version: 1, items: ["ll1"] },
+        days: ["day-1"],
+      },
     },
   },
 ];
