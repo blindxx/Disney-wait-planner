@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, daySort, removedDayIds, confirmRemovedDayIds } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, pickWinningDays, pickWinningItems, reconcileItemsWithDays } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -27,6 +27,8 @@ import {
   pullPlanner,
   registerUnloadSync,
   cancelScheduledSync,
+  SYNC_STATE_CHANGED_EVENT,
+  getSyncStateForProfile,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -489,56 +491,51 @@ export default function LightningPage() {
   // Stable ref used inside storage event handler to get current safeActiveDayId
   // without adding it to the effect dependency array.
   const safeActiveDayIdRef = useRef("day-1");
-  // SH.2 — Conflict Domains: split from a single combined localEditRef into
-  // one ref per synced domain (Lightning items, days), mirroring the same
-  // split in plans/page.tsx. A local edit to one domain only protects that
-  // domain from stale cloud hydration and does not block the other.
-  const localLightningEditRef = useRef(false);
-  const localDaysEditRef = useRef(false);
-  // Codex P1 fix — tracks whether another tab wrote this profile's shared
-  // Plans storage key while this tab's pull is in flight. Lightning doesn't
-  // own the Plans domain, so it has no localPlansEditRef of its own — but
-  // the pull's Phase 7.6.3 hydration write below unconditionally overwrites
-  // the shared Plans key with (possibly stale) cloud plans data, which
-  // would otherwise clobber a genuinely newer cross-tab Plans edit made in
-  // another tab during this same window. Reset to false at the start of
-  // each pull, mirroring the domain refs.
-  const crossTabPlansChangedRef = useRef(false);
-  // Codex P2 fix — day IDs a genuine cross-tab days[] event told this tab
-  // were REMOVED (via removedDayIds()), pending independent CONTENT
-  // confirmation from a fresh Plans snapshot — not merely "a plans event
-  // was observed". Remove Day writes `days` synchronously but its
-  // plans-item deletion is persisted slightly later (via the items-persist
-  // effect in the OTHER tab) — so this tab can receive the `days`
-  // membership event, and even have its own pull resolve, entirely BEFORE
-  // the corresponding `plans` storage event arrives. In that gap,
-  // `allPlans`/planDiscoveredDayIds below (read fresh from the shared
-  // plans key at pull-resolution time) can still reflect the OLD,
-  // pre-deletion plan items, so a removed day discovered only through
-  // that stale sibling snapshot must not be trusted as a legitimate
-  // addition to days[].
+  // SH.2 architecture — reconciliation-from-authoritative-state model,
+  // mirroring plans/page.tsx (see its own detailed doc for the full
+  // rationale). Repeated Codex findings on the previous ref-per-event-type
+  // approach (localLightningEditRef/localDaysEditRef reset-on-pull-start
+  // discarding a pre-existing unpushed edit; a permanent removed-day
+  // tombstone in pendingRemovedDayIdsRef that could blacklist a
+  // legitimately REUSED day ID; this page's own items able to re-add a
+  // day another tab had already removed, before the coupled Lightning
+  // deletion here happened to land) all traced back to the same root
+  // cause: inferring "did local change" from whether/when a 'storage'
+  // event fired, rather than from local storage's own content.
+  // localStorage is the device-local authority; a 'storage' event is only
+  // ever a notification, never proof of ordering or synchronization.
   //
-  // A previous version of this fix cleared staleness on ANY observed
-  // `plans`-key event, which is wrong with 3+ tabs: an unrelated/stale
-  // plans write from a THIRD tab can arrive before the removing tab's own
-  // coupled write, falsely "confirming" a removal that hasn't actually
-  // been reflected yet (Codex P2). Entries here instead clear only via
-  // confirmRemovedDayIds() — content evidence that a freshly-read plans
-  // snapshot genuinely no longer references the day — never merely
-  // because some plans write happened. Day IDs are never reused (see
-  // removedDayIds()'s own doc in crossDayChecks.ts), so a pending entry
-  // is always safe to keep — there is no "wait forever" cost, and no
-  // separate handling is needed for pure additions (Add Day/Duplicate
-  // Day): a newly-added day's absence from a stale plans snapshot is
-  // expected and benign, never evidence of staleness, so nothing is ever
-  // tracked here for it. Deliberately NOT reset at the start of a new
-  // pull cycle like the other conflict refs — "a new pull started" is not
-  // proof the sibling plans write has landed, and correctness here must
-  // not depend on enough wall-clock time having passed since the
-  // membership change (Codex: do not rely on timing). A pure reorder
-  // never adds anything here — same-membership reorders don't invalidate
-  // sibling-derived day IDs.
-  const pendingRemovedDayIdsRef = useRef<Set<string>>(new Set());
+  // itemsBaselineRef/daysBaselineRef hold this page's own last-confirmed
+  // local Lightning items / days[] — captured once at mount, and updated
+  // ONLY in two situations: (a) a pull decides cloud wins a domain (local
+  // was unchanged, so adopting cloud's value is safe and the baseline
+  // should now reflect it), or (b) a push is confirmed successful (see the
+  // SYNC_STATE_CHANGED_EVENT listener below) — NEVER merely because a pull
+  // effect re-ran, and NEVER when local won a domain's conflict (that
+  // domain's edit may still be unpushed; only a confirmed push proves it's
+  // safe to stop protecting it). Each pull re-reads CURRENT local storage
+  // fresh and compares it against these stable baselines
+  // (pickWinningDays/pickWinningItems in crossDayChecks.ts) to determine,
+  // independently per domain, whether it changed locally (before OR during
+  // the pull, same-tab OR cross-tab) — see the pull effect below.
+  const itemsBaselineRef = useRef<LightningItem[]>([]);
+  const daysBaselineRef = useRef<string[]>([]);
+  // Same baseline concept, applied to the OPPOSITE dataset (Plans' raw
+  // storage) this page hydrates on every pull (Phase 7.6.3). Captured as
+  // the raw string (Lightning never parses/normalizes Plans items) so
+  // comparison is a simple, exact string check. A null baseline (key
+  // absent at mount) legitimately compares unequal to any later non-null
+  // read.
+  const plansRawBaselineRef = useRef<string | null>(null);
+  // Last lastSyncedAt timestamp this page has already reacted to — lets the
+  // SYNC_STATE_CHANGED_EVENT listener below tell a genuinely NEW successful
+  // push apart from an unrelated status transition (e.g. a 401 idle bounce,
+  // or another profile's push) that happens to leave status "idle" without
+  // actually completing a new push for THIS profile. Initialized from the
+  // value already on disk at mount (see the load effect below) so a stale
+  // pre-existing timestamp from a prior session is never mistaken for a
+  // fresh completion on the very first event this page observes.
+  const lastSyncedSeenRef = useRef<string | null>(null);
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
 
@@ -584,7 +581,8 @@ export default function LightningPage() {
     setActiveDayId(normalizeDayId(localStorage.getItem(activeDayKeyRef.current)));
     // Phase 8.3.2 — load known planner days for safe display-day validation.
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
-    setKnownDays(loadKnownDays(daysKeyRef.current));
+    const loadedKnownDays = loadKnownDays(daysKeyRef.current);
+    setKnownDays(loadedKnownDays);
     // Phase 8.8 — load day park overrides and metadata (read-only context display).
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
     setDayParks(loadDayParks(dayParksKeyRef.current));
@@ -597,19 +595,36 @@ export default function LightningPage() {
     setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
-    setItems(loadFromStorage(lightningKeyRef.current));
+    const loadedItems = loadFromStorage(lightningKeyRef.current);
+    setItems(loadedItems);
+    // SH.2 architecture — capture this page's own last-confirmed-local
+    // baselines from the values just loaded above. Every future pull
+    // compares a FRESH read of local storage against these stable
+    // references (see itemsBaselineRef's own doc) rather than resetting
+    // an event-driven flag, so a pull that resolves before vs. after this
+    // effect finishes cannot matter — there is no window where "no
+    // baseline yet" could be misread as "nothing changed".
+    itemsBaselineRef.current = loadedItems;
+    daysBaselineRef.current = loadedKnownDays;
+    // Same baseline concept for the opposite (Plans) dataset this page
+    // hydrates on every pull — captured as the raw string since no
+    // parsing/normalization is needed for a page that doesn't own that
+    // domain.
+    try {
+      plansRawBaselineRef.current = localStorage.getItem(plansKeyRef.current);
+    } catch {
+      plansRawBaselineRef.current = null;
+    }
+    lastSyncedSeenRef.current = getSyncStateForProfile(currentProfileId).lastSyncedAt;
     setLoaded(true);
   }, []);
 
-  // Persist whenever items change (after initial load).
-  // Also marks localLightningEditRef so any in-flight pull sees the edit and
-  // skips overwriting it — scoped to the Lightning domain only, so it never
-  // blocks an unrelated in-flight cloud days[] application. Kept separate
-  // from the sync effect so syncReady state changes don't spuriously flip
-  // localLightningEditRef.
+  // Persist whenever items change (after initial load). SH.2 architecture —
+  // no ref-marking needed here: a pull's own fresh read of localStorage at
+  // resolution time (see the pull effect below) already reflects whatever
+  // this effect just wrote, compared against the stable itemsBaselineRef.
   useEffect(() => {
     if (!loaded) return;
-    localLightningEditRef.current = true;
     saveToStorage(items, lightningKeyRef.current);
   }, [items, loaded]);
 
@@ -636,271 +651,164 @@ export default function LightningPage() {
     if (!loaded) return;
     cancelScheduledSync();
     let cancelled = false;
-    // SH.2 — reset both domain local-edit guards so the upcoming pull starts
-    // with a clean slate. An edit to one domain never blocks applying the
-    // other domain's cloud result — see localLightningEditRef/localDaysEditRef.
-    localLightningEditRef.current = false;
-    localDaysEditRef.current = false;
-    // Codex P1 fix — reset alongside the domain refs so a foreign Plans
-    // write observed before this pull started never leaks into this pull's
-    // hydration decision.
-    crossTabPlansChangedRef.current = false;
+    // SH.2 architecture — no ref resets here. Winner selection for this
+    // pull is entirely a function of (a) itemsBaselineRef/daysBaselineRef
+    // (stable across this whole mount — see their own doc) and (b) fresh
+    // reads of local storage taken below, at resolution time. There is
+    // nothing to "reset" at pull start: resetting an event-driven flag
+    // here is exactly the mechanism that let a pre-existing, still-unpushed
+    // edit get silently discarded by a later pull (Codex finding).
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
     void pullPlanner(activeProfileIdRef.current)
       .then((planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
-        // Phase 11.2 Codex fix — day IDs discovered from Lightning items and
-        // from plan items are collected here and reconciled into knownDays
-        // in a single step below, rather than two independent sequential
-        // setKnownDays calls. Two independent merges each append their own
-        // newly-found IDs in isolation, which can interleave two unrelated
-        // discovery orders (e.g. Lightning's [day-1, day-3] then Plans'
-        // [day-2] landing as [day-1, day-3, day-2]) instead of the single
-        // deterministic fallback order My Plans uses for IDs with no
-        // persisted position.
-        let lightningDiscoveredDayIds: string[] = [];
-        let planDiscoveredDayIds: string[] = [];
-        // SH.2 — cloudLightningItems is derived once (pure, no state writes)
-        // whenever a valid cloud Lightning payload exists, independent of
-        // whether localLightningEditRef blocks applying it to `items` below.
+        // Codex fix — tracks whether the checked authoritative days[] write
+        // below failed. A failed write must not let syncReady reopen (it
+        // would leave a stale local order to be pushed back over cloud).
+        let daysWriteFailed = false;
         let cloudLightningItems: LightningItem[] | null = null;
         if (cloud) {
           // Phase 8.3 — normalize dayIds from cloud items so legacy items
           // (no dayId) are safely migrated to "day-1" on hydration.
           cloudLightningItems = migrateLightningDayIds(cloud.items as LightningItem[]);
         }
-        // Lightning domain: only apply cloud items if no local Lightning
-        // edits occurred while the pull was in flight. Either way, the sync
-        // gate still opens below so edits can push.
-        if (!localLightningEditRef.current && cloudLightningItems) {
-          setItems(cloudLightningItems);
-          // Phase 8.3.2 — Refresh knownDays after cloud pull so safeActiveDayId
-          // doesn't stay stale on a fresh device where Plans page hasn't yet
-          // written the days list to localStorage. New days are added, nothing
-          // is removed — see the single reconciliation step below.
+        const cloudDaysOrder = planner?.days;
+
+        // SH.2 architecture — read CURRENT local storage fresh, right now,
+        // for both domains this page owns. This is what actually closes
+        // the Codex findings: a domain's winner is determined by comparing
+        // this fresh read against a STABLE baseline (never reset merely
+        // because this effect re-ran), not by consulting a flag that could
+        // have been reset or never set at all. See pickWinningItems/
+        // pickWinningDays/reconcileItemsWithDays in crossDayChecks.ts (and
+        // their DEV_*_CASES) for the full model and its regression cases —
+        // mirrors plans/page.tsx exactly.
+        const currentItems = migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
+        const currentDays = loadKnownDays(daysKeyRef.current);
+
+        const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
+          itemsBaselineRef.current,
+          currentItems,
+          cloudLightningItems
+        );
+        const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
+          daysBaselineRef.current,
+          currentDays,
+          cloudDaysOrder
+        );
+        // Structural reconciliation: a day known at daysBaselineRef but
+        // absent from daysCandidate is authoritatively removed for this
+        // pull — any Lightning item referencing it is dropped, from
+        // EITHER candidate source, never re-added. This is what closes
+        // Codex finding #3 (Lightning re-adding a removed day before the
+        // coupled deletion here happened to land): the removal is detected
+        // from the days[] baseline/winner diff alone, independent of
+        // whether THIS page's own items read happened to be stale — see
+        // reconcileItemsWithDays's own doc.
+        const { items: winningLightningItems, days: winningDays } = reconcileItemsWithDays(
+          itemsCandidate,
+          daysBaselineRef.current,
+          daysCandidate
+        );
+
+        // Only touch React state when the winning result actually differs
+        // from what's already there — avoids an unnecessary re-render/
+        // persist-effect write on an ordinary no-conflict pull.
+        if (JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
+          setItems(winningLightningItems);
         }
-        // Codex P1 #2 fix — the days-domain safety net below must reconcile
-        // against whichever Lightning item dataset actually WON this pull's
-        // conflict decision, not always the cloud snapshot. When cloud
-        // Lightning applied (above), that's cloudLightningItems; when local
-        // Lightning won (localLightningEditRef.current) — or there was no
-        // valid cloud payload to apply at all — the winning dataset is the
-        // CURRENT local items, read via itemsRef (always up to date, unlike
-        // a stale closure) rather than the `items` state captured when this
-        // effect was created. Sourcing this from cloudLightningItems
-        // unconditionally would let a day referenced only by winning local
-        // Lightning items get dropped from days[] whenever local Lightning
-        // won, violating the invariant that every persisted item's dayId
-        // belongs to persisted days[].
-        const winningLightningItems =
-          !localLightningEditRef.current && cloudLightningItems ? cloudLightningItems : itemsRef.current;
-        if (winningLightningItems.length > 0) {
-          lightningDiscoveredDayIds = [...new Set(winningLightningItems.map((it) => it.dayId))];
+        // Cloud "won" the items domain when local hadn't changed and a
+        // valid cloud payload existed — safe to trust immediately as this
+        // page's new baseline (see itemsBaselineRef's own doc: updating
+        // here does not risk discarding an unpushed edit, since none
+        // exists in this branch).
+        const itemsCloudWon = !itemsChangedLocally && cloudLightningItems !== null;
+        if (itemsCloudWon) {
+          itemsBaselineRef.current = winningLightningItems;
         }
+
+        // Days domain — checked write only if the winning result actually
+        // differs from what's currently on disk.
+        if (winningDays.join(",") !== currentDays.join(",")) {
+          try {
+            localStorage.setItem(daysKeyRef.current, JSON.stringify(winningDays));
+          } catch {
+            daysWriteFailed = true;
+          }
+          setKnownDays(winningDays);
+          // Revalidate activeDayId against the newly winning order: another
+          // device may have removed the day this device currently has
+          // active (e.g. Remove Day there, synced here). Mirrors the exact
+          // same fallback plans/page.tsx already uses locally. Reads
+          // activeDayIdRef (not the closure `activeDayId`) since this async
+          // callback's closure could otherwise be stale relative to a
+          // day-picker switch the user made while the pull was in flight.
+          if (!winningDays.includes(activeDayIdRef.current)) {
+            const nextActiveDayId = winningDays[0];
+            setActiveDayId(nextActiveDayId);
+            try {
+              localStorage.setItem(activeDayKeyRef.current, nextActiveDayId);
+            } catch {}
+            // Refresh day-scoped Lightning state that depends on the active
+            // day — would otherwise stay stale, showing plan items for the
+            // now-invalid removed day, until some unrelated trigger (e.g.
+            // the user manually picking a day) happened to refresh it.
+            setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
+          }
+        }
+        // Days baseline updates only when NEITHER domain had a local,
+        // unconfirmed change this pull — i.e. winningDays is entirely
+        // cloud-sourced (including any additive extension, since that
+        // extension was itself derived from cloud-sourced winning items).
+        // If either domain won locally, any extension may be locally
+        // sourced too; leave the baseline stale so a later pull keeps
+        // protecting it until the SYNC_STATE_CHANGED_EVENT listener below
+        // confirms an actual push succeeded.
+        if (itemsCloudWon && !daysChangedLocally) {
+          daysBaselineRef.current = winningDays;
+        }
+
         // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
         // so sync pushes always include a complete dataset regardless of which page loads first.
         // Phase 7.6.4 — Hydration Guard: only open syncReady when the opposite-dataset
         // write succeeds. A failed write leaves the key missing, which syncHelper would
         // treat as empty data on the next push — potentially overwriting valid cloud state.
         let hydrationSucceeded = true;
-        if (typeof window !== "undefined") {
-          if (planner?.plans) {
-            // Codex P1 fix — skip only the WRITE when another tab wrote the
-            // shared Plans storage key while this pull was in flight
-            // (crossTabPlansChangedRef). That other tab's write is a
-            // genuinely newer local edit; this pull's cloud snapshot may
-            // predate it (the other tab's own push may not have reached
-            // the server yet), so applying it here would silently revert
-            // that edit in shared storage. Skipping is not a failure —
-            // hydrationSucceeded stays true.
-            if (!crossTabPlansChangedRef.current) {
-              try {
-                localStorage.setItem(
-                  profileKeysForPull.plans,
-                  JSON.stringify(planner.plans)
-                );
-              } catch {
-                hydrationSucceeded = false;
-              }
-            }
-            // Same-tab writes do not fire a storage event, so refresh
-            // planDayItems explicitly now. Reads fresh from the storage
-            // KEY (not from `planner.plans` directly) either way, so this
-            // correctly reflects whichever data is actually in storage —
-            // the cloud snapshot just written above, or the foreign tab's
-            // newer edit that write was skipped to protect.
-            setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
-            const allPlans = loadAllPlanItems(profileKeysForPull.plans);
-            setAllPlanItems(allPlans);
-            // Codex P2 fix — this is itself a fresh read of the current
-            // persisted plans snapshot, so it's a valid opportunity to
-            // confirm (or fail to confirm) any day IDs still pending in
-            // pendingRemovedDayIdsRef: cleared only when THIS content
-            // genuinely no longer references them, never merely because
-            // some plans data was read (an unrelated/third-tab snapshot
-            // that still contains a pending-removed day's items must
-            // leave it pending — see confirmRemovedDayIds()'s doc).
-            if (pendingRemovedDayIdsRef.current.size > 0) {
-              pendingRemovedDayIdsRef.current = new Set(
-                confirmRemovedDayIds(
-                  [...pendingRemovedDayIdsRef.current],
-                  allPlans.map((it) => it.dayId)
-                )
-              );
-            }
-            // Plan-only dayIds — merged together with lightningDiscoveredDayIds
-            // below so a fresh profile that hydrates cloud plans and Lightning
-            // together resolves one consistent fallback order.
-            //
-            // Codex P1/P2 fix — any day ID still pending in
-            // pendingRemovedDayIdsRef (per the confirmation just above) is
-            // excluded here. `allPlans` is read fresh from the shared
-            // plans key right here, but "fresh from storage right now" is
-            // not the same as "reflects a pending cross-tab days
-            // MEMBERSHIP change this tab already knows about" — Remove
-            // Day's plans-item deletion can be persisted by the other tab
-            // strictly later than its `days` write, so this read can
-            // still return the OLD, pre-deletion items even at this exact
-            // moment. Trusting those stale day IDs here would let the
-            // days-domain safety net below re-add a day another tab just
-            // removed. Lightning's OWN winning items
-            // (lightningDiscoveredDayIds above) are not subject to this —
-            // they come from this page's own protected domain, never from
-            // the suspect sibling snapshot.
-            if (allPlans.length > 0) {
-              planDiscoveredDayIds = [
-                ...new Set(
-                  allPlans
-                    .map((it) => it.dayId)
-                    .filter((id) => !pendingRemovedDayIdsRef.current.has(id))
-                ),
-              ];
-            }
-          }
-        }
-        const discoveredDayIds = [...new Set([...lightningDiscoveredDayIds, ...planDiscoveredDayIds])];
-        // Days domain: gated independently of the Lightning-domain guard
-        // above (SH.2) — a local days[] edit/reorder (including one
-        // discovered via a cross-tab storage write, see the onStorage
-        // listener below) protects cloud days from applying even when cloud
-        // Lightning items just applied, and vice versa.
-        //
-        // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
-        // authoritative, exactly as it is for My Plans' own pull handling:
-        // it reflects the pushing device's real persisted order, so it
-        // replaces knownDays outright rather than being merged into it.
-        //
-        // Codex fix (cross-tab race) — gated on !localDaysEditRef.current:
-        // without this, this branch ran unconditionally regardless of
-        // whether a newer local days[] had just arrived (another tab's
-        // reorder received while this pull was in flight), so a stale
-        // planner.days could still clobber it. Skipping here does not fail
-        // hydration — it just defers to the newer local state, exactly like
-        // skipping the items application does.
-        const cloudDaysOrder = planner?.days;
-        if (!localDaysEditRef.current && cloudDaysOrder && cloudDaysOrder.length > 0) {
-          const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
-          const resolvedDays = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
-          // Codex fix — persist the resolved authoritative order to the
-          // mounted profile's namespaced `days` key BEFORE the sync gate
-          // reopens below. syncHelper's push payload reads `days`
-          // exclusively from this localStorage key (buildPayloadFromStorage
-          // → readLocalDaysOrder) — Lightning previously only updated
-          // in-memory knownDays here, so on a fresh/stale device the
-          // correct cloud order was never written locally; the very next
-          // push (e.g. from adding a Lightning reservation, or even the
-          // items-hydration push below) would then read the still-stale
-          // or missing local `days` key and push it back to the cloud,
-          // silently reverting the order this pull just resolved. Writing
-          // it here — using the same daysKeyRef bound to this mounted
-          // profile at mount time — is required before syncReady reopens;
-          // a failed write must NOT reopen the gate, mirroring the plans
-          // hydration-write failure handling above.
-          if (typeof window !== "undefined") {
+        if (typeof window !== "undefined" && planner?.plans) {
+          // SH.2 architecture — same baseline-comparison model, applied to
+          // the opposite (Plans) dataset: a fresh raw read compared against
+          // plansRawBaselineRef (this page's own last-confirmed view of
+          // Plans' storage) tells whether another tab wrote a genuinely
+          // newer Plans edit since this page last confirmed it — skip the
+          // unconditional overwrite below if so, rather than reverting
+          // that edit with a possibly-stale cloud snapshot.
+          const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
+          const plansChangedLocally = currentPlansRaw !== plansRawBaselineRef.current;
+          if (!plansChangedLocally) {
+            const plansRawToWrite = JSON.stringify(planner.plans);
             try {
-              localStorage.setItem(daysKeyRef.current, JSON.stringify(resolvedDays));
+              localStorage.setItem(profileKeysForPull.plans, plansRawToWrite);
+              plansRawBaselineRef.current = plansRawToWrite;
             } catch {
               hydrationSucceeded = false;
             }
           }
-          setKnownDays((prev) => (resolvedDays.join(",") === prev.join(",") ? prev : resolvedDays));
-          // Codex fix — revalidate activeDayId against the newly
-          // authoritative order: another device may have removed the day
-          // this device currently has active (e.g. Remove Day there, synced
-          // here). Mirrors the same fallback plans/page.tsx already uses
-          // after its own cloud-authoritative days[] replacement — if the
-          // active day is still present, leave it; otherwise fall back to
-          // the new order's first (positional Day 1) entry and persist it
-          // now, using activeDayKeyRef (bound to this mounted profile,
-          // same as daysKeyRef above) — never a live profile lookup. Reads
-          // activeDayIdRef (not the closure `activeDayId`) since this async
-          // callback's closure could otherwise be stale relative to a
-          // day-picker switch the user made while the pull was in flight.
-          if (!resolvedDays.includes(activeDayIdRef.current)) {
-            const nextActiveDayId = resolvedDays[0];
-            setActiveDayId(nextActiveDayId);
-            try {
-              localStorage.setItem(activeDayKeyRef.current, nextActiveDayId);
-            } catch {}
-            // Refresh day-scoped Lightning state that depends on the active
-            // day: planDayItems was already computed above (for the
-            // pre-correction active day, via safeActiveDayIdRef.current) and
-            // would otherwise stay stale — showing plan items for the
-            // now-invalid removed day — until some unrelated trigger (e.g.
-            // the user manually picking a day) happened to refresh it.
-            setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
-          }
-        } else if (!localDaysEditRef.current && discoveredDayIds.length > 0) {
-          // Legacy payload with no synced days[] — reconcile the full union
-          // of newly discovered day IDs from both sources in one step.
-          // SH.2 — also gated on !localDaysEditRef.current: a local days[]
-          // edit/reorder during the pull protects the days domain here too,
-          // matching the cloudDaysOrder branch above rather than always
-          // running regardless of a days-domain conflict.
-          // `prev` (a genuinely persisted days[] order, when one exists) is
-          // preserved exactly and never re-sorted; only IDs not already
-          // known are appended, and only those are ordered — via the same
-          // daySort numeric-suffix comparator My Plans uses for its own
-          // unordered/unknown-ID tail — so the fallback order matches My
-          // Plans regardless of which source discovered which ID first.
-          setKnownDays((prev) => {
-            const extra = discoveredDayIds.filter((id) => !prev.includes(id)).sort(daySort);
-            return extra.length > 0 ? [...prev, ...extra] : prev;
-          });
-        } else if (localDaysEditRef.current && discoveredDayIds.length > 0) {
-          // Codex P1 fix — invariant safety net: even when a local days[]
-          // edit/reorder (including one discovered via a cross-tab storage
-          // write) is protecting the persisted ORDER from cloud replacement
-          // (localDaysEditRef.current true, so neither branch above ran),
-          // every persisted item's dayId must still belong to persisted
-          // days[]. If the WINNING Lightning items (see
-          // winningLightningItems above) and/or the freshly-hydrated plans
-          // reference a day not yet known locally, it must still be
-          // appended. Purely additive: never reorders or removes existing
-          // entries, so it cannot disturb whatever order the local edit is
-          // protecting, preserving SH.2's pure-reorder independence.
-          // Persisted directly to daysKeyRef (unlike the in-memory-only
-          // "no cloudDaysOrder" branch above) so this specifically closes
-          // the persisted-days invariant gap rather than only fixing the
-          // in-memory display.
-          setKnownDays((prev) => {
-            const extra = discoveredDayIds.filter((id) => !prev.includes(id)).sort(daySort);
-            if (extra.length === 0) return prev;
-            const next = [...prev, ...extra];
-            if (typeof window !== "undefined") {
-              try {
-                localStorage.setItem(daysKeyRef.current, JSON.stringify(next));
-              } catch {
-                // Best-effort, matching the tier of the legacy in-memory-only
-                // branch above — not gated into hydrationSucceeded.
-              }
-            }
-            return next;
-          });
+          // Same-tab writes do not fire a storage event, so refresh
+          // planDayItems/allPlanItems explicitly now. Reads fresh from the
+          // storage KEY (not from `planner.plans` directly) either way, so
+          // this correctly reflects whichever data is actually in storage —
+          // the cloud snapshot just written above, or the foreign tab's
+          // newer edit that write was skipped to protect.
+          setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
+          setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
         }
-        if (hydrationSucceeded) setSyncReady(true);
+        // Codex fix — a failed authoritative days[] write (daysWriteFailed)
+        // keeps the gate closed exactly like a failed plans-hydration write
+        // already does, so a stale locally-persisted order can never be
+        // pushed back over the cloud's actual value.
+        if (hydrationSucceeded && !daysWriteFailed) setSyncReady(true);
       })
       .catch(() => {
         if (cancelled) return;
@@ -908,6 +816,40 @@ export default function LightningPage() {
       });
     return () => { cancelled = true; };
   }, [sessionStatus, loaded]);
+
+  // SH.2 architecture — release a locally-won baseline once a push for
+  // this page's own profile is CONFIRMED successful. Closes the "second
+  // pull before push confirms" gap: unconditionally updating a
+  // locally-won baseline right after a pull resolves would let a LATER
+  // pull within the same mount treat that edit as unchanged (current
+  // would then equal the just-updated baseline) before the debounced push
+  // actually reached the cloud — silently reintroducing a Codex-style
+  // "discard a pre-existing unpushed edit" bug for a second pull.
+  // getSyncStateForProfile's lastSyncedAt is the actual proof of a
+  // completed push (the event itself carries no payload); comparing it
+  // against lastSyncedSeenRef detects this page's own profile's push
+  // completing (SYNC_STATE_CHANGED_EVENT is global, not profile-scoped —
+  // see its own doc in syncHelper.ts), then this page re-reads local
+  // storage fresh — never the possibly-stale winning* values captured at
+  // pull-resolution time — so the released baseline reflects the ACTUAL
+  // persisted content at confirmation time.
+  useEffect(() => {
+    function onSyncStateChanged() {
+      const state = getSyncStateForProfile(activeProfileIdRef.current);
+      if (state.status !== "idle" || !state.lastSyncedAt) return;
+      if (state.lastSyncedAt === lastSyncedSeenRef.current) return;
+      lastSyncedSeenRef.current = state.lastSyncedAt;
+      itemsBaselineRef.current = migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
+      daysBaselineRef.current = loadKnownDays(daysKeyRef.current);
+      try {
+        plansRawBaselineRef.current = localStorage.getItem(plansKeyRef.current);
+      } catch {
+        plansRawBaselineRef.current = null;
+      }
+    }
+    window.addEventListener(SYNC_STATE_CHANGED_EVENT, onSyncStateChanged);
+    return () => window.removeEventListener(SYNC_STATE_CHANGED_EVENT, onSyncStateChanged);
+  }, []);
 
   // Register a best-effort sendBeacon push on page unload.
   useEffect(() => {
@@ -1018,66 +960,20 @@ export default function LightningPage() {
         setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
       }
       if (e.key === daysKeyRef.current) {
-        // SH.2 — distinguish a genuine cross-tab days[] change from a no-op
-        // hydration write, mirroring plans/page.tsx's onStorage handler
-        // (this listener previously marked a days-domain conflict on EVERY
-        // matching storage event, even a no-op one). My Plans's own
-        // cloud-pull handler — and another Lightning tab's own successful
-        // pull, via the checked write below — writes this key
-        // unconditionally on every authoritative pull, so this listener can
-        // fire even when the newly-persisted order is already identical to
-        // what this tab currently has. Comparing against
-        // knownDaysRef.current — this tab's own latest knownDays, captured
-        // BEFORE any state update below — tells that apart from an actual
-        // reorder this tab doesn't yet know about.
+        // SH.2 architecture — UI-reactivity only: refresh this tab's
+        // displayed knownDays to match what another tab just persisted,
+        // purely to avoid a stale display. Conflict resolution no longer
+        // depends on this listener at all — the pull effect above always
+        // re-reads localStorage fresh and compares it against a stable
+        // baseline (pickWinningDays/reconcileItemsWithDays in
+        // crossDayChecks.ts), so there is nothing here to "protect" a
+        // pending pull from; a genuine days[] change and a no-op hydration
+        // write are treated identically since both are equally irrelevant
+        // to the pull's own independent, storage-event-free comparison.
         const next = loadKnownDays(daysKeyRef.current);
         const isGenuineChange = next.join(",") !== knownDaysRef.current.join(",");
         if (isGenuineChange) {
           setKnownDays(next);
-        }
-        // Codex fix — another tab (e.g. My Plans reordering, or another
-        // Lightning tab's own successful pull) just wrote a newer days[]
-        // order for this same profile. Mark the days domain as locally
-        // edited so that if this tab's own pullPlanner() is still in
-        // flight, its eventual (possibly older) planner.days does not
-        // clobber the value the other tab just persisted — same
-        // `if (!localDaysEditRef.current && cloudDaysOrder)` guard already
-        // used for same-tab days edits, just triggered by a cross-tab write
-        // instead of a same-tab one. Only set on a genuine change — a
-        // no-op-relative-to-this-tab write carries no real conflict to
-        // protect against, so it must not block an otherwise-valid pending
-        // pull's cloud days from applying. This deliberately only ever sets
-        // localDaysEditRef, not localLightningEditRef: a days-only
-        // cross-tab write must not block an otherwise-valid pending pull's
-        // cloud Lightning items from applying. onStorage only ever fires
-        // for writes from OTHER tabs (the tab that wrote the key never
-        // receives its own 'storage' event), so this can never mark this
-        // tab's own pull-applied write as if it were external, and it
-        // never fires at all when no other tab wrote anything — so a
-        // genuine first hydration with no concurrent edit is never
-        // blocked.
-        if (isGenuineChange) {
-          localDaysEditRef.current = true;
-          // Codex P2 fix — a genuine cross-tab days[] change is either a
-          // pure REORDER (same day-ID set, different order) or a
-          // MEMBERSHIP change (a day was added and/or removed by another
-          // tab — e.g. Plans' Remove/Add/Duplicate Day). Only a REMOVAL
-          // (via removedDayIds() — crossDayChecks.ts, with its own
-          // DEV_REMOVED_DAY_IDS_CASES) is tracked: a day ID, once removed,
-          // can never legitimately reappear (IDs are never reused), so it
-          // is unambiguous, permanently-safe evidence that sibling
-          // plan-derived day IDs referencing it may be stale. A pure
-          // ADDITION (Add Day/Duplicate Day — indistinguishable from each
-          // other by this diff alone) is NOT tracked here: an added day's
-          // absence from a stale plans snapshot is expected and benign,
-          // never evidence of staleness (Codex: "plans missing an ADDED
-          // day is NOT evidence Plans storage is stale"). A pure reorder
-          // never removes anything, so it deliberately adds nothing here —
-          // sibling-derived day IDs stay fully trusted for a reorder-only
-          // event.
-          for (const removedId of removedDayIds(knownDaysRef.current, next)) {
-            pendingRemovedDayIdsRef.current.add(removedId);
-          }
         }
       }
       if (e.key === dayParksKeyRef.current) {
@@ -1087,33 +983,13 @@ export default function LightningPage() {
         setDayMeta(loadDayMeta(dayMetaKeyRef.current));
       }
       if (e.key === plansKeyRef.current) {
-        // Plans changed — re-infer using current active day.
+        // Plans changed — re-infer using current active day. SH.2
+        // architecture — UI-reactivity only, same rationale as the
+        // daysKeyRef branch above: the pull effect's own fresh read plus
+        // baseline comparison is what actually protects against a stale
+        // cloud overwrite, not this listener.
         setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, safeActiveDayIdRef.current));
-        const freshAllPlans = loadAllPlanItems(plansKeyRef.current);
-        setAllPlanItems(freshAllPlans);
-        // Codex P1 fix — another tab just wrote this profile's shared Plans
-        // storage key. Mark it so this tab's in-flight pull (if any) skips
-        // its own unconditional Plans-hydration write below rather than
-        // overwriting that newer cross-tab edit with a possibly-stale
-        // cloud snapshot.
-        crossTabPlansChangedRef.current = true;
-        // Codex P2 fix — confirm any pending removed-day IDs against THIS
-        // fresh read's actual content, not merely because a plans write
-        // was observed at all (the previous version of this fix cleared
-        // unconditionally here, which is wrong with 3+ tabs: an
-        // unrelated/stale plans write from a THIRD tab could arrive before
-        // the removing tab's own coupled write and falsely "confirm" a
-        // removal that isn't actually reflected yet). confirmRemovedDayIds()
-        // only drops a pending ID once this genuinely current snapshot no
-        // longer references it — see its own doc in crossDayChecks.ts.
-        if (pendingRemovedDayIdsRef.current.size > 0) {
-          pendingRemovedDayIdsRef.current = new Set(
-            confirmRemovedDayIds(
-              [...pendingRemovedDayIdsRef.current],
-              freshAllPlans.map((it) => it.dayId)
-            )
-          );
-        }
+        setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
       }
       // Phase 11.0 review fix — reconcile this page's own Lightning items when
       // another tab (e.g. My Plans doing Remove Day) writes the active profile's
@@ -1122,22 +998,12 @@ export default function LightningPage() {
       // edit here would persist that stale array — resurrecting entries Remove
       // Day already deleted. This only ever fires for writes from OTHER tabs
       // (the tab that wrote the key never receives its own 'storage' event), so
-      // it cannot clobber an in-progress edit made in this tab.
+      // it cannot clobber an in-progress edit made in this tab. SH.2
+      // architecture — no ref-marking needed: the pull effect's own fresh
+      // read of this same key at resolution time already reflects whatever
+      // was just reloaded here, compared against the stable itemsBaselineRef.
       if (e.key === lightningKeyRef.current) {
         setItems(loadFromStorage(lightningKeyRef.current));
-        // Codex P1 fix (symmetry audit) — mark the Lightning domain as
-        // locally edited too. Without this, a still-in-flight pull could
-        // apply a stale cloudLightningItems snapshot over the items this
-        // tab just reloaded (since localLightningEditRef stayed false), and
-        // this page's own items-persist effect would then immediately
-        // write that stale snapshot back over the shared Lightning storage
-        // key — resurrecting the exact entries the other tab's write just
-        // removed. Any other tab's write to this key is, by definition, an
-        // external change to this page's own domain, so this is marked
-        // unconditionally (no genuine-change comparison needed) — mirrors
-        // how the same-tab items-persist effect below already marks this
-        // ref on every items change, without distinguishing content.
-        localLightningEditRef.current = true;
       }
     }
     window.addEventListener("storage", onStorage);

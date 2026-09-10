@@ -68,163 +68,312 @@ function parseDayNumLocal(dayId: string): number {
 }
 
 /**
- * SH.2 Codex P1 fix (Add Day false-positive) — returns the day IDs present
- * in `prevDayIds` but absent from `nextDayIds`: the days a genuine
- * cross-tab days[] change actually REMOVED. Empty for a pure REORDER
- * (same set, different order — e.g. Move Up/Down) and empty for a PURE
- * ADDITION (Add Day, or Duplicate Day's new day-ID — day IDs are never
- * reused, see handleAddDay/handleDuplicateDay's "max suffix + 1" rule, so
- * a brand-new ID can never itself be "removed").
+ * SH.2 — returns the day IDs present in `prevDayIds` but absent from
+ * `nextDayIds`: the days a comparison between two days[] snapshots says
+ * were REMOVED. Empty for a pure REORDER (same set, different order) and
+ * empty for a pure ADDITION (a day present in `nextDayIds` but not
+ * `prevDayIds` is never "removed").
  *
- * Both plans/page.tsx and lightning/page.tsx use this — not the broader
- * "did the day-ID SET change at all" check a previous SH.2 fix used — to
- * decide what needs protecting from a cross-tab days[] event. Only a
- * REMOVAL is unambiguous evidence that a coupled plans-item deletion may
- * be in flight (Remove Day deletes that day's items in the same handler
- * that shrinks `days`): a day ID, once removed, can never legitimately
- * reappear, so removed IDs can be filtered out of any item/day-ID set
- * permanently and safely, with no "wait for confirmation" needed. A pure
- * ADDITION (Add Day: no items ever coming; Duplicate Day: items ARE
- * coming, but indistinguishable from Add Day by this diff alone) is
- * NOT treated as evidence of a plans change here — using set-membership
- * change as that evidence (the previous approach) let Add Day incorrectly
- * mark the plans domain dirty forever (for this pull cycle), since no
- * plans event ever follows it to clear that mark.
+ * IMPORTANT: day IDs CAN be reused. handleAddDay/handleDuplicateDay derive
+ * a new ID from `max(existing numeric suffixes) + 1` — if the
+ * HIGHEST-numbered day is the one removed, the very next Add/Duplicate Day
+ * generates that exact same ID again (e.g. days [day-1,day-2,day-3] →
+ * remove day-3 → days [day-1,day-2] → Add Day → day-3 again). An earlier
+ * SH.2 fix treated a removed ID as a permanent, session-lifetime tombstone
+ * on this false assumption, which could blacklist a legitimately reused
+ * ID forever (Codex finding). This function itself makes no such
+ * assumption — it is a pure, stateless snapshot comparison, always
+ * recomputed fresh against the CURRENT baseline/winning days[] for a
+ * single pull (see reconcileItemsWithDays below), never accumulated into
+ * a persistent set. If day-3 is removed then re-added before the next
+ * comparison, `nextDayIds` simply contains day-3 again and it is not
+ * reported as removed relative to that comparison.
  */
 export function removedDayIds(prevDayIds: string[], nextDayIds: string[]): string[] {
   const nextSet = new Set(nextDayIds);
   return prevDayIds.filter((id) => !nextSet.has(id));
 }
 
-/**
- * SH.2 Codex P1 fix — given a set of day IDs already known-removed (but
- * whose coupled plans-item deletion hasn't yet been independently
- * confirmed) and a FRESH read of the day IDs actually referenced by the
- * current persisted plans/Lightning-sibling snapshot, returns the subset
- * that remains unconfirmed: a removed day ID is confirmed (dropped from
- * the result) only when the fresh snapshot no longer references it at
- * all. An unrelated snapshot that still contains it — e.g., a third tab's
- * own stale write, landing after the removal but before the removing
- * tab's own coupled plans write — leaves it pending rather than falsely
- * clearing it. This is content evidence, not event identity: "a plans
- * storage event happened" is not proof of anything by itself; "the
- * current persisted plans content is actually compatible with the newer
- * days membership" is.
- */
-export function confirmRemovedDayIds(pending: string[], freshReferencedDayIds: string[]): string[] {
-  const freshSet = new Set(freshReferencedDayIds);
-  return pending.filter((id) => freshSet.has(id));
+/** Order-and-content-sensitive equality for two days[] snapshots. */
+function daysArraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /**
- * Reference cases for removedDayIds() + confirmRemovedDayIds() — Codex P1
- * (Add Day false-positive) and Codex P2 (sibling staleness must clear on
- * content, not event identity) fixes. Run from Node:
- *   import { DEV_REMOVED_DAY_IDS_CASES, removedDayIds, confirmRemovedDayIds } from "@/lib/crossDayChecks";
- *   DEV_REMOVED_DAY_IDS_CASES.forEach(c => {
- *     const got = removedDayIds(c.prev, c.next);
- *     console.log(JSON.stringify(got) === JSON.stringify(c.expectedRemoved) ? "✓" : "✗ FAIL", c.name);
+ * SH.2 architecture — determines the winning days[] for one pull.
+ *
+ * `baseline` is this page's own local days[] as last confirmed synced
+ * (captured once at mount, or updated after this page's own successful
+ * push/cloud-apply — never reset merely because a pull effect re-ran).
+ * `current` is a FRESH read of local days[] storage taken at pull
+ * resolution time — not a cached ref, not gated by whether any 'storage'
+ * event fired. localStorage is the device-local authority; a 'storage'
+ * event is only ever a notification that MAY prompt a fresh read, never
+ * proof of what that read will contain or when.
+ *
+ * Local wins outright whenever `current` differs from `baseline` in ANY
+ * way (reorder or membership) — that direct comparison, not an inferred
+ * "was this a membership change", is what protects a local change (made
+ * before OR during this pull, in this tab or another) from a stale cloud
+ * apply. When local hasn't changed, cloud's order applies if the pull
+ * returned one; otherwise (no cloud days at all, or a legacy payload that
+ * omits the field) current local order is kept as-is.
+ */
+export function pickWinningDays(
+  baseline: string[],
+  current: string[],
+  cloudDays: string[] | undefined
+): { days: string[]; changedLocally: boolean } {
+  const changedLocally = !daysArraysEqual(baseline, current);
+  if (changedLocally) return { days: current, changedLocally };
+  if (cloudDays && cloudDays.length > 0) return { days: cloudDays, changedLocally: false };
+  return { days: current, changedLocally: false };
+}
+
+/**
+ * SH.2 architecture — determines the winning item array (PlanItem[] or
+ * LightningItem[]) for one pull. Same "local wins whenever a fresh read
+ * differs from the stable baseline" rule as pickWinningDays, applied to
+ * this page's own item domain — see its doc for the full rationale.
+ */
+export function pickWinningItems<T>(
+  baseline: T[],
+  current: T[],
+  cloudItems: T[] | null
+): { items: T[]; changedLocally: boolean } {
+  const changedLocally = JSON.stringify(baseline) !== JSON.stringify(current);
+  if (changedLocally) return { items: current, changedLocally };
+  if (cloudItems) return { items: cloudItems, changedLocally: false };
+  return { items: current, changedLocally: false };
+}
+
+/**
+ * Reference cases for pickWinningItems() — generic over both PlanItem[]
+ * and LightningItem[], so these use a minimal shared shape. Run from Node:
+ *   import { DEV_PICK_WINNING_ITEMS_CASES, pickWinningItems } from "@/lib/crossDayChecks";
+ *   DEV_PICK_WINNING_ITEMS_CASES.forEach(c => {
+ *     const got = pickWinningItems(c.baseline, c.current, c.cloudItems);
+ *     ...
  *   });
  */
-export const DEV_REMOVED_DAY_IDS_CASES: Array<{
+export const DEV_PICK_WINNING_ITEMS_CASES: Array<{
   name: string;
-  prev: string[];
-  next: string[];
-  expectedRemoved: string[];
+  baseline: Array<{ dayId: string; id: string }>;
+  current: Array<{ dayId: string; id: string }>;
+  cloudItems: Array<{ dayId: string; id: string }> | null;
+  expectedWinner: "current" | "cloud";
+  expectedChangedLocally: boolean;
 }> = [
   {
-    name: "identical order — no change at all",
-    prev: ["day-1", "day-2"],
-    next: ["day-1", "day-2"],
-    expectedRemoved: [],
+    name: "no local change, no cloud payload — current kept (e.g. unauthenticated)",
+    baseline: [{ id: "1", dayId: "day-1" }],
+    current: [{ id: "1", dayId: "day-1" }],
+    cloudItems: null,
+    expectedWinner: "current",
+    expectedChangedLocally: false,
   },
   {
-    name: "pure reorder — Move Up/Down swaps two days, same set",
-    prev: ["day-1", "day-2", "day-3"],
-    next: ["day-1", "day-3", "day-2"],
-    expectedRemoved: [],
+    name: "no local change, cloud items present — cloud wins",
+    baseline: [{ id: "1", dayId: "day-1" }],
+    current: [{ id: "1", dayId: "day-1" }],
+    cloudItems: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-2" }],
+    expectedWinner: "cloud",
+    expectedChangedLocally: false,
   },
   {
-    name: "Add Day — pure addition, no removed days (regression case 1: must not block plans hydration)",
-    prev: ["day-1"],
-    next: ["day-1", "day-2"],
-    expectedRemoved: [],
+    name: "edit made before this pull started (baseline predates it) — local wins even though the pull hasn't touched anything yet",
+    baseline: [{ id: "1", dayId: "day-1" }],
+    current: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-1" }],
+    cloudItems: [{ id: "1", dayId: "day-1" }],
+    expectedWinner: "current",
+    expectedChangedLocally: true,
   },
   {
-    name: "Duplicate Day — pure addition (from the days[] diff's perspective), no removed days",
-    prev: ["day-1", "day-2"],
-    next: ["day-1", "day-2", "day-3"],
-    expectedRemoved: [],
-  },
-  {
-    name: "Remove Day (populated) — day-2 removed (regression case 3: stays distrusted until confirmed)",
-    prev: ["day-1", "day-2", "day-3"],
-    next: ["day-1", "day-3"],
-    expectedRemoved: ["day-2"],
-  },
-  {
-    name: "Remove Day (empty day) — same removedDayIds result regardless of whether the day had items (regression case 7)",
-    prev: ["day-1", "day-2", "day-3"],
-    next: ["day-1", "day-3"],
-    expectedRemoved: ["day-2"],
-  },
-  {
-    name: "multiple removals in one event",
-    prev: ["day-1", "day-2", "day-3", "day-4"],
-    next: ["day-1", "day-4"],
-    expectedRemoved: ["day-2", "day-3"],
+    name: "cross-tab edit landed in storage during the pull — fresh read (current) differs from baseline, local wins",
+    baseline: [{ id: "1", dayId: "day-1" }],
+    current: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-2" }],
+    cloudItems: [{ id: "1", dayId: "day-1" }],
+    expectedWinner: "current",
+    expectedChangedLocally: true,
   },
 ];
 
 /**
- * Reference cases for confirmRemovedDayIds() — Codex P2 fix. Run from Node:
- *   import { DEV_CONFIRM_REMOVED_CASES, confirmRemovedDayIds } from "@/lib/crossDayChecks";
- *   DEV_CONFIRM_REMOVED_CASES.forEach(c => {
- *     const got = confirmRemovedDayIds(c.pending, c.freshReferencedDayIds);
- *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ * SH.2 architecture — structural reconciliation. Given the winning items
+ * and winning days[] for one pull (each already chosen independently by
+ * pickWinningItems/pickWinningDays), plus the days[] baseline those days[]
+ * were compared against, returns items sanitized to only reference days
+ * present in the (possibly extended) returned days[].
+ *
+ * A day present in `daysBaseline` but absent from `winningDays` is
+ * authoritatively removed — for THIS pull, from THIS page's own
+ * perspective — regardless of why `winningDays` ended up without it
+ * (this page's own local removal, or a cloud days[] that already reflects
+ * a removal made elsewhere). Any item referencing it is dropped, from
+ * EITHER candidate source: a stale cloud snapshot that hasn't caught up
+ * to the removal, or a local read that hasn't caught up to a sibling
+ * domain's own (possibly still in-flight) write for the same removal —
+ * neither is ever grounds to re-add the day. A day NOT in `daysBaseline`
+ * at all (never known before this pull) is not "removed" by this
+ * comparison — an item referencing it is legitimate new-day evidence,
+ * appended to the returned days[] (never reordering or removing existing
+ * entries). `extraDiscoveredDayIds` (optional) lets a sibling domain
+ * (Lightning discovering Plans-referenced days, or vice versa) contribute
+ * to that same additive step, subject to the identical removed-day filter.
+ */
+export function reconcileItemsWithDays<T extends { dayId: string }>(
+  items: T[],
+  daysBaseline: string[],
+  winningDays: string[],
+  extraDiscoveredDayIds: string[] = []
+): { items: T[]; days: string[] } {
+  const removed = new Set(removedDayIds(daysBaseline, winningDays));
+  const sanitizedItems = removed.size === 0 ? items : items.filter((it) => !removed.has(it.dayId));
+  const knownDays = new Set(winningDays);
+  const discovered = [
+    ...new Set([...sanitizedItems.map((it) => it.dayId), ...extraDiscoveredDayIds]),
+  ].filter((id) => !knownDays.has(id) && !removed.has(id));
+  const days = discovered.length > 0 ? [...winningDays, ...discovered.sort(daySort)] : winningDays;
+  return { items: sanitizedItems, days };
+}
+
+/**
+ * Reference cases for removedDayIds() + pickWinningDays(). Run from Node:
+ *   import { DEV_DAYS_RECONCILIATION_CASES, removedDayIds, pickWinningDays } from "@/lib/crossDayChecks";
+ *   DEV_DAYS_RECONCILIATION_CASES.forEach(c => {
+ *     const gotRemoved = removedDayIds(c.baseline, c.winningDaysForRemovedCheck ?? c.current);
+ *     const gotWinner = pickWinningDays(c.baseline, c.current, c.cloudDays);
+ *     ...
  *   });
  */
-export const DEV_CONFIRM_REMOVED_CASES: Array<{
+export const DEV_DAYS_RECONCILIATION_CASES: Array<{
   name: string;
-  pending: string[];
-  freshReferencedDayIds: string[];
-  expected: string[];
+  baseline: string[];
+  current: string[];
+  cloudDays: string[] | undefined;
+  expectedDays: string[];
+  expectedChangedLocally: boolean;
 }> = [
   {
-    name: "regression case 4 — the actual post-removal plans dataset arrives (day-2 genuinely absent): confirmed, cleared",
-    pending: ["day-2"],
-    freshReferencedDayIds: ["day-1", "day-3"],
-    expected: [],
+    name: "no local change, no cloud days (unauthenticated/local-only) — current kept as-is",
+    baseline: ["day-1"],
+    current: ["day-1"],
+    cloudDays: undefined,
+    expectedDays: ["day-1"],
+    expectedChangedLocally: false,
   },
   {
-    name: "regression case 5 — three-tab case: an unrelated plans write that still contains the removed day's items must NOT clear it",
-    pending: ["day-2"],
-    freshReferencedDayIds: ["day-1", "day-2", "day-3"],
-    expected: ["day-2"],
+    name: "no local change, cloud days present — cloud replaces local outright",
+    baseline: ["day-1"],
+    current: ["day-1"],
+    cloudDays: ["day-1", "day-2"],
+    expectedDays: ["day-1", "day-2"],
+    expectedChangedLocally: false,
   },
   {
-    name: "regression case 6 — after the unrelated write, the correct plans event finally arrives without day-2: now clears",
-    pending: ["day-2"],
-    freshReferencedDayIds: ["day-1", "day-3"],
-    expected: [],
+    name: "no local change, legacy cloud payload (no days field) — local order preserved",
+    baseline: ["day-1", "day-2"],
+    current: ["day-1", "day-2"],
+    cloudDays: undefined,
+    expectedDays: ["day-1", "day-2"],
+    expectedChangedLocally: false,
   },
   {
-    name: "multiple pending, only one confirmed by this particular fresh snapshot",
-    pending: ["day-2", "day-5"],
-    freshReferencedDayIds: ["day-1", "day-5"],
-    expected: ["day-5"],
+    name: "pure reorder — local wins, cloud days ignored even if present",
+    baseline: ["day-1", "day-2", "day-3"],
+    current: ["day-1", "day-3", "day-2"],
+    cloudDays: ["day-1", "day-2", "day-3"],
+    expectedDays: ["day-1", "day-3", "day-2"],
+    expectedChangedLocally: true,
   },
   {
-    name: "empty pending set — no-op",
-    pending: [],
-    freshReferencedDayIds: ["day-1", "day-2"],
-    expected: [],
+    name: "Add Day — local wins (membership changed), cloud order ignored",
+    baseline: ["day-1"],
+    current: ["day-1", "day-2"],
+    cloudDays: ["day-1"],
+    expectedDays: ["day-1", "day-2"],
+    expectedChangedLocally: true,
   },
   {
-    name: "empty fresh snapshot (e.g. all plans cleared) — confirms everything pending",
-    pending: ["day-2", "day-3"],
-    freshReferencedDayIds: [],
-    expected: [],
+    name: "Remove Day (populated) — local wins, removed day stays removed",
+    baseline: ["day-1", "day-2", "day-3"],
+    current: ["day-1", "day-3"],
+    cloudDays: ["day-1", "day-2", "day-3"],
+    expectedDays: ["day-1", "day-3"],
+    expectedChangedLocally: true,
+  },
+  {
+    name: "remove highest day then recreate same ID — current equals baseline again, treated as unchanged",
+    baseline: ["day-1", "day-2", "day-3"],
+    current: ["day-1", "day-2", "day-3"],
+    cloudDays: undefined,
+    expectedDays: ["day-1", "day-2", "day-3"],
+    expectedChangedLocally: false,
+  },
+];
+
+/**
+ * Reference cases for reconcileItemsWithDays() — the structural
+ * reconciliation step that closes the Codex "removed day resurrected via
+ * a stale sibling/cloud item snapshot" finding without any tombstone. Run
+ * from Node:
+ *   import { DEV_RECONCILE_ITEMS_CASES, reconcileItemsWithDays } from "@/lib/crossDayChecks";
+ *   DEV_RECONCILE_ITEMS_CASES.forEach(c => {
+ *     const got = reconcileItemsWithDays(c.items, c.daysBaseline, c.winningDays, c.extraDiscoveredDayIds);
+ *     ...
+ *   });
+ */
+export const DEV_RECONCILE_ITEMS_CASES: Array<{
+  name: string;
+  items: Array<{ dayId: string }>;
+  daysBaseline: string[];
+  winningDays: string[];
+  extraDiscoveredDayIds?: string[];
+  expectedItemDayIds: string[];
+  expectedDays: string[];
+}> = [
+  {
+    name: "regression — stale item snapshot still references a day the winning days[] already removed: dropped, not re-added",
+    items: [{ dayId: "day-1" }, { dayId: "day-2" }, { dayId: "day-2" }],
+    daysBaseline: ["day-1", "day-2", "day-3"],
+    winningDays: ["day-1", "day-3"],
+    expectedItemDayIds: ["day-1"],
+    expectedDays: ["day-1", "day-3"],
+  },
+  {
+    name: "legitimate new day: winning items reference a day cloud omitted — appended, not dropped",
+    items: [{ dayId: "day-1" }, { dayId: "day-4" }],
+    daysBaseline: ["day-1"],
+    winningDays: ["day-1"],
+    expectedItemDayIds: ["day-1", "day-4"],
+    expectedDays: ["day-1", "day-4"],
+  },
+  {
+    name: "sibling-discovered day ID also subject to the same removed-day filter",
+    items: [{ dayId: "day-1" }],
+    daysBaseline: ["day-1", "day-2"],
+    winningDays: ["day-1"],
+    extraDiscoveredDayIds: ["day-2", "day-5"],
+    expectedItemDayIds: ["day-1"],
+    expectedDays: ["day-1", "day-5"],
+  },
+  {
+    name: "day removed then recreated with the same ID before this pull — no longer treated as removed, items trusted",
+    items: [{ dayId: "day-3" }],
+    daysBaseline: ["day-1", "day-2", "day-3"],
+    winningDays: ["day-1", "day-2", "day-3"],
+    expectedItemDayIds: ["day-3"],
+    expectedDays: ["day-1", "day-2", "day-3"],
+  },
+  {
+    name: "nothing to reconcile — items already fully consistent with winningDays",
+    items: [{ dayId: "day-1" }, { dayId: "day-2" }],
+    daysBaseline: ["day-1", "day-2"],
+    winningDays: ["day-1", "day-2"],
+    expectedItemDayIds: ["day-1", "day-2"],
+    expectedDays: ["day-1", "day-2"],
   },
 ];
 
