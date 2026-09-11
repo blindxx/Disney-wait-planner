@@ -9,7 +9,7 @@ import {
   formatTimeLabel,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, daySort } from "@/lib/crossDayChecks";
+import { computeCrossDayChecks, pickWinningDays, pickWinningItems, reconcilePlannerSnapshot } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
   mockAttractionWaits,
@@ -23,11 +23,31 @@ import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActivePro
 import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
+  setSyncUserId,
   scheduleSync,
   pullPlanner,
   registerUnloadSync,
   cancelScheduledSync,
+  getConfirmedState,
+  commitConfirmedBaseline,
+  getLocalContentOwner,
+  setLocalContentOwner,
+  selectPendingOpBatch,
+  reconcilePendingOperations,
+  commitLocalDomainRaw,
+  commitLocalDomainRawSync,
+  isLocalDomainCommitSuccess,
+  beginPullContext,
+  isPullContextCurrent,
+  readLatestDurableValue,
 } from "@/lib/syncHelper";
+import {
+  capturePreFetchDomainSnapshot,
+  resolvePostFetchDomainBaseline,
+  decideStaleResponseRecovery,
+  type DomainPreFetchSnapshot,
+  type DomainBaselineOutcome,
+} from "@/lib/syncPayload";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -123,13 +143,12 @@ function migrateLightningDayIds(items: LightningItem[]): LightningItem[] {
 // ===== DAY LIST LOADER (Phase 8.3.2) =====
 
 /**
- * Load the planner day list from profile storage (read-only).
- * Always guarantees "day-1" as the baseline.
- * Used by safeActiveDayId to validate the active day against the known planner model.
+ * SH.2.1 P3 — parses the SAME sanitize/dedupe/day-1-baseline rules the
+ * days domain always applies, from an already-read raw string. Mirrors
+ * plans/page.tsx's own parseDaysRaw() exactly.
  */
-function loadKnownDays(key: string): string[] {
+function parseDaysRaw(raw: string | null): string[] {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return ["day-1"];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed) || parsed.length === 0) return ["day-1"];
@@ -146,6 +165,26 @@ function loadKnownDays(key: string): string[] {
   } catch {
     return ["day-1"];
   }
+}
+
+/**
+ * Load the planner day list from profile storage (read-only on this page —
+ * Plans page owns writes). Always guarantees "day-1" as the baseline. Used
+ * by safeActiveDayId to validate the active day against the known planner
+ * model, at mount and via the cross-tab 'storage' listener's own knownDays
+ * update.
+ *
+ * SH.2.1 P3 — THE authority-bearing read for the days domain: canonical +
+ * any still-unresolved local-edit fact (see readLatestDurableValue()'s own
+ * doc in syncHelper.ts). Mirrors plans/page.tsx's own
+ * loadEffectiveDurableDays() exactly, see its doc there for the full
+ * rationale. This is now the ONLY reader of the days domain anywhere on
+ * this page; the canonical-only loadKnownDays() this replaced was removed
+ * once its last remaining caller (the storage listener) was routed through
+ * this function instead.
+ */
+function loadEffectiveDurableDays(key: string): string[] {
+  return parseDaysRaw(readLatestDurableValue(key));
 }
 
 // ===== DAY CONTEXT HELPERS (Phase 8.8) =====
@@ -284,14 +323,140 @@ function loadAllPlanItems(plansKey: string): { name: string; dayId: string; time
   }
 }
 
+/**
+ * Parse a raw Plans storage string down to its FULL, untyped `items`
+ * array (unlike loadAllPlanItems/loadPlanItemsForDay above, which project
+ * each entry down to {name, dayId, timeLabel} for read-only UI display).
+ * Codex P1 fix (4th round) — reconcilePlannerSnapshot's sibling-domain
+ * output must be written back to Plans' own storage verbatim (id, type,
+ * timeLabel and every other field intact) whenever this pull sanitizes a
+ * stale Plans item, so this mirrors Plans page's own parseLightningRawItems:
+ * full raw objects preserved, only used to read `dayId` for reconciliation.
+ *
+ * SH.2.1 P1 fix (Codex) — recognizes the SAME two Plans storage shapes
+ * plans/page.tsx's own loadFromStorage()/parseDurablePlanItemsRaw()
+ * recognize (see their docs there): the current v1 `{ version, items }`
+ * object AND the supported legacy top-level array shape (unversioned data
+ * that predates the v1 wrapper). This function previously recognized ONLY
+ * the v1 object shape — a profile whose Plans data was still a legacy raw
+ * array (never touched by Plans' own page/migration yet) parsed down to an
+ * EMPTY candidate here. Since reconcilePlannerSnapshot trusts a
+ * changedLocally-true candidate outright (see its own doc — a real,
+ * possibly still-unpushed edit), that wrongly-empty candidate could be
+ * written back over Plans' own storage as the "winning" content, silently
+ * erasing valid, unsynced legacy Plans data. This mirrors the SAME
+ * structural recognition rule Plans' own loader applies (an object without
+ * `.items`, or non-array/non-object JSON, still safely falls through to
+ * empty — malformed data is not newly trusted by this fix) without
+ * depending on Plans' own PlanItem type or its migration-write side effect:
+ * this function stays a pure parser, matching its own established
+ * raw-passthrough contract exactly.
+ */
+function parsePlansRawItems(raw: string | null): unknown[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    // v1 shape: { version, items: [...] }
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      Array.isArray((parsed as Record<string, unknown>).items)
+    ) {
+      return (parsed as Record<string, unknown>).items as unknown[];
+    }
+    // Legacy v0 shape: a bare top-level array — the same compatibility
+    // rule plans/page.tsx's own loader applies to this exact shape.
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    // malformed — treat as no items, same tier as every other opportunistic
+    // read of this opaque sibling dataset on this page.
+  }
+  return [];
+}
+
+/**
+ * Reference cases for parsePlansRawItems() — the REQUIRED cases from the
+ * SH.2.1 (this round) architectural contract. Run from Node (extract the
+ * function body verbatim, or transpile this file, into a scratch script —
+ * this page is not part of the shared/crossDayChecks Node harness):
+ *   DEV_PARSE_PLANS_RAW_ITEMS_CASES.forEach(c => {
+ *     const got = parsePlansRawItems(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+const DEV_PARSE_PLANS_RAW_ITEMS_CASES: Array<{
+  name: string;
+  raw: string | null;
+  expected: unknown[];
+}> = [
+  {
+    name: "required case 1 — legacy top-level Plans array survives (Lightning-first reconciliation must not erase it)",
+    raw: JSON.stringify([{ id: "1", name: "Space Mountain", timeLabel: "10:00 AM", dayId: "day-1", type: "attraction" }]),
+    expected: [{ id: "1", name: "Space Mountain", timeLabel: "10:00 AM", dayId: "day-1", type: "attraction" }],
+  },
+  {
+    name: "required case 1 — legacy top-level array, multiple items, verbatim fields preserved (no normalization applied)",
+    raw: JSON.stringify([
+      { id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" },
+      { id: "2", name: "B", timeLabel: "2:00 PM", dayId: "day-2", type: "dining" },
+    ]),
+    expected: [
+      { id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" },
+      { id: "2", name: "B", timeLabel: "2:00 PM", dayId: "day-2", type: "dining" },
+    ],
+  },
+  {
+    name: "required case 1 — legacy empty top-level array is a valid (empty) Plans dataset, not \"unrecognized\"",
+    raw: JSON.stringify([]),
+    expected: [],
+  },
+  {
+    name: "required case 2 — current v1 object shape remains correct, unaffected by the legacy-array fix",
+    raw: JSON.stringify({ version: 1, items: [{ id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" }] }),
+    expected: [{ id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" }],
+  },
+  {
+    name: "required case 3 — malformed JSON fails safe to an empty candidate (never throws, never treated as legacy)",
+    raw: "{not valid json",
+    expected: [],
+  },
+  {
+    name: "required case 3 — well-formed JSON but unsupported shape (object with no items array, not an array) fails safe to empty",
+    raw: JSON.stringify({ version: 1, foo: "bar" }),
+    expected: [],
+  },
+  {
+    name: "required case 3 — well-formed JSON of an unsupported primitive type (a bare number) fails safe to empty",
+    raw: "42",
+    expected: [],
+  },
+  {
+    name: "null raw (key never existed) is empty, same as before this fix",
+    raw: null,
+    expected: [],
+  },
+];
+
 // ===== STORAGE =====
 
 const STORAGE_KEY = "dwp.lightning.v1";
 
-function loadFromStorage(key: string = STORAGE_KEY): LightningItem[] {
-  if (typeof window === "undefined") return [];
+/**
+ * SH.2.1 closing audit round — parses the v1 Lightning-item shape from an
+ * already-read raw string rather than reading localStorage itself.
+ * Deliberately has NO destructive removeItem()-on-corrupt-data side effect
+ * (unlike the canonical-only loadFromStorage() this replaced, now removed —
+ * every remaining consumer of Lightning's authority-bearing content reads
+ * through loadEffectiveDurableLightningItems() below): the raw string this
+ * parses may come from a local-edit-fact key, never the canonical key
+ * itself, so a parse failure here must never delete the CANONICAL key — an
+ * unrelated key this function was never asked to touch.
+ */
+function parseDurableLightningItemsRaw(raw: string | null): LightningItem[] {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (
@@ -300,27 +465,39 @@ function loadFromStorage(key: string = STORAGE_KEY): LightningItem[] {
       (parsed as StoredSchema).version === 1 &&
       Array.isArray((parsed as StoredSchema).items)
     ) {
-      // Phase 8.3 — normalize dayId on every loaded item (handles legacy items with
-      // no dayId, invalid dayId, or non-string dayId — all normalize to "day-1").
       return migrateLightningDayIds((parsed as StoredSchema).items as LightningItem[]);
     }
-    // Wrong version or corrupt structure — clear and start fresh
-    localStorage.removeItem(key);
     return [];
   } catch {
-    // JSON parse failed — clear bad data
-    try {
-      localStorage.removeItem(key);
-    } catch {}
     return [];
   }
 }
 
+/**
+ * SH.2.1 P3 — THE authority-bearing read for the Lightning domain: mirrors
+ * plans/page.tsx's own loadEffectiveDurablePlanItems() exactly, see its
+ * doc there for the full rationale. Use this — never a raw canonical
+ * localStorage.getItem() — for any sync/conflict decision touching the
+ * Lightning domain, including mount-time UI hydration and the cross-tab
+ * 'storage' listener's own `items` update (both fixed in later rounds —
+ * canonical rendering alone could show a stale value when a newer
+ * local-edit fact survives unresolved, the documented cross-tab hydration
+ * race). This is now the ONLY reader of Lightning's canonical/edit-fact
+ * state anywhere on this page; the canonical-only loadFromStorage() this
+ * replaced was removed once its last remaining caller (the storage
+ * listener) was routed through this function instead.
+ */
+function loadEffectiveDurableLightningItems(key: string): LightningItem[] {
+  return parseDurableLightningItemsRaw(readLatestDurableValue(key));
+}
+
+// SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
+// routes through the shared commitLocalDomainRawSync primitive (see its own
+// doc in syncHelper.ts) instead of a bare setItem: mirrors plans/page.tsx's
+// own saveToStorage exactly — see its doc there for the full rationale.
 function saveToStorage(items: LightningItem[], key: string = STORAGE_KEY): void {
-  try {
-    const schema: StoredSchema = { version: 1, items };
-    localStorage.setItem(key, JSON.stringify(schema));
-  } catch {}
+  const schema: StoredSchema = { version: 1, items };
+  commitLocalDomainRawSync(key, JSON.stringify(schema));
 }
 
 // ===== ID GENERATION =====
@@ -427,12 +604,26 @@ function nowInMinutes(): number {
 export default function LightningPage() {
   const [items, setItems] = useState<LightningItem[]>([]);
   const [loaded, setLoaded] = useState(false);
+  // Codex P1 #2 fix — ref that always holds the latest items, mirroring
+  // itemsRef in plans/page.tsx: the cloud-pull's .then() callback is an
+  // async context whose closure over `items` is fixed to whatever it was
+  // when the effect was (re)created, not necessarily what's current by the
+  // time the pull resolves — reading this ref instead lets the days-domain
+  // reconciliation source day IDs from the CURRENT local items when local
+  // Lightning wins its own conflict decision.
+  const itemsRef = useRef<LightningItem[]>([]);
+  itemsRef.current = items;
 
   // Profile-aware storage key refs — set once on mount after bootstrapProfiles().
   const lightningKeyRef = useRef(STORAGE_KEY);
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   // Stable ref to the active profile id — used by sync effects.
   const activeProfileIdRef = useRef("default");
+  // SH.2 architecture (Codex P1, 3rd round) — stable ref to the currently
+  // authenticated user's identity, used ONLY to scope confirmed-baseline
+  // reads/writes. Mirrors plans/page.tsx exactly — see its own detailed
+  // doc for the full rationale.
+  const activeUserIdRef = useRef<string | null>(null);
   // Phase 8.3 — per-profile activeDayId key. Phase 9.4 — the day picker on this
   // page now also writes this key (handleSelectDay), shared with My Plans.
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
@@ -456,6 +647,13 @@ export default function LightningPage() {
   const daysKeyRef = useRef("dwp:default:days");
   // Phase 8.3.2 — known planner days for safe display-day validation.
   const [knownDays, setKnownDays] = useState<string[]>(["day-1"]);
+  // SH.2 — ref that always holds the latest knownDays, mirroring daysRef in
+  // plans/page.tsx: the cross-tab storage listener below (a mount-time-only
+  // effect) needs the current value to tell a genuine cross-tab days[]
+  // change apart from a no-op hydration write, which a closure over
+  // `knownDays` captured at effect-creation time cannot provide.
+  const knownDaysRef = useRef(knownDays);
+  knownDaysRef.current = knownDays;
   // Phase 8.8 — per-day park overrides (read-only; Plans page owns writes).
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
@@ -473,16 +671,238 @@ export default function LightningPage() {
   // Stable ref used inside storage event handler to get current safeActiveDayId
   // without adding it to the effect dependency array.
   const safeActiveDayIdRef = useRef("day-1");
-  // Tracks whether the user made a local edit after the current pull started.
-  const localEditRef = useRef(false);
+  // SH.2 architecture — reconciliation-from-authoritative-state model,
+  // mirroring plans/page.tsx (see its own detailed doc for the full
+  // rationale). Repeated Codex findings on the previous ref-per-event-type
+  // approach (localLightningEditRef/localDaysEditRef reset-on-pull-start
+  // discarding a pre-existing unpushed edit; a permanent removed-day
+  // tombstone in pendingRemovedDayIdsRef that could blacklist a
+  // legitimately REUSED day ID; this page's own items able to re-add a
+  // day another tab had already removed, before the coupled Lightning
+  // deletion here happened to land) all traced back to the same root
+  // cause: inferring "did local change" from whether/when a 'storage'
+  // event fired, rather than from local storage's own content.
+  // localStorage is the device-local authority; a 'storage' event is only
+  // ever a notification, never proof of ordering or synchronization.
+  //
+  // itemsBaselineRef/daysBaselineRef hold this page's own FALLBACK
+  // baseline — used only when no confirmed snapshot exists yet for this
+  // profile (see buildPostFetchPullBaseline() below, the ONE place this
+  // fallback is actually consulted). Captured once at mount, and updated
+  // ONLY when a pull resolves and cloud wins a domain (local was unchanged,
+  // so adopting cloud's value is safe) — NEVER merely because a pull effect
+  // re-ran, and NEVER when local won a domain's conflict.
+  // buildPostFetchPullBaseline() prefers a real confirmed snapshot over
+  // these refs whenever one exists.
+  const itemsBaselineRef = useRef<LightningItem[]>([]);
+  const daysBaselineRef = useRef<string[]>([]);
+  // Same fallback concept, applied to the OPPOSITE dataset (Plans' raw
+  // storage) this page hydrates on every pull (Phase 7.6.3). Captured as
+  // the raw string (Lightning never parses/normalizes Plans items) so
+  // comparison is a simple, exact string check. A null baseline (key
+  // absent at mount) legitimately compares unequal to any later non-null
+  // read.
+  const plansRawBaselineRef = useRef<string | null>(null);
+
+  // SH.2.1 — mirrors plans/page.tsx exactly (see its own detailed doc for
+  // the full architecture, the SH.2 18th round's P1 this replaced, and the
+  // SH.2.1 P2 fix: a confirmed fact newer than this pull's own response, or
+  // a response carrying no revision at all, must never be used as this
+  // pull's baseline). buildPreFetchPullBaseline()/buildPostFetchPullBaseline()
+  // below are pure page-local GLUE only, wired into the shared
+  // capturePreFetchDomainSnapshot()/resolvePostFetchDomainBaseline()
+  // functions (syncPayload.ts) — no baseline/conflict/recovery/staleness
+  // DECISION lives in this file. Stage 2 is called UNCONDITIONALLY, exactly
+  // once per pull — never conditionally skipped (see plans/page.tsx's own
+  // doc for why that conditional was itself the P2 bug). Note this page's
+  // "items" is the LIGHTNING domain (confirmed.lightning) and its
+  // "plansRaw" is the SIBLING domain (confirmed.plans) — the mirror image
+  // of plans/page.tsx throughout.
+  //
+  // `identity` is REQUIRED on stage 2 — never defaults to the live
+  // activeUserIdRef/activeProfileIdRef refs, for the same reason as
+  // plans/page.tsx (see its own doc).
+
+  /**
+   * FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE — mirrors
+   * plans/page.tsx's own domainFallbackValue() exactly, see its doc there
+   * for the full rationale.
+   */
+  function domainFallbackValue<T>(ref: { current: T }, neutral: T, contentOwnershipMismatch: boolean): T {
+    return contentOwnershipMismatch ? neutral : ref.current;
+  }
+
+  /** Mirrors plans/page.tsx's own clearRefOnFallbackMismatch() exactly. */
+  function clearRefOnFallbackMismatch<T>(
+    ref: { current: T },
+    outcome: DomainBaselineOutcome<T>,
+    neutral: T,
+    contentOwnershipMismatch: boolean
+  ): void {
+    if (contentOwnershipMismatch && outcome.kind === "fallback") {
+      ref.current = neutral;
+    }
+  }
+
+  /**
+   * STAGE 1 (pre-fetch) — mirrors plans/page.tsx's own
+   * buildPreFetchPullBaseline() exactly, see its doc there for the full
+   * rationale, including the SH.2.1 P3 fix: this is the domain's EFFECTIVE
+   * DURABLE value (via loadEffectiveDurableLightningItems()/
+   * loadEffectiveDurableDays()/readLatestDurableValue(), never a raw
+   * canonical read) — required case 6, a conflict-recovery "recovered"
+   * outcome reuses this frozen value, so it must already reflect durable
+   * local intent.
+   */
+  function buildPreFetchPullBaseline(): {
+    items: DomainPreFetchSnapshot<LightningItem[]>;
+    days: DomainPreFetchSnapshot<string[]>;
+    plansRaw: DomainPreFetchSnapshot<string | null>;
+  } {
+    return {
+      items: capturePreFetchDomainSnapshot(migrateLightningDayIds(loadEffectiveDurableLightningItems(lightningKeyRef.current))),
+      days: capturePreFetchDomainSnapshot(loadEffectiveDurableDays(daysKeyRef.current)),
+      plansRaw: capturePreFetchDomainSnapshot(readLatestDurableValue(getActiveProfileKeys().plans)),
+    };
+  }
+
+  /**
+   * STAGE 2 (post-fetch) — mirrors plans/page.tsx's own
+   * buildPostFetchPullBaseline() exactly, see its doc there for the full
+   * rationale, including the revision-bound now enforced inside
+   * resolvePostFetchDomainBaseline() itself.
+   */
+  function buildPostFetchPullBaseline(
+    contentOwnershipMismatch: boolean,
+    identity: { userId: string | null; profileId: string },
+    cloudRevision: number | null,
+    preFetch: {
+      items: DomainPreFetchSnapshot<LightningItem[]>;
+      days: DomainPreFetchSnapshot<string[]>;
+      plansRaw: DomainPreFetchSnapshot<string | null>;
+    }
+  ): {
+    items: DomainBaselineOutcome<LightningItem[]>;
+    days: DomainBaselineOutcome<string[]>;
+    plansRaw: DomainBaselineOutcome<string | null>;
+  } {
+    const confirmed = identity.userId
+      ? getConfirmedState(identity.userId, identity.profileId)
+      : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+
+    const items = resolvePostFetchDomainBaseline(
+      confirmed.lightning,
+      cloudRevision,
+      (raw) => migrateLightningDayIds(raw.items as LightningItem[]),
+      preFetch.items,
+      domainFallbackValue(itemsBaselineRef, [] as LightningItem[], contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(itemsBaselineRef, items, [], contentOwnershipMismatch);
+
+    const days = resolvePostFetchDomainBaseline(
+      confirmed.days,
+      cloudRevision,
+      (raw) => raw,
+      preFetch.days,
+      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(daysBaselineRef, days, ["day-1"], contentOwnershipMismatch);
+
+    const plansRaw = resolvePostFetchDomainBaseline(
+      confirmed.plans,
+      cloudRevision,
+      (raw) => JSON.stringify(raw),
+      preFetch.plansRaw,
+      domainFallbackValue(plansRawBaselineRef, null, contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(plansRawBaselineRef, plansRaw, null, contentOwnershipMismatch);
+
+    return { items, days, plansRaw };
+  }
+
+  /**
+   * Mirrors plans/page.tsx's own UnusableDomain type exactly.
+   */
+  type UnusableDomain =
+    | { domain: "plans" | "lightning" | "days"; reason: "conflict"; revision: number }
+    | {
+        domain: "plans" | "lightning" | "days";
+        reason: "stale-response";
+        confirmedRevision: number;
+        cloudRevision: number;
+      }
+    | {
+        domain: "plans" | "lightning" | "days";
+        reason: "unusable-response";
+        confirmedRevision: number;
+      };
+
+  /**
+   * Mirrors plans/page.tsx's own collectUnusableDomains() exactly, including
+   * this round's "unusable-response" split (see that function's own doc).
+   */
+  function collectUnusableDomains(outcomes: {
+    items: DomainBaselineOutcome<unknown>;
+    days: DomainBaselineOutcome<unknown>;
+    plansRaw: DomainBaselineOutcome<unknown>;
+  }): UnusableDomain[] {
+    const unusable: UnusableDomain[] = [];
+    const check = (domain: "plans" | "lightning" | "days", outcome: DomainBaselineOutcome<unknown>) => {
+      if (outcome.kind === "gated") {
+        unusable.push({ domain, reason: "conflict", revision: outcome.revision });
+      } else if (outcome.kind === "stale-response") {
+        unusable.push({
+          domain,
+          reason: "stale-response",
+          confirmedRevision: outcome.confirmedRevision,
+          cloudRevision: outcome.cloudRevision,
+        });
+      } else if (outcome.kind === "unusable-response") {
+        unusable.push({
+          domain,
+          reason: "unusable-response",
+          confirmedRevision: outcome.confirmedRevision,
+        });
+      }
+    };
+    check("lightning", outcomes.items);
+    check("plans", outcomes.plansRaw);
+    check("days", outcomes.days);
+    return unusable;
+  }
+
+  /**
+   * Mirrors plans/page.tsx's own requireResolvedValue() exactly.
+   */
+  function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
+    if (outcome.kind === "gated" || outcome.kind === "stale-response" || outcome.kind === "unusable-response") {
+      throw new Error("SH.2.1: requireResolvedValue() called on an unusable domain outcome");
+    }
+    return outcome.value;
+  }
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
 
   // Auth session — used to trigger cloud pull on sign-in.
-  const { status: sessionStatus } = useSession();
+  const { data: session, status: sessionStatus } = useSession();
+  // SH.2 architecture (Codex P1, 13th round) — mirrors plans/page.tsx
+  // exactly, see its own detailed doc. The RESOLVED authenticated user id
+  // as its own primitive value, used as an auth-transition-effect
+  // dependency alongside `sessionStatus` so a genuine A -> B identity
+  // switch re-runs that effect even when `sessionStatus` never leaves
+  // "authenticated".
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const authenticatedUserId =
+    sessionStatus === "authenticated" ? ((session?.user as any)?.id ?? session?.user?.email ?? null) : null;
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Same semantics as plans/page.tsx syncReady.
   const [syncReady, setSyncReady] = useState(false);
+  // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
+  // plans/page.tsx's own staleRetryTick/staleRetryPendingRef exactly — see
+  // their doc there for the full rationale (required case 6: Plans and
+  // Lightning stay symmetric).
+  const [staleRetryTick, setStaleRetryTick] = useState(0);
+  const staleRetryPendingRef = useRef(false);
 
   // Form state
   const [rideName, setRideName] = useState("");
@@ -520,7 +940,13 @@ export default function LightningPage() {
     setActiveDayId(normalizeDayId(localStorage.getItem(activeDayKeyRef.current)));
     // Phase 8.3.2 — load known planner days for safe display-day validation.
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
-    setKnownDays(loadKnownDays(daysKeyRef.current));
+    // SH.2.1 P1 fix — reads the days domain's EFFECTIVE DURABLE value (see
+    // loadEffectiveDurableDays()'s own doc above), never a raw canonical
+    // read: rendering canonical bytes alone at mount could show a stale
+    // value when a newer local-edit fact survives unresolved (the
+    // documented cross-tab hydration race).
+    const loadedKnownDays = loadEffectiveDurableDays(daysKeyRef.current);
+    setKnownDays(loadedKnownDays);
     // Phase 8.8 — load day park overrides and metadata (read-only context display).
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
     setDayParks(loadDayParks(dayParksKeyRef.current));
@@ -533,17 +959,40 @@ export default function LightningPage() {
     setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
-    setItems(loadFromStorage(lightningKeyRef.current));
+    // SH.2.1 P1 fix — same rationale as `loadedKnownDays` just above: reads
+    // the Lightning domain's effective durable value (see
+    // loadEffectiveDurableLightningItems()'s own doc above), never a raw
+    // canonical read, so mount-time rendering can never regress behind a
+    // surviving local-edit fact.
+    const loadedItems = loadEffectiveDurableLightningItems(lightningKeyRef.current);
+    setItems(loadedItems);
+    // SH.2 architecture — capture this page's own FALLBACK baselines from
+    // the values just loaded above. This is only a STARTING assumption for
+    // a profile that has never had a successful push yet (or is offline/
+    // unauthenticated) — buildPostFetchPullBaseline() (declared above)
+    // prefers a real confirmed snapshot the moment one exists, falling
+    // back to these refs only
+    // until then.
+    itemsBaselineRef.current = loadedItems;
+    daysBaselineRef.current = loadedKnownDays;
+    // Same baseline concept for the opposite (Plans) dataset this page
+    // hydrates on every pull — captured as the raw string since no
+    // parsing/normalization is needed for a page that doesn't own that
+    // domain.
+    try {
+      plansRawBaselineRef.current = localStorage.getItem(plansKeyRef.current);
+    } catch {
+      plansRawBaselineRef.current = null;
+    }
     setLoaded(true);
   }, []);
 
-  // Persist whenever items change (after initial load).
-  // Also marks localEditRef so any in-flight pull sees the edit and skips
-  // overwriting it. Kept separate from the sync effect so syncReady state
-  // changes don't spuriously flip localEditRef.
+  // Persist whenever items change (after initial load). SH.2 architecture —
+  // no ref-marking needed here: a pull's own fresh read of localStorage at
+  // resolution time (see the pull effect below) already reflects whatever
+  // this effect just wrote, compared against the stable itemsBaselineRef.
   useEffect(() => {
     if (!loaded) return;
-    localEditRef.current = true;
     saveToStorage(items, lightningKeyRef.current);
   }, [items, loaded]);
 
@@ -557,171 +1006,528 @@ export default function LightningPage() {
 
   // Manage syncReady gate based on auth state transitions — mirrors plans/page.tsx.
   useEffect(() => {
+    // SH.2.1 (this round) — see plans/page.tsx's own doc on
+    // staleRetryPendingRef for why this reset is unconditional.
+    staleRetryPendingRef.current = false;
     if (sessionStatus === "loading") {
       cancelScheduledSync();
+      // Codex P1 fix (13th round) — mirrors plans/page.tsx exactly: retarget
+      // sync identity to "signed out" and advance the pull epoch, so any
+      // authenticated pull still in flight is invalidated immediately.
+      setSyncUserId(null);
       setSyncReady(false);
       return;
     }
     if (sessionStatus === "unauthenticated") {
+      setSyncUserId(null);
       setSyncReady(true);
       return;
     }
     // authenticated
     if (!loaded) return;
+    // SH.2 architecture (Codex P1, 3rd round; identity now sourced from the
+    // authenticatedUserId dependency — 13th round) — resolve and record
+    // this session's authenticated identity BEFORE anything else in this
+    // branch. Mirrors plans/page.tsx exactly — see its own detailed doc.
+    const resolvedUserId = authenticatedUserId;
+    // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
+    // SESSION boundary. Mirrors plans/page.tsx exactly — see its own
+    // detailed doc for the full root-cause explanation, why this
+    // supersedes the 4th round's previousUserId-based fallback-ref rebase
+    // (obsolete machinery, removed), and why a null/absent ownership
+    // marker is trusted (preserves local-first sign-in behavior).
+    //
+    // Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY: the ownership
+    // WRITE is deliberately NOT here — see getLocalContentOwner's own doc
+    // in syncHelper.ts and plans/page.tsx's mirrored comment. It happens at
+    // the END of this pull's `.then()` below, only once the pull genuinely
+    // resolved AND its own hydration/day writes succeeded.
+    const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
+    const contentOwnershipMismatch =
+      priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
+    activeUserIdRef.current = resolvedUserId;
+    setSyncUserId(resolvedUserId);
     cancelScheduledSync();
+    // SH.2 architecture (Codex P1, 13th round) — capture this pull's
+    // immutable execution context. Mirrors plans/page.tsx exactly — see its
+    // own detailed doc in the module doc of syncHelper.ts ("Pull execution
+    // context") for the full contract.
+    const pullCtx = beginPullContext();
     let cancelled = false;
-    localEditRef.current = false;
+    // SH.2 architecture (Codex P1, 13th round) — the ONE helper every check
+    // in this pull uses instead of scattered `if (cancelled)` conditions.
+    // Mirrors plans/page.tsx exactly — see its own detailed doc.
+    const isPullCurrent = () => !cancelled && isPullContextCurrent(pullCtx);
+    // SH.2 architecture — no ref resets here. Winner selection for this
+    // pull is entirely a function of (a) itemsBaselineRef/daysBaselineRef
+    // (stable across this whole mount — see their own doc) and (b) fresh
+    // reads of local storage taken below, at resolution time. There is
+    // nothing to "reset" at pull start: resetting an event-driven flag
+    // here is exactly the mechanism that let a pre-existing, still-unpushed
+    // edit get silently discarded by a later pull (Codex finding).
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
-    void pullPlanner(activeProfileIdRef.current)
-      .then((planner) => {
-        if (cancelled) return;
+    // SH.2.1 — STAGE 1: freeze this pull's causal disk snapshot NOW, before
+    // the GET is even issued (Codex P1 #2, preserved). `preFetchBaseline` is
+    // closed over by `.then()` below and consulted there instead of any
+    // ref — see buildPreFetchPullBaseline()'s own doc above. Every pull's
+    // baseline DECISION is made once, unconditionally, in stage 2 below —
+    // this is purely a disk-bytes freeze. Mirrors plans/page.tsx exactly.
+    const preFetchBaseline = buildPreFetchPullBaseline();
+    // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
+    // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
+    // batch of still-pending unload-beacon opIds BEFORE this pull's fetch
+    // starts. Mirrors plans/page.tsx exactly — see its own doc.
+    const pendingOpIds = pullCtx.userId
+      ? selectPendingOpBatch(pullCtx.userId, pullCtx.profileId)
+      : [];
+    void pullPlanner(pullCtx.profileId, pendingOpIds)
+      .then(async (planner) => {
+        if (!isPullCurrent()) return;
         const cloud = planner?.lightning ?? null;
-        // Phase 11.2 Codex fix — day IDs discovered from Lightning items and
-        // from plan items are collected here and reconciled into knownDays
-        // in a single step below, rather than two independent sequential
-        // setKnownDays calls. Two independent merges each append their own
-        // newly-found IDs in isolation, which can interleave two unrelated
-        // discovery orders (e.g. Lightning's [day-1, day-3] then Plans'
-        // [day-2] landing as [day-1, day-3, day-2]) instead of the single
-        // deterministic fallback order My Plans uses for IDs with no
-        // persisted position.
-        let lightningDiscoveredDayIds: string[] = [];
-        let planDiscoveredDayIds: string[] = [];
-        // Only apply cloud lightning data if no local edits occurred while
-        // the pull was in flight. Either way, open the sync gate.
-        if (!localEditRef.current && cloud) {
+        let cloudLightningItems: LightningItem[] | null = null;
+        if (cloud) {
           // Phase 8.3 — normalize dayIds from cloud items so legacy items
           // (no dayId) are safely migrated to "day-1" on hydration.
-          const cloudItems = migrateLightningDayIds(cloud.items as LightningItem[]);
-          setItems(cloudItems);
-          // Phase 8.3.2 — Refresh knownDays after cloud pull so safeActiveDayId
-          // doesn't stay stale on a fresh device where Plans page hasn't yet
-          // written the days list to localStorage. New days are added, nothing
-          // is removed — see the single reconciliation step below.
-          if (cloudItems.length > 0) {
-            lightningDiscoveredDayIds = [...new Set(cloudItems.map((it) => it.dayId))];
-          }
+          cloudLightningItems = migrateLightningDayIds(cloud.items as LightningItem[]);
         }
-        // Phase 7.6.3 — Sync Hydration Safety: hydrate plans into localStorage
-        // so sync pushes always include a complete dataset regardless of which page loads first.
-        // Phase 7.6.4 — Hydration Guard: only open syncReady when the opposite-dataset
-        // write succeeds. A failed write leaves the key missing, which syncHelper would
-        // treat as empty data on the next push — potentially overwriting valid cloud state.
-        let hydrationSucceeded = true;
-        if (typeof window !== "undefined") {
-          if (planner?.plans) {
-            try {
-              localStorage.setItem(
-                profileKeysForPull.plans,
-                JSON.stringify(planner.plans)
-              );
-              // Same-tab writes do not fire a storage event, so refresh planDayItems
-              // explicitly now that cloud plan data is in localStorage.
-              setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
-              const allPlans = loadAllPlanItems(profileKeysForPull.plans);
-              setAllPlanItems(allPlans);
-              // Plan-only dayIds — merged together with lightningDiscoveredDayIds
-              // below so a fresh profile that hydrates cloud plans and Lightning
-              // together resolves one consistent fallback order.
-              if (allPlans.length > 0) {
-                planDiscoveredDayIds = [...new Set(allPlans.map((it) => it.dayId))];
-              }
-            } catch {
-              hydrationSucceeded = false;
-            }
-          }
-        }
-        const discoveredDayIds = [...new Set([...lightningDiscoveredDayIds, ...planDiscoveredDayIds])];
-        // Phase 11.2 Codex fix — a valid synced days[] (planner.days) is
-        // authoritative, exactly as it is for My Plans' own pull handling:
-        // it reflects the pushing device's real persisted order, so it
-        // replaces knownDays outright rather than being merged into it.
-        //
-        // Codex fix (cross-tab race) — gated on !localEditRef.current, same
-        // as the lightning-items application above: without this, this
-        // branch ran unconditionally regardless of whether a newer local
-        // days[] had just arrived (same-tab item edit, or — since the
-        // storage listener now marks a cross-tab days[] write as a local
-        // edit too — another tab's reorder received while this pull was in
-        // flight), so a stale planner.days could still clobber it. Skipping
-        // here does not fail hydration — it just defers to the newer local
-        // state, exactly like skipping the items application does.
         const cloudDaysOrder = planner?.days;
-        if (!localEditRef.current && cloudDaysOrder && cloudDaysOrder.length > 0) {
-          const extra = discoveredDayIds.filter((id) => !cloudDaysOrder.includes(id)).sort(daySort);
-          const resolvedDays = extra.length > 0 ? [...cloudDaysOrder, ...extra] : [...cloudDaysOrder];
-          // Codex fix — persist the resolved authoritative order to the
-          // mounted profile's namespaced `days` key BEFORE the sync gate
-          // reopens below. syncHelper's push payload reads `days`
-          // exclusively from this localStorage key (buildPayloadFromStorage
-          // → readLocalDaysOrder) — Lightning previously only updated
-          // in-memory knownDays here, so on a fresh/stale device the
-          // correct cloud order was never written locally; the very next
-          // push (e.g. from adding a Lightning reservation, or even the
-          // items-hydration push below) would then read the still-stale
-          // or missing local `days` key and push it back to the cloud,
-          // silently reverting the order this pull just resolved. Writing
-          // it here — using the same daysKeyRef bound to this mounted
-          // profile at mount time — is required before syncReady reopens;
-          // a failed write must NOT reopen the gate, mirroring the plans
-          // hydration-write failure handling above.
-          if (typeof window !== "undefined") {
+
+        // SH.2 architecture (Codex P1, 8th round; generalized 9th) — PULL
+        // ORDER: resolve EVERY pending op's fate against THIS SAME GET
+        // response BEFORE any winner is selected. Mirrors plans/page.tsx
+        // exactly — see its own detailed doc for the full rationale.
+        const opStatuses = planner?.opStatuses ?? [];
+        // PULL OUTCOME CONTRACT (Codex P1, 17th round) — mirrors
+        // plans/page.tsx exactly, see its own detailed doc.
+        const promotionOk =
+          pullCtx.userId && pendingOpIds.length > 0
+            ? await reconcilePendingOperations(pullCtx.userId, pullCtx.profileId, opStatuses, planner?.revision ?? null, planner)
+            : true;
+        // A newer pull may have started, or this exact effect instance may
+        // have been cleaned up, while the await above was in flight —
+        // re-check before this stale pull mutates anything further (Codex
+        // P1, 13th round — mirrors plans/page.tsx exactly).
+        if (!isPullCurrent()) return;
+        // PULL OUTCOME CONTRACT (Codex P1, 17th round) — mirrors
+        // plans/page.tsx exactly, see its own detailed doc: an accepted
+        // beacon whose promotion could not be durably proven fails this
+        // entire pull closed, leaving the pending op untouched for retry.
+        if (!promotionOk) {
+          try {
+            console.error("SH.2: pull deferred — accepted beacon promotion could not be durably confirmed; pending op retained for retry.");
+          } catch {}
+          return;
+        }
+        // This pull's EFFECTIVE baseline for winner selection — SH.2.1
+        // STAGE 2, called UNCONDITIONALLY, exactly once, every pull, now
+        // that this pull's own authoritative response is known. Codex P1
+        // (SH.2.1 P2) — the PREVIOUS conditional (`anyAccepted ||
+        // preFetchGatedDomains.length > 0`) could skip re-reading confirmed
+        // state entirely, so a race landing between pre-fetch and this call
+        // was never checked against this pull's own revision at all. The
+        // revision bound now lives INSIDE resolvePostFetchDomainBaseline()
+        // itself (see its own doc in syncPayload.ts), so calling stage 2
+        // unconditionally is what actually closes that race — a
+        // `getConfirmedState()` read newer than this pull's own
+        // `cloudRevision` resolves to "stale-response" rather than being
+        // blindly trusted as this pull's baseline. Mirrors plans/page.tsx
+        // exactly — see its own detailed doc.
+        const baselineOutcomes = buildPostFetchPullBaseline(
+          contentOwnershipMismatch,
+          { userId: pullCtx.userId, profileId: pullCtx.profileId },
+          planner?.revision ?? null,
+          preFetchBaseline
+        );
+
+        // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
+        // added 17th; SH.2.1 P1 enforced by DomainBaselineOutcome's own
+        // discriminated union; SH.2.1 P2 adds "stale-response" as a second,
+        // equally unusable outcome kind) — mirrors plans/page.tsx exactly,
+        // see its own detailed doc: a conflict at ANY domain's newest
+        // confirmed revision that this pull could NOT repair, OR a
+        // confirmed revision NEWER than this pull's own response, means the
+        // entire pull bails out here rather than proceeding for the healthy
+        // domains while leaving syncReady closed — since push always sends
+        // plans+lightning+days combined in one request. Local storage is
+        // left completely untouched; the next pull resolves it automatically
+        // once a later unambiguous (or, for a stale-response domain, simply
+        // a later/equal) revision resolves it.
+        const unusableDomains = collectUnusableDomains(baselineOutcomes);
+        if (unusableDomains.length > 0) {
+          for (const unusable of unusableDomains) {
             try {
-              localStorage.setItem(daysKeyRef.current, JSON.stringify(resolvedDays));
-            } catch {
-              hydrationSucceeded = false;
-            }
+              if (unusable.reason === "conflict") {
+                console.error(
+                  `SH.2: pull deferred — ${unusable.domain}'s confirmed state is conflicted at revision ${unusable.revision}.`
+                );
+              } else if (unusable.reason === "stale-response") {
+                console.error(
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision}); refusing to hydrate an older response over it. Scheduling a replacement pull.`
+                );
+              } else {
+                console.error(
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is at revision ${unusable.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
+                );
+              }
+            } catch {}
           }
-          setKnownDays((prev) => (resolvedDays.join(",") === prev.join(",") ? prev : resolvedDays));
-          // Codex fix — revalidate activeDayId against the newly
-          // authoritative order: another device may have removed the day
-          // this device currently has active (e.g. Remove Day there, synced
-          // here). Mirrors the same fallback plans/page.tsx already uses
-          // after its own cloud-authoritative days[] replacement — if the
-          // active day is still present, leave it; otherwise fall back to
-          // the new order's first (positional Day 1) entry and persist it
-          // now, using activeDayKeyRef (bound to this mounted profile,
-          // same as daysKeyRef above) — never a live profile lookup. Reads
+          // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
+          // plans/page.tsx exactly, see its own detailed doc: retry only
+          // when EVERY unusable domain is "stale-response", never when ANY
+          // is "conflict" or "unusable-response" (this pull's own response
+          // carried no usable revision at all — retrying cannot help).
+          if (
+            isPullCurrent() &&
+            !staleRetryPendingRef.current &&
+            decideStaleResponseRecovery(unusableDomains) === "retry"
+          ) {
+            staleRetryPendingRef.current = true;
+            setStaleRetryTick((t) => t + 1);
+          }
+          return;
+        }
+        // Every outcome above is now proven usable — safe to read `.value`
+        // off each. Mirrors plans/page.tsx exactly.
+        const effectiveBaseline = {
+          items: requireResolvedValue(baselineOutcomes.items),
+          days: requireResolvedValue(baselineOutcomes.days),
+          plansRaw: requireResolvedValue(baselineOutcomes.plansRaw),
+        };
+
+        // SH.2 architecture — read CURRENT local state fresh, right now,
+        // for both domains this page owns. This is what actually closes
+        // the Codex findings: a domain's winner is determined by comparing
+        // this fresh read against a STABLE baseline (never reset merely
+        // because this effect re-ran), not by consulting a flag that could
+        // have been reset or never set at all. See pickWinningItems/
+        // pickWinningDays/reconcilePlannerSnapshot in crossDayChecks.ts
+        // (and their DEV_*_CASES) for the full model and its regression
+        // cases — mirrors plans/page.tsx exactly.
+        //
+        // SH.2.1 P3 — mirrors plans/page.tsx exactly: TWO deliberately
+        // separate reads per domain, never conflated. `currentItemsRaw`/
+        // `currentDaysRaw`/`currentPlansRaw` are the LITERAL canonical
+        // key's raw bytes — used ONLY as commitLocalDomainRaw's
+        // `expectedPreviousRaw` CAS argument below. `currentItems`/
+        // `currentDays`/`currentPlansRawDurable` are THE authority-bearing
+        // reads, via loadEffectiveDurableLightningItems()/
+        // loadEffectiveDurableDays()/readLatestDurableValue() — used for
+        // changed-locally/winner selection. See plans/page.tsx's own
+        // detailed doc for the full rationale.
+        const currentItemsRaw = localStorage.getItem(lightningKeyRef.current);
+        const currentItems = migrateLightningDayIds(loadEffectiveDurableLightningItems(lightningKeyRef.current));
+        const currentDaysRaw = localStorage.getItem(daysKeyRef.current);
+        const currentDays = loadEffectiveDurableDays(daysKeyRef.current);
+        const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
+        const currentPlansRawDurable = readLatestDurableValue(profileKeysForPull.plans);
+
+        // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
+        // SESSION substitution — mirrors plans/page.tsx exactly (see its
+        // own detailed doc). When this transition's ownership check found
+        // the raw content in storage attributed to a different, known
+        // identity, every "current" fed into a conflict decision below is
+        // forced to equal this pull's own effective baseline instead of a
+        // real (possibly foreign-owned) read.
+        const itemsForComparison = contentOwnershipMismatch ? effectiveBaseline.items : currentItems;
+        const daysForComparison = contentOwnershipMismatch ? effectiveBaseline.days : currentDays;
+        const plansRawForComparison = contentOwnershipMismatch ? effectiveBaseline.plansRaw : currentPlansRawDurable;
+
+        // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
+        // (Plans) dataset's own local-vs-cloud CANDIDATE (winning items,
+        // before removed-day sanitization) EARLY, so reconcilePlannerSnapshot
+        // below can reconcile it structurally alongside Lightning's own
+        // items — not just extend days[] with its day IDs. Same
+        // baseline-comparison model as Lightning's own domains: a fresh
+        // raw read compared against effectiveBaseline.plansRaw (this
+        // pull's causal baseline, advanced ahead of any pre-fetch freeze if
+        // an accepted beacon was just resolved above) tells whether Plans
+        // changed since this pull started. Codex P1 fix (4th round) — the
+        // actual hydration WRITE to Plans' storage is deferred until AFTER
+        // reconciliation below (it needs the sanitized result, not the raw
+        // cloud payload — see reconcilePlannerSnapshot's own doc), unlike
+        // the 2nd round's version of this code which wrote here first.
+        const plansChangedLocally = plansRawForComparison !== effectiveBaseline.plansRaw;
+        const plansCandidateItems: unknown[] =
+          !plansChangedLocally && planner?.plans
+            ? (planner.plans.items as unknown[])
+            : parsePlansRawItems(plansRawForComparison);
+
+        const { items: itemsCandidate, changedLocally: itemsChangedLocally } = pickWinningItems(
+          effectiveBaseline.items,
+          itemsForComparison,
+          cloudLightningItems
+        );
+        const { days: daysCandidate, changedLocally: daysChangedLocally } = pickWinningDays(
+          effectiveBaseline.days,
+          daysForComparison,
+          cloudDaysOrder
+        );
+        // Structural reconciliation (Codex P1, 4th round) — reconciles
+        // BOTH domains that will actually be persisted this pull, not just
+        // Lightning's own items plus a derived Plans day-id list:
+        // itemsCandidate/itemsChangedLocally is trusted outright when
+        // locally-won (never filtered merely because winningDays omits a
+        // day it references — reconciled back in instead, which is also
+        // what still closes Codex finding #3 from an earlier round —
+        // Lightning re-adding a removed day before the coupled deletion
+        // here happened to land); plansCandidateItems/plansChangedLocally
+        // get the SAME two-way treatment for ITS actual items, not merely
+        // its day IDs — a stale (cloud/unchanged) Plans item referencing a
+        // day the winning days[] removed is now filtered OUT of the
+        // returned siblingItems array itself, closing the gap where such
+        // an item could survive verbatim in Plans' own persisted storage
+        // even after its day was correctly dropped from days[] — see
+        // reconcilePlannerSnapshot's own doc for the full rule.
+        const { items: winningLightningItems, siblingItems: winningPlansItems, days: winningDays } =
+          reconcilePlannerSnapshot(
+            { items: itemsCandidate, changedLocally: itemsChangedLocally },
+            { items: plansCandidateItems, changedLocally: plansChangedLocally },
+            effectiveBaseline.days,
+            daysCandidate
+          );
+
+        // SH.2 architecture (Codex P1, 7th round) — DURABLE-BEFORE-OWNERSHIP
+        // for THIS page's own PRIMARY domain (Lightning's own items).
+        // Codex P1 fix (12th round) — routes through the shared
+        // commitLocalDomainRaw primitive (see its own doc in syncHelper.ts)
+        // instead of a bespoke read-current/choose-winner/setItem sequence:
+        // mirrors plans/page.tsx exactly — see its own detailed doc for the
+        // full rationale (never trusts itemsRef.current/knownDaysRef.current
+        // for "is a write still needed" — Codex finding #2; never clobbers a
+        // same-tab or cross-tab write that lands after `currentItemsRaw` was
+        // captured above — Codex finding #1).
+        const nextItemsRaw = JSON.stringify({ version: 1, items: winningLightningItems });
+        const itemsCommitStatus = await commitLocalDomainRaw(
+          lightningKeyRef.current,
+          currentItemsRaw,
+          nextItemsRaw,
+          isPullCurrent
+        );
+        // Codex P1 fix (13th round) — re-check after EVERY awaited
+        // local-domain commit, before using its result for anything.
+        // Mirrors plans/page.tsx exactly — see its own detailed doc.
+        if (!isPullCurrent()) return;
+        const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
+        // Only touch React state once the durable write is confirmed (or
+        // confirmed unnecessary) AND the winning result actually differs
+        // from what's already rendered.
+        if (primaryPersistSucceeded && JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
+          setItems(winningLightningItems);
+        }
+        // Cloud "won" the items domain when local hadn't changed and a
+        // valid cloud payload existed — safe to trust immediately as this
+        // page's new baseline (see itemsBaselineRef's own doc: updating
+        // here does not risk discarding an unpushed edit, since none
+        // exists in this branch).
+        const itemsCloudWon = !itemsChangedLocally && cloudLightningItems !== null;
+        if (itemsCloudWon) {
+          // Codex P1 fix (7th round; commit outcome generalized 12th) —
+          // only trust winningLightningItems as the new fallback baseline
+          // when it is actually durably confirmed on disk (committed or
+          // noop). Mirrors plans/page.tsx.
+          if (primaryPersistSucceeded) {
+            itemsBaselineRef.current = winningLightningItems;
+          }
+        }
+
+        // Phase 7.6.3 — Sync Hydration Safety: hydrate Plans into
+        // localStorage so sync pushes always include a complete dataset
+        // regardless of which page loads first. Codex P1 fix (4th round) —
+        // writes the RECONCILED/sanitized winningPlansItems (from
+        // reconcilePlannerSnapshot above), not planner.plans verbatim: a
+        // stale item this pull's days reconciliation determined should be
+        // dropped (its day removed by the winning days[], and Plans itself
+        // didn't win this domain locally) must never survive into Plans'
+        // own persisted storage just because it was still present in the
+        // raw cloud payload — that was the actual gap (days[] correctly
+        // excluded the day, but the orphaned item itself was written
+        // through verbatim). Performed here — BEFORE the Days domain block
+        // below — so that block's own day-invalidation refresh (reading
+        // Plans' storage fresh) sees the sanitized content, not a stale
+        // pre-write copy.
+        // Phase 7.6.4 — Hydration Guard: only open syncReady when the
+        // opposite-dataset write succeeds. A failed write leaves the key
+        // missing, which syncHelper would treat as empty data on the next
+        // push — potentially overwriting valid cloud state.
+        // Codex P1 fix (10th round; commit primitive 12th) — this commit is
+        // UNCONDITIONAL on whether `planner?.plans` existed at all;
+        // persistence depends ONLY on whether the durable value on disk
+        // actually differs from the reconciled winningPlansItems. Mirrors
+        // plans/page.tsx's own Lightning-sibling fix exactly.
+        const winningPlansRawToWrite = JSON.stringify({ version: 1, items: winningPlansItems });
+        const plansCommitStatus = await commitLocalDomainRaw(
+          profileKeysForPull.plans,
+          currentPlansRaw,
+          winningPlansRawToWrite,
+          isPullCurrent
+        );
+        if (!isPullCurrent()) return;
+        const hydrationSucceeded = isLocalDomainCommitSuccess(plansCommitStatus);
+        // Codex P1 fix (1st round; commit outcome generalized 12th) —
+        // tracks specifically whether THIS pull's final durable Plans value
+        // is CLOUD-SOURCED (distinct from hydrationSucceeded, which is also
+        // true on a "noop" outcome where disk already held that exact
+        // value) — only a durably-confirmed, cloud-derived value is
+        // eligible to advance Plans' confirmed baseline below.
+        const plansHydrationWritten = hydrationSucceeded && !plansChangedLocally && !!planner?.plans;
+        if (hydrationSucceeded) {
+          plansRawBaselineRef.current = winningPlansRawToWrite;
+        }
+
+        // Days domain — same shared commit primitive as Lightning's own
+        // items.
+        const nextDaysRaw = JSON.stringify(winningDays);
+        const daysCommitStatus = await commitLocalDomainRaw(
+          daysKeyRef.current,
+          currentDaysRaw,
+          nextDaysRaw,
+          isPullCurrent
+        );
+        if (!isPullCurrent()) return;
+        const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
+        if (!daysWriteFailed && winningDays.join(",") !== knownDaysRef.current.join(",")) {
+          setKnownDays(winningDays);
+          // Revalidate activeDayId against the newly winning order: another
+          // device may have removed the day this device currently has
+          // active (e.g. Remove Day there, synced here). Mirrors the exact
+          // same fallback plans/page.tsx already uses locally. Reads
           // activeDayIdRef (not the closure `activeDayId`) since this async
           // callback's closure could otherwise be stale relative to a
           // day-picker switch the user made while the pull was in flight.
-          if (!resolvedDays.includes(activeDayIdRef.current)) {
-            const nextActiveDayId = resolvedDays[0];
+          if (!winningDays.includes(activeDayIdRef.current)) {
+            const nextActiveDayId = winningDays[0];
             setActiveDayId(nextActiveDayId);
             try {
               localStorage.setItem(activeDayKeyRef.current, nextActiveDayId);
             } catch {}
             // Refresh day-scoped Lightning state that depends on the active
-            // day: planDayItems was already computed above (for the
-            // pre-correction active day, via safeActiveDayIdRef.current) and
-            // would otherwise stay stale — showing plan items for the
-            // now-invalid removed day — until some unrelated trigger (e.g.
+            // day — would otherwise stay stale, showing plan items for the
+            // now-invalid removed day, until some unrelated trigger (e.g.
             // the user manually picking a day) happened to refresh it.
             setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
           }
-        } else if (discoveredDayIds.length > 0) {
-          // Legacy payload with no synced days[] — reconcile the full union
-          // of newly discovered day IDs from both sources in one step.
-          // `prev` (a genuinely persisted days[] order, when one exists) is
-          // preserved exactly and never re-sorted; only IDs not already
-          // known are appended, and only those are ordered — via the same
-          // daySort numeric-suffix comparator My Plans uses for its own
-          // unordered/unknown-ID tail — so the fallback order matches My
-          // Plans regardless of which source discovered which ID first.
-          setKnownDays((prev) => {
-            const extra = discoveredDayIds.filter((id) => !prev.includes(id)).sort(daySort);
-            return extra.length > 0 ? [...prev, ...extra] : prev;
-          });
         }
-        if (hydrationSucceeded) setSyncReady(true);
+        // Days FALLBACK baseline updates only when NEITHER domain had a
+        // local, unconfirmed change this pull — i.e. winningDays is
+        // entirely cloud-sourced (including any additive extension, since
+        // that extension was itself derived from cloud-sourced winning
+        // items) — AND the days write itself durably succeeded. If either
+        // domain won locally, any extension may be locally sourced too;
+        // leave this fallback stale so a later pull (absent a genuine
+        // confirmed snapshot by then) keeps protecting it rather than
+        // assuming it's safe.
+        if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
+          daysBaselineRef.current = winningDays;
+        }
+
+        // Same-tab writes do not fire a storage event, so refresh
+        // planDayItems/allPlanItems explicitly after every pull. Reads
+        // fresh from the storage KEY (not from `planner.plans` directly),
+        // so this correctly reflects whichever data is actually in storage
+        // — the cloud snapshot just written above, the foreign tab's newer
+        // edit that write was skipped to protect, or (Codex P1, 10th round)
+        // the reconciled B-safe/empty content this pull just wrote on a
+        // 204/no-cloud-plans ownership transfer. Unconditional on
+        // `planner?.plans` now — gating this UI refresh on cloud's presence
+        // let it keep showing a previous identity's stale cross-referenced
+        // plan items even after the underlying storage was correctly
+        // overwritten.
+        setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
+        setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
+        // Codex fix — a failed authoritative days[] write (daysWriteFailed)
+        // keeps the gate closed exactly like a failed plans-hydration write
+        // already does, so a stale locally-persisted order can never be
+        // pushed back over the cloud's actual value. Codex P1 fix (7th
+        // round) — also requires `primaryPersistSucceeded` (this page's own
+        // Lightning items write). Mirrors plans/page.tsx.
+        if (hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) setSyncReady(true);
+
+        // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
+        // BOUNDARY. Mirrors plans/page.tsx exactly — see its own detailed
+        // comment and getLocalContentOwner's doc in syncHelper.ts. Codex P1
+        // fix (7th round) — also requires `primaryPersistSucceeded`.
+        if (pullCtx.userId && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
+          setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
+        }
+
+        // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
+        // MOVED to the top of this `.then()`, before winner selection.
+        // Mirrors plans/page.tsx exactly — see its own detailed doc.
+
+        // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
+        // DURABLE confirmed baseline for whichever domain(s) this pull
+        // determined were cloud-won AND successfully persisted. This is
+        // what makes a pull-hydrated domain just as "confirmed" as a
+        // pushed one, so a LATER pull's buildPostFetchPullBaseline()
+        // never misclassifies it as an unsynced local edit — see
+        // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
+        // domains are simply omitted: their prior confirmation status is
+        // left untouched, exactly matching this pull's own conflict
+        // decision (never "retroactively" changed by a later event).
+        // 3rd round: the commit is now identity-scoped (activeUserIdRef)
+        // and revision-gated — it's skipped entirely when we don't know
+        // which account this is for, or when the GET response carried no
+        // server revision, since an un-ordered commit could otherwise
+        // regress a newer confirmed snapshot written by a concurrent push.
+        const acceptedForBaseline: {
+          plans?: { version: number; items: unknown[] };
+          lightning?: { version: number; items: unknown[] };
+          days?: string[];
+        } = {};
+        // Codex P1 fix (7th round) — also requires `primaryPersistSucceeded`:
+        // metadata must never advance ahead of the durable state it
+        // describes. Mirrors plans/page.tsx.
+        if (itemsCloudWon && primaryPersistSucceeded) {
+          acceptedForBaseline.lightning = { version: 1, items: winningLightningItems };
+        }
+        if (plansHydrationWritten && planner?.plans) {
+          // Codex P1 fix (4th round) — commit the SAME sanitized content
+          // that was actually persisted to Plans' storage above, not the
+          // raw planner.plans payload; committing the unsanitized version
+          // would re-introduce the orphaned item into the durable
+          // confirmed record even though it was correctly stripped from
+          // local storage.
+          acceptedForBaseline.plans = { version: planner.plans.version, items: winningPlansItems };
+        }
+        // Days is committed only when winningDays is ENTIRELY cloud-derived
+        // — own items cloud-won, Plans didn't win locally either (so no
+        // locally-sourced day could have been folded into the
+        // reconciliation step above), days itself didn't win locally, and
+        // the write actually succeeded. Mirrors the daysBaselineRef
+        // fallback-tier condition just above, now also accounting for the
+        // sibling dataset.
+        if (itemsCloudWon && primaryPersistSucceeded && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
+          acceptedForBaseline.days = winningDays;
+        }
+        if (pullCtx.userId && planner?.revision != null) {
+          // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
+          // the 11th — see commitConfirmedBaseline's own doc); fired
+          // without awaiting since nothing later in this callback depends
+          // on the commit having landed. Scoped to pullCtx.userId/
+          // pullCtx.profileId (13th round), not the live refs.
+          void commitConfirmedBaseline(
+            pullCtx.userId,
+            pullCtx.profileId,
+            planner.revision,
+            acceptedForBaseline
+          );
+        }
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!isPullCurrent()) return;
         // Cloud state is uncertain — keep push gate closed.
       });
     return () => { cancelled = true; };
-  }, [sessionStatus, loaded]);
+  // `session` itself is deliberately excluded — mirrors plans/page.tsx
+  // exactly, see its own detailed doc. `authenticatedUserId` (Codex P1,
+  // 13th round) is included so this effect DOES still re-run on a genuine
+  // authenticated-identity change even when `sessionStatus` never leaves
+  // "authenticated". `staleRetryTick` (SH.2.1, this round) is included so a
+  // stale-response bail-out's own scheduled replacement pull actually runs
+  // this effect again — mirrors plans/page.tsx exactly, see its own doc.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionStatus, loaded, authenticatedUserId, staleRetryTick]);
 
   // Register a best-effort sendBeacon push on page unload.
   useEffect(() => {
@@ -832,22 +1638,30 @@ export default function LightningPage() {
         setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
       }
       if (e.key === daysKeyRef.current) {
-        setKnownDays(loadKnownDays(daysKeyRef.current));
-        // Codex fix — another tab (e.g. My Plans reordering, or another
-        // Lightning tab's own successful pull) just wrote a newer days[]
-        // order for this same profile. Mark it as a local edit so that if
-        // this tab's own pullPlanner() is still in flight, its eventual
-        // (possibly older) planner.days does not clobber the value the
-        // other tab just persisted — same `if (!localEditRef.current &&
-        // cloud)` guard already used for same-tab item/day edits, just
-        // triggered by a cross-tab write instead of a same-tab one.
-        // onStorage only ever fires for writes from OTHER tabs (the tab
-        // that wrote the key never receives its own 'storage' event), so
-        // this can never mark this tab's own pull-applied write as if it
-        // were external, and it never fires at all when no other tab
-        // wrote anything — so a genuine first hydration with no
-        // concurrent edit is never blocked.
-        localEditRef.current = true;
+        // SH.2 architecture — UI-reactivity only: refresh this tab's
+        // displayed knownDays to match what another tab just persisted,
+        // purely to avoid a stale display. Conflict resolution no longer
+        // depends on this listener at all — the pull effect above always
+        // re-reads localStorage fresh and compares it against a stable
+        // baseline (pickWinningDays/reconcilePlannerSnapshot in
+        // crossDayChecks.ts), so there is nothing here to "protect" a
+        // pending pull from; a genuine days[] change and a no-op hydration
+        // write are treated identically since both are equally irrelevant
+        // to the pull's own independent, storage-event-free comparison.
+        //
+        // SH.2.1 closing audit fix — reads the days domain's EFFECTIVE
+        // DURABLE value (see loadEffectiveDurableDays()'s own doc above),
+        // never a raw canonical read: symmetric with the lightningKeyRef
+        // branch below (and with plans/page.tsx's own mirrored fix) —
+        // knownDays here is display-only on THIS page (Plans owns writes),
+        // but a stale canonical read here is still the same missed
+        // consumer of the established durable-authority abstraction the
+        // closing audit required routing through it.
+        const next = loadEffectiveDurableDays(daysKeyRef.current);
+        const isGenuineChange = next.join(",") !== knownDaysRef.current.join(",");
+        if (isGenuineChange) {
+          setKnownDays(next);
+        }
       }
       if (e.key === dayParksKeyRef.current) {
         setDayParks(loadDayParks(dayParksKeyRef.current));
@@ -856,7 +1670,11 @@ export default function LightningPage() {
         setDayMeta(loadDayMeta(dayMetaKeyRef.current));
       }
       if (e.key === plansKeyRef.current) {
-        // Plans changed — re-infer using current active day.
+        // Plans changed — re-infer using current active day. SH.2
+        // architecture — UI-reactivity only, same rationale as the
+        // daysKeyRef branch above: the pull effect's own fresh read plus
+        // baseline comparison is what actually protects against a stale
+        // cloud overwrite, not this listener.
         setPlanDayItems(loadPlanItemsForDay(plansKeyRef.current, safeActiveDayIdRef.current));
         setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
       }
@@ -867,10 +1685,31 @@ export default function LightningPage() {
       // edit here would persist that stale array — resurrecting entries Remove
       // Day already deleted. This only ever fires for writes from OTHER tabs
       // (the tab that wrote the key never receives its own 'storage' event), so
-      // it cannot clobber an in-progress edit made in this tab.
+      // it cannot clobber an in-progress edit made in this tab. SH.2
+      // architecture — no ref-marking needed: the pull effect's own fresh
+      // read of this same key at resolution time already reflects whatever
+      // was just reloaded here, compared against the stable itemsBaselineRef.
+      //
+      // SH.2.1 closing audit fix (Codex finding) — reads the Lightning
+      // domain's EFFECTIVE DURABLE value (see
+      // loadEffectiveDurableLightningItems()'s own doc above), never a raw
+      // canonical read: `items` is this page's
+      // authoritative React state and has its OWN auto-persist effect
+      // (saveToStorage(items, ...) on every items change), so adopting a
+      // stale canonical value here would get republished as a BRAND-NEW
+      // edit fact on the very next render — permanently retiring whatever
+      // genuinely newer edit fact was surviving. This is the exact
+      // stale-canonical-outranks-a-durable-fact shape every other SH.2.1
+      // round has closed, left open at this one remaining consumer.
       if (e.key === lightningKeyRef.current) {
-        setItems(loadFromStorage(lightningKeyRef.current));
+        setItems(loadEffectiveDurableLightningItems(lightningKeyRef.current));
       }
+      // SH.2 architecture — no confirmed-snapshot listener here (removed —
+      // obsolete under the pull-start-baseline model). Each pull captures
+      // its own causal baseline fresh, once, at pull start (see
+      // buildPreFetchPullBaseline()) — a live cross-tab listener
+      // that could update an in-use baseline mid-pull is exactly the
+      // mechanism Codex P1 #2 flagged.
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
