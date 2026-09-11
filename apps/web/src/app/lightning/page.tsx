@@ -34,6 +34,9 @@ import {
   setLocalContentOwner,
   selectPendingOpBatch,
   reconcilePendingOperations,
+  commitLocalDomainRaw,
+  forceCommitLocalDomainRaw,
+  isLocalDomainCommitSuccess,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -351,11 +354,13 @@ function loadFromStorage(key: string = STORAGE_KEY): LightningItem[] {
   }
 }
 
+// SH.2 architecture (Codex P1, 12th round) — routes through the shared
+// forceCommitLocalDomainRaw primitive (see its own doc in syncHelper.ts)
+// instead of a bare setItem: mirrors plans/page.tsx's own saveToStorage
+// exactly — see its doc there for the full rationale.
 function saveToStorage(items: LightningItem[], key: string = STORAGE_KEY): void {
-  try {
-    const schema: StoredSchema = { version: 1, items };
-    localStorage.setItem(key, JSON.stringify(schema));
-  } catch {}
+  const schema: StoredSchema = { version: 1, items };
+  void forceCommitLocalDomainRaw(key, JSON.stringify(schema));
 }
 
 // ===== ID GENERATION =====
@@ -816,10 +821,6 @@ export default function LightningPage() {
       .then(async (planner) => {
         if (cancelled) return;
         const cloud = planner?.lightning ?? null;
-        // Codex fix — tracks whether the checked authoritative days[] write
-        // below failed. A failed write must not let syncReady reopen (it
-        // would leave a stale local order to be pushed back over cloud).
-        let daysWriteFailed = false;
         let cloudLightningItems: LightningItem[] | null = null;
         if (cloud) {
           // Phase 8.3 — normalize dayIds from cloud items so legacy items
@@ -866,7 +867,15 @@ export default function LightningPage() {
         // always used for write-skip checks below, so a genuinely
         // differing winner always actually overwrites whatever is really
         // on disk (contaminated or not).
+        //
+        // Codex P1 fix (12th round) — `currentItemsRaw`/`currentDaysRaw`
+        // capture the EXACT raw bytes alongside the parsed forms — the
+        // compare-and-swap baseline commitLocalDomainRaw (below) checks
+        // against immediately before writing. Mirrors plans/page.tsx
+        // exactly — see its own doc for the full rationale.
+        const currentItemsRaw = localStorage.getItem(lightningKeyRef.current);
         const currentItems = migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
+        const currentDaysRaw = localStorage.getItem(daysKeyRef.current);
         const currentDays = loadKnownDays(daysKeyRef.current);
         const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
 
@@ -937,28 +946,26 @@ export default function LightningPage() {
 
         // SH.2 architecture (Codex P1, 7th round) — DURABLE-BEFORE-OWNERSHIP
         // for THIS page's own PRIMARY domain (Lightning's own items).
-        // Mirrors plans/page.tsx's own doc for this exact fix — see there
-        // for the full rationale: `hydrationSucceeded`/`daysWriteFailed`
-        // below only ever tracked the SIBLING (Plans) domain's write, never
-        // this page's own primary write (previously routed only through
-        // setItems() + a separate, decoupled persist-effect whose success
-        // was never observed here). This performs the SAME durable write
-        // directly and synchronously, mirroring the sibling's own
-        // try/catch pattern just below, so failure is observable HERE.
-        let primaryPersistSucceeded = true;
-        // Only touch React state when the winning result actually differs
-        // from what's already there — avoids an unnecessary re-render/
-        // persist-effect write on an ordinary no-conflict pull.
-        if (JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
+        // Codex P1 fix (12th round) — routes through the shared
+        // commitLocalDomainRaw primitive (see its own doc in syncHelper.ts)
+        // instead of a bespoke read-current/choose-winner/setItem sequence:
+        // mirrors plans/page.tsx exactly — see its own detailed doc for the
+        // full rationale (never trusts itemsRef.current/knownDaysRef.current
+        // for "is a write still needed" — Codex finding #2; never clobbers a
+        // same-tab or cross-tab write that lands after `currentItemsRaw` was
+        // captured above — Codex finding #1).
+        const nextItemsRaw = JSON.stringify({ version: 1, items: winningLightningItems });
+        const itemsCommitStatus = await commitLocalDomainRaw(
+          lightningKeyRef.current,
+          currentItemsRaw,
+          nextItemsRaw
+        );
+        const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
+        // Only touch React state once the durable write is confirmed (or
+        // confirmed unnecessary) AND the winning result actually differs
+        // from what's already rendered.
+        if (primaryPersistSucceeded && JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
           setItems(winningLightningItems);
-          try {
-            localStorage.setItem(
-              lightningKeyRef.current,
-              JSON.stringify({ version: 1, items: winningLightningItems })
-            );
-          } catch {
-            primaryPersistSucceeded = false;
-          }
         }
         // Cloud "won" the items domain when local hadn't changed and a
         // valid cloud payload existed — safe to trust immediately as this
@@ -967,9 +974,10 @@ export default function LightningPage() {
         // exists in this branch).
         const itemsCloudWon = !itemsChangedLocally && cloudLightningItems !== null;
         if (itemsCloudWon) {
-          // Codex P1 fix (7th round) — only trust winningLightningItems as
-          // the new fallback baseline when it is actually durably on disk
-          // (or needed no write at all). Mirrors plans/page.tsx.
+          // Codex P1 fix (7th round; commit outcome generalized 12th) —
+          // only trust winningLightningItems as the new fallback baseline
+          // when it is actually durably confirmed on disk (committed or
+          // noop). Mirrors plans/page.tsx.
           if (primaryPersistSucceeded) {
             itemsBaselineRef.current = winningLightningItems;
           }
@@ -989,62 +997,44 @@ export default function LightningPage() {
         // through verbatim). Performed here — BEFORE the Days domain block
         // below — so that block's own day-invalidation refresh (reading
         // Plans' storage fresh) sees the sanitized content, not a stale
-        // pre-write copy (2nd round had this write in the same relative
-        // position, before pickWinningItems/Days ran at all; now it must
-        // run after reconciliation, since it needs reconciliation's own
-        // sanitized output, while staying before the Days domain block).
+        // pre-write copy.
         // Phase 7.6.4 — Hydration Guard: only open syncReady when the
         // opposite-dataset write succeeds. A failed write leaves the key
         // missing, which syncHelper would treat as empty data on the next
         // push — potentially overwriting valid cloud state.
-        let hydrationSucceeded = true;
-        // Codex P1 fix (1st round) — tracks specifically whether THIS pull
-        // just wrote CLOUD-SOURCED Plans data (distinct from
-        // hydrationSucceeded, which also stays true when the write was
-        // correctly SKIPPED because the reconciled winner already matches
-        // on-disk content) — only a real, successful cloud-derived write is
-        // eligible to advance Plans' confirmed baseline below.
-        let plansHydrationWritten = false;
-        // Codex P1 fix (10th round) — COHERENT PULL COMMIT: mirrors
-        // plans/page.tsx's own Lightning-sibling fix exactly — see its
-        // detailed doc. This write is UNCONDITIONAL on whether
-        // `planner?.plans` existed at all; persistence depends ONLY on
-        // whether the reconciled winningPlansItems actually differs from
-        // what's really on disk (`currentPlansRaw`, a real fresh read taken
-        // earlier). The previous `planner?.plans &&` gate let a 204/no-
-        // cloud-plans account-ownership-transfer pull compute a correct,
-        // B-safe, intentionally-empty winningPlansItems via reconciliation
-        // and then SKIP writing it, leaving the PREVIOUS identity's foreign
-        // Plans bytes on disk while `hydrationSucceeded` wrongly reported
-        // success — letting ownership transfer with foreign sibling bytes
-        // still present (Codex finding #1). `version` is a fixed schema
-        // constant, never derived from whether cloud happened to supply
-        // this domain.
+        // Codex P1 fix (10th round; commit primitive 12th) — this commit is
+        // UNCONDITIONAL on whether `planner?.plans` existed at all;
+        // persistence depends ONLY on whether the durable value on disk
+        // actually differs from the reconciled winningPlansItems. Mirrors
+        // plans/page.tsx's own Lightning-sibling fix exactly.
         const winningPlansRawToWrite = JSON.stringify({ version: 1, items: winningPlansItems });
-        if (winningPlansRawToWrite !== currentPlansRaw) {
-          try {
-            localStorage.setItem(profileKeysForPull.plans, winningPlansRawToWrite);
-            plansRawBaselineRef.current = winningPlansRawToWrite;
-            // Only a write BOTH cloud-sourced AND not superseded by a local
-            // edit is eligible to advance Plans' own confirmed baseline as
-            // "the cloud's accepted state" — see plans/page.tsx's mirrored
-            // doc for the full rationale.
-            if (!plansChangedLocally && planner?.plans) {
-              plansHydrationWritten = true;
-            }
-          } catch {
-            hydrationSucceeded = false;
-          }
+        const plansCommitStatus = await commitLocalDomainRaw(
+          profileKeysForPull.plans,
+          currentPlansRaw,
+          winningPlansRawToWrite
+        );
+        const hydrationSucceeded = isLocalDomainCommitSuccess(plansCommitStatus);
+        // Codex P1 fix (1st round; commit outcome generalized 12th) —
+        // tracks specifically whether THIS pull's final durable Plans value
+        // is CLOUD-SOURCED (distinct from hydrationSucceeded, which is also
+        // true on a "noop" outcome where disk already held that exact
+        // value) — only a durably-confirmed, cloud-derived value is
+        // eligible to advance Plans' confirmed baseline below.
+        const plansHydrationWritten = hydrationSucceeded && !plansChangedLocally && !!planner?.plans;
+        if (hydrationSucceeded) {
+          plansRawBaselineRef.current = winningPlansRawToWrite;
         }
 
-        // Days domain — checked write only if the winning result actually
-        // differs from what's currently on disk.
-        if (winningDays.join(",") !== currentDays.join(",")) {
-          try {
-            localStorage.setItem(daysKeyRef.current, JSON.stringify(winningDays));
-          } catch {
-            daysWriteFailed = true;
-          }
+        // Days domain — same shared commit primitive as Lightning's own
+        // items.
+        const nextDaysRaw = JSON.stringify(winningDays);
+        const daysCommitStatus = await commitLocalDomainRaw(
+          daysKeyRef.current,
+          currentDaysRaw,
+          nextDaysRaw
+        );
+        const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
+        if (!daysWriteFailed && winningDays.join(",") !== knownDaysRef.current.join(",")) {
           setKnownDays(winningDays);
           // Revalidate activeDayId against the newly winning order: another
           // device may have removed the day this device currently has
@@ -1070,11 +1060,12 @@ export default function LightningPage() {
         // local, unconfirmed change this pull — i.e. winningDays is
         // entirely cloud-sourced (including any additive extension, since
         // that extension was itself derived from cloud-sourced winning
-        // items). If either domain won locally, any extension may be
-        // locally sourced too; leave this fallback stale so a later pull
-        // (absent a genuine confirmed snapshot by then) keeps protecting
-        // it rather than assuming it's safe.
-        if (itemsCloudWon && !daysChangedLocally) {
+        // items) — AND the days write itself durably succeeded. If either
+        // domain won locally, any extension may be locally sourced too;
+        // leave this fallback stale so a later pull (absent a genuine
+        // confirmed snapshot by then) keeps protecting it rather than
+        // assuming it's safe.
+        if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
           daysBaselineRef.current = winningDays;
         }
 

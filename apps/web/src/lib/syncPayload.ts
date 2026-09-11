@@ -886,3 +886,110 @@ export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
     expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1", "day-2"] },
   },
 ];
+
+// ===== LOCAL-DOMAIN COMMIT DECISION (SH.2, 12th round) =====
+//
+// Codex found two P1s in local persistence after pull reconciliation: (1)
+// hydration's read-current → choose-winner → later setItem() sequence left
+// a window in which another tab's newer same-domain write could land in
+// between and get silently clobbered by the pull's now-stale winner; (2)
+// some persistence-retry checks compared the winning value against REACT
+// STATE (e.g. itemsRef.current) instead of the actual durable localStorage
+// value — if a prior direct write AND its persistence effect had both
+// failed, React state could already equal the winner while disk stayed
+// stale, so the check wrongly concluded "already persisted" and skipped
+// the write, letting sync/ownership gates reopen over unpersisted data.
+//
+// This function is the PURE decision core both bugs are fixed through: it
+// takes the durable value actually on disk right now (`currentRaw`), the
+// durable value that was on disk when the winner was decided
+// (`expectedPreviousRaw`), and the value a caller wants to commit
+// (`nextRaw`) — never React state, never a timestamp, never arrival order —
+// and returns which of three things must happen:
+//   "noop"       — `currentRaw` already equals `nextRaw`; nothing to write,
+//                  and this is a SUCCESS (the durable value already is the
+//                  winner, however it got there).
+//   "superseded" — `currentRaw` no longer equals `expectedPreviousRaw`: a
+//                  write this caller didn't know about landed since the
+//                  decision was made. That write is NEWER by construction
+//                  (it happened after the observation the caller's own
+//                  decision was based on) and must never be overwritten —
+//                  the caller MUST NOT write `nextRaw` in this case.
+//   "write"      — `currentRaw` still matches the caller's own baseline;
+//                  safe to persist `nextRaw`.
+// See commitLocalDomainRaw()/forceCommitLocalDomainRaw() in syncHelper.ts
+// for the actual localStorage I/O built on this decision (including the
+// per-key Web Locks serialization used when available, and the fail-safe
+// behavior — this same decision, just without a lock — when it isn't).
+export type LocalDomainCommitDecision = "write" | "noop" | "superseded";
+
+export function decideLocalDomainCommit(
+  currentRaw: string | null,
+  expectedPreviousRaw: string | null,
+  nextRaw: string
+): LocalDomainCommitDecision {
+  if (currentRaw === nextRaw) return "noop";
+  if (currentRaw !== expectedPreviousRaw) return "superseded";
+  return "write";
+}
+
+/**
+ * Reference cases for decideLocalDomainCommit() — the REQUIRED cases from
+ * the 12th round's architectural contract, reduced to this function's pure
+ * inputs/outputs. Run from Node:
+ *   import { DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES.forEach(c => {
+ *     const got = decideLocalDomainCommit(c.currentRaw, c.expectedPreviousRaw, c.nextRaw);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES: Array<{
+  name: string;
+  currentRaw: string | null;
+  expectedPreviousRaw: string | null;
+  nextRaw: string;
+  expected: LocalDomainCommitDecision;
+}> = [
+  {
+    name: "required — durable value unchanged since decision: safe to write",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "required — a newer write already landed (current diverged from the decision baseline): superseded, must not overwrite",
+    currentRaw: "C",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "superseded",
+  },
+  {
+    name: "required — durable value already equals the winner: successful no-op, regardless of what the stale baseline was",
+    currentRaw: "B",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "noop",
+  },
+  {
+    name: "force-commit policy (expectedPrevious == currentRaw always): never superseded, writes whenever different",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "A",
+    expected: "noop",
+  },
+  {
+    name: "key never previously existed (null baseline) and still doesn't: safe to write",
+    currentRaw: null,
+    expectedPreviousRaw: null,
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "key never previously existed per the decision baseline, but now does (a concurrent first-write raced in): superseded",
+    currentRaw: "C",
+    expectedPreviousRaw: null,
+    nextRaw: "B",
+    expected: "superseded",
+  },
+];

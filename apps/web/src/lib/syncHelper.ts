@@ -115,6 +115,70 @@ Reviewers should check any changes affecting:
  *                                                         this pull's
  *                                                         baseline BEFORE
  *                                                         winner selection)
+ *   await commitLocalDomainRaw(key,                  — the shared LOCAL
+ *     expectedPreviousRaw, nextRaw)                     persistence commit
+ *                                                        primitive (12th
+ *                                                        round; see its own
+ *                                                        doc) — writes
+ *                                                        `nextRaw` to a
+ *                                                        synced domain's
+ *                                                        localStorage `key`
+ *                                                        ONLY if the value
+ *                                                        actually there right
+ *                                                        now still equals
+ *                                                        `expectedPreviousRaw`
+ *                                                        (the value a
+ *                                                        caller's winner
+ *                                                        decision was based
+ *                                                        on) — used by pull
+ *                                                        hydration, which
+ *                                                        must never clobber a
+ *                                                        newer same-domain
+ *                                                        write that landed
+ *                                                        after its decision
+ *                                                        was made
+ *   await forceCommitLocalDomainRaw(key, nextRaw)    — the same primitive's
+ *                                                        unconditional
+ *                                                        policy: always
+ *                                                        writes `nextRaw`
+ *                                                        (skipping only when
+ *                                                        the durable value
+ *                                                        already equals it) —
+ *                                                        used by ordinary
+ *                                                        user-edit writers,
+ *                                                        which always
+ *                                                        represent the
+ *                                                        user's own freshest
+ *                                                        intent and so are
+ *                                                        never subject to
+ *                                                        rejection, but still
+ *                                                        participate in the
+ *                                                        SAME per-key Web
+ *                                                        Locks serialization
+ *                                                        as commitLocalDomainRaw
+ *                                                        so a concurrent
+ *                                                        hydration commit to
+ *                                                        the same key can
+ *                                                        never interleave
+ *                                                        with one of these
+ *   isLocalDomainCommitSuccess(status)               — true for "committed"
+ *                                                        or "noop" (the
+ *                                                        durable value is
+ *                                                        confirmed to be, or
+ *                                                        already was, the
+ *                                                        caller's intended
+ *                                                        value); false for
+ *                                                        "superseded" or
+ *                                                        "failed" — gates
+ *                                                        that must only
+ *                                                        advance once a
+ *                                                        winning domain is
+ *                                                        durably committed
+ *                                                        (ownership,
+ *                                                        syncReady,
+ *                                                        confirmed-baseline)
+ *                                                        should check this,
+ *                                                        never React state
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -371,6 +435,70 @@ Reviewers should check any changes affecting:
  * in each page for how a pull's OWN immutable baseline is frozen from it
  * (per domain, independently), and each page's pull effect for how
  * commitConfirmedBaseline() is called afterward.
+ *
+ * ── Local-domain commit (SH.2, Codex P1, 12th round) ────────────────────────
+ *
+ * Codex found two P1s in local persistence AFTER pull reconciliation has
+ * already picked a winner for a synced domain (plans/lightning/days):
+ *   (1) STALE-WINNER OVERWRITE. Hydration's sequence was read current local
+ *       domain → choose winner → LATER localStorage.setItem(...). Nothing
+ *       re-checked the durable value immediately before that final write, so
+ *       another tab's genuinely newer same-domain write landing in the
+ *       window between the read and the write was silently clobbered by the
+ *       pull's now-stale winner.
+ *   (2) REACT-STATE COMPARISON. Some "is a write still needed" checks
+ *       compared the winning value against REACT STATE (e.g. itemsRef.current)
+ *       instead of the actual durable localStorage value. If an earlier
+ *       direct write AND its persistence effect had both failed, React state
+ *       could already equal the winner while disk stayed on the OLD value —
+ *       the check then wrongly concluded "already persisted", skipped the
+ *       write, and let sync/ownership gates reopen over data that was never
+ *       actually durable.
+ *
+ * Both are fixed by routing every synced-domain local write — hydration's
+ * AND every ordinary user-edit writer, not hydration alone (a lock used only
+ * by hydration cannot prevent a non-participating ordinary writer from
+ * landing inside its critical section) — through ONE shared primitive,
+ * keyed purely by the domain's localStorage key (which already uniquely
+ * identifies profile+domain via buildNamespacedKey, so no separate
+ * profile/user threading is needed here):
+ *   • commitLocalDomainRaw(key, expectedPreviousRaw, nextRaw) — the CAS
+ *     ("compare-and-swap") policy hydration uses: writes `nextRaw` ONLY if
+ *     the durable value read right now still equals `expectedPreviousRaw`
+ *     (the durable value hydration's OWN winner decision was based on).
+ *     If it doesn't — some other write already landed — the commit reports
+ *     "superseded" and never touches disk, so that newer write survives
+ *     untouched. This is a pure VALUE comparison, never a timestamp or
+ *     arrival-order heuristic, so it is correct regardless of which tab
+ *     produced the divergent value or how much wall-clock time passed.
+ *   • forceCommitLocalDomainRaw(key, nextRaw) — the policy ordinary
+ *     user-edit writers use: a live edit is by definition the user's
+ *     freshest intent, so it is never rejected — it always writes (skipping
+ *     only when the durable value already equals it, itself a "noop"
+ *     success, never a failure). Critically, it acquires the SAME per-key
+ *     lock as commitLocalDomainRaw (see below), so a concurrent hydration
+ *     commit to that exact key can never interleave with it — closing
+ *     exactly the gap a hydration-only lock would leave open.
+ * Both share one internal primitive (decideLocalDomainCommit() in
+ * syncPayload.ts is the pure "noop/superseded/write" decision both policies
+ * reduce to) and one internal serialization mechanism: when the Web Locks
+ * API (navigator.locks) is available, the entire read-decide-write sequence
+ * for a given key runs inside `navigator.locks.request(name, ...)`, giving
+ * true mutual exclusion across every tab/writer contending for that SAME
+ * key — closing even the narrow window where two commits could both
+ * observe a matching baseline before either writes. When Web Locks are
+ * UNAVAILABLE, the fail-safe is the SAME read-decide-write logic run
+ * directly (never a blind, uncompared write — that was the original bug,
+ * not merely "not yet atomic") — this alone is sufficient for every
+ * required correctness case (a genuinely newer write is always detected via
+ * the value comparison, whether or not it happened to race the exact
+ * instant of this read), leaving only the theoretical simultaneous-
+ * double-read race as a documented residual (see this round's own report).
+ * isLocalDomainCommitSuccess(status) is the single "may gates advance"
+ * predicate every caller uses afterward — true for "committed" or "noop",
+ * false for "superseded" or "failed" — so ownership/syncReady/confirmed-
+ * baseline advancement is always derived from what ACTUALLY happened on
+ * disk, never from React memory.
  */
 
 import { buildNamespacedKey } from "./profileStorage";
@@ -381,6 +509,7 @@ import {
   parseConfirmedDaysFact,
   reduceConfirmedFacts,
   acceptedDomainFactsFromBeacon,
+  decideLocalDomainCommit,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -433,6 +562,112 @@ function syncErrorKeyForProfile(profileId: string): string {
  */
 function localContentOwnerKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:localContentOwner`;
+}
+
+// ── Local-domain commit (SH.2, Codex P1, 12th round) ────────────────────────
+// See the module doc's own "Local-domain commit" section above for the full
+// architecture. Keyed purely by the target localStorage key (which already
+// uniquely identifies profile+domain), so this primitive needs no separate
+// identity parameters and is callable from module-level pure helpers (e.g.
+// plans/page.tsx's saveToStorage/saveDays) with no React refs in scope.
+
+export type LocalDomainCommitStatus = "committed" | "noop" | "superseded" | "failed";
+
+function localDomainCommitLockName(key: string): string {
+  return `dwp:localDomainCommit:${key}`;
+}
+
+/**
+ * Runs `fn` (a synchronous read-decide-write) serialized against every
+ * other caller contending for the SAME `key`, via the Web Locks API when
+ * available. `navigator.locks.request` always resolves asynchronously (a
+ * task hop is inherent to the API even when the lock is free), so callers
+ * that need synchronous-feeling completion timing only get it in the
+ * no-Web-Locks fallback path — which runs `fn` immediately, in this same
+ * tick, and merely wraps its already-computed result in a resolved Promise.
+ * That fallback is not "less safe" in a way that matters for correctness:
+ * it is the EXACT SAME read-decide-write logic locking would also run, just
+ * without the cross-tab mutual exclusion around the narrow gap between the
+ * read and the write — see decideLocalDomainCommit's own doc in
+ * syncPayload.ts for why a plain value comparison already catches every
+ * required case regardless of that gap, leaving only the theoretical
+ * simultaneous-double-read race as this design's documented residual (see
+ * this round's own report).
+ */
+function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  if (locks && typeof locks.request === "function") {
+    return locks.request(localDomainCommitLockName(key), () => fn());
+  }
+  return Promise.resolve(fn());
+}
+
+function commitLocalDomainCore(
+  key: string,
+  nextRaw: string,
+  resolveExpectedPrevious: (currentRaw: string | null) => string | null
+): Promise<LocalDomainCommitStatus> {
+  if (typeof window === "undefined") return Promise.resolve("failed");
+  return withLocalDomainCommitLock(key, (): LocalDomainCommitStatus => {
+    let currentRaw: string | null;
+    try {
+      currentRaw = localStorage.getItem(key);
+    } catch {
+      return "failed";
+    }
+    const decision = decideLocalDomainCommit(currentRaw, resolveExpectedPrevious(currentRaw), nextRaw);
+    if (decision !== "write") return decision;
+    try {
+      localStorage.setItem(key, nextRaw);
+    } catch {
+      return "failed";
+    }
+    return "committed";
+  });
+}
+
+/**
+ * CAS ("compare-and-swap") commit policy — used by pull hydration. Writes
+ * `nextRaw` to `key` only if the durable value there right now still equals
+ * `expectedPreviousRaw` (the durable value the caller's OWN winner decision
+ * was based on, captured via a fresh read at decision time — never React
+ * state). If some other write has landed since — this SAME tab's own
+ * ordinary edit, or another tab's, it makes no difference which — that
+ * write is newer by construction and must survive: this call reports
+ * "superseded" and never touches disk.
+ */
+export function commitLocalDomainRaw(
+  key: string,
+  expectedPreviousRaw: string | null,
+  nextRaw: string
+): Promise<LocalDomainCommitStatus> {
+  return commitLocalDomainCore(key, nextRaw, () => expectedPreviousRaw);
+}
+
+/**
+ * Unconditional commit policy — used by ordinary user-edit writers. A live
+ * edit is the user's own freshest intent, so it is never rejected: it
+ * always writes `nextRaw` (a "noop" only when the durable value already
+ * equals it — still a success, not a failure). Still acquires the SAME
+ * per-key lock commitLocalDomainRaw does, so a concurrent hydration commit
+ * to this exact key can never interleave with it — the gap a hydration-only
+ * lock would otherwise leave open for every non-participating writer.
+ */
+export function forceCommitLocalDomainRaw(key: string, nextRaw: string): Promise<LocalDomainCommitStatus> {
+  return commitLocalDomainCore(key, nextRaw, (currentRaw) => currentRaw);
+}
+
+/**
+ * The single "may gates advance" predicate every caller uses after a
+ * commit: true for "committed" (a real write just landed) or "noop" (the
+ * durable value already was the intended one) — both mean the intended
+ * value is CONFIRMED durable right now. False for "superseded" (a newer
+ * write won the race) or "failed" (a real localStorage exception) — both
+ * mean the intended value is NOT durable, so ownership/syncReady/
+ * confirmed-baseline advancement must not proceed as if it were.
+ */
+export function isLocalDomainCommitSuccess(status: LocalDomainCommitStatus): boolean {
+  return status === "committed" || status === "noop";
 }
 
 /**
