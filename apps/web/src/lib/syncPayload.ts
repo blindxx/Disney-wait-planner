@@ -174,10 +174,22 @@ export interface ConfirmedDomainFact<T> {
   value: T;
 }
 
+/**
+ * Codex P1 fix (16th round) — every field is now a REQUIRED
+ * ConfirmedDomainResult (see its own doc below), never merely an optional
+ * fact. The old `plans?: ConfirmedDomainFact<...>` shape could only ever
+ * say "here's the fact" or "absent" — it had no way to represent "the
+ * newest revision exists but is CONFLICTED", so getConfirmedState()
+ * (syncHelper.ts) silently collapsed that case into either the fact from
+ * an older, stale revision or nothing at all, discarding the one signal
+ * a caller most needed. Every consumer (captureConfirmedSnapshotForPull in
+ * plans/page.tsx and lightning/page.tsx) now must handle all three
+ * statuses explicitly.
+ */
 export interface ConfirmedPlannerState {
-  plans?: ConfirmedDomainFact<{ version: number; items: unknown[] }>;
-  lightning?: ConfirmedDomainFact<{ version: number; items: unknown[] }>;
-  days?: ConfirmedDomainFact<string[]>;
+  plans: ConfirmedDomainResult<{ version: number; items: unknown[] }>;
+  lightning: ConfirmedDomainResult<{ version: number; items: unknown[] }>;
+  days: ConfirmedDomainResult<string[]>;
 }
 
 function isPlannerDomainValue(v: unknown): v is { version: number; items: unknown[] } {
@@ -201,11 +213,11 @@ function isDaysValue(v: unknown): v is string[] {
  * missing or invalid — callers (syncHelper.ts's getConfirmedState) treat
  * null as "no confirmed fact here", never as an error. A non-finite/non-
  * numeric `revision` is rejected outright (never coerced to 0) since
- * reduceConfirmedFactRecords()'s whole revision comparison depends on
+ * resolveConfirmedDomainState()'s whole revision comparison depends on
  * genuine server-issued revisions — treating a corrupted fact as revision
  * 0 would make it look OLDER than everything, silently discarding it
  * instead of just refusing to trust it (it is simply excluded from the
- * candidate set reduceConfirmedFactRecords() reduces over).
+ * candidate set resolveConfirmedDomainState() reduces over).
  */
 export function parseConfirmedPlannerDomainFact(
   raw: unknown
@@ -309,78 +321,62 @@ export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
 ];
 
 /**
- * SH.2 architecture (Codex P1, 15th round) — REPLACES the 11th round's
- * reduceConfirmedFacts() (removed). That function assumed AT MOST ONE fact
- * would ever exist per (domain, revision), and picked the max revision with
- * no regard for whether two DIFFERENT values had been recorded for the
- * SAME revision. Round 14 tried to prevent that upstream, by having the
- * WRITE side read-then-compare before deciding to write — but that read-
- * then-write sequence is itself exactly the un-atomic check-then-act
- * pattern round 13 already established localStorage cannot safely provide
- * without a lock: two tabs can both observe a key absent, both decide to
- * write, and the later setItem() silently replaces the earlier one. Round
- * 15's fix removes the assumption entirely, at the storage-primitive
- * level: a domain+revision may now legitimately have MULTIPLE recorded
- * facts (see syncHelper.ts's confirmedFactKey — each recording gets its
- * own permanently-unique physical key, so the WRITE side never reads
- * before writing and can never race at all), and this function is where
- * they get reconciled, at READ time, into one logical answer:
- *   1. Group all facts by revision.
- *   2. Walk revisions HIGHEST first. For each revision's group, compare
- *      every fact's CANONICAL value (canonicalizeJSON() above): if they
- *      are ALL identical, that revision is UNAMBIGUOUS — return it as
- *      `confirmed` immediately (it is the highest such revision, which is
- *      exactly what "confirmed" means) and stop.
- *   3. A revision whose group disagrees is a CONFLICT — a genuine
- *      same-revision inconsistency (never a legitimate "which is newer"
- *      question, since a single server revision has exactly one true
- *      accepted content) — it is recorded in `conflictedRevisions` and
- *      skipped; the search continues at the next-lower revision. This is
- *      the "fail closed for that domain" the architectural contract
- *      requires: a contested revision is never arbitrarily resolved by
- *      picking whichever fact happens to be first/last/lock-order-
- *      determined — it is simply not trusted, and an older, genuinely
- *      unambiguous revision (or nothing) is reported instead.
- * The reduction is a pure function of WHICH facts exist, never of write
- * order or arrival timing — exactly like the 11th round's version, just
- * generalized to tolerate (and correctly reconcile) more than one fact per
- * revision instead of assuming it away.
+ * SH.2 architecture (Codex P1, 15th round; STATUS MODEL REPLACED 16th
+ * round) — the 15th round's reduceConfirmedFactRecords() (removed) walked
+ * revisions highest-first and, on finding a CONFLICTED one, silently fell
+ * back to the next-lower UNAMBIGUOUS revision as "confirmed". Codex's
+ * 16th-round finding: that fallback is wrong. A conflict at the NEWEST
+ * revision means the domain's true current state is UNKNOWN — falling back
+ * to an older revision presents a STALE value as if it were a trustworthy
+ * current baseline, which a pull's winner-selection logic (captureConfirmed-
+ * SnapshotForPull, plans/lightning page.tsx) would then treat as genuine
+ * confirmed truth, potentially misclassifying newer local/cloud state as an
+ * unsynced edit and overwriting it. "A conflict at the newest confirmed
+ * revision is NOT equivalent to using the next older revision."
+ *
+ * resolveConfirmedDomainState() is the replacement: it looks ONLY at the
+ * HIGHEST revision recorded for a domain (never falling back), and returns
+ * one of exactly three statuses — the CONFIRMED-STATE CONTRACT's own
+ * required distinction:
+ *   • "none"      — no facts recorded for this domain at all.
+ *   • "confirmed" — the highest revision's recorded fact(s) all canonically
+ *     agree (canonicalizeJSON() above) — this domain has a valid,
+ *     trustworthy confirmed value.
+ *   • "conflict"  — the highest revision's recorded facts DISAGREE. The
+ *     domain's confirmed state is presently UNKNOWABLE — callers must fail
+ *     closed for this domain (no winner selection, no push, sync gated)
+ *     rather than substitute ANY older revision, however unambiguous that
+ *     older one might individually be.
+ * A conflict is always temporary: the moment a NEWER, unambiguous revision
+ * is recorded (e.g. a later successful push or pull resolves the
+ * inconsistency going forward), it becomes the new highest revision and
+ * resolveConfirmedDomainState() reports "confirmed" again — the stale
+ * conflicted revision is simply no longer the one being looked at. See
+ * confirmedFactKey's own doc in syncHelper.ts for why facts are physically
+ * append-only (so this function never needs to worry about a fact changing
+ * out from under it mid-computation), and this round's own report for how
+ * the "conflict" status propagates through the actual pull/baseline
+ * consumers instead of being silently dropped.
  */
-export interface ConfirmedFactReduction<T> {
-  confirmed: ConfirmedDomainFact<T> | null;
-  /** Revisions strictly above `confirmed`'s (or, if `confirmed` is null,
-   * every revision present) whose recorded facts disagree — see this
-   * function's own doc. Exposed for logging/pruning; ordinary callers only
-   * need `confirmed`. */
-  conflictedRevisions: number[];
-}
+export type ConfirmedDomainResult<T> =
+  | { status: "confirmed"; fact: ConfirmedDomainFact<T> }
+  | { status: "none" }
+  | { status: "conflict"; revision: number };
 
-export function reduceConfirmedFactRecords<T>(
+export function resolveConfirmedDomainState<T>(
   facts: Array<ConfirmedDomainFact<T>>
-): ConfirmedFactReduction<T> {
-  const byRevision = new Map<number, Array<ConfirmedDomainFact<T>>>();
+): ConfirmedDomainResult<T> {
+  if (facts.length === 0) return { status: "none" };
+  let topRevision = facts[0].revision;
   for (const fact of facts) {
-    const group = byRevision.get(fact.revision);
-    if (group) {
-      group.push(fact);
-    } else {
-      byRevision.set(fact.revision, [fact]);
-    }
+    if (fact.revision > topRevision) topRevision = fact.revision;
   }
-  const revisionsDesc = Array.from(byRevision.keys()).sort((a, b) => b - a);
-  const conflictedRevisions: number[] = [];
-  let confirmed: ConfirmedDomainFact<T> | null = null;
-  for (const revision of revisionsDesc) {
-    const group = byRevision.get(revision) as Array<ConfirmedDomainFact<T>>;
-    const canonicalValues = new Set(group.map((f) => canonicalizeJSON(f.value)));
-    if (canonicalValues.size > 1) {
-      conflictedRevisions.push(revision);
-      continue;
-    }
-    confirmed = group[0];
-    break;
+  const topGroup = facts.filter((fact) => fact.revision === topRevision);
+  const canonicalValues = new Set(topGroup.map((fact) => canonicalizeJSON(fact.value)));
+  if (canonicalValues.size > 1) {
+    return { status: "conflict", revision: topRevision };
   }
-  return { confirmed, conflictedRevisions };
+  return { status: "confirmed", fact: topGroup[0] };
 }
 
 /**
@@ -409,62 +405,72 @@ export function confirmedFactRevisionIsUnambiguous<T>(
 }
 
 /**
- * Reference cases for reduceConfirmedFactRecords() — the REQUIRED cases
- * from the 15th round's architectural contract. Run from Node:
- *   import { DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES, reduceConfirmedFactRecords } from "@/lib/syncPayload";
- *   DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES.forEach(c => {
- *     const got = reduceConfirmedFactRecords(c.facts);
+ * Reference cases for resolveConfirmedDomainState() — the REQUIRED cases
+ * from the 16th round's architectural contract. Run from Node:
+ *   import { DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES, resolveConfirmedDomainState } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES.forEach(c => {
+ *     const got = resolveConfirmedDomainState(c.facts);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES: Array<{
+export const DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES: Array<{
   name: string;
   facts: Array<ConfirmedDomainFact<unknown>>;
-  expected: ConfirmedFactReduction<unknown>;
+  expected: ConfirmedDomainResult<unknown>;
 }> = [
   {
-    name: "empty set — nothing confirmed for this domain yet",
+    name: "empty set — no confirmed state for this domain yet",
     facts: [],
-    expected: { confirmed: null, conflictedRevisions: [] },
+    expected: { status: "none" },
   },
   {
-    name: "single fact — that one wins trivially",
+    name: "single fact — confirmed trivially",
     facts: [{ revision: 5, value: "A" }],
-    expected: { confirmed: { revision: 5, value: "A" }, conflictedRevisions: [] },
+    expected: { status: "confirmed", fact: { revision: 5, value: "A" } },
   },
   {
-    name: "required — two tabs record IDENTICAL rev5 value (as separate physical facts) — one equivalent confirmed result",
+    name: "two tabs record IDENTICAL rev5 value (as separate physical facts) — one equivalent confirmed result",
     facts: [
       { revision: 5, value: { version: 1, items: ["a"] } },
       { revision: 5, value: { version: 1, items: ["a"] } },
     ],
-    expected: { confirmed: { revision: 5, value: { version: 1, items: ["a"] } }, conflictedRevisions: [] },
+    expected: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: ["a"] } } },
   },
   {
-    name: "required — two tabs record DIFFERENT rev5 values — conflict, neither wins, no lower revision to fall back to",
+    name: "two tabs record DIFFERENT rev5 values — conflict, neither wins",
     facts: [
       { revision: 5, value: "A" },
       { revision: 5, value: "B" },
     ],
-    expected: { confirmed: null, conflictedRevisions: [5] },
+    expected: { status: "conflict", revision: 5 },
   },
   {
-    name: "required — a conflicted HIGHER revision falls back to the next unambiguous lower one",
+    name: "required — rev5=A confirmed, rev6 has conflicting facts: reports conflict at rev6, NEVER falls back to rev5 as a usable baseline",
     facts: [
       { revision: 5, value: "A" },
-      { revision: 7, value: "B" },
-      { revision: 7, value: "C" },
+      { revision: 6, value: "B" },
+      { revision: 6, value: "C" },
     ],
-    expected: { confirmed: { revision: 5, value: "A" }, conflictedRevisions: [7] },
+    expected: { status: "conflict", revision: 6 },
   },
   {
-    name: "required — different revisions recorded concurrently — highest valid (unconflicted) revision wins",
+    name: "required — later unambiguous rev7 arrives after rev6's conflict: rev6's conflict is superseded, normal confirmed state resumes from rev7",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 6, value: "B" },
+      { revision: 6, value: "C" },
+      { revision: 7, value: "D" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 7, value: "D" } },
+  },
+  {
+    name: "different revisions recorded concurrently — highest revision's own status determines the result",
     facts: [
       { revision: 6, value: "B" },
       { revision: 9, value: "D" },
       { revision: 3, value: "A" },
     ],
-    expected: { confirmed: { revision: 9, value: "D" }, conflictedRevisions: [] },
+    expected: { status: "confirmed", fact: { revision: 9, value: "D" } },
   },
   {
     name: "delayed lower revision arriving after a higher unambiguous one remains harmless — still resolves to the higher revision",
@@ -472,17 +478,15 @@ export const DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES: Array<{
       { revision: 7, value: "C" },
       { revision: 6, value: "B-delayed" },
     ],
-    expected: { confirmed: { revision: 7, value: "C" }, conflictedRevisions: [] },
+    expected: { status: "confirmed", fact: { revision: 7, value: "C" } },
   },
   {
-    name: "all revisions conflicted — nothing confirmed, every revision reported",
+    name: "only the newest revision is conflicted, with no older revision at all — still 'conflict', never fabricates a fallback",
     facts: [
       { revision: 5, value: "A" },
       { revision: 5, value: "B" },
-      { revision: 6, value: "C" },
-      { revision: 6, value: "D" },
     ],
-    expected: { confirmed: null, conflictedRevisions: [6, 5] },
+    expected: { status: "conflict", revision: 5 },
   },
 ];
 
@@ -551,7 +555,7 @@ export const DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES: Array<{
  * accept/reject decision to make here at all — recording an immutable fact
  * is ALWAYS valid (it is simply a true historical record of what revision
  * R produced), and whether it ends up being the domain's CURRENT confirmed
- * value is entirely up to reduceConfirmedFactRecords() at READ time. This
+ * value is entirely up to resolveConfirmedDomainState() at READ time. This
  * function exists only to describe, per domain, WHAT to record — never
  * whether it's "allowed".
  */
@@ -605,7 +609,7 @@ export interface AcceptedPlannerDomains {
  * Codex P1 fix (11th round) — no longer routes through a "current state"
  * merge/rejection step (the old nextConfirmedBaseline()): recording a fact
  * is always valid regardless of what's currently confirmed for any domain,
- * per-domain OR mixed together — see reduceConfirmedFactRecords()'s own doc
+ * per-domain OR mixed together — see resolveConfirmedDomainState()'s own doc
  * for why this is what removes the Web-Locks dependency for confirmed state.
  */
 export function acceptedDomainFactsFromBeacon(
@@ -1060,10 +1064,13 @@ export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
 //                  the caller MUST NOT write `nextRaw` in this case.
 //   "write"      — `currentRaw` still matches the caller's own baseline;
 //                  safe to persist `nextRaw`.
-// See commitLocalDomainRaw()/forceCommitLocalDomainRaw() in syncHelper.ts
-// for the actual localStorage I/O built on this decision (including the
-// per-key Web Locks serialization used when available, and the fail-safe
-// behavior — this same decision, just without a lock — when it isn't).
+// See commitLocalDomainRaw()/commitLocalDomainRawSync() in syncHelper.ts
+// for the actual localStorage I/O built on this decision — commitLocalDomainRaw()
+// (pull hydration's CAS policy) uses per-key Web Locks serialization when
+// available and fails closed otherwise; commitLocalDomainRawSync() (ordinary
+// user edits, 16th round) is a synchronous, lock-free `write`-or-`noop`
+// application of this SAME decision (its own baseline is always the current
+// value itself, so it can never observe "superseded").
 export type LocalDomainCommitDecision = "write" | "noop" | "superseded";
 
 export function decideLocalDomainCommit(
@@ -1203,7 +1210,7 @@ export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
 ];
 
 // ===== CONFIRMED-FACT CANONICALIZATION (SH.2, 14th round; storage model
-// replaced 15th round) =====
+// replaced 15th round; status model replaced 16th round) =====
 //
 // The 14th round gave every fact's value ONE deterministic canonical
 // serialization (canonicalizeJSON() below) so two code paths constructing
@@ -1218,8 +1225,10 @@ export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
 // 13 already established localStorage cannot safely provide without a
 // lock: two tabs can both read the key as absent, both independently decide
 // "write", and the later setItem() silently replaces the earlier fact —
-// Codex's 15th-round finding. See reduceConfirmedFactRecords() and
-// confirmedFactRevisionIsUnambiguous() below, and confirmedFactKey()'s own
+// Codex's 15th-round finding. See resolveConfirmedDomainState() (16th round;
+// the 15th round's own reduceConfirmedFactRecords() has since been replaced —
+// see that function's own doc) and confirmedFactRevisionIsUnambiguous()
+// below, and confirmedFactKey()'s own
 // doc in syncHelper.ts, for the replacement: every recorded fact now gets
 // its own permanently-unique physical key (an append-only representation),
 // so the write side is a single unconditional setItem with no read-before-

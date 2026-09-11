@@ -90,7 +90,7 @@ import {
   selectPendingOpBatch,
   reconcilePendingOperations,
   commitLocalDomainRaw,
-  forceCommitLocalDomainRaw,
+  commitLocalDomainRawSync,
   isLocalDomainCommitSuccess,
   beginPullContext,
   isPullContextCurrent,
@@ -301,20 +301,23 @@ function loadFromStorage(key: string = STORAGE_KEY): PlanItem[] {
   }
 }
 
-// SH.2 architecture (Codex P1, 12th round) — routes through the shared
-// forceCommitLocalDomainRaw primitive (see its own doc in syncHelper.ts)
-// instead of a bare setItem: this is an ORDINARY user-edit writer, so it
-// always wins (never rejected — a live edit is always the freshest intent),
-// but still acquires the SAME per-key Web Locks serialization a concurrent
-// pull-hydration commit to this exact key uses, closing the race a
-// hydration-only lock would otherwise leave open. Fire-and-forget: no
-// caller of saveToStorage awaits completion (matches this function's
-// original synchronous void signature) — a thrown/rejected commit is
-// exactly as unobservable here as the old try/catch's swallowed exception
-// was, by design; callers that DO need to observe success (pull hydration)
-// call commitLocalDomainRaw directly instead.
+// SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
+// routes through the shared commitLocalDomainRawSync primitive (see its own
+// doc in syncHelper.ts) instead of a bare setItem: this is an ORDINARY
+// user-edit writer, so it always wins (never rejected — a live edit is
+// always the freshest intent). Codex P1 fix (16th round) — SYNCHRONOUS, not
+// fire-and-forget: the old forceCommitLocalDomainRaw() acquired the SAME
+// per-key Web Lock pull hydration uses, so if another tab held that lock
+// this write could be silently QUEUED behind it — possibly never running at
+// all if the page closed first, losing the edit both locally and in the
+// cloud (the actual P1 Codex found). commitLocalDomainRawSync() never
+// touches any lock; by the time this call returns, the write is already
+// durable (or has definitively failed) — see LOCAL-FIRST DURABILITY
+// CONTRACT in syncHelper.ts's own doc for the full rationale. Callers that
+// DO need CAS-gated, conflict-aware commit (pull hydration) call
+// commitLocalDomainRaw directly instead.
 function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
-  void forceCommitLocalDomainRaw(key, JSON.stringify({ version: SCHEMA_VERSION, items }));
+  commitLocalDomainRawSync(key, JSON.stringify({ version: SCHEMA_VERSION, items }));
 }
 
 // ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1 / 8.0.2) =====
@@ -552,11 +555,11 @@ function loadDays(key: string): string[] {
   }
 }
 
-// SH.2 architecture (Codex P1, 12th round) — same forceCommitLocalDomainRaw
-// routing as saveToStorage above; see its own doc there and in
-// syncHelper.ts.
+// SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
+// same commitLocalDomainRawSync routing as saveToStorage above; see its own
+// doc there and in syncHelper.ts.
 function saveDays(days: string[], key: string): void {
-  void forceCommitLocalDomainRaw(key, JSON.stringify(days));
+  commitLocalDomainRawSync(key, JSON.stringify(days));
 }
 
 function loadActiveDayId(key: string): string {
@@ -980,6 +983,15 @@ export default function PlansPage() {
   // transition by then, and reading them at that point would attribute
   // this pull's own baseline to whichever identity happens to be current
   // NOW rather than the one it actually started under.
+  // Codex P1 fix (16th round) — `conflicts` reports every domain whose
+  // confirmed state came back "conflict" (see getConfirmedState's own doc
+  // in syncHelper.ts): the CONFIRMED-STATE CONTRACT requires this signal to
+  // PROPAGATE to the pull effect, never be silently dropped here. The
+  // items/days/lightningRaw returned for a conflicted domain fall back to
+  // that domain's own baseline ref purely so the return type stays
+  // well-formed — the pull effect below MUST bail out entirely before ever
+  // using them for winner selection whenever `conflicts` is non-empty (see
+  // its own doc at the call site).
   function captureConfirmedSnapshotForPull(
     contentOwnershipMismatch: boolean,
     identity?: { userId: string | null; profileId: string }
@@ -987,6 +999,7 @@ export default function PlansPage() {
     items: PlanItem[];
     days: string[];
     lightningRaw: string | null;
+    conflicts: Array<{ domain: "plans" | "lightning" | "days"; revision: number }>;
   } {
     const userId = identity ? identity.userId : activeUserIdRef.current;
     const profileId = identity ? identity.profileId : activeProfileIdRef.current;
@@ -996,7 +1009,13 @@ export default function PlansPage() {
     // yet for any domain. This should not normally happen (the pull effect
     // only reaches here once sessionStatus is "authenticated"), but never
     // guesses an identity if it does.
-    const confirmed = userId ? getConfirmedState(userId, profileId) : {};
+    const confirmed = userId
+      ? getConfirmedState(userId, profileId)
+      : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+    const conflicts: Array<{ domain: "plans" | "lightning" | "days"; revision: number }> = [];
+    if (confirmed.plans.status === "conflict") conflicts.push({ domain: "plans", revision: confirmed.plans.revision });
+    if (confirmed.lightning.status === "conflict") conflicts.push({ domain: "lightning", revision: confirmed.lightning.revision });
+    if (confirmed.days.status === "conflict") conflicts.push({ domain: "days", revision: confirmed.days.revision });
     // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
     // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. A
     // mismatch (this profile's raw storage is attributed to a DIFFERENT,
@@ -1029,8 +1048,13 @@ export default function PlansPage() {
     // mismatch flag — it is this identity's own genuine, server-verified
     // state, not foreign content.
     let items: PlanItem[];
-    if (confirmed.plans) {
-      items = migrateDayIds((confirmed.plans.value.items as unknown[]).map(normalizePlanItem));
+    if (confirmed.plans.status === "confirmed") {
+      items = migrateDayIds((confirmed.plans.fact.value.items as unknown[]).map(normalizePlanItem));
+    } else if (confirmed.plans.status === "conflict") {
+      // Never used as a real baseline — the pull effect bails out entirely
+      // for a conflicted domain before this value could matter. See this
+      // function's own doc above.
+      items = itemsBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       items = [];
       itemsBaselineRef.current = [];
@@ -1039,8 +1063,10 @@ export default function PlansPage() {
     }
 
     let days: string[];
-    if (confirmed.days) {
-      days = confirmed.days.value;
+    if (confirmed.days.status === "confirmed") {
+      days = confirmed.days.fact.value;
+    } else if (confirmed.days.status === "conflict") {
+      days = daysBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       days = ["day-1"];
       daysBaselineRef.current = ["day-1"];
@@ -1049,8 +1075,10 @@ export default function PlansPage() {
     }
 
     let lightningRaw: string | null;
-    if (confirmed.lightning) {
-      lightningRaw = JSON.stringify(confirmed.lightning.value);
+    if (confirmed.lightning.status === "confirmed") {
+      lightningRaw = JSON.stringify(confirmed.lightning.fact.value);
+    } else if (confirmed.lightning.status === "conflict") {
+      lightningRaw = lightningRawBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       lightningRaw = null;
       lightningRawBaselineRef.current = null;
@@ -1058,7 +1086,7 @@ export default function PlansPage() {
       lightningRaw = lightningRawBaselineRef.current;
     }
 
-    return { items, days, lightningRaw };
+    return { items, days, lightningRaw, conflicts };
   }
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
@@ -1873,6 +1901,41 @@ export default function PlansPage() {
             })
           : pullStartBaseline;
 
+        // CONFIRMED-STATE CONTRACT (Codex P1, 16th round) — a conflict at
+        // ANY domain's newest confirmed revision means that domain's true
+        // confirmed state is presently unknowable (see getConfirmedState's
+        // own doc in syncHelper.ts): there is no trustworthy baseline this
+        // pull could use for it. Since this page's push always sends
+        // plans+lightning+days combined in ONE request, letting winner
+        // selection/local writes proceed normally for the OTHER, healthy
+        // domains this pull while leaving syncReady closed for the whole
+        // page would still risk that a later push bundles the unresolved
+        // domain's untouched-but-unverified local content alongside them —
+        // so the entire pull bails out here: no winner selection, no local
+        // write, no ownership transfer, no confirmed-baseline commit, no
+        // syncReady, for ANY domain, this pull. Local storage is left
+        // completely untouched (nothing already durably committed is
+        // undone — there is simply nothing new to commit). The NEXT pull
+        // (next mount/auth-transition) re-reads confirmed state fresh and
+        // proceeds normally the moment a later unambiguous revision
+        // supersedes the conflict (see resolveConfirmedDomainState's own
+        // doc in syncPayload.ts) — no special "retry" plumbing is needed
+        // here for that to happen. A conflict in ONE domain (e.g. Plans)
+        // never touches or corrupts the OTHER domains' own confirmed facts
+        // (each domain's facts live under a fully independent keyspace —
+        // see confirmedFactPrefix's own doc), only defers what THIS pull
+        // does with them.
+        if (effectiveBaseline.conflicts.length > 0) {
+          for (const conflict of effectiveBaseline.conflicts) {
+            try {
+              console.error(
+                `SH.2: pull deferred — ${conflict.domain}'s confirmed state is conflicted at revision ${conflict.revision}.`
+              );
+            } catch {}
+          }
+          return;
+        }
+
         // SH.2 architecture — read CURRENT local storage fresh, right now,
         // for both domains this page owns. This is what actually closes
         // the Codex findings: a domain's winner is determined by comparing
@@ -2604,7 +2667,7 @@ export default function PlansPage() {
           const llItems = (parsed as Record<string, unknown>).items as Array<{ dayId?: unknown }>;
           const nextLlItems = llItems.filter((it) => normalizeDayId(it?.dayId) !== dayId);
           if (nextLlItems.length !== llItems.length) {
-            void forceCommitLocalDomainRaw(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
+            commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
             setLightningVersion((v) => v + 1);
           }
         }
@@ -3160,7 +3223,7 @@ export default function PlansPage() {
     // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
     // hidden day-scoped items survive into the next session (BUG C fix).
     const _lightningKey = buildNamespacedKey(_profileId, "lightning");
-    void forceCommitLocalDomainRaw(_lightningKey, JSON.stringify({ version: 1, items: [] }));
+    commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: [] }));
   }
 
   function handleToggleSort(checked: boolean) {
@@ -3685,7 +3748,7 @@ export default function PlansPage() {
       dayId: normalizeDayId(it.dayId),
     }));
     const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-    void forceCommitLocalDomainRaw(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
+    commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);

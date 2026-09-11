@@ -147,34 +147,37 @@ Reviewers should check any changes affecting:
  *                                                        that goes stale
  *                                                        while queued for the
  *                                                        lock never lands
- *   await forceCommitLocalDomainRaw(key, nextRaw)    — the same primitive's
- *                                                        unconditional
- *                                                        policy: always
- *                                                        writes `nextRaw`
- *                                                        (skipping only when
- *                                                        the durable value
- *                                                        already equals it) —
- *                                                        used by ordinary
- *                                                        user-edit writers,
- *                                                        which always
+ *   commitLocalDomainRawSync(key, nextRaw)            — the ordinary-edit
+ *                                                        primitive (16th
+ *                                                        round; see its own
+ *                                                        doc — REPLACES the
+ *                                                        13th round's async,
+ *                                                        Web-Locks-
+ *                                                        participating
+ *                                                        forceCommitLocalDomainRaw):
+ *                                                        a single SYNCHRONOUS
+ *                                                        localStorage
+ *                                                        getItem/setItem
+ *                                                        pair — no Promise,
+ *                                                        no lock, no
+ *                                                        queuing — so the
+ *                                                        write is durable
+ *                                                        before this call
+ *                                                        even returns. Used
+ *                                                        by every ordinary
+ *                                                        user-edit writer
+ *                                                        (Plans/Lightning
+ *                                                        items, days, and
+ *                                                        every Remove/Clear/
+ *                                                        Restore/import
+ *                                                        path), which always
  *                                                        represent the
  *                                                        user's own freshest
- *                                                        intent, never claim
- *                                                        cross-tab CAS safety,
- *                                                        and so are NOT gated
- *                                                        on Web Locks being
- *                                                        present (13th
- *                                                        round) — but still
- *                                                        participate in the
- *                                                        SAME per-key Web
- *                                                        Locks serialization
- *                                                        as commitLocalDomainRaw
- *                                                        when one IS present,
- *                                                        so a concurrent
- *                                                        hydration commit to
- *                                                        the same key can
- *                                                        never interleave
- *                                                        with one of these
+ *                                                        intent and so are
+ *                                                        never rejected —
+ *                                                        "noop" only when
+ *                                                        the durable value
+ *                                                        already equals it
  *   isLocalDomainCommitSuccess(status)               — true for "committed"
  *                                                        or "noop" (the
  *                                                        durable value is
@@ -494,13 +497,16 @@ Reviewers should check any changes affecting:
  *       write, and let sync/ownership gates reopen over data that was never
  *       actually durable.
  *
- * Both are fixed by routing every synced-domain local write — hydration's
- * AND every ordinary user-edit writer, not hydration alone (a lock used only
- * by hydration cannot prevent a non-participating ordinary writer from
- * landing inside its critical section) — through ONE shared primitive,
- * keyed purely by the domain's localStorage key (which already uniquely
- * identifies profile+domain via buildNamespacedKey, so no separate
- * profile/user threading is needed here):
+ * Both are fixed by routing every synced-domain local write through a
+ * shared decision core (decideLocalDomainCommit() in syncPayload.ts — the
+ * pure "noop/superseded/write" decision), keyed purely by the domain's
+ * localStorage key (which already uniquely identifies profile+domain via
+ * buildNamespacedKey, so no separate profile/user threading is needed
+ * here) — but, as of the 16th round, through TWO DELIBERATELY SEPARATE
+ * primitives rather than one shared async API, because ordinary edits and
+ * hydration need genuinely different guarantees (see "Local-domain commit,
+ * 16th round" below for why forcing both through one lock-participating
+ * API was itself a P1):
  *   • commitLocalDomainRaw(key, expectedPreviousRaw, nextRaw) — the CAS
  *     ("compare-and-swap") policy hydration uses: writes `nextRaw` ONLY if
  *     the durable value read right now still equals `expectedPreviousRaw`
@@ -509,23 +515,18 @@ Reviewers should check any changes affecting:
  *     "superseded" and never touches disk, so that newer write survives
  *     untouched. This is a pure VALUE comparison, never a timestamp or
  *     arrival-order heuristic, so it is correct regardless of which tab
- *     produced the divergent value or how much wall-clock time passed.
- *   • forceCommitLocalDomainRaw(key, nextRaw) — the policy ordinary
- *     user-edit writers use: a live edit is by definition the user's
- *     freshest intent, so it is never rejected — it always writes (skipping
- *     only when the durable value already equals it, itself a "noop"
- *     success, never a failure). Critically, it acquires the SAME per-key
- *     lock as commitLocalDomainRaw (see below), so a concurrent hydration
- *     commit to that exact key can never interleave with it — closing
- *     exactly the gap a hydration-only lock would leave open.
- * Both share one internal primitive (decideLocalDomainCommit() in
- * syncPayload.ts is the pure "noop/superseded/write" decision both policies
- * reduce to) and one internal serialization mechanism: when the Web Locks
- * API (navigator.locks) is available, the entire read-decide-write sequence
- * for a given key runs inside `navigator.locks.request(name, ...)`, giving
- * true mutual exclusion across every tab/writer contending for that SAME
- * key — closing even the narrow window where two commits could both
- * observe a matching baseline before either writes.
+ *     produced the divergent value or how much wall-clock time passed. When
+ *     the Web Locks API (navigator.locks) is available, the entire
+ *     read-decide-write sequence for a given key runs inside
+ *     `navigator.locks.request(name, ...)`, giving true mutual exclusion
+ *     across every OTHER commitLocalDomainRaw() caller contending for that
+ *     SAME key.
+ *   • commitLocalDomainRawSync(key, nextRaw) — the SYNCHRONOUS policy
+ *     ordinary user-edit writers use (16th round — see its own doc): a
+ *     single localStorage.getItem/setItem pair, no Promise, no lock
+ *     involvement at all. A live edit is by definition the user's freshest
+ *     intent, so it is never rejected — it always writes (skipping only
+ *     when the durable value already equals it, itself a "noop" success).
  *
  * Codex P1 fix (13th round) — the 12th round's own report mischaracterized
  * the no-Web-Locks path as "sufficient for correctness": a plain
@@ -536,28 +537,67 @@ Reviewers should check any changes affecting:
  * an unguarded lost update, not a rare residual. There is no lock-free way
  * to close that gap against plain localStorage, so commitLocalDomainRaw()
  * — the CAS policy whose result GATES ownership/confirmed-baseline/
- * syncReady — now FAILS CLOSED as "unavailable" when Web Locks are absent:
- * it neither reads nor writes anything, so no destructive overwrite is
+ * syncReady — FAILS CLOSED as "unavailable" when Web Locks are absent: it
+ * neither reads nor writes anything, so no destructive overwrite is
  * possible and (isLocalDomainCommitSuccess() treats "unavailable" exactly
  * like "failed") no false confirmation is possible either. This is a
  * permanent, environment-determined refusal — never a timing retry or a
  * probability-based heuristic — so cross-tab conflict resolution for
  * synced domains simply stays deferred in a browser lacking Web Locks,
- * while ordinary local editing keeps working: forceCommitLocalDomainRaw()
- * never claimed cross-tab CAS safety (there is no expectedPreviousRaw to
- * violate — it is a plain last-write-wins write, exactly as any client-side
- * app's localStorage usage has always behaved), so it is not gated on Web
- * Locks at all; it still shares the same lock when one IS present, purely
- * as a best-effort improvement over an already-honest baseline. See "Local
- * domain commit" types and functions below for the "aborted" status this
- * round also adds — see "Pull execution context" below for what that
- * protects against.
+ * while ordinary local editing keeps working regardless: it was never
+ * gated on Web Locks (commitLocalDomainRawSync never touches the lock at
+ * all — see "Local-domain commit, 16th round" below).
  *
  * isLocalDomainCommitSuccess(status) is the single "may gates advance"
  * predicate every caller uses afterward — true for "committed" or "noop",
  * false for "superseded", "aborted", "unavailable", or "failed" — so
  * ownership/syncReady/confirmed-baseline advancement is always derived from
  * what ACTUALLY happened on disk, never from React memory.
+ *
+ * ── Local-domain commit, LOCAL-FIRST DURABILITY (SH.2, Codex P1, 16th
+ * round) ─────────────────────────────────────────────────────────────────
+ *
+ * Codex found that the 13th round's design — ordinary user-edit writers
+ * (forceCommitLocalDomainRaw, REMOVED this round) sharing the SAME per-key
+ * Web Lock as hydration's CAS commit — had a real cost nothing had
+ * accounted for: if ANOTHER tab currently held that lock (its own
+ * hydration CAS, or its own ordinary edit), `navigator.locks.request()`
+ * QUEUES the write and does not run it until the lock is released — an
+ * UNBOUNDED wait bearing no relationship to how long the user's own action
+ * took. Every ordinary-edit call site fires this with `void` (never
+ * awaited — they are synchronous DOM/React event handlers, not async
+ * functions), so nothing observed or waited for that delay. If the user
+ * closed the tab while the lock was held elsewhere, the queued write could
+ * NEVER RUN: the durable value on disk stayed OLD, an unload beacon push
+ * (which reads localStorage synchronously, right now) sent the stale
+ * content, and the user's most recent edit was lost both locally AND in
+ * the cloud.
+ *
+ * The fix separates the LOCAL-FIRST DURABILITY CONTRACT's two distinct
+ * requirements onto two different primitives instead of forcing both
+ * through one async API:
+ *   • ORDINARY user edit persistence needs IMMEDIATE, LOCAL-FIRST
+ *     durability — durable before the call that made it returns, full
+ *     stop, with NO dependency on anything (a lock, a queue, an await)
+ *     that could outlive page teardown. commitLocalDomainRawSync() is
+ *     exactly that: synchronous, no Promise, no lock — by the time it
+ *     returns, the write has already landed (or definitively failed).
+ *   • PULL HYDRATION/CAS still needs SERIALIZED, conflict-safe commit —
+ *     commitLocalDomainRaw() is unchanged: a fundamentally different
+ *     question ("does this decision, made against a specific baseline,
+ *     still hold") from "durably persist the user's live edit right now".
+ * This reopens a NARROWER version of the cross-tab race the shared lock
+ * used to close for ordinary writers specifically: a genuinely
+ * simultaneous cross-tab write (landing in the exact instant between
+ * another tab's own lock-protected hydration CAS's read and write) is
+ * possible again in principle. Accepted as the correct trade-off — see
+ * this round's own report — because it is the SAME class of residual risk
+ * already documented since the 12th/13th rounds, hydration's own CAS check
+ * still catches an ordinary edit that landed BEFORE its critical section
+ * began (every required case), and an ordinary edit was never a
+ * participant in any correctness proof that depended on cross-tab mutual
+ * exclusion — only on overwriting unconditionally, which a plain setItem
+ * still does perfectly.
  *
  * ── Pull execution context (SH.2, Codex P1, 13th round) ─────────────────────
  *
@@ -642,7 +682,7 @@ import {
   parseSyncedPlannerPayload,
   parseConfirmedPlannerDomainFact,
   parseConfirmedDaysFact,
-  reduceConfirmedFactRecords,
+  resolveConfirmedDomainState,
   confirmedFactRevisionIsUnambiguous,
   acceptedDomainFactsFromBeacon,
   decideLocalDomainCommit,
@@ -702,11 +742,11 @@ function localContentOwnerKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:localContentOwner`;
 }
 
-// ── Local-domain commit (SH.2, Codex P1, 12th/13th rounds) ──────────────────
+// ── Local-domain commit (SH.2, Codex P1, 12th/13th/16th rounds) ─────────────
 // See the module doc's own "Local-domain commit" section above for the full
 // architecture. Keyed purely by the target localStorage key (which already
-// uniquely identifies profile+domain), so this primitive needs no separate
-// identity parameters and is callable from module-level pure helpers (e.g.
+// uniquely identifies profile+domain), so these primitives need no separate
+// identity parameters and are callable from module-level pure helpers (e.g.
 // plans/page.tsx's saveToStorage/saveDays) with no React refs in scope.
 //
 // Codex P1 fix (13th round) — the 12th round's own report mischaracterized
@@ -717,29 +757,18 @@ function localContentOwnerKeyForProfile(profileId: string): string {
 // second write silently clobbers the first with no way for either side to
 // detect it. That is a genuine unguarded lost-update, not a rare residual.
 // This round's fix does NOT try to patch that gap with a smarter read; there
-// is no lock-free way to close it against plain localStorage. Instead:
-//   • commitLocalDomainRaw() (the CAS policy hydration uses to gate
-//     ownership/confirmed-baseline/syncReady) now FAILS CLOSED when Web
-//     Locks are unavailable — it returns "unavailable" without reading OR
-//     writing anything at all. No destructive overwrite is possible (nothing
-//     is written) and no false confirmation is possible (isLocalDomainCommitSuccess
-//     is false for "unavailable", exactly like "failed"). This is
-//     deliberately NOT a timing retry or a probability-based heuristic — it
-//     is a permanent, environment-determined refusal: cross-tab conflict
-//     resolution for synced domains stays deferred in that browser until it
-//     gains genuine serialization, while ordinary local use keeps working
-//     (see forceCommitLocalDomainRaw below).
-//   • forceCommitLocalDomainRaw() (the policy ordinary user-edit writers
-//     use) never claimed cross-tab CAS safety in the first place — an
-//     ordinary edit is a plain last-write-wins localStorage write, exactly
-//     as any client-side app's local storage has always behaved, with or
-//     without SH.2. It keeps working with or without Web Locks; only the
-//     CAS policy's SAFETY CLAIM was the thing that needed correcting.
-//   • Both policies still serialize through the SAME per-key Web Lock when
-//     one exists, so ordinary edits and hydration can never interleave
-//     mid-write in that (now genuinely CAS-safe) environment.
+// is no lock-free way to close it against plain localStorage. Instead,
+// commitLocalDomainRaw() (the CAS policy hydration uses to gate ownership/
+// confirmed-baseline/syncReady) FAILS CLOSED when Web Locks are unavailable —
+// it returns "unavailable" without reading OR writing anything at all. No
+// destructive overwrite is possible (nothing is written) and no false
+// confirmation is possible (isLocalDomainCommitSuccess is false for
+// "unavailable", exactly like "failed"). This is deliberately NOT a timing
+// retry or a probability-based heuristic — it is a permanent, environment-
+// determined refusal: cross-tab conflict resolution for synced domains stays
+// deferred in that browser until it gains genuine serialization.
 //
-// Codex P1 fix (13th round, finding #2) — commitLocalDomainRaw() also now
+// Codex P1 fix (13th round, finding #2) — commitLocalDomainRaw() also
 // accepts an optional `isStillValid` predicate, re-checked as the LAST step
 // before the actual mutation, still INSIDE the lock's critical section. A
 // caller's own pull-context epoch (see "Pull execution context" below) can
@@ -749,6 +778,54 @@ function localContentOwnerKeyForProfile(profileId: string): string {
 // superseded identity/profile. Re-checking here, immediately before
 // `localStorage.setItem`, closes that window completely: an invalidated
 // caller's commit reports "aborted" and never touches disk.
+//
+// Codex P1 fix (16th round) — the 13th round had ORDINARY user-edit writers
+// (forceCommitLocalDomainRaw — REMOVED this round) ALSO acquire the SAME
+// per-key Web Lock as commitLocalDomainRaw, reasoning that a concurrent
+// hydration commit could otherwise interleave mid-write. Codex found the
+// actual cost: if ANOTHER tab currently holds that lock, `navigator.locks
+// .request()` QUEUES the ordinary edit's write and does not run it until
+// the lock is released — an unbounded wait bearing no relationship to how
+// long the user's own action took, and since ordinary-edit call sites fire
+// this with `void` (never awaited — they are synchronous DOM/React event
+// handlers), nothing observed or waited for that delay. If the user closed
+// the tab while the lock was held elsewhere, the queued write could NEVER
+// RUN: the durable value on disk stayed OLD, an unload beacon push (reading
+// localStorage synchronously, right now) sent the stale content, and the
+// user's most recent edit was lost both locally and in the cloud.
+//
+// The fix separates the two requirements the LOCAL-FIRST DURABILITY
+// CONTRACT calls out explicitly, onto two different primitives instead of
+// forcing both through one async API:
+//   • Ordinary user edits need IMMEDIATE, LOCAL-FIRST durability — the
+//     mutation must be durable before the call that made it returns, full
+//     stop, with no dependency on anything that could outlive page
+//     teardown. commitLocalDomainRawSync() below is a single SYNCHRONOUS
+//     localStorage.getItem/setItem pair — no Promise, no lock acquisition,
+//     no queuing, ever. By the time it returns, the write has already
+//     landed (or definitively failed); a beforeunload handler firing any
+//     time afterward — a microtask, a minute — reads the true latest value
+//     by ordinary JS execution order, not by awaiting anything.
+//   • Pull hydration/CAS still needs SERIALIZED, conflict-safe commit —
+//     commitLocalDomainRaw() is UNCHANGED: still async, still Web-Locks-
+//     gated, still the right tool for "does this decision, made against a
+//     specific baseline, still hold" — a fundamentally different question
+//     from "durably persist the user's live edit right now."
+// This does reopen a NARROWER version of the cross-tab race the shared lock
+// used to close for ordinary writers specifically: a genuinely simultaneous
+// cross-tab write (this tab's plain setItem landing in the exact instant
+// between another tab's OWN lock-protected hydration CAS's read and write)
+// is possible in principle again. This is the correct trade-off — see this
+// round's own report — because (a) it is the SAME class of residual risk
+// already documented and accepted since the 12th/13th rounds for the
+// no-Web-Locks case generally, (b) hydration's own CAS check (a fresh read
+// immediately before writing, inside its lock) still catches an ordinary
+// edit that landed BEFORE that critical section began — which is every
+// required case (an edit followed by page close, or an edit racing a pull
+// that has not yet reached its own critical section) — and (c) an ordinary
+// edit was never a participant in any correctness proof that depended on
+// cross-tab mutual exclusion, only on being able to overwrite
+// unconditionally, which a plain setItem still does perfectly.
 
 export type LocalDomainCommitStatus = "committed" | "noop" | "superseded" | "failed" | "unavailable" | "aborted";
 
@@ -764,14 +841,10 @@ function hasLocalDomainSerialization(): boolean {
 
 /**
  * Runs `fn` (a synchronous read-decide-write) serialized against every
- * other caller contending for the SAME `key`, via the Web Locks API.
- * Callers MUST check hasLocalDomainSerialization() themselves before
- * relying on this for CAS safety — this helper does not fall back to an
- * unlocked direct call, because that fallback is exactly what the 13th
- * round's fix removed (see this section's own doc above). It is used
- * unconditionally only by forceCommitLocalDomainRaw's ordinary-edit policy,
- * which never claimed lock-derived safety and is content with the
- * best-effort serialization this still provides when a lock IS present.
+ * other caller contending for the SAME `key`, via the Web Locks API. Used
+ * exclusively by commitLocalDomainRaw() (the CAS policy) below — ordinary
+ * edits no longer participate in this lock at all (16th round; see this
+ * section's own doc above).
  */
 function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
   if (hasLocalDomainSerialization()) {
@@ -780,13 +853,33 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
   return Promise.resolve(fn());
 }
 
-function commitLocalDomainCore(
+/**
+ * CAS ("compare-and-swap") commit policy — used by pull hydration. Writes
+ * `nextRaw` to `key` only if the durable value there right now still equals
+ * `expectedPreviousRaw` (the durable value the caller's OWN winner decision
+ * was based on, captured via a fresh read at decision time — never React
+ * state). If some other write has landed since — this SAME tab's own
+ * ordinary edit, or another tab's, it makes no difference which — that
+ * write is newer by construction and must survive: this call reports
+ * "superseded" and never touches disk.
+ *
+ * FAILS CLOSED as "unavailable" (no read, no write) when Web Locks are not
+ * present (13th round) — see this section's own module doc for why a plain
+ * read-decide-write is not genuinely CAS-safe without one.
+ *
+ * `isStillValid`, when provided, is re-checked as the last step before the
+ * actual write, still inside the lock's critical section — pass a closure
+ * over the caller's own pull-context epoch (isPullContextCurrent(ctx)) so a
+ * commit that went stale while queued for the lock never lands. Defaults to
+ * always-valid for callers with no such context.
+ */
+export function commitLocalDomainRaw(
   key: string,
+  expectedPreviousRaw: string | null,
   nextRaw: string,
-  resolveExpectedPrevious: (currentRaw: string | null) => string | null,
-  isStillValid: () => boolean
+  isStillValid: () => boolean = () => true
 ): Promise<LocalDomainCommitStatus> {
-  if (typeof window === "undefined") return Promise.resolve("failed");
+  if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
   return withLocalDomainCommitLock(key, (): LocalDomainCommitStatus => {
     let currentRaw: string | null;
     try {
@@ -794,7 +887,7 @@ function commitLocalDomainCore(
     } catch {
       return "failed";
     }
-    const decision = decideLocalDomainCommit(currentRaw, resolveExpectedPrevious(currentRaw), nextRaw);
+    const decision = decideLocalDomainCommit(currentRaw, expectedPreviousRaw, nextRaw);
     if (decision !== "write") return decision;
     // Codex P1 fix (13th round) — the LAST gate before mutation, evaluated
     // here rather than by the caller after this Promise resolves, so a
@@ -810,53 +903,44 @@ function commitLocalDomainCore(
   });
 }
 
-/**
- * CAS ("compare-and-swap") commit policy — used by pull hydration. Writes
- * `nextRaw` to `key` only if the durable value there right now still equals
- * `expectedPreviousRaw` (the durable value the caller's OWN winner decision
- * was based on, captured via a fresh read at decision time — never React
- * state). If some other write has landed since — this SAME tab's own
- * ordinary edit, or another tab's, it makes no difference which — that
- * write is newer by construction and must survive: this call reports
- * "superseded" and never touches disk.
- *
- * Codex P1 fix (13th round) — FAILS CLOSED as "unavailable" (no read, no
- * write) when Web Locks are not present: see this section's own module doc
- * for why a plain read-decide-write is not genuinely CAS-safe without one.
- *
- * `isStillValid`, when provided, is re-checked as the last step before the
- * actual write (see commitLocalDomainCore's own doc) — pass a closure over
- * the caller's own pull-context epoch (isPullContextCurrent(ctx)) so a
- * commit that went stale while queued for the lock never lands. Defaults to
- * always-valid for callers with no such context (there are none among this
- * codebase's current hydration call sites, which all have a pull context).
- */
-export function commitLocalDomainRaw(
-  key: string,
-  expectedPreviousRaw: string | null,
-  nextRaw: string,
-  isStillValid: () => boolean = () => true
-): Promise<LocalDomainCommitStatus> {
-  if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
-  return commitLocalDomainCore(key, nextRaw, () => expectedPreviousRaw, isStillValid);
-}
+/** The outcomes commitLocalDomainRawSync() (below) can report — a strict
+ * subset of LocalDomainCommitStatus, since a synchronous, lock-free,
+ * always-unconditional write can never be "superseded", "aborted", or
+ * "unavailable" (there is no baseline to violate, no queued wait to go
+ * stale during, and no serialization primitive it depends on). */
+export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
 
 /**
- * Unconditional commit policy — used by ordinary user-edit writers. A live
- * edit is the user's own freshest intent, so it is never rejected: it
- * always writes `nextRaw` (a "noop" only when the durable value already
- * equals it — still a success, not a failure). Never claims cross-tab CAS
- * safety (there is no `expectedPreviousRaw` to violate), so — unlike
- * commitLocalDomainRaw — it is NOT gated on Web Locks being present: an
- * ordinary edit is a plain last-write-wins local write, exactly as
- * client-side localStorage usage has always behaved. When a lock IS
- * present, it still participates in the SAME per-key serialization
- * commitLocalDomainRaw uses, so a concurrent hydration commit to this exact
- * key can never interleave with it — the gap a hydration-only lock would
- * otherwise leave open for every non-participating writer.
+ * Unconditional, SYNCHRONOUS commit policy — used by ORDINARY user-edit
+ * writers: Plans/Lightning items, days, and every Remove/Clear/Restore/
+ * import path that persists one of those domains (see this round's own
+ * report for the full writer audit). Codex P1 fix (16th round) — see this
+ * section's own module doc above for the full rationale; in short, this
+ * is a single localStorage.getItem/setItem pair that runs to completion
+ * BEFORE this function returns — no Promise, no lock, no possibility of
+ * being queued behind another tab's operation, so the write is durable by
+ * the time any subsequent code (including a beforeunload handler) runs,
+ * satisfying the LOCAL-FIRST DURABILITY CONTRACT's "immediate/local-first
+ * durability" requirement by construction rather than by awaiting anything.
+ * A live edit is the user's own freshest intent, so it is never rejected:
+ * "noop" only when the durable value already equals it (still a success).
  */
-export function forceCommitLocalDomainRaw(key: string, nextRaw: string): Promise<LocalDomainCommitStatus> {
-  return commitLocalDomainCore(key, nextRaw, (currentRaw) => currentRaw, () => true);
+export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
+  if (typeof window === "undefined") return "failed";
+  let currentRaw: string | null;
+  try {
+    currentRaw = localStorage.getItem(key);
+  } catch {
+    return "failed";
+  }
+  const decision = decideLocalDomainCommit(currentRaw, currentRaw, nextRaw);
+  if (decision === "noop") return "noop";
+  try {
+    localStorage.setItem(key, nextRaw);
+  } catch {
+    return "failed";
+  }
+  return "committed";
 }
 
 /**
@@ -869,6 +953,8 @@ export function forceCommitLocalDomainRaw(key: string, nextRaw: string): Promise
  * in this environment), or "failed" (a real localStorage exception) — all
  * four mean the intended value is NOT confirmed durable, so ownership/
  * syncReady/confirmed-baseline advancement must not proceed as if it were.
+ * Also accepts LocalDomainSyncCommitStatus (a strict subset), so callers of
+ * either primitive can share this one check.
  */
 export function isLocalDomainCommitSuccess(status: LocalDomainCommitStatus): boolean {
   return status === "committed" || status === "noop";
@@ -1066,16 +1152,17 @@ const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightn
  *     check-then-act localStorage cannot safely provide without a lock —
  *     Codex's 15th-round finding), a plain unconditional `setItem` to an
  *     already-unique key cannot race with anything.
- *   • Reconciliation moves ENTIRELY to READ time: reduceConfirmedFactRecords()
- *     (syncPayload.ts) groups whatever facts exist for a domain by revision
- *     and walks them highest-first, treating a revision whose recorded
- *     facts all canonically agree as that domain's confirmed value, and a
- *     revision whose facts DISAGREE as an unresolved conflict — skipped in
- *     favor of the next-lower unambiguous revision, never resolved by
- *     picking an arbitrary winner. Write order therefore never matters at
- *     all, for identical OR conflicting values alike — only which facts
- *     exist matters, and a fresh read always sees all of them (via the
- *     shared, concurrency-safe snapshotKeysWithPrefix() primitive above).
+ *   • Reconciliation moves ENTIRELY to READ time: resolveConfirmedDomainState()
+ *     (syncPayload.ts) looks at whatever facts exist for a domain's HIGHEST
+ *     recorded revision only — never falls back to an older one, even an
+ *     unambiguous one (Codex P1, 16th round — see that function's own doc
+ *     for why the 15th round's "fall back to the next-lower unambiguous
+ *     revision" behavior was itself unsound) — and reports "confirmed" if
+ *     they all canonically agree, or "conflict" if they don't. Write order
+ *     therefore never matters at all, for identical OR conflicting values
+ *     alike — only which facts exist matters, and a fresh read always sees
+ *     all of them (via the shared, concurrency-safe snapshotKeysWithPrefix()
+ *     primitive above).
  *
  * This is precisely why NO Web Locks API involvement is needed anywhere in
  * this section: correctness comes from genuine per-write physical
@@ -1094,7 +1181,7 @@ function confirmedFactPrefix(userId: string, profileId: string, domain: Confirme
  * the SAME tab. This is what makes writing a fact a single unconditional
  * `setItem` with NO read-before-write, ever: there is no key two callers
  * could ever contend for, so there is no TOCTOU window left to close. See
- * reduceConfirmedFactRecords() (syncPayload.ts) for how multiple facts
+ * resolveConfirmedDomainState() (syncPayload.ts) for how multiple facts
  * recorded for the same revision are reconciled at READ time instead.
  */
 function confirmedFactKey(
@@ -1151,13 +1238,25 @@ function scanConfirmedFactEntries(
  * Read the CURRENT per-domain confirmed state for this authenticated user +
  * profile — see the module doc's "Cloud-confirmed local snapshot contract"
  * above. Each of plans/lightning/days is independently computed by
- * reduceConfirmedFactRecords() (syncPayload.ts) over whatever facts have
- * been recorded for it: the highest revision whose recorded fact(s) all
- * agree canonically — a domain with no recorded facts, or whose every
- * recorded revision is conflicted, is simply absent from the returned
- * object ("nothing confirmed yet for this domain"), never inferred from
- * another domain's state and never resolved by picking an arbitrary
- * conflicting value.
+ * resolveConfirmedDomainState() (syncPayload.ts) over whatever facts have
+ * been recorded for it, and returns one of THREE statuses (Codex P1, 16th
+ * round — see that function's own doc for the full contract this replaces):
+ *   • "none"      — no facts recorded for this domain at all.
+ *   • "confirmed" — the highest recorded revision's fact(s) all canonically
+ *     agree; `.fact` is the trustworthy confirmed value.
+ *   • "conflict"  — the highest recorded revision's facts DISAGREE. The
+ *     domain's confirmed state is presently UNKNOWABLE. Callers (see
+ *     captureConfirmedSnapshotForPull in each page) MUST fail closed for
+ *     this domain — never substitute an older, individually-unambiguous
+ *     revision as if it were current truth; that was exactly the P1 Codex
+ *     found in the previous version of this function, which silently
+ *     dropped the conflict signal and fell back to a stale baseline,
+ *     letting a pull misclassify newer state as unsynced and overwrite it.
+ * A "conflict" is logged via console.error (best-effort) so the underlying
+ * inconsistency is at least observable; it is always temporary — the
+ * moment a newer, unambiguous revision is recorded, it becomes the domain's
+ * new highest revision and normal "confirmed" resolution resumes with no
+ * special handling needed anywhere.
  *
  * Safe to call from any tab: this is a plain localStorage scan of keys that
  * are durable (survive reloads) and shared (every same-origin tab for this
@@ -1166,42 +1265,48 @@ function scanConfirmedFactEntries(
  * wants an answer. No Web Locks involvement — see this section's own doc.
  */
 export function getConfirmedState(userId: string, profileId: string): ConfirmedPlannerState {
-  if (typeof window === "undefined") return {};
-  const state: ConfirmedPlannerState = {};
+  if (typeof window === "undefined") {
+    return { plans: { status: "none" }, lightning: { status: "none" }, days: { status: "none" } };
+  }
+  const state = {} as ConfirmedPlannerState;
   for (const domain of CONFIRMED_DOMAIN_NAMES) {
     const facts = scanConfirmedFactEntries(userId, profileId, domain)
       .map(({ raw }) => parseConfirmedFactForDomain(domain, raw))
       .filter((f): f is ConfirmedDomainFact<unknown> => f !== null);
-    const { confirmed } = reduceConfirmedFactRecords(facts);
-    if (confirmed) {
-      // Safe cast: parseConfirmedFactForDomain's per-domain branch already
-      // guarantees the value shape matches this domain's own slot type.
-      (state as Record<string, unknown>)[domain] = confirmed;
+    const result = resolveConfirmedDomainState(facts);
+    if (result.status === "conflict") {
+      try {
+        console.error(
+          `SH.2: ${domain}'s confirmed state is conflicted at revision ${result.revision} — sync stays gated for this domain until a later unambiguous revision resolves it.`
+        );
+      } catch {}
     }
+    // Safe cast: parseConfirmedFactForDomain's per-domain branch already
+    // guarantees the value shape matches this domain's own slot type.
+    (state as unknown as Record<string, unknown>)[domain] = result;
   }
   return state;
 }
 
 /**
  * Selects which of this domain's currently-recorded fact keys are safe to
- * prune (delete), given the domain's current confirmed revision (`null` if
- * nothing is unambiguous yet):
- *   • any fact whose revision is STRICTLY LESS than the confirmed revision
- *     is fully superseded — a higher revision is already unambiguously
- *     confirmed, so an older revision's fact(s), conflicted or not, can
- *     never affect getConfirmedState()'s result again. Deleted outright.
- *   • within each revision AT OR ABOVE the confirmed one (the confirmed
- *     revision itself, plus any higher CONFLICTED revisions still being
- *     contested), facts are grouped by canonical value and only ONE
- *     representative per distinct value is kept — duplicates carry no
- *     additional information (see reduceConfirmedFactRecords()'s doc: it
- *     only needs to know a revision's set of DISTINCT canonical values, not
- *     how many times each was recorded), but at least one representative of
- *     every distinct value at a conflicted revision must survive, or the
- *     conflict itself would become undetectable.
+ * prune (delete), given `confirmedRevision` — the revision
+ * resolveConfirmedDomainState() reports as "confirmed" right now, or `null`
+ * if it instead reports "none" or "conflict" (Codex P1, 16th round: since
+ * that function only ever looks at the TOP recorded revision, `null` here
+ * covers BOTH "nothing recorded yet" and "the top revision is itself
+ * conflicted" — in either case there is no revision this domain can safely
+ * treat as superseded, so nothing at all is pruned; every historical fact,
+ * including the conflicting frontier's, is left in place until a later
+ * unambiguous revision establishes a real confirmedRevision):
+ *   • any fact whose revision is STRICTLY LESS than `confirmedRevision` is
+ *     fully superseded — deleted outright.
+ *   • facts AT `confirmedRevision` (necessarily all canonically identical,
+ *     by definition of "confirmed") are deduped down to one representative;
+ *     duplicates carry no additional information.
  * Pruning is a pure optimization: skipping it entirely (or it failing
  * mid-way) never changes what getConfirmedState() computes, since
- * reduceConfirmedFactRecords() reduces correctly over however many facts —
+ * resolveConfirmedDomainState() reduces correctly over however many facts —
  * duplicate or conflicting — happen to still exist.
  */
 function selectConfirmedFactPruneKeys(
@@ -1289,8 +1394,9 @@ function recordConfirmedFact(
         );
       } catch {}
     }
-    const { confirmed } = reduceConfirmedFactRecords(facts);
-    const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmed ? confirmed.revision : null);
+    const domainResult = resolveConfirmedDomainState(facts);
+    const confirmedRevision = domainResult.status === "confirmed" ? domainResult.fact.revision : null;
+    const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmedRevision);
     for (const pruneKey of pruneKeys) {
       try {
         localStorage.removeItem(pruneKey);
@@ -1552,7 +1658,7 @@ export function selectPendingOpBatch(
  * revision 6 (via acceptedDomainFactsFromBeacon() + commitConfirmedBaseline())
  * is what BOTH opA's and opB's "accepted" status resolve into — opA's own
  * revision (5) never even enters this call, since only THIS pull's own
- * current cloudRevision (6) is ever recorded; reduceConfirmedFactRecords()
+ * current cloudRevision (6) is ever recorded; resolveConfirmedDomainState()
  * (syncPayload.ts) is what proves, at READ time, that revision 6 correctly
  * supersedes anything opA might separately have contributed.
  *
