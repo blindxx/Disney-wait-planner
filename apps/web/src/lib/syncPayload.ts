@@ -2263,3 +2263,111 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
   },
 ];
 
+// ===== HYDRATION NOOP SAFETY (SH.2.1, this round) =====
+//
+// Codex found that commitLocalDomainRaw() (syncHelper.ts) — the CAS/lock
+// primitive every pull's hydration commit uses — could report "noop"
+// whenever canonical bytes already equalled the hydration winner, even
+// when a surviving, unresolved local-edit fact still held a genuinely
+// DIFFERENT value. `decideLocalDomainCommit()`'s own "noop" branch only
+// ever proved a byte-level fact (canonical === nextRaw); it was never
+// asked whether DURABLE AUTHORITY (canonical + facts) also agreed.
+// Reporting that byte-level coincidence as a safe "noop" let hydration
+// count as successful (isLocalDomainCommitSuccess treats noop and
+// committed identically) while leaving the stale fact fully intact and
+// unretired — durably authoritative for the next readLatestDurableValue()
+// read, and capable of later being pushed back over the very cloud state
+// this pull just recorded as confirmed.
+//
+// The fix (commitLocalDomainRaw()'s own doc in syncHelper.ts has the full
+// rationale) adds ONE more check, reached only on a byte-level "noop": ask
+// resolveEffectiveDurableRaw() — the SAME shared resolver every other
+// durable-authority decision in this codebase uses, never a competing
+// interpretation — whether canonical + this decision's OWN
+// baselineEditFactIds frontier already agrees with nextRaw. Agreement
+// keeps the fast "noop" path; disagreement falls through to the EXACT
+// SAME write-and-retire path a genuine "write" decision already took
+// (including its own re-scan for a fact that lands AFTER the snapshot,
+// which still reports "superseded" — untouched by this fix).
+//
+// The cases below model that exact two-step decision purely — real
+// resolveEffectiveDurableRaw() calls, plus the same frontier-membership
+// check commitLocalDomainRaw()'s own re-scan performs — reduced to
+// commitLocalDomainRaw()'s actual inputs/outputs, not a reimplementation.
+export type HydrationNoopSafetyOutcome = "noop" | "committed" | "superseded";
+
+/**
+ * Reference cases for commitLocalDomainRaw()'s hydration-noop-safety
+ * decision — the REQUIRED cases from the SH.2.1 (this round) architectural
+ * contract. Deliberately NOT a new production function: the real decision
+ * stays inline in commitLocalDomainRaw() (syncHelper.ts) per this round's
+ * "fix centrally in the existing primitive" instruction. This composes the
+ * SAME real resolveEffectiveDurableRaw() production primitive the fix
+ * itself calls, plus the same frontier-membership condition
+ * commitLocalDomainRaw()'s own re-scan already checks — reduced to that
+ * function's actual inputs/outputs, not a reimplementation. Run from Node:
+ *   import { DEV_HYDRATION_NOOP_SAFETY_CASES, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_HYDRATION_NOOP_SAFETY_CASES.forEach(c => {
+ *     const effectiveDurableRaw = resolveEffectiveDurableRaw(c.canonicalRaw, c.baselineFactRawValues);
+ *     const got = effectiveDurableRaw === c.nextRaw ? "noop" : (c.liveFactKeysGrew ? "superseded" : "committed");
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_HYDRATION_NOOP_SAFETY_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  baselineFactRawValues: string[];
+  nextRaw: string;
+  liveFactKeysGrew: boolean;
+  expected: HydrationNoopSafetyOutcome;
+}> = [
+  {
+    name: "required case 4 — canonical=A, no surviving facts, hydration wants A: durable authority already agrees, safe noop",
+    canonicalRaw: "A",
+    baselineFactRawValues: [],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "noop",
+  },
+  {
+    name: "required case 5 — canonical=A, surviving fact=B, hydration wants A: durable authority (B) disagrees — must NOT report a safe noop that leaves B authoritative; commits (idempotent canonical rewrite) and retires B",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["B"],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "committed",
+  },
+  {
+    name: "required case 6 — same as required case 5, but a NEW conflicting fact (C) lands after this commit's own baseline snapshot: the conflicting frontier is NOT safe to retire — reports superseded, exactly like a genuine 'write' decision would, so C is never touched",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["B"],
+    nextRaw: "A",
+    liveFactKeysGrew: true,
+    expected: "superseded",
+  },
+  {
+    name: "fact exactly matches the hydration winner already — genuinely redundant, safe noop (structural rule, not a value comparison coincidence)",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["A"],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "noop",
+  },
+  {
+    name: "ambiguous 2-fact tie falls back to canonical for this decision too — ANY conflicting fact resolution defers to the established resolveEffectiveDurableRaw() tie-break, never a special case here",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["B", "C"],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "noop",
+  },
+  {
+    name: "required case 7 (Plans/Lightning/days symmetry) — a days[]-shaped payload (JSON array raw string) goes through the identical decision: surviving fact disagrees, commits and retires, same as the Plans/Lightning-shaped cases above",
+    canonicalRaw: JSON.stringify(["day-1", "day-2"]),
+    baselineFactRawValues: [JSON.stringify(["day-1", "day-2", "day-3"])],
+    nextRaw: JSON.stringify(["day-1", "day-2"]),
+    liveFactKeysGrew: false,
+    expected: "committed",
+  },
+];
+

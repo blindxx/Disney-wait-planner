@@ -1013,12 +1013,36 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
  * single-threaded window between that loop and this retirement running (no
  * `await` between them), cannot exist at all.
  *
- * Retirement runs ONLY on "committed" (an actual write landed) — never on
- * "noop" (the durable value already equalled the winner; any edit fact
- * describing it still accurately describes CURRENT content, so it is left
- * alone rather than guessed at) and never on any other outcome (nothing was
- * written, so nothing was superseded — required case 3: a failed
- * persistence must leave edit facts and gates untouched).
+ * Retirement runs on "committed" — including a "noop"-shaped commit this
+ * function upgrades to "committed" when canonical bytes already equalled
+ * `nextRaw` but a surviving edit fact still disagreed (see the HYDRATION
+ * NOOP MUST NOT OUTRANK A SURVIVING FACT doc below) — never on any outcome
+ * where nothing was actually superseded (a GENUINE noop, or any other
+ * non-write outcome — required case 3: a failed persistence must leave
+ * edit facts and gates untouched).
+ *
+ * HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT (Codex, this round) — a
+ * THIRD gate, checked only when the byte-level CAS above says "noop"
+ * (`currentRaw === nextRaw`): that comparison alone proves canonical bytes
+ * already equal the winner, never that DURABLE AUTHORITY does. Canonical
+ * can equal `nextRaw` purely because a prior pull left it at a stale
+ * pre-hydration value (the documented cross-tab hydration race) while a
+ * surviving, unresolved edit fact — outranking canonical per
+ * resolveEffectiveDurableRaw()'s own rule — still holds a genuinely
+ * different value. Reporting that as a safe "noop" would let hydration
+ * count as SUCCESS (isLocalDomainCommitSuccess treats noop and committed
+ * identically) while leaving the stale fact fully intact and unretired:
+ * durably authoritative for every later readLatestDurableValue() read,
+ * capable of resurfacing and even being pushed back over the cloud state
+ * this pull just recorded as confirmed. A byte-level noop is trusted as-is
+ * ONLY when resolveEffectiveDurableRaw(currentRaw, this decision's own
+ * baselineEditFactIds frontier) already agrees with `nextRaw`; when it does
+ * not, this falls through to the EXACT SAME write-and-retire path a
+ * genuine "write" decision takes — canonical already holds `nextRaw`'s
+ * bytes (the setItem below is a harmless idempotent rewrite), but the
+ * conflicting fact frontier still needs the SAME validity/re-scan gates
+ * (required case 6: a fact landing AFTER this snapshot still reports
+ * "superseded", never silently retired) and the SAME retirement.
  */
 export function commitLocalDomainRaw(
   key: string,
@@ -1036,7 +1060,33 @@ export function commitLocalDomainRaw(
       return "failed";
     }
     const decision = decideLocalDomainCommit(currentRaw, expectedPreviousRaw, nextRaw);
-    if (decision !== "write") return decision;
+    if (decision === "superseded") return "superseded";
+    if (decision === "noop") {
+      // HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT (Codex, this
+      // round) — see this function's own doc above for the full rationale.
+      // `decision === "noop"` only proves canonical bytes already equal
+      // `nextRaw`; it says nothing about a surviving edit fact that might
+      // still disagree. Read baselineEditFactIds' own raw values (the SAME
+      // frontier the write path's re-scan below validates) and ask the ONE
+      // shared durable-authority resolver whether it agrees with nextRaw.
+      const baselineFactRawValues: string[] = [];
+      for (const factKey of baselineEditFactIds) {
+        let factRaw: string | null;
+        try {
+          factRaw = localStorage.getItem(factKey);
+        } catch {
+          continue;
+        }
+        if (factRaw !== null) baselineFactRawValues.push(factRaw);
+      }
+      const effectiveDurableRaw = resolveEffectiveDurableRaw(currentRaw, baselineFactRawValues);
+      if (effectiveDurableRaw === nextRaw) return "noop";
+      // Durable authority disagrees with nextRaw — NOT a safe noop. Fall
+      // through to the exact same write-and-retire path "write" takes
+      // below: canonical already holds nextRaw's bytes, so the setItem
+      // there is a harmless idempotent rewrite, but the conflicting fact
+      // frontier still needs validating and retiring.
+    }
     // Codex P1 fix (13th round) — the LAST gate before mutation, evaluated
     // here rather than by the caller after this Promise resolves, so a
     // context that went stale while this commit sat queued for the lock is

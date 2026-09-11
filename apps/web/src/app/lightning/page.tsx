@@ -332,17 +332,43 @@ function loadAllPlanItems(plansKey: string): { name: string; dayId: string; time
  * timeLabel and every other field intact) whenever this pull sanitizes a
  * stale Plans item, so this mirrors Plans page's own parseLightningRawItems:
  * full raw objects preserved, only used to read `dayId` for reconciliation.
+ *
+ * SH.2.1 P1 fix (Codex) — recognizes the SAME two Plans storage shapes
+ * plans/page.tsx's own loadFromStorage()/parseDurablePlanItemsRaw()
+ * recognize (see their docs there): the current v1 `{ version, items }`
+ * object AND the supported legacy top-level array shape (unversioned data
+ * that predates the v1 wrapper). This function previously recognized ONLY
+ * the v1 object shape — a profile whose Plans data was still a legacy raw
+ * array (never touched by Plans' own page/migration yet) parsed down to an
+ * EMPTY candidate here. Since reconcilePlannerSnapshot trusts a
+ * changedLocally-true candidate outright (see its own doc — a real,
+ * possibly still-unpushed edit), that wrongly-empty candidate could be
+ * written back over Plans' own storage as the "winning" content, silently
+ * erasing valid, unsynced legacy Plans data. This mirrors the SAME
+ * structural recognition rule Plans' own loader applies (an object without
+ * `.items`, or non-array/non-object JSON, still safely falls through to
+ * empty — malformed data is not newly trusted by this fix) without
+ * depending on Plans' own PlanItem type or its migration-write side effect:
+ * this function stays a pure parser, matching its own established
+ * raw-passthrough contract exactly.
  */
 function parsePlansRawItems(raw: string | null): unknown[] {
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw) as unknown;
+    // v1 shape: { version, items: [...] }
     if (
       typeof parsed === "object" &&
       parsed !== null &&
+      !Array.isArray(parsed) &&
       Array.isArray((parsed as Record<string, unknown>).items)
     ) {
       return (parsed as Record<string, unknown>).items as unknown[];
+    }
+    // Legacy v0 shape: a bare top-level array — the same compatibility
+    // rule plans/page.tsx's own loader applies to this exact shape.
+    if (Array.isArray(parsed)) {
+      return parsed;
     }
   } catch {
     // malformed — treat as no items, same tier as every other opportunistic
@@ -350,6 +376,69 @@ function parsePlansRawItems(raw: string | null): unknown[] {
   }
   return [];
 }
+
+/**
+ * Reference cases for parsePlansRawItems() — the REQUIRED cases from the
+ * SH.2.1 (this round) architectural contract. Run from Node (extract the
+ * function body verbatim, or transpile this file, into a scratch script —
+ * this page is not part of the shared/crossDayChecks Node harness):
+ *   DEV_PARSE_PLANS_RAW_ITEMS_CASES.forEach(c => {
+ *     const got = parsePlansRawItems(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+const DEV_PARSE_PLANS_RAW_ITEMS_CASES: Array<{
+  name: string;
+  raw: string | null;
+  expected: unknown[];
+}> = [
+  {
+    name: "required case 1 — legacy top-level Plans array survives (Lightning-first reconciliation must not erase it)",
+    raw: JSON.stringify([{ id: "1", name: "Space Mountain", timeLabel: "10:00 AM", dayId: "day-1", type: "attraction" }]),
+    expected: [{ id: "1", name: "Space Mountain", timeLabel: "10:00 AM", dayId: "day-1", type: "attraction" }],
+  },
+  {
+    name: "required case 1 — legacy top-level array, multiple items, verbatim fields preserved (no normalization applied)",
+    raw: JSON.stringify([
+      { id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" },
+      { id: "2", name: "B", timeLabel: "2:00 PM", dayId: "day-2", type: "dining" },
+    ]),
+    expected: [
+      { id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" },
+      { id: "2", name: "B", timeLabel: "2:00 PM", dayId: "day-2", type: "dining" },
+    ],
+  },
+  {
+    name: "required case 1 — legacy empty top-level array is a valid (empty) Plans dataset, not \"unrecognized\"",
+    raw: JSON.stringify([]),
+    expected: [],
+  },
+  {
+    name: "required case 2 — current v1 object shape remains correct, unaffected by the legacy-array fix",
+    raw: JSON.stringify({ version: 1, items: [{ id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" }] }),
+    expected: [{ id: "1", name: "A", timeLabel: "", dayId: "day-1", type: "attraction" }],
+  },
+  {
+    name: "required case 3 — malformed JSON fails safe to an empty candidate (never throws, never treated as legacy)",
+    raw: "{not valid json",
+    expected: [],
+  },
+  {
+    name: "required case 3 — well-formed JSON but unsupported shape (object with no items array, not an array) fails safe to empty",
+    raw: JSON.stringify({ version: 1, foo: "bar" }),
+    expected: [],
+  },
+  {
+    name: "required case 3 — well-formed JSON of an unsupported primitive type (a bare number) fails safe to empty",
+    raw: "42",
+    expected: [],
+  },
+  {
+    name: "null raw (key never existed) is empty, same as before this fix",
+    raw: null,
+    expected: [],
+  },
+];
 
 // ===== STORAGE =====
 
