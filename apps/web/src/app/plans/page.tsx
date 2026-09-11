@@ -594,11 +594,9 @@ function dayLabelFromId(dayId: string, days: string[]): string {
 }
 
 /**
- * SH.2.1 P3 — parses the SAME sanitize/dedupe/day-1-baseline rules
- * loadDays() applies, but from an already-read raw string rather than
- * reading localStorage itself — shared by loadDays() (canonical) and
- * loadEffectiveDurableDays() (below) so both apply IDENTICAL rules to
- * whichever raw source they're given.
+ * SH.2.1 P3 — parses the SAME sanitize/dedupe/day-1-baseline rules the days
+ * domain always applies, from an already-read raw string rather than
+ * reading localStorage itself.
  */
 function parseDaysRaw(raw: string | null): string[] {
   try {
@@ -630,31 +628,19 @@ function parseDaysRaw(raw: string | null): string[] {
   }
 }
 
-function loadDays(key: string): string[] {
-  let raw: string | null;
-  try {
-    raw = localStorage.getItem(key);
-  } catch {
-    return ["day-1"];
-  }
-  return parseDaysRaw(raw);
-}
-
 /**
  * SH.2.1 P3 — THE authority-bearing read for the days domain (shared by
  * Plans and Lightning — see resolveEffectiveDurableRaw's own doc in
- * syncPayload.ts for the full rationale). Use this — never loadDays()
- * directly — for any sync/conflict decision: the pre-fetch frozen
- * snapshot, the post-fetch "current" candidate, changed-locally/winner
- * selection.
- *
- * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
- * mount-time UI hydration (see loadEffectiveDurablePlanItems()'s own doc
- * above for the full rationale — the same stale-canonical-at-mount risk
- * applies identically to this domain). loadDays() remains correct for the
- * cross-tab 'storage' listener's own display refresh, which is reflecting
- * what another tab just canonically wrote, not resolving this tab's own
- * local authority.
+ * syncPayload.ts for the full rationale). Use this — never a raw canonical
+ * localStorage.getItem() — for any sync/conflict decision: the pre-fetch
+ * frozen snapshot, the post-fetch "current" candidate, changed-locally/
+ * winner selection, mount-time UI hydration, and the cross-tab 'storage'
+ * listener's own days update (all fixed across SH.2.1's rounds — canonical
+ * bytes alone can be stale relative to a surviving local-edit fact, the
+ * documented cross-tab hydration race). This is now the ONLY reader of the
+ * days domain anywhere on this page; the canonical-only loadDays() this
+ * replaced was removed once its last remaining caller (the storage
+ * listener) was routed through this function instead.
  */
 function loadEffectiveDurableDays(key: string): string[] {
   return parseDaysRaw(readLatestDurableValue(key));
@@ -1123,8 +1109,8 @@ export default function PlansPage() {
    *
    * SH.2.1 P3 — this read is the domain's EFFECTIVE DURABLE value (via
    * loadEffectiveDurablePlanItems()/loadEffectiveDurableDays()/
-   * readLatestDurableValue(), never loadFromStorage()/loadDays()/a raw
-   * localStorage.getItem() directly): required case 6 — a conflict-recovery
+   * readLatestDurableValue(), never a raw canonical localStorage.getItem()
+   * directly): required case 6 — a conflict-recovery
    * "recovered" outcome reuses THIS frozen value (see
    * resolvePostFetchDomainBaseline's own doc), so it must already reflect
    * durable local intent (canonical + unresolved edit facts), never merely
@@ -1600,10 +1586,22 @@ export default function PlansPage() {
       }
       if (e.key === daysKeyRef.current) {
         // Refresh this tab's local day state to match what the other tab
-        // just persisted — loadDays() applies the same sanitize/dedupe/
-        // day-1-baseline rules used at mount-time hydration, so a malformed
-        // cross-tab write can't corrupt this tab's in-memory `days`.
-        const next = loadDays(daysKeyRef.current);
+        // just persisted — loadEffectiveDurableDays() applies the same
+        // sanitize/dedupe/day-1-baseline rules used at mount-time
+        // hydration, so a malformed cross-tab write can't corrupt this
+        // tab's in-memory `days`.
+        //
+        // SH.2.1 closing audit fix (Codex finding) — reads the days
+        // domain's EFFECTIVE DURABLE value, never a raw canonical read:
+        // `days` is this page's authoritative React state, and
+        // while no auto-persist effect republishes it automatically (unlike
+        // Lightning's `items`), an explicit day-mutating action (Move Day,
+        // Remove Day, Duplicate Day, ...) performed on top of a stale
+        // adopted value would build its next durable write from that stale
+        // base — the same missed consumer of the established
+        // durable-authority abstraction, just requiring one more user
+        // action to manifest.
+        const next = loadEffectiveDurableDays(daysKeyRef.current);
         // Codex fix — distinguish a genuine cross-tab days[] change from a
         // no-op hydration write, purely to avoid an unnecessary re-render/
         // active-day re-check below (this listener no longer marks any
@@ -2301,8 +2299,8 @@ export default function PlansPage() {
         //     language.
         //   • `current{Items,Days}`/`currentLightningRawDurable` — THE
         //     authority-bearing reads, via loadEffectiveDurablePlanItems()/
-        //     loadEffectiveDurableDays()/readLatestDurableValue() (never
-        //     loadFromStorage()/loadDays()/a raw canonical read): these
+        //     loadEffectiveDurableDays()/readLatestDurableValue() (never a
+        //     raw canonical read): these
         //     prefer a surviving local-edit fact over the canonical key,
         //     exactly like the unload/push path already does, so a fact the
         //     documented cross-tab hydration race left stranded ahead of a

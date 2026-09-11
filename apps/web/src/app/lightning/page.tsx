@@ -143,15 +143,9 @@ function migrateLightningDayIds(items: LightningItem[]): LightningItem[] {
 // ===== DAY LIST LOADER (Phase 8.3.2) =====
 
 /**
- * Load the planner day list from profile storage (read-only).
- * Always guarantees "day-1" as the baseline.
- * Used by safeActiveDayId to validate the active day against the known planner model.
- */
-/**
- * SH.2.1 P3 — parses the SAME sanitize/dedupe/day-1-baseline rules
- * loadKnownDays() applies, but from an already-read raw string — shared by
- * loadKnownDays() (canonical) and loadEffectiveDurableDays() (below).
- * Mirrors plans/page.tsx's own parseDaysRaw() exactly.
+ * SH.2.1 P3 — parses the SAME sanitize/dedupe/day-1-baseline rules the
+ * days domain always applies, from an already-read raw string. Mirrors
+ * plans/page.tsx's own parseDaysRaw() exactly.
  */
 function parseDaysRaw(raw: string | null): string[] {
   try {
@@ -173,24 +167,21 @@ function parseDaysRaw(raw: string | null): string[] {
   }
 }
 
-function loadKnownDays(key: string): string[] {
-  let raw: string | null;
-  try {
-    raw = localStorage.getItem(key);
-  } catch {
-    return ["day-1"];
-  }
-  return parseDaysRaw(raw);
-}
-
 /**
- * SH.2.1 P3 — THE authority-bearing read for the days domain. Mirrors
- * plans/page.tsx's own loadEffectiveDurableDays() exactly, see its doc
- * there for the full rationale.
+ * Load the planner day list from profile storage (read-only on this page —
+ * Plans page owns writes). Always guarantees "day-1" as the baseline. Used
+ * by safeActiveDayId to validate the active day against the known planner
+ * model, at mount and via the cross-tab 'storage' listener's own knownDays
+ * update.
  *
- * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
- * mount-time UI hydration; see loadEffectiveDurableLightningItems()'s own
- * doc above for the full rationale.
+ * SH.2.1 P3 — THE authority-bearing read for the days domain: canonical +
+ * any still-unresolved local-edit fact (see readLatestDurableValue()'s own
+ * doc in syncHelper.ts). Mirrors plans/page.tsx's own
+ * loadEffectiveDurableDays() exactly, see its doc there for the full
+ * rationale. This is now the ONLY reader of the days domain anywhere on
+ * this page; the canonical-only loadKnownDays() this replaced was removed
+ * once its last remaining caller (the storage listener) was routed through
+ * this function instead.
  */
 function loadEffectiveDurableDays(key: string): string[] {
   return parseDaysRaw(readLatestDurableValue(key));
@@ -364,43 +355,16 @@ function parsePlansRawItems(raw: string | null): unknown[] {
 
 const STORAGE_KEY = "dwp.lightning.v1";
 
-function loadFromStorage(key: string = STORAGE_KEY): LightningItem[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      (parsed as StoredSchema).version === 1 &&
-      Array.isArray((parsed as StoredSchema).items)
-    ) {
-      // Phase 8.3 — normalize dayId on every loaded item (handles legacy items with
-      // no dayId, invalid dayId, or non-string dayId — all normalize to "day-1").
-      return migrateLightningDayIds((parsed as StoredSchema).items as LightningItem[]);
-    }
-    // Wrong version or corrupt structure — clear and start fresh
-    localStorage.removeItem(key);
-    return [];
-  } catch {
-    // JSON parse failed — clear bad data
-    try {
-      localStorage.removeItem(key);
-    } catch {}
-    return [];
-  }
-}
-
 /**
- * SH.2.1 P3 — parses the SAME v1 Lightning-item shape loadFromStorage()
- * recognizes, but from an already-read raw string rather than reading
- * localStorage itself, and WITHOUT loadFromStorage's destructive
- * removeItem()-on-corrupt-data side effect: the raw string this parses may
- * come from a local-edit-fact key (see loadEffectiveDurableLightningItems()
- * below), never the canonical key itself, so a parse failure here must
- * never delete the CANONICAL key — an unrelated key this function was
- * never asked to touch.
+ * SH.2.1 closing audit round — parses the v1 Lightning-item shape from an
+ * already-read raw string rather than reading localStorage itself.
+ * Deliberately has NO destructive removeItem()-on-corrupt-data side effect
+ * (unlike the canonical-only loadFromStorage() this replaced, now removed —
+ * every remaining consumer of Lightning's authority-bearing content reads
+ * through loadEffectiveDurableLightningItems() below): the raw string this
+ * parses may come from a local-edit-fact key, never the canonical key
+ * itself, so a parse failure here must never delete the CANONICAL key — an
+ * unrelated key this function was never asked to touch.
  */
 function parseDurableLightningItemsRaw(raw: string | null): LightningItem[] {
   try {
@@ -423,13 +387,16 @@ function parseDurableLightningItemsRaw(raw: string | null): LightningItem[] {
 /**
  * SH.2.1 P3 — THE authority-bearing read for the Lightning domain: mirrors
  * plans/page.tsx's own loadEffectiveDurablePlanItems() exactly, see its
- * doc there for the full rationale. Use this — never loadFromStorage()
- * directly — for any sync/conflict decision touching the Lightning domain.
- *
- * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
- * mount-time UI hydration, for the same reason: rendering canonical bytes
- * alone at mount could show a stale value when a newer local-edit fact
- * survives unresolved (the documented cross-tab hydration race).
+ * doc there for the full rationale. Use this — never a raw canonical
+ * localStorage.getItem() — for any sync/conflict decision touching the
+ * Lightning domain, including mount-time UI hydration and the cross-tab
+ * 'storage' listener's own `items` update (both fixed in later rounds —
+ * canonical rendering alone could show a stale value when a newer
+ * local-edit fact survives unresolved, the documented cross-tab hydration
+ * race). This is now the ONLY reader of Lightning's canonical/edit-fact
+ * state anywhere on this page; the canonical-only loadFromStorage() this
+ * replaced was removed once its last remaining caller (the storage
+ * listener) was routed through this function instead.
  */
 function loadEffectiveDurableLightningItems(key: string): LightningItem[] {
   return parseDurableLightningItemsRaw(readLatestDurableValue(key));
@@ -693,10 +660,10 @@ export default function LightningPage() {
    * buildPreFetchPullBaseline() exactly, see its doc there for the full
    * rationale, including the SH.2.1 P3 fix: this is the domain's EFFECTIVE
    * DURABLE value (via loadEffectiveDurableLightningItems()/
-   * loadEffectiveDurableDays()/readLatestDurableValue(), never
-   * loadFromStorage()/loadKnownDays()/a raw canonical read) — required
-   * case 6, a conflict-recovery "recovered" outcome reuses this frozen
-   * value, so it must already reflect durable local intent.
+   * loadEffectiveDurableDays()/readLatestDurableValue(), never a raw
+   * canonical read) — required case 6, a conflict-recovery "recovered"
+   * outcome reuses this frozen value, so it must already reflect durable
+   * local intent.
    */
   function buildPreFetchPullBaseline(): {
     items: DomainPreFetchSnapshot<LightningItem[]>;
@@ -884,11 +851,11 @@ export default function LightningPage() {
     setActiveDayId(normalizeDayId(localStorage.getItem(activeDayKeyRef.current)));
     // Phase 8.3.2 — load known planner days for safe display-day validation.
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
-    // SH.2.1 P1 fix (this round, Codex finding #1) — reads the days
-    // domain's EFFECTIVE DURABLE value (see loadEffectiveDurableDays()'s own
-    // doc above), never canonical-only loadKnownDays(): rendering canonical
-    // bytes alone at mount could show a stale value when a newer local-edit
-    // fact survives unresolved (the documented cross-tab hydration race).
+    // SH.2.1 P1 fix — reads the days domain's EFFECTIVE DURABLE value (see
+    // loadEffectiveDurableDays()'s own doc above), never a raw canonical
+    // read: rendering canonical bytes alone at mount could show a stale
+    // value when a newer local-edit fact survives unresolved (the
+    // documented cross-tab hydration race).
     const loadedKnownDays = loadEffectiveDurableDays(daysKeyRef.current);
     setKnownDays(loadedKnownDays);
     // Phase 8.8 — load day park overrides and metadata (read-only context display).
@@ -903,11 +870,11 @@ export default function LightningPage() {
     setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
-    // SH.2.1 P1 fix (this round, Codex finding #1) — same rationale as
-    // `loadedKnownDays` just above: reads the Lightning domain's effective
-    // durable value (see loadEffectiveDurableLightningItems()'s own doc
-    // above), never canonical-only loadFromStorage(), so mount-time
-    // rendering can never regress behind a surviving local-edit fact.
+    // SH.2.1 P1 fix — same rationale as `loadedKnownDays` just above: reads
+    // the Lightning domain's effective durable value (see
+    // loadEffectiveDurableLightningItems()'s own doc above), never a raw
+    // canonical read, so mount-time rendering can never regress behind a
+    // surviving local-edit fact.
     const loadedItems = loadEffectiveDurableLightningItems(lightningKeyRef.current);
     setItems(loadedItems);
     // SH.2 architecture — capture this page's own FALLBACK baselines from
@@ -1592,7 +1559,16 @@ export default function LightningPage() {
         // pending pull from; a genuine days[] change and a no-op hydration
         // write are treated identically since both are equally irrelevant
         // to the pull's own independent, storage-event-free comparison.
-        const next = loadKnownDays(daysKeyRef.current);
+        //
+        // SH.2.1 closing audit fix — reads the days domain's EFFECTIVE
+        // DURABLE value (see loadEffectiveDurableDays()'s own doc above),
+        // never a raw canonical read: symmetric with the lightningKeyRef
+        // branch below (and with plans/page.tsx's own mirrored fix) —
+        // knownDays here is display-only on THIS page (Plans owns writes),
+        // but a stale canonical read here is still the same missed
+        // consumer of the established durable-authority abstraction the
+        // closing audit required routing through it.
+        const next = loadEffectiveDurableDays(daysKeyRef.current);
         const isGenuineChange = next.join(",") !== knownDaysRef.current.join(",");
         if (isGenuineChange) {
           setKnownDays(next);
@@ -1624,8 +1600,20 @@ export default function LightningPage() {
       // architecture — no ref-marking needed: the pull effect's own fresh
       // read of this same key at resolution time already reflects whatever
       // was just reloaded here, compared against the stable itemsBaselineRef.
+      //
+      // SH.2.1 closing audit fix (Codex finding) — reads the Lightning
+      // domain's EFFECTIVE DURABLE value (see
+      // loadEffectiveDurableLightningItems()'s own doc above), never a raw
+      // canonical read: `items` is this page's
+      // authoritative React state and has its OWN auto-persist effect
+      // (saveToStorage(items, ...) on every items change), so adopting a
+      // stale canonical value here would get republished as a BRAND-NEW
+      // edit fact on the very next render — permanently retiring whatever
+      // genuinely newer edit fact was surviving. This is the exact
+      // stale-canonical-outranks-a-durable-fact shape every other SH.2.1
+      // round has closed, left open at this one remaining consumer.
       if (e.key === lightningKeyRef.current) {
-        setItems(loadFromStorage(lightningKeyRef.current));
+        setItems(loadEffectiveDurableLightningItems(lightningKeyRef.current));
       }
       // SH.2 architecture — no confirmed-snapshot listener here (removed —
       // obsolete under the pull-start-baseline model). Each pull captures
