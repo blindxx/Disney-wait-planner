@@ -2921,7 +2921,19 @@ export default function PlansPage() {
     // and that push reads Lightning fresh from localStorage at push time.
     const _lightningKey = buildNamespacedKey(_profileId, "lightning");
     try {
-      const rawLightning = localStorage.getItem(_lightningKey);
+      // SH.2.1 P1 fix (this round, Codex finding #2) — reads the
+      // Lightning domain's EFFECTIVE DURABLE value (canonical + any still-
+      // unresolved edit fact — see readLatestDurableValue()'s own doc in
+      // syncHelper.ts), never canonical-only localStorage.getItem(): this
+      // mutation DERIVES a new Lightning value from the existing one (a
+      // day-scoped filter), and any authority-bearing derivation must start
+      // from durable authority, not stale canonical bytes. Filtering from a
+      // stale canonical B while a newer edit fact C survives unresolved
+      // would publish B's day-2 selections (missing whatever C actually
+      // added/changed) as the newest durable intent and prune C's fact in
+      // the process — losing the real edit, not just the removed day's
+      // entries.
+      const rawLightning = readLatestDurableValue(_lightningKey);
       if (rawLightning) {
         const parsed = JSON.parse(rawLightning) as unknown;
         if (

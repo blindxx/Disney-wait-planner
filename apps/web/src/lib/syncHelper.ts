@@ -689,6 +689,7 @@ import {
   isPullEpochCurrent,
   canonicalizeJSON,
   resolveEffectiveDurableRaw,
+  isProfileOwnedSyncKey,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -1340,6 +1341,34 @@ function snapshotKeysWithPrefix(prefix: string): string[] {
     }
   } catch {}
   return keys;
+}
+
+/**
+ * SH.2.1 P1 fix (this round, Codex finding #1) — I/O wrapper profileStorage.
+ * ts's deleteProfile() calls, IN ADDITION to its own removal of the
+ * profile's plain `dwp:{profileId}:{baseKey}` canonical keys, to purge
+ * every OTHER key shape this module's sync layer owns for that profile:
+ * local-edit facts, the local-content-owner marker, confirmed facts, and
+ * pending pushes (+ their rotation cursor). See isProfileOwnedSyncKey()'s
+ * own doc in syncPayload.ts for the full root-cause rationale (durable
+ * edit facts left behind can resurrect deleted planner state the moment a
+ * profile with the same normalized id is recreated) and the exact key
+ * shapes this covers.
+ *
+ * A single full-localStorage scan (snapshotKeysWithPrefix("") — every key
+ * startsWith the empty string) filtered through the one shared PURE
+ * predicate, rather than a bespoke prefix per key family: this is a rare,
+ * user-initiated, one-shot cleanup (not a hot path), so the O(n) scan cost
+ * is irrelevant next to the correctness benefit of one shared rule instead
+ * of several hand-maintained prefixes drifting apart over time.
+ */
+export function purgeProfileSyncState(profileId: string): void {
+  for (const key of snapshotKeysWithPrefix("")) {
+    if (!isProfileOwnedSyncKey(key, profileId)) continue;
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  }
 }
 
 // ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────

@@ -1971,3 +1971,139 @@ export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
   },
 ];
 
+// ===== PROFILE-OWNED SYNC STATE (SH.2.1 P1, this round) =====
+//
+// Codex found a second architectural gap: deleteProfile() (profileStorage.ts)
+// removes a deleted profile's plain `dwp:{profileId}:{baseKey}` canonical
+// keys, but every OTHER per-profile key shape this module's sync layer
+// owns — local-edit facts, confirmed facts, pending pushes, the local-
+// content-owner marker — lives under a DIFFERENT prefix
+// (`dwp:localEditFact:...` / `dwp:sync:...`) that deleteProfile()'s own
+// simple `dwp:{profileId}:` prefix scan never matches. Left behind, these
+// are DURABLE, profile-owned sync state: recreating a profile with the
+// SAME normalized id (trivial — normalizeId() is deterministic) can
+// resurrect them. A leftover local-edit fact in particular can outrank the
+// new profile's own (empty) canonical value the moment ANY sync/conflict
+// decision reads durable local authority for that key (mount hydration,
+// pull winner selection, or an ordinary edit's own noop check — see
+// resolveEffectiveDurableRaw()'s standing rule above), letting deleted
+// planner content silently reappear under a profile the user believes is
+// brand new.
+//
+// isProfileOwnedSyncKey() is the ONE shared predicate for "does this
+// localStorage KEY belong to this profileId's sync-layer state" — covering
+// every shape syncHelper.ts's own key-builders produce for a profile:
+//   - local-edit facts:    dwp:localEditFact:dwp:{profileId}:{baseKey}:{editId}
+//   - local content owner: dwp:sync:{profileId}:localContentOwner
+//   - confirmed facts:     dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision}:{instanceId}
+//   - pending ops:         dwp:sync:{userId}:{profileId}:pendingOp:{opId}
+//   - pending op cursor:   dwp:sync:{userId}:{profileId}:pendingOpCursor
+// `userId` is unknown to a profile-deletion caller (profileStorage.ts has
+// no auth context, by design — profiles are device-local), so the
+// confirmedFact/pendingOp/pendingOpCursor family — all namespaced
+// `dwp:sync:{userId}:{profileId}:...` — is matched STRUCTURALLY: profileId
+// must appear as the exact 4th colon-delimited segment (0-indexed 3),
+// wherever `userId` actually is, rather than requiring the caller to
+// enumerate every identity that may ever have synced this profile.
+//
+// This is a PURE string predicate deliberately kept in this module (not
+// syncHelper.ts) so it carries real DEV_* coverage the same way every
+// other decision in this file does; syncHelper.ts's purgeProfileSyncState()
+// (the I/O wrapper profileStorage.ts's deleteProfile() calls) is a thin
+// scan-and-remove loop built directly on this exact predicate — see its
+// own doc there.
+export function isProfileOwnedSyncKey(key: string, profileId: string): boolean {
+  if (key.startsWith(`dwp:localEditFact:dwp:${profileId}:`)) return true;
+  if (key === `dwp:sync:${profileId}:localContentOwner`) return true;
+  if (key.startsWith("dwp:sync:")) {
+    const parts = key.split(":");
+    // ["dwp", "sync", userId, profileId, domainKind, ...] — profileId is
+    // always the 4th segment (index 3) in every userId-scoped shape.
+    if (parts.length >= 5 && parts[3] === profileId) return true;
+  }
+  return false;
+}
+
+/**
+ * Reference cases for isProfileOwnedSyncKey() — the REQUIRED cases from the
+ * SH.2.1 P1 (this round) architectural contract. Run from Node:
+ *   import { DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES, isProfileOwnedSyncKey } from "@/lib/syncPayload";
+ *   DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES.forEach(c => {
+ *     const got = isProfileOwnedSyncKey(c.key, c.profileId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
+  name: string;
+  key: string;
+  profileId: string;
+  expected: boolean;
+}> = [
+  {
+    name: "required case 1 — a plans local-edit fact for this profile is matched",
+    key: "dwp:localEditFact:dwp:my-family:plans:op-123",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a lightning local-edit fact for this profile is matched",
+    key: "dwp:localEditFact:dwp:my-family:lightning:op-456",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a days local-edit fact for this profile is matched",
+    key: "dwp:localEditFact:dwp:my-family:days:op-789",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — the local-content-owner marker for this profile is matched",
+    key: "dwp:sync:my-family:localContentOwner",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a confirmed fact for this profile, under some userId, is matched without knowing the userId in advance",
+    key: "dwp:sync:user-abc123:my-family:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a pending op for this profile, under some userId, is matched",
+    key: "dwp:sync:user-abc123:my-family:pendingOp:op-321",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — the pending-op cursor for this profile, under some userId, is matched",
+    key: "dwp:sync:user-abc123:my-family:pendingOpCursor",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 2 — a DIFFERENT profile's local-edit fact must never be matched (no cross-profile resurrection risk introduced by this purge)",
+    key: "dwp:localEditFact:dwp:other-profile:plans:op-123",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "required case 2 — a different profile's confirmed fact, even under the SAME userId, must never be matched",
+    key: "dwp:sync:user-abc123:other-profile:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "a profile's own plain canonical key is NOT matched here — deleteProfile()'s existing dwp:{id}: prefix scan already owns that shape; this predicate only covers the sync-layer shapes it misses",
+    key: "dwp:my-family:plans",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "an unrelated global key is never matched",
+    key: "dwp.activeProfile",
+    profileId: "my-family",
+    expected: false,
+  },
+];
+

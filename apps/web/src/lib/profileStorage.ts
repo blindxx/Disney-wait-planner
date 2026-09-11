@@ -15,6 +15,8 @@
  *   dwp:{id}:selectedPark   — active park (mirrors legacy dwp.selectedPark)
  */
 
+import { purgeProfileSyncState } from "./syncHelper";
+
 // ===== TYPES =====
 
 export type Profile = {
@@ -196,6 +198,24 @@ export function deleteProfile(id: string): void {
       }
     }
   } catch {}
+
+  // SH.2.1 P1 fix (Codex finding #1, this round) — the loop above only
+  // matches this profile's plain `dwp:{id}:{baseKey}` canonical keys (the
+  // shape this module itself owns — see the module doc above). It does NOT
+  // reach the sync layer's OWN per-profile key shapes (local-edit facts,
+  // confirmed facts, pending pushes, the local-content-owner marker — all
+  // namespaced `dwp:localEditFact:...`/`dwp:sync:...`, never `dwp:{id}:...`
+  // directly). Those are DURABLE, profile-owned sync state: left behind, a
+  // profile recreated with the SAME normalized id (normalizeId() is
+  // deterministic) could resurrect them — a leftover local-edit fact in
+  // particular can outrank the new, empty profile's canonical value the
+  // moment any sync/conflict decision reads durable local authority for
+  // that key. purgeProfileSyncState() (syncHelper.ts) is the shared purge
+  // for that entire key family — see its own doc, and
+  // isProfileOwnedSyncKey()'s doc in syncPayload.ts, for the full rationale
+  // and the exact shapes covered. Deliberately NOT duplicating knowledge of
+  // any of those key shapes here.
+  purgeProfileSyncState(id);
 
   // If the deleted profile was active, explicitly persist fallback to default.
   // Compare raw localStorage directly — getActiveProfileId() already applies

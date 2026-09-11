@@ -20,6 +20,7 @@ import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
   resolveEffectiveDurableRaw,
+  decideLocalDomainCommit,
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
 
@@ -503,6 +504,99 @@ export const DEV_DURABLE_LOCAL_AUTHORITY_INTEGRATION_CASES: Array<{
  * the fact KEYSPACE grow) independent of this function, which this round
  * does not modify. See DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES/that function's
  * own doc for its existing, unaffected coverage.
+ */
+
+// ===== REMOVE DAY LIGHTNING DERIVATION (SH.2.1 P1, this round) =====
+//
+// Codex found a second architectural gap alongside profile deletion: Plans'
+// own Remove Day handler filters Lightning's day-scoped selections by
+// reading Lightning's CANONICAL key directly (this page holds no Lightning
+// React state of its own), then republishes the filtered result as
+// Lightning's newest durable intent via the ordinary-edit commit path. Any
+// mutation that DERIVES a new synced-domain value from the existing one
+// must read EFFECTIVE DURABLE authority first — canonical + unresolved
+// edit fact → effective value (the SAME standing rule SH.2.1 P3 and this
+// round's ordinary-edit-noop fix already established) — never canonical
+// alone: if canonical held stale B while a newer Lightning edit fact C
+// survived unresolved, filtering from B would publish B's (incomplete)
+// day-scoped selections as the newest durable intent, silently dropping
+// whatever C actually added or changed — including selections on OTHER
+// days that were never supposed to be touched by removing this one.
+//
+// This models the REAL production chain Remove Day's Lightning filter now
+// runs (resolveEffectiveDurableRaw for the read, a plain dayId filter for
+// the derivation, decideLocalDomainCommit for the ordinary-edit publish
+// decision) — not a reimplementation of any of those three functions.
+export const DEV_REMOVE_DAY_LIGHTNING_DERIVATION_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  factRawValues: string[];
+  removedDayId: string;
+  expectedFilteredItems: Array<{ id: string; dayId: string }>;
+  expectedCommitDecision: "write" | "noop";
+}> = [
+  {
+    name: "required cases 3 & 4 — canonical Lightning B (day-2 only) is stale; durable fact C also carries a NEWER day-3 selection. Filtering must start from C (case 3), and the day-3 selection must survive removing day-2 (case 4) — a canonical-only read would lose the day-3 selection entirely, since stale B never had it",
+    canonicalRaw: JSON.stringify({ version: 1, items: [{ id: "1", dayId: "day-2" }] }),
+    factRawValues: [
+      JSON.stringify({
+        version: 1,
+        items: [
+          { id: "1", dayId: "day-2" },
+          { id: "2", dayId: "day-3" },
+        ],
+      }),
+    ],
+    removedDayId: "day-2",
+    expectedFilteredItems: [{ id: "2", dayId: "day-3" }],
+    expectedCommitDecision: "write",
+  },
+  {
+    name: "required case 5 — normal case, no edit facts: durable read equals canonical, filtering behavior unchanged from before this fix",
+    canonicalRaw: JSON.stringify({
+      version: 1,
+      items: [
+        { id: "1", dayId: "day-2" },
+        { id: "2", dayId: "day-3" },
+      ],
+    }),
+    factRawValues: [],
+    removedDayId: "day-2",
+    expectedFilteredItems: [{ id: "2", dayId: "day-3" }],
+    expectedCommitDecision: "write",
+  },
+  {
+    name: "removing a day with no Lightning selections on it is a true noop — nothing to publish (mirrors the existing llItems.length !== nextLlItems.length guard Remove Day's own handler keeps)",
+    canonicalRaw: JSON.stringify({ version: 1, items: [{ id: "2", dayId: "day-3" }] }),
+    factRawValues: [],
+    removedDayId: "day-2",
+    expectedFilteredItems: [{ id: "2", dayId: "day-3" }],
+    expectedCommitDecision: "noop",
+  },
+];
+
+/**
+ * Run from Node:
+ *   import { DEV_REMOVE_DAY_LIGHTNING_DERIVATION_CASES } from "@/lib/crossDayChecks";
+ *   import { resolveEffectiveDurableRaw, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_REMOVE_DAY_LIGHTNING_DERIVATION_CASES.forEach(c => {
+ *     const durableRaw = resolveEffectiveDurableRaw(c.canonicalRaw, c.factRawValues);
+ *     const parsed = durableRaw ? JSON.parse(durableRaw) : { items: [] };
+ *     const filtered = (parsed.items as Array<{ id: string; dayId: string }>)
+ *       .filter((it) => it.dayId !== c.removedDayId);
+ *     const nextRaw = JSON.stringify({ version: 1, items: filtered });
+ *     const decision = decideLocalDomainCommit(durableRaw, durableRaw, nextRaw);
+ *     const itemsOk = JSON.stringify(filtered) === JSON.stringify(c.expectedFilteredItems);
+ *     const decisionOk = decision === c.expectedCommitDecision;
+ *     console.log(itemsOk && decisionOk ? "✓" : "✗ FAIL", c.name);
+ *   });
+ *
+ * Required case 6 (Plans/Lightning/days durable-authority symmetry) — this
+ * derivation reuses resolveEffectiveDurableRaw()/decideLocalDomainCommit()
+ * unmodified, the exact same primitives already proven symmetric across
+ * Plans/Lightning/days by DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES and
+ * DEV_ORDINARY_EDIT_COMMIT_CASES (syncPayload.ts) — no domain-specific
+ * branch was introduced for this fix, so symmetry holds structurally.
  */
 
 /**
