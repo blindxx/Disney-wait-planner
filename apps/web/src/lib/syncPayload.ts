@@ -1058,3 +1058,178 @@ export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
     expected: true,
   },
 ];
+
+// ===== CONFIRMED-FACT CANONICALIZATION & CONFLICT DETECTION (SH.2, 14th round) =====
+//
+// Codex found two P1s in the per-domain confirmed-fact store (11th round):
+//   (1) NOT ACTUALLY IMMUTABLE. recordConfirmedFact() (syncHelper.ts)
+//       unconditionally `setItem()`s the (user, profile, domain, revision)
+//       key. Two callers — most concretely, plans/page.tsx confirming the
+//       "plans" domain from ITS OWN primary-domain reconciliation vs.
+//       lightning/page.tsx confirming the SAME "plans" domain from ITS OWN
+//       sibling-domain reconciliation, for the SAME server revision — can
+//       write DIFFERENT byte representations for that one revision, and
+//       whichever call's setItem lands last silently replaces the other.
+//       A fact "called immutable" that can still be overwritten is not
+//       actually immutable.
+//   (2) SCAN-DURING-PRUNE INDEX SHIFT. Confirmed-state reads enumerate
+//       localStorage by index (length/key(i)) while opportunistic pruning
+//       (also inside recordConfirmedFact) can concurrently remove matching
+//       keys. Removing an earlier index shifts every LATER key down by one;
+//       a forward index scan that has already consumed that later index
+//       silently skips the key now occupying it — including, in the worst
+//       case, the true max-revision fact.
+//
+// Both are fixed at the confirmed-fact store's own architectural level:
+//   • canonicalizeJSON() below gives every fact's value ONE deterministic
+//     serialization regardless of which code path (or which page's own
+//     mirrored-but-independent reconciliation) constructed the JS object —
+//     recordConfirmedFact() (syncHelper.ts) compares CANONICAL values, so
+//     incidental differences (object key construction order) can never
+//     manufacture a false "conflict", and a genuine logical difference is
+//     never hidden by picking whichever write happened to land first or
+//     last. See decideConfirmedFactWrite() below for what happens on an
+//     actual mismatch: the existing fact is never silently replaced.
+//   • The scan itself (scanConfirmedFactEntries() in syncHelper.ts) is
+//     restructured into two phases — snapshot every matching KEY first
+//     (index-based, but scanned backward from one captured length, which
+//     cannot skip a live key the way forward iteration can — see that
+//     function's own doc), THEN read each key's VALUE by its exact string
+//     (immune to any further index shifting, since getItem addresses by
+//     key, never by position). Pruning is untouched by this: it still runs
+//     only after a fact's value is durably written, and a key vanishing
+//     between the snapshot and the value-read (because a concurrent prune
+//     removed it) can only ever be a NON-max fact — see this round's own
+//     report for the invariant that makes that true.
+
+/**
+ * Deterministic, canonical JSON serialization: object keys are recursively
+ * sorted so any two JS values with the same LOGICAL content — regardless of
+ * which code path constructed them, or in what order their keys happened to
+ * be assigned — always serialize identically. Array element ORDER is
+ * preserved exactly: order is semantically significant for every value this
+ * module canonicalizes (a days[] sequence, an items[] display order), so it
+ * is never reordered, only recursed into.
+ */
+export function canonicalizeJSON(value: unknown): string {
+  return JSON.stringify(canonicalizeValue(value));
+}
+
+function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeValue);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalizeValue((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Reference cases for canonicalizeJSON(). Run from Node:
+ *   import { DEV_CANONICALIZE_JSON_CASES, canonicalizeJSON } from "@/lib/syncPayload";
+ *   DEV_CANONICALIZE_JSON_CASES.forEach(c => {
+ *     const got = canonicalizeJSON(c.value);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CANONICALIZE_JSON_CASES: Array<{
+  name: string;
+  value: unknown;
+  expected: string;
+}> = [
+  {
+    name: "flat object — keys sorted regardless of construction order",
+    value: { b: 2, a: 1 },
+    expected: '{"a":1,"b":2}',
+  },
+  {
+    name: "two objects with same content, different key order, canonicalize identically",
+    value: { version: 1, items: [] },
+    expected: '{"items":[],"version":1}',
+  },
+  {
+    name: "nested objects inside an array — array order preserved, each element's keys sorted",
+    value: { version: 1, items: [{ name: "b", id: "1" }, { id: "2", name: "a" }] },
+    expected: '{"items":[{"id":"1","name":"b"},{"id":"2","name":"a"}],"version":1}',
+  },
+  {
+    name: "days[] array order is NEVER reordered — it is semantically the display sequence",
+    value: ["day-2", "day-1", "day-3"],
+    expected: '["day-2","day-1","day-3"]',
+  },
+  {
+    name: "primitives pass through unchanged",
+    value: null,
+    expected: "null",
+  },
+];
+
+/** What recording a NEW confirmed-fact value should do, given whichever
+ * canonical value (if any) is already stored at that exact
+ * (user, profile, domain, revision) key. */
+export type ConfirmedFactWriteDecision = "write" | "idempotent" | "conflict";
+
+/**
+ * Pure decision core for recordConfirmedFact() (syncHelper.ts) — the
+ * CONFIRMED-FACT CONTRACT's own rules, reduced to canonical-value
+ * comparison:
+ *   • no existing fact at this key yet -> "write" (the fact is being
+ *     established for the first time; always safe).
+ *   • an existing fact's canonical value equals the new one -> "idempotent"
+ *     (the SAME logical fact recorded again — a harmless no-op, not a
+ *     conflict, however many times or from however many callers it
+ *     happens).
+ *   • an existing fact's canonical value DIFFERS -> "conflict" (two
+ *     different values for the SAME server revision — an upstream
+ *     reconciliation inconsistency, never a stale-vs-fresh ordering
+ *     question, since a single server revision has exactly one true
+ *     accepted content). The existing fact must never be silently
+ *     replaced; see recordConfirmedFact's own doc for how this is
+ *     reported to callers.
+ */
+export function decideConfirmedFactWrite(
+  existingCanonicalValue: string | null,
+  newCanonicalValue: string
+): ConfirmedFactWriteDecision {
+  if (existingCanonicalValue === null) return "write";
+  if (existingCanonicalValue === newCanonicalValue) return "idempotent";
+  return "conflict";
+}
+
+/**
+ * Reference cases for decideConfirmedFactWrite() — the REQUIRED cases from
+ * the 14th round's architectural contract. Run from Node:
+ *   import { DEV_DECIDE_CONFIRMED_FACT_WRITE_CASES, decideConfirmedFactWrite } from "@/lib/syncPayload";
+ *   DEV_DECIDE_CONFIRMED_FACT_WRITE_CASES.forEach(c => {
+ *     const got = decideConfirmedFactWrite(c.existingCanonicalValue, c.newCanonicalValue);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DECIDE_CONFIRMED_FACT_WRITE_CASES: Array<{
+  name: string;
+  existingCanonicalValue: string | null;
+  newCanonicalValue: string;
+  expected: ConfirmedFactWriteDecision;
+}> = [
+  {
+    name: "required — no existing fact yet: safe to write",
+    existingCanonicalValue: null,
+    newCanonicalValue: '{"items":[],"version":1}',
+    expected: "write",
+  },
+  {
+    name: "required — recording the SAME canonical value twice: idempotent no-op",
+    existingCanonicalValue: '{"items":[],"version":1}',
+    newCanonicalValue: '{"items":[],"version":1}',
+    expected: "idempotent",
+  },
+  {
+    name: "required — two callers attempt DIFFERENT values for the same revision: conflict, never silently overwritten",
+    existingCanonicalValue: '{"items":[{"id":"a"}],"version":1}',
+    newCanonicalValue: '{"items":[{"id":"b"}],"version":1}',
+    expected: "conflict",
+  },
+];
