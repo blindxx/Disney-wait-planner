@@ -96,7 +96,7 @@ import {
   isPullContextCurrent,
 } from "@/lib/syncHelper";
 import {
-  resolvePreFetchDomainBaseline,
+  capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
@@ -918,15 +918,15 @@ export default function PlansPage() {
   //
   // itemsBaselineRef/daysBaselineRef hold this page's own FALLBACK
   // baseline — used only when no confirmed snapshot exists yet for this
-  // profile (see buildPreFetchPullBaseline()/buildPostFetchPullBaseline()
-  // below). Captured once at mount from the initial load, and updated ONLY
-  // when a pull resolves and cloud wins a domain (local was unchanged, so
-  // adopting cloud's value is safe) — NEVER merely because a pull effect
-  // re-ran, and NEVER when local won a domain's conflict (that domain's
-  // edit may still be unpushed). Each pull captures its OWN immutable
-  // baseline once, at pull start (see buildPreFetchPullBaseline()),
-  // preferring a real confirmed snapshot over these refs whenever one
-  // exists — these refs are consulted only as the pre-first-confirmation
+  // profile (see buildPostFetchPullBaseline() below, the ONE place this
+  // fallback is actually consulted). Captured once at mount from the
+  // initial load, and updated ONLY when a pull resolves and cloud wins a
+  // domain (local was unchanged, so adopting cloud's value is safe) —
+  // NEVER merely because a pull effect re-ran, and NEVER when local won a
+  // domain's conflict (that domain's edit may still be unpushed).
+  // buildPostFetchPullBaseline() prefers a real confirmed snapshot over
+  // these refs whenever one exists — these refs are consulted only as the
+  // pre-first-confirmation
   // fallback.
   const itemsBaselineRef = useRef<PlanItem[]>([]);
   const daysBaselineRef = useRef<string[]>([]);
@@ -938,25 +938,38 @@ export default function PlansPage() {
   // read.
   const lightningRawBaselineRef = useRef<string | null>(null);
 
-  // SH.2.1 — this pull's baseline authority is now split into the two
-  // explicit causal stages resolvePreFetchDomainBaseline()/
-  // resolvePostFetchDomainBaseline() (syncPayload.ts) require: see that
-  // module's own doc for the full architecture and the SH.2 P1 it replaces
-  // (a single dual-purpose function whose "capture fresh disk bytes for
-  // recovery" branch could never actually run on the pre-fetch call that
-  // was supposed to run it). buildPreFetchPullBaseline()/
-  // buildPostFetchPullBaseline() below are pure page-local GLUE only — they
-  // take a fresh disk read (stage 1) or reuse stage 1's frozen one (stage
-  // 2), read this identity's confirmed state, and hand both to the shared
-  // resolver; no baseline/conflict/recovery DECISION lives in this file
-  // anymore.
+  // SH.2.1 — this pull's baseline authority is split into two causal
+  // stages: capturePreFetchDomainSnapshot() (a trivial passthrough) and
+  // resolvePostFetchDomainBaseline() (syncPayload.ts) — see that module's
+  // own doc for the full architecture, the SH.2 P1 it replaced (a single
+  // dual-purpose function whose "capture fresh disk bytes for recovery"
+  // branch could never actually run on the pre-fetch call that was
+  // supposed to run it), and the SH.2.1 P2 fix (revision-bounded confirmed
+  // authority: a confirmed fact newer than this pull's own response, or a
+  // response carrying no revision at all, must never be used as this
+  // pull's baseline).
   //
-  // `identity` is REQUIRED on both — never defaults to the live
+  // buildPreFetchPullBaseline()/buildPostFetchPullBaseline() below are pure
+  // page-local GLUE only — no baseline/conflict/recovery/staleness DECISION
+  // lives in this file. Stage 1 takes a fresh disk read per domain,
+  // UNCONDITIONALLY, before the fetch is issued — that is its entire job;
+  // it does not read confirmed state at all, since any decision made from
+  // it would be pre-fetch information that stage 2 (with the now-known
+  // cloudRevision) must re-derive anyway. Stage 2 is called EXACTLY ONCE
+  // PER PULL, UNCONDITIONALLY, once this pull's response is known — never
+  // conditionally skipped in favor of reusing a frozen decision, because
+  // the revision bound that makes it safe to consult confirmed state is
+  // enforced INSIDE resolvePostFetchDomainBaseline() itself: a race landing
+  // at any point before this call cannot slip through by arriving between
+  // "was a re-check even attempted" and "the re-check ran," because the
+  // re-check always runs.
+  //
+  // `identity` is REQUIRED on stage 2 — never defaults to the live
   // activeUserIdRef/activeProfileIdRef refs. A call made after an awaited
-  // boundary (stage 2, always) could otherwise attribute this pull's own
-  // baseline to whichever identity happens to be live NOW rather than the
-  // one it actually started under; every real call site below passes its
-  // own captured PullContext explicitly (Codex P1, 13th round — see
+  // boundary could otherwise attribute this pull's own baseline to
+  // whichever identity happens to be live NOW rather than the one it
+  // actually started under; the real call site below passes its own
+  // captured PullContext explicitly (Codex P1, 13th round — see
   // beginPullContext's own doc in syncHelper.ts).
 
   /**
@@ -971,9 +984,9 @@ export default function PlansPage() {
    * edit the moment cloud has no data for the domain — so a mismatch
    * substitutes `neutral` instead. A domain that DOES already have a
    * confirmed fact for this identity never reaches this fallback path at
-   * all (resolvePreFetchDomainBaseline/resolvePostFetchDomainBaseline only
-   * ever consult it for "none" status) — it is used outright regardless of
-   * the mismatch flag, exactly as SH.2 always intended.
+   * all (resolvePostFetchDomainBaseline only ever consults it for "none"
+   * status) — it is used outright regardless of the mismatch flag, exactly
+   * as SH.2 always intended.
    */
   function domainFallbackValue<T>(ref: { current: T }, neutral: T, contentOwnershipMismatch: boolean): T {
     return contentOwnershipMismatch ? neutral : ref.current;
@@ -985,8 +998,9 @@ export default function PlansPage() {
    * neutral state from this point on, but ONLY when the resolved outcome
    * actually reached the fallback path under a mismatch (never for a
    * domain that resolved via a real confirmed fact, a recovery, or stayed
-   * gated) — mirrors the narrowly-scoped exception to this file's general
-   * preference against destructive clears that SH.2 already established.
+   * unusable) — mirrors the narrowly-scoped exception to this file's
+   * general preference against destructive clears that SH.2 already
+   * established.
    */
   function clearRefOnFallbackMismatch<T>(
     ref: { current: T },
@@ -1002,59 +1016,42 @@ export default function PlansPage() {
   /**
    * STAGE 1 (pre-fetch) — called once, synchronously, before this pull's
    * fetch is even issued. Takes a genuine fresh disk read for every
-   * domain, UNCONDITIONALLY (never gated on this domain's confirmed
-   * status) — this is the actual SH.2.1 fix: whether that read will be
-   * NEEDED (a later repair) cannot be known until stage 2 runs, so it must
-   * always be taken here regardless.
+   * domain, UNCONDITIONALLY — this is the SH.2.1 P1 fix: whether that read
+   * will be NEEDED (a later repair) cannot be known until stage 2 runs, so
+   * it must always be taken here regardless. No confirmed-state read, no
+   * decision: see this section's own module doc above for why that would
+   * be redundant with stage 2, which now always re-derives it anyway.
    */
-  function buildPreFetchPullBaseline(
-    contentOwnershipMismatch: boolean,
-    identity: { userId: string | null; profileId: string }
-  ): {
+  function buildPreFetchPullBaseline(): {
     items: DomainPreFetchSnapshot<PlanItem[]>;
     days: DomainPreFetchSnapshot<string[]>;
     lightningRaw: DomainPreFetchSnapshot<string | null>;
   } {
-    const confirmed = identity.userId
-      ? getConfirmedState(identity.userId, identity.profileId)
-      : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
-
-    const items = resolvePreFetchDomainBaseline(
-      confirmed.plans,
-      (raw) => migrateDayIds((raw.items as unknown[]).map(normalizePlanItem)),
-      migrateDayIds(loadFromStorage(planKeyRef.current)),
-      domainFallbackValue(itemsBaselineRef, [] as PlanItem[], contentOwnershipMismatch)
-    );
-    clearRefOnFallbackMismatch(itemsBaselineRef, items.outcome, [], contentOwnershipMismatch);
-
-    const days = resolvePreFetchDomainBaseline(
-      confirmed.days,
-      (raw) => raw,
-      loadDays(daysKeyRef.current),
-      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch)
-    );
-    clearRefOnFallbackMismatch(daysBaselineRef, days.outcome, ["day-1"], contentOwnershipMismatch);
-
-    const lightningRaw = resolvePreFetchDomainBaseline(
-      confirmed.lightning,
-      (raw) => JSON.stringify(raw),
-      localStorage.getItem(getActiveProfileKeys().lightning),
-      domainFallbackValue(lightningRawBaselineRef, null, contentOwnershipMismatch)
-    );
-    clearRefOnFallbackMismatch(lightningRawBaselineRef, lightningRaw.outcome, null, contentOwnershipMismatch);
-
-    return { items, days, lightningRaw };
+    return {
+      items: capturePreFetchDomainSnapshot(migrateDayIds(loadFromStorage(planKeyRef.current))),
+      days: capturePreFetchDomainSnapshot(loadDays(daysKeyRef.current)),
+      lightningRaw: capturePreFetchDomainSnapshot(localStorage.getItem(getActiveProfileKeys().lightning)),
+    };
   }
 
   /**
-   * STAGE 2 (post-fetch) — called once this pull's authoritative server
-   * response is known. `preFetch` MUST be THIS SAME pull's own stage-1
-   * result (the pull effect below always passes it) — never re-derived,
-   * never re-read from disk here: reusing stage 1's frozen diskValue is
-   * what lets a repaired domain's recovery distinguish pre-existing
-   * uncertain bytes (never overwrite newer authoritative cloud state) from
-   * a genuine edit made during the fetch/recovery window (stays protected)
-   * — see resolvePostFetchDomainBaseline's own doc in syncPayload.ts.
+   * STAGE 2 (post-fetch) — the ONE place a baseline/conflict/recovery/
+   * staleness decision is made for this pull, called EXACTLY ONCE, always,
+   * once this pull's authoritative server response is known — never
+   * conditionally skipped (see this section's own module doc above for why
+   * that conditional was itself the SH.2.1 P2 bug: it could skip re-reading
+   * confirmed state entirely, so a race landing between pre-fetch and this
+   * call was never checked against this pull's own revision at all).
+   * `confirmed` is read FRESH, right here, every time. `preFetch` MUST be
+   * THIS SAME pull's own stage-1 result (the pull effect below always
+   * passes it) — never re-derived, never re-read from disk here: reusing
+   * stage 1's frozen diskValue is what lets a repaired domain's recovery
+   * distinguish pre-existing uncertain bytes (never overwrite newer
+   * authoritative cloud state) from a genuine edit made during the
+   * fetch/recovery window (stays protected) — see
+   * resolvePostFetchDomainBaseline's own doc in syncPayload.ts for both
+   * that mechanic and the revision-bound that now guards its "confirmed"
+   * branch the same way.
    */
   function buildPostFetchPullBaseline(
     contentOwnershipMismatch: boolean,
@@ -1105,42 +1102,82 @@ export default function PlansPage() {
   }
 
   /**
-   * Gathers every domain whose outcome is "gated" into the same
-   * `{ domain, revision }[]` shape the pull effect logs and bails on — see
-   * its own doc at the call sites for why ANY gated domain defers the
-   * ENTIRE pull, never just that one domain.
+   * A domain outcome this pull cannot safely use as a baseline this round —
+   * either "gated" (an ambiguous/conflicted confirmed revision this pull's
+   * own response could not repair) or "stale-response" (a confirmed
+   * revision NEWER than this pull's own response — SH.2.1 P2's revision-
+   * bound). Both are, identically, whole-pull bail-out triggers (see
+   * collectUnusableDomains's own doc for why), but carry different revision
+   * information worth logging distinctly.
    */
-  function collectGatedDomains(outcomes: {
+  type UnusableDomain =
+    | { domain: "plans" | "lightning" | "days"; reason: "conflict"; revision: number }
+    | {
+        domain: "plans" | "lightning" | "days";
+        reason: "stale-response";
+        confirmedRevision: number;
+        cloudRevision: number | null;
+      };
+
+  /**
+   * Gathers every domain whose outcome is "gated" or "stale-response" —
+   * see UnusableDomain's own doc for why both trigger the SAME whole-pull
+   * bail-out. Since this page's push always sends plans+lightning+days
+   * combined in ONE request, letting winner selection/local writes proceed
+   * normally for the OTHER, healthy domains this pull while leaving
+   * syncReady closed for the whole page would still risk that a later push
+   * bundles the unresolved domain's untouched-but-unverified local content
+   * alongside them — so ANY unusable domain defers the ENTIRE pull, never
+   * just that one domain (unchanged from SH.2's own 16th-round rule).
+   * Detection itself, however, IS per-domain: each domain's own confirmed
+   * revision is checked independently against this pull's SAME
+   * cloudRevision, so one domain being stale never misclassifies a
+   * genuinely healthy, unrelated domain as stale too.
+   */
+  function collectUnusableDomains(outcomes: {
     items: DomainBaselineOutcome<unknown>;
     days: DomainBaselineOutcome<unknown>;
     lightningRaw: DomainBaselineOutcome<unknown>;
-  }): Array<{ domain: "plans" | "lightning" | "days"; revision: number }> {
-    const gated: Array<{ domain: "plans" | "lightning" | "days"; revision: number }> = [];
-    if (outcomes.items.kind === "gated") gated.push({ domain: "plans", revision: outcomes.items.revision });
-    if (outcomes.lightningRaw.kind === "gated") gated.push({ domain: "lightning", revision: outcomes.lightningRaw.revision });
-    if (outcomes.days.kind === "gated") gated.push({ domain: "days", revision: outcomes.days.revision });
-    return gated;
+  }): UnusableDomain[] {
+    const unusable: UnusableDomain[] = [];
+    const check = (domain: "plans" | "lightning" | "days", outcome: DomainBaselineOutcome<unknown>) => {
+      if (outcome.kind === "gated") {
+        unusable.push({ domain, reason: "conflict", revision: outcome.revision });
+      } else if (outcome.kind === "stale-response") {
+        unusable.push({
+          domain,
+          reason: "stale-response",
+          confirmedRevision: outcome.confirmedRevision,
+          cloudRevision: outcome.cloudRevision,
+        });
+      }
+    };
+    check("plans", outcomes.items);
+    check("lightning", outcomes.lightningRaw);
+    check("days", outcomes.days);
+    return unusable;
   }
 
   /**
    * Narrows a DomainBaselineOutcome to its `.value` — callers must already
-   * have proven (via collectGatedDomains(), checked BEFORE this is called)
-   * that no domain in this same outcome set is "gated". This is what makes
-   * "conflicted/unusable state cannot accidentally be consumed as a valid
-   * baseline" (SH.2.1's own discriminated-result requirement) a compile-time
-   * property rather than a convention: TypeScript will not let a caller
-   * read `.value` off a DomainBaselineOutcome without first narrowing away
-   * "gated" (which has no `.value` field at all), and this function is the
-   * ONE place that narrowing happens for this pull.
+   * have proven (via collectUnusableDomains(), checked BEFORE this is
+   * called) that no domain in this same outcome set is "gated" or
+   * "stale-response". This is what makes "conflicted/unusable state cannot
+   * accidentally be consumed as a valid baseline" (SH.2.1's own
+   * discriminated-result requirement) a compile-time property rather than a
+   * convention: TypeScript will not let a caller read `.value` off a
+   * DomainBaselineOutcome without first narrowing away both unusable kinds
+   * (neither has a `.value` field), and this function is the ONE place
+   * that narrowing happens for this pull.
    */
   function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
-    if (outcome.kind === "gated") {
+    if (outcome.kind === "gated" || outcome.kind === "stale-response") {
       // Unreachable in practice — the pull effect always calls
-      // collectGatedDomains() on this same outcome set and bails out
+      // collectUnusableDomains() on this same outcome set and bails out
       // before ever reaching this call. Guarded rather than asserted away
       // so a future call site that forgets the gate check fails loudly
-      // instead of silently treating gated state as a real baseline.
-      throw new Error("SH.2.1: requireResolvedValue() called on a gated domain outcome");
+      // instead of silently treating unusable state as a real baseline.
+      throw new Error("SH.2.1: requireResolvedValue() called on an unusable domain outcome");
     }
     return outcome.value;
   }
@@ -1583,9 +1620,8 @@ export default function PlansPage() {
     // SH.2 architecture — capture this page's own FALLBACK baselines from
     // the values just loaded/merged above. This is only a STARTING
     // assumption for a profile that has never had a successful push yet
-    // (or is offline/unauthenticated) — buildPreFetchPullBaseline()/
-    // buildPostFetchPullBaseline() (declared above) prefer a real confirmed
-    // snapshot the moment one
+    // (or is offline/unauthenticated) — buildPostFetchPullBaseline()
+    // (declared above) prefers a real confirmed snapshot the moment one
     // exists, falling back to these refs only until then.
     itemsBaselineRef.current = loaded;
     daysBaselineRef.current = mergedDays;
@@ -1861,25 +1897,16 @@ export default function PlansPage() {
     // edit get silently discarded by a later pull (Codex finding).
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
-    // SH.2.1 — STAGE 1: freeze this pull's causal baseline NOW, before the
-    // GET is even issued (Codex P1 #2, preserved). `preFetchBaseline` is
+    // SH.2.1 — STAGE 1: freeze this pull's causal disk snapshot NOW, before
+    // the GET is even issued (Codex P1 #2, preserved). `preFetchBaseline` is
     // closed over by `.then()` below and consulted there instead of any
     // ref — nothing between now and pull resolution (a push confirming,
-    // another tab writing storage) can change what this pull compares
-    // against. See buildPreFetchPullBaseline()'s own doc above. This is a
-    // floor, not necessarily what winner selection actually uses: if THIS
-    // pull's own GET resolves an accepted beacon, or a domain is already
-    // gated here, `.then()` below re-derives via buildPostFetchPullBaseline()
-    // instead — see that block's own doc.
-    const preFetchBaseline = buildPreFetchPullBaseline(contentOwnershipMismatch, {
-      userId: pullCtx.userId,
-      profileId: pullCtx.profileId,
-    });
-    const preFetchGatedDomains = collectGatedDomains({
-      items: preFetchBaseline.items.outcome,
-      days: preFetchBaseline.days.outcome,
-      lightningRaw: preFetchBaseline.lightningRaw.outcome,
-    });
+    // another tab writing storage) can change what this pull's OWN
+    // recovery, if needed, compares against. See
+    // buildPreFetchPullBaseline()'s own doc above. Every pull's baseline
+    // DECISION is made once, unconditionally, in stage 2 below — this is
+    // purely a disk-bytes freeze.
+    const preFetchBaseline = buildPreFetchPullBaseline();
     // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
     // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
     // batch of still-pending unload-beacon opIds BEFORE this pull's fetch
@@ -1914,15 +1941,13 @@ export default function PlansPage() {
         // server-verified fact per op (never inferred from content
         // comparison or timing) — a definitive 204 (`planner` null) is
         // structurally incompatible with any `found` ever being true (see
-        // pullPlanner's own doc), so `anyAccepted` correctly resolves to
-        // `false` here without needing to special-case it. See
-        // reconcilePendingOperations' own doc in syncHelper.ts for why this
-        // must be AWAITED and folded into this pull's baseline HERE, before
-        // winner selection, AND for the exact remove-after-promotion rule
-        // that keeps an op pending until its confirmed-baseline promotion
-        // is durably proven — never speculatively retired ahead of that.
+        // pullPlanner's own doc). See reconcilePendingOperations' own doc in
+        // syncHelper.ts for why this must be AWAITED and folded into this
+        // pull's baseline HERE, before winner selection, AND for the exact
+        // remove-after-promotion rule that keeps an op pending until its
+        // confirmed-baseline promotion is durably proven — never
+        // speculatively retired ahead of that.
         const opStatuses = planner?.opStatuses ?? [];
-        const anyAccepted = opStatuses.some((s) => s.found);
         // PULL OUTCOME CONTRACT (Codex P1, 17th round) — reconcilePendingOperations
         // now reports whether this pull may continue past promotion: `true`
         // when nothing needed promoting or promotion durably succeeded,
@@ -1955,28 +1980,25 @@ export default function PlansPage() {
           return;
         }
         // This pull's EFFECTIVE baseline for winner selection — SH.2.1
-        // STAGE 2. Re-derived (rather than reusing the frozen pre-fetch
-        // `preFetchBaseline`) whenever at least one pending op was just
-        // confirmed accepted (`anyAccepted` — a domain this device already
-        // got acknowledged for must never be mistaken for a fresh local
-        // edit relative to a now-stale baseline) OR the pre-fetch baseline
-        // itself already reported a gated domain (`preFetchGatedDomains` —
-        // stage 1 always passes `cloudRevision: null` and can never attempt
-        // repair; this pull's own actual `planner?.revision` is only known
-        // now, via buildPostFetchPullBaseline()). When NEITHER condition
-        // holds, `preFetchBaseline`'s own stage-1 outcomes are reused
-        // UNCHANGED, never re-read from getConfirmedState() — re-reading
-        // unconditionally here would reintroduce the exact race the 2nd
-        // round's "freeze before the fetch" fix closed: an UNRELATED tab's
-        // push landing while this pull's own GET was in flight could
-        // silently advance the baseline this pull compares against,
-        // treating this pull's own genuinely newer local content as if it
-        // matched the (now-advanced, but foreign-to-this-pull) baseline and
-        // wrongly letting a stale GET response overwrite it. See
-        // buildPostFetchPullBaseline's/resolvePostFetchDomainBaseline's own
-        // docs for the recovery mechanics themselves (required case 3:
-        // confirmed rev6 conflicted + authoritative GET rev7 → resumes,
-        // with no beacon promotion in the picture).
+        // STAGE 2, called UNCONDITIONALLY, exactly once, every pull, now
+        // that this pull's own authoritative response is known. Codex P1
+        // (SH.2.1 P2) — the PREVIOUS version of this call was conditional
+        // (`anyAccepted || preFetchGatedDomains.length > 0`), reusing
+        // stage 1's frozen (pre-fetch, necessarily `cloudRevision: null`)
+        // outcome whenever neither held. That conditional is exactly what
+        // let a confirmed fact newer than this pull's OWN response revision
+        // slip through un-checked: stage 1 never had a cloudRevision to
+        // bound anything against, so skipping stage 2 meant NO revision
+        // bound was ever applied for that pull, at all. Since the bound is
+        // now enforced INSIDE resolvePostFetchDomainBaseline() itself (see
+        // its own doc in syncPayload.ts), stage 2 is unconditionally safe
+        // to call every time — a `getConfirmedState()` read newer than this
+        // pull's own `cloudRevision` now resolves to "stale-response"
+        // rather than being blindly trusted as this pull's baseline, which
+        // is what actually closes the 2nd round's original race (an
+        // UNRELATED tab's push landing mid-flight can no longer make a
+        // stale GET response look "safe to hydrate" — it fails the bound
+        // check instead).
         //
         // Explicitly scoped to `pullCtx.userId`/`pullCtx.profileId` (Codex
         // P1, 13th round) — this call happens AFTER the await above, so the
@@ -1985,61 +2007,60 @@ export default function PlansPage() {
         // guards against actually USING a result attributed to the wrong
         // identity, but the identity passed into the read itself must still
         // be THIS pull's own, never whatever is live right now.
-        const shouldRederiveBaseline = anyAccepted || preFetchGatedDomains.length > 0;
-        const baselineOutcomes = shouldRederiveBaseline
-          ? buildPostFetchPullBaseline(
-              contentOwnershipMismatch,
-              { userId: pullCtx.userId, profileId: pullCtx.profileId },
-              planner?.revision ?? null,
-              preFetchBaseline
-            )
-          : {
-              items: preFetchBaseline.items.outcome,
-              days: preFetchBaseline.days.outcome,
-              lightningRaw: preFetchBaseline.lightningRaw.outcome,
-            };
+        const baselineOutcomes = buildPostFetchPullBaseline(
+          contentOwnershipMismatch,
+          { userId: pullCtx.userId, profileId: pullCtx.profileId },
+          planner?.revision ?? null,
+          preFetchBaseline
+        );
 
         // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
-        // added 17th; SH.2.1 now enforced by DomainBaselineOutcome's own
-        // discriminated union rather than a value that happened to be
-        // unused) — a conflict at ANY domain's newest confirmed revision
-        // that this pull could NOT repair means that domain's true
-        // confirmed state is presently unknowable (see getConfirmedState's
-        // own doc in syncHelper.ts): there is no trustworthy baseline this
-        // pull could use for it. Since this page's push always sends
-        // plans+lightning+days combined in ONE request, letting winner
-        // selection/local writes proceed normally for the OTHER, healthy
-        // domains this pull while leaving syncReady closed for the whole
-        // page would still risk that a later push bundles the unresolved
-        // domain's untouched-but-unverified local content alongside them —
-        // so the entire pull bails out here: no winner selection, no local
-        // write, no ownership transfer, no confirmed-baseline commit, no
-        // syncReady, for ANY domain, this pull. Local storage is left
-        // completely untouched (nothing already durably committed is
-        // undone — there is simply nothing new to commit). The NEXT pull
-        // (next mount/auth-transition) re-reads confirmed state fresh and
-        // proceeds normally the moment a later unambiguous revision
-        // supersedes the conflict (see resolveConfirmedDomainState's own
-        // doc in syncPayload.ts) — no special "retry" plumbing is needed
-        // here for that to happen. A conflict in ONE domain (e.g. Plans)
-        // never touches or corrupts the OTHER domains' own confirmed facts
-        // (each domain's facts live under a fully independent keyspace —
-        // see confirmedFactPrefix's own doc), only defers what THIS pull
-        // does with them.
-        const gatedDomains = collectGatedDomains(baselineOutcomes);
-        if (gatedDomains.length > 0) {
-          for (const conflict of gatedDomains) {
+        // added 17th; SH.2.1 P1 enforced by DomainBaselineOutcome's own
+        // discriminated union; SH.2.1 P2 adds "stale-response" as a second,
+        // equally unusable outcome kind — see UnusableDomain's/
+        // collectUnusableDomains's own docs above) — a conflict at ANY
+        // domain's newest confirmed revision that this pull could NOT
+        // repair, OR a confirmed revision NEWER than this pull's own
+        // response, means that domain cannot safely be used as this pull's
+        // baseline. Since this page's push always sends plans+lightning+days
+        // combined in ONE request, letting winner selection/local writes
+        // proceed normally for the OTHER, healthy domains this pull while
+        // leaving syncReady closed for the whole page would still risk that
+        // a later push bundles the unresolved domain's
+        // untouched-but-unverified local content alongside them — so ANY
+        // unusable domain bails out the ENTIRE pull here: no winner
+        // selection, no local write, no ownership transfer, no
+        // confirmed-baseline commit, no syncReady, for ANY domain, this
+        // pull. Local storage is left completely untouched (nothing already
+        // durably committed is undone — there is simply nothing new to
+        // commit). The NEXT pull re-reads confirmed state fresh and
+        // proceeds normally the moment a later unambiguous (or, for a
+        // stale-response domain, simply a later/equal) revision resolves it
+        // — no special "retry" plumbing is needed here for that to happen.
+        // One domain's unusable outcome never touches or corrupts the OTHER
+        // domains' own confirmed facts (each domain's facts live under a
+        // fully independent keyspace — see confirmedFactPrefix's own doc),
+        // only defers what THIS pull does with them.
+        const unusableDomains = collectUnusableDomains(baselineOutcomes);
+        if (unusableDomains.length > 0) {
+          for (const unusable of unusableDomains) {
             try {
-              console.error(
-                `SH.2: pull deferred — ${conflict.domain}'s confirmed state is conflicted at revision ${conflict.revision}.`
-              );
+              if (unusable.reason === "conflict") {
+                console.error(
+                  `SH.2: pull deferred — ${unusable.domain}'s confirmed state is conflicted at revision ${unusable.revision}.`
+                );
+              } else {
+                console.error(
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision ?? "none"}); refusing to hydrate an older response over it.`
+                );
+              }
             } catch {}
           }
           return;
         }
-        // Every outcome above is now proven non-"gated" — safe to read
-        // `.value` off each. requireResolvedValue() enforces this via the
-        // type system rather than trusting the caller to have checked.
+        // Every outcome above is now proven usable — safe to read `.value`
+        // off each. requireResolvedValue() enforces this via the type
+        // system rather than trusting the caller to have checked.
         const effectiveBaseline = {
           items: requireResolvedValue(baselineOutcomes.items),
           days: requireResolvedValue(baselineOutcomes.days),
@@ -2368,7 +2389,7 @@ export default function PlansPage() {
         // determined were cloud-won AND successfully persisted, gated by
         // THIS pull's own GET response revision. This is what makes a
         // pull-hydrated domain just as "confirmed" as a pushed one, so a
-        // LATER pull's buildPreFetchPullBaseline() never
+        // LATER pull's buildPostFetchPullBaseline() never
         // misclassifies it as an unsynced local edit — see
         // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
         // domains are simply omitted: their prior confirmation status is

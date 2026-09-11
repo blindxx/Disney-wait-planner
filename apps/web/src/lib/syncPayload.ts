@@ -1420,58 +1420,116 @@ export const DEV_CANONICALIZE_JSON_CASES: Array<{
  * caught this because it exercised the INTENDED behavior directly, never
  * the two real call sites in their real sequence.
  *
- * The fix replaces that single dual-purpose function with two separate,
- * explicitly-named, pure functions — one per causal stage — so neither
- * stage's behavior can ever again be inferred from an optional parameter or
- * a condition that happens to be unreachable:
+ * The fix splits the old dual-purpose function into two causal stages so
+ * neither stage's behavior can ever again be inferred from an optional
+ * parameter or a condition that happens to be unreachable:
  *
- *   • resolvePreFetchDomainBaseline() — STAGE 1. Takes NO cloudRevision
- *     parameter at all — there structurally isn't one yet. A conflicted
- *     domain can only ever resolve to "gated" here, never "recovered": this
- *     is a property of the function's own signature, not a value that
- *     merely happens to be null. `diskValue` is supplied by the caller as a
- *     plain, already-taken read — captured UNCONDITIONALLY, regardless of
- *     this domain's confirmed status, because whether it will be NEEDED (a
- *     later repair) cannot be known until stage 2 runs.
+ *   • capturePreFetchDomainSnapshot() — STAGE 1. A trivial, pure passthrough
+ *     that freezes this domain's real on-disk value BEFORE any network/async
+ *     work begins — see its own doc for why it makes NO baseline decision at
+ *     all (a deliberate simplification over this abstraction's first
+ *     revision — see the SH.2.1 P2 doc immediately below for why).
  *
- *   • resolvePostFetchDomainBaseline() — STAGE 2. Takes the now-known
- *     `cloudRevision` and this SAME pull's stage-1 `DomainPreFetchSnapshot`
- *     as a REQUIRED parameter — never optional, because stage 1 always runs
- *     first, synchronously, for every pull, so a stage-2 call always has
- *     exactly one to pass. A conflicted domain repairable by `cloudRevision`
- *     resolves to "recovered", reusing the FROZEN `diskValue` from stage 1 —
- *     never a fresh disk read taken at this point, which would already have
- *     absorbed any edit that landed DURING the fetch, erasing the very
- *     signal recovery needs to tell "pre-existing uncertain bytes" apart
- *     from "a genuine local edit made mid-recovery".
+ *   • resolvePostFetchDomainBaseline() — STAGE 2. The ONE place a baseline/
+ *     conflict/recovery/staleness decision is ever made, once this pull's
+ *     authoritative server response is known. Takes the frozen stage-1
+ *     snapshot as a REQUIRED parameter (never optional) for its "recovered"
+ *     case, and a freshly-read ConfirmedDomainResult — see its own doc for
+ *     the full authority rule.
  *
- * Both stages funnel through the SAME `DomainBaselineOutcome<T>`
- * discriminated union, so a "gated" domain's absence of a `value` field is
- * enforced by the type system: a caller cannot accidentally read `.value`
- * off a gated outcome and consume it as a real baseline — TypeScript
+ * Both funnel through the SAME `DomainBaselineOutcome<T>` discriminated
+ * union, so an unusable domain's absent `value` field is enforced by the
+ * type system: a caller cannot accidentally read `.value` off a "gated" or
+ * "stale-response" outcome and consume it as a real baseline — TypeScript
  * refuses to narrow it without an explicit `kind` check first. See this
  * section's own DEV_* cases below, and plans/page.tsx's/lightning/
  * page.tsx's pull effect, for the per-domain narrowing every consumer must
  * perform before any outcome's `.value` is used.
+ *
+ * SH.2.1 P2 (Codex) — REVISION-BOUNDED AUTHORITY. A second-round audit found
+ * that resolvePostFetchDomainBaseline()'s original "confirmed" branch
+ * returned a confirmed fact's value UNCONDITIONALLY, never checking it
+ * against `cloudRevision` at all. Concretely: this pull's own fetch resolves
+ * at server revision 7; while that fetch was in flight (or even before this
+ * pull started at all), a DIFFERENT push/pull already durably confirmed
+ * revision 8 (and, being local-first, already wrote revision 8's bytes to
+ * local disk). The old "confirmed" branch would use revision 8's value as
+ * this pull's baseline; a fresh disk read (taken later, downstream in the
+ * page) would find disk STILL equal to that revision-8 value (nothing
+ * genuinely new happened locally) — "unchanged" — so THIS pull's own stale
+ * revision-7 cloud payload would be selected as the winner and PERSISTED,
+ * silently regressing local (and eventually server) state from 8 back to 7.
+ * This is the exact class of bug the SH.2 2nd round's "freeze baseline
+ * before the fetch" fix was meant to close, resurfacing because the
+ * post-fetch resolver never bounded a CONFIRMED fact's revision against the
+ * pull's OWN response revision — only the CONFLICT branch (via
+ * isConflictRepairableByRevision) had ever been revision-bounded.
+ *
+ * STANDING RULE — a pull must never use authority from the future to
+ * justify hydrating an older server response. A pull's authority window is
+ * bounded by the server revision its OWN response carries:
+ *   • confirmed revision < cloud revision → normal progression: the
+ *     confirmed fact predates this response and remains valid (this
+ *     response may still advance it further, via ordinary winner
+ *     selection).
+ *   • confirmed revision == cloud revision → valid same-revision authority:
+ *     this response IS (or matches) that confirmation.
+ *   • confirmed revision > cloud revision, OR `cloudRevision` is `null`
+ *     (this response carries no revision at all — a 204/unparseable GET,
+ *     which establishes no bound whatsoever) → this pull is STALE relative
+ *     to already-confirmed server state. It must NOT use that newer (or
+ *     unbounded) fact as a baseline and then hydrate its own older
+ *     response over it.
+ *
+ * The fail-safe chosen for the stale case is a NEW, explicit
+ * `"stale-response"` outcome — never silently downgraded to "fallback" (a
+ * stale-response domain has a well-known, just-unusable-by-THIS-pull
+ * confirmed value; "fallback" means no confirmed fact exists AT ALL, a
+ * different situation) and never folded into "gated" (a stale-response
+ * domain is not ambiguous/conflicted — its confirmed truth is perfectly
+ * well-defined, just newer than what this pull can safely act on). Both
+ * "gated" and "stale-response" are, identically, unusable-this-pull
+ * outcomes from the caller's point of view: plans/page.tsx's and
+ * lightning/page.tsx's collectGatedDomains() treats them the same way
+ * (whole-pull bail-out — see its own doc for why "whole pull" rather than
+ * per-domain), while still detecting and reporting each PER DOMAIN,
+ * independently, using only that domain's own confirmed revision — one
+ * domain being stale relative to this pull's response never misclassifies
+ * an unrelated, genuinely-current domain as stale too (see this section's
+ * own DEV_* per-domain-independence case, and required case 5).
+ *
+ * Because this bound now lives entirely inside resolvePostFetchDomainBaseline
+ * and is checked on EVERY call, it is now safe — indeed necessary, to catch
+ * a race landing between pre-fetch and post-fetch (required case 4) — for
+ * callers to invoke stage 2 UNCONDITIONALLY on every pull, with a freshly
+ * read ConfirmedDomainResult, rather than only when some other signal
+ * (a just-accepted beacon, or a pre-fetch-time conflict) suggested it might
+ * be needed. That conditional "should we even re-check" heuristic (the
+ * SH.2.1 P1 fix's own `shouldRederiveBaseline`) is exactly what let this P2
+ * go undetected in one of its two forms (required case 4): it could skip
+ * stage 2 entirely, in which case NO revision bound was ever checked at
+ * all for that pull. Stage 1 no longer produces a baseline "decision" for
+ * this same reason — its only remaining job, and the only thing that must
+ * happen strictly BEFORE the fetch, is freezing the disk read a "recovered"
+ * outcome might need later.
  */
 export type DomainBaselineOutcome<T> =
   | { kind: "confirmed"; value: T }
   | { kind: "recovered"; value: T; revision: number }
   | { kind: "gated"; revision: number }
+  | { kind: "stale-response"; confirmedRevision: number; cloudRevision: number | null }
   | { kind: "fallback"; value: T };
 
 /**
  * STAGE 1 output for one domain — this pull's frozen pre-fetch snapshot.
  * `diskValue` is the real on-disk value at the moment this was captured
  * (always a genuine read the caller took just before calling this
- * function, never a ref, never a placeholder). `outcome` is this domain's
- * stage-1 baseline decision — see resolvePreFetchDomainBaseline()'s own
- * doc for why it can only ever be "confirmed", "gated", or "fallback", and
- * never "recovered", at this stage.
+ * function, never a ref, never a placeholder). Consumed ONLY by
+ * resolvePostFetchDomainBaseline()'s "recovered" case — stage 1 makes no
+ * baseline decision of its own (see this section's own module doc).
  */
 export interface DomainPreFetchSnapshot<T> {
   diskValue: T;
-  outcome: DomainBaselineOutcome<T>;
 }
 
 /**
@@ -1479,39 +1537,28 @@ export interface DomainPreFetchSnapshot<T> {
  * once per domain, synchronously, before a pull's fetch is even issued.
  * `diskValue` must be a fresh read taken by the caller right before this
  * call — this function never reads storage itself, keeping it pure and
- * trivially testable. `fallbackValue` is the domain's own baseline-ref
- * value (or a neutral value under a content-ownership mismatch — the
- * caller's own decision, unrelated to conflict/recovery authority), used
- * only when there is no confirmed fact for this domain yet.
+ * trivially testable. A plain passthrough by design: whether this snapshot
+ * ends up being NEEDED (a later repair) cannot be known until stage 2 runs,
+ * so it is captured unconditionally rather than gated on any status this
+ * function would otherwise have to read confirmed state to determine.
  */
-export function resolvePreFetchDomainBaseline<Raw, T>(
-  confirmed: ConfirmedDomainResult<Raw>,
-  mapConfirmedValue: (raw: Raw) => T,
-  diskValue: T,
-  fallbackValue: T
-): DomainPreFetchSnapshot<T> {
-  if (confirmed.status === "confirmed") {
-    return { diskValue, outcome: { kind: "confirmed", value: mapConfirmedValue(confirmed.fact.value) } };
-  }
-  if (confirmed.status === "conflict") {
-    return { diskValue, outcome: { kind: "gated", revision: confirmed.revision } };
-  }
-  return { diskValue, outcome: { kind: "fallback", value: fallbackValue } };
+export function capturePreFetchDomainSnapshot<T>(diskValue: T): DomainPreFetchSnapshot<T> {
+  return { diskValue };
 }
 
 /**
- * STAGE 2 (post-fetch) — see this section's own module doc above. Called
- * once this pull's authoritative server response is known: `cloudRevision`
- * is that response's own `revision`, or `null` for a 204/unparseable
- * response — never repairable either way (isConflictRepairableByRevision's
- * own contract). `preFetch` MUST be this SAME pull's own stage-1 result for
- * this SAME domain — never re-derived, never borrowed from a different
- * pull or a different domain. `confirmed` is a fresh (or reused, at the
- * caller's discretion) ConfirmedDomainResult read for this domain —
- * whether to re-read it fresh at this point vs. reuse stage 1's own read is
- * a pull-level policy decision that belongs to the caller (see
- * plans/page.tsx's/lightning/page.tsx's own doc on why an unrelated race
- * elsewhere must not silently override this pull's own frozen view).
+ * STAGE 2 (post-fetch) — see this section's own module doc above for the
+ * full authority rule. The ONE place a baseline/conflict/recovery/staleness
+ * decision is made for this domain. Called once this pull's authoritative
+ * server response is known: `cloudRevision` is that response's own
+ * `revision`, or `null` for a 204/unparseable response (which, per the
+ * revision-bounded authority rule, establishes no bound at all). `preFetch`
+ * MUST be this SAME pull's own stage-1 result for this SAME domain — never
+ * re-derived, never borrowed from a different pull or a different domain.
+ * `confirmed` MUST be read fresh (or at least no older than) at this call —
+ * see plans/page.tsx's/lightning/page.tsx's own doc for why callers now
+ * invoke this unconditionally, every pull, rather than only when some other
+ * signal suggested it might be needed.
  */
 export function resolvePostFetchDomainBaseline<Raw, T>(
   confirmed: ConfirmedDomainResult<Raw>,
@@ -1521,6 +1568,15 @@ export function resolvePostFetchDomainBaseline<Raw, T>(
   fallbackValue: T
 ): DomainBaselineOutcome<T> {
   if (confirmed.status === "confirmed") {
+    // REVISION-BOUNDED AUTHORITY (SH.2.1 P2) — a confirmed fact is usable
+    // as THIS pull's baseline only within this pull's own authority window:
+    // its revision must be no newer than `cloudRevision`, and `cloudRevision`
+    // must actually exist (a null response establishes no bound at all, so
+    // nothing can be proven "within" it). Equal revisions are explicitly
+    // fine (required case 2: this response IS/matches that confirmation).
+    if (cloudRevision === null || confirmed.fact.revision > cloudRevision) {
+      return { kind: "stale-response", confirmedRevision: confirmed.fact.revision, cloudRevision };
+    }
     return { kind: "confirmed", value: mapConfirmedValue(confirmed.fact.value) };
   }
   if (confirmed.status === "conflict") {
@@ -1535,52 +1591,34 @@ export function resolvePostFetchDomainBaseline<Raw, T>(
 }
 
 /**
- * Reference cases for resolvePreFetchDomainBaseline() — run from Node:
- *   import { DEV_RESOLVE_PRE_FETCH_DOMAIN_BASELINE_CASES, resolvePreFetchDomainBaseline } from "@/lib/syncPayload";
- *   DEV_RESOLVE_PRE_FETCH_DOMAIN_BASELINE_CASES.forEach(c => {
- *     const got = resolvePreFetchDomainBaseline(c.confirmed, (raw) => raw, c.diskValue, c.fallbackValue);
+ * Reference cases for capturePreFetchDomainSnapshot() — run from Node:
+ *   import { DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES, capturePreFetchDomainSnapshot } from "@/lib/syncPayload";
+ *   DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES.forEach(c => {
+ *     const got = capturePreFetchDomainSnapshot(c.diskValue);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_RESOLVE_PRE_FETCH_DOMAIN_BASELINE_CASES: Array<{
+export const DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES: Array<{
   name: string;
-  confirmed: ConfirmedDomainResult<string>;
-  diskValue: string;
-  fallbackValue: string;
-  expected: DomainPreFetchSnapshot<string>;
+  diskValue: string | null;
+  expected: DomainPreFetchSnapshot<string | null>;
 }> = [
   {
-    name: "normal confirmed baseline — confirmed value used, disk still captured untouched",
-    confirmed: { status: "confirmed", fact: { revision: 5, value: "CLOUD-V5" } },
+    name: "captures whatever disk value the caller took, unconditionally",
     diskValue: "DISK-BYTES",
-    fallbackValue: "FALLBACK-REF",
-    expected: { diskValue: "DISK-BYTES", outcome: { kind: "confirmed", value: "CLOUD-V5" } },
+    expected: { diskValue: "DISK-BYTES" },
   },
   {
-    name: "no confirmed baseline yet — falls back to the caller's own fallback value",
-    confirmed: { status: "none" },
-    diskValue: "DISK-BYTES",
-    fallbackValue: "FALLBACK-REF",
-    expected: { diskValue: "DISK-BYTES", outcome: { kind: "fallback", value: "FALLBACK-REF" } },
-  },
-  {
-    name: "required — conflicted domain pre-fetch always gates (no cloudRevision parameter exists at this stage to repair with)",
-    confirmed: { status: "conflict", revision: 6 },
-    diskValue: "DISK-BYTES",
-    fallbackValue: "FALLBACK-REF",
-    expected: { diskValue: "DISK-BYTES", outcome: { kind: "gated", revision: 6 } },
-  },
-  {
-    name: "required — diskValue is captured UNCONDITIONALLY even while gated (this is the actual P1 fix: stage 1 never skips the fresh disk read merely because repair isn't attemptable yet)",
-    confirmed: { status: "conflict", revision: 9 },
-    diskValue: "FROZEN-PRE-FETCH-BYTES",
-    fallbackValue: "FALLBACK-REF",
-    expected: { diskValue: "FROZEN-PRE-FETCH-BYTES", outcome: { kind: "gated", revision: 9 } },
+    name: "a null disk read (e.g. Lightning's raw key absent at mount) passes through unchanged",
+    diskValue: null,
+    expected: { diskValue: null },
   },
 ];
 
 /**
- * Reference cases for resolvePostFetchDomainBaseline() — run from Node:
+ * Reference cases for resolvePostFetchDomainBaseline() — the REQUIRED cases
+ * from the SH.2.1 P1 fix (conflict/recovery) and the P2 fix (revision-bounded
+ * confirmed authority). Run from Node:
  *   import { DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
  *   DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES.forEach(c => {
  *     const got = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, (raw) => raw, c.preFetch, c.fallbackValue);
@@ -1596,52 +1634,114 @@ export const DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES: Array<{
   expected: DomainBaselineOutcome<string>;
 }> = [
   {
-    name: "normal confirmed baseline — confirmed value wins outright, cloudRevision irrelevant",
-    confirmed: { status: "confirmed", fact: { revision: 5, value: "CLOUD-V5" } },
-    cloudRevision: 5,
-    preFetch: { diskValue: "DISK-BYTES", outcome: { kind: "confirmed", value: "CLOUD-V5" } },
+    name: "required case 1 — confirmed rev6 + GET rev7: normal progression, confirmed value used",
+    confirmed: { status: "confirmed", fact: { revision: 6, value: "CLOUD-V6" } },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
     fallbackValue: "FALLBACK-REF",
-    expected: { kind: "confirmed", value: "CLOUD-V5" },
+    expected: { kind: "confirmed", value: "CLOUD-V6" },
   },
   {
-    name: "no confirmed baseline — falls back exactly as stage 1 did",
+    name: "required case 2 — confirmed rev7 + GET rev7: valid same-revision authority, confirmed value used",
+    confirmed: { status: "confirmed", fact: { revision: 7, value: "CLOUD-V7" } },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "confirmed", value: "CLOUD-V7" },
+  },
+  {
+    name: "required case 3 — confirmed rev8 + GET rev7: rev7 cannot hydrate over rev8, fails safe as stale-response",
+    confirmed: { status: "confirmed", fact: { revision: 8, value: "CLOUD-V8" } },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "stale-response", confirmedRevision: 8, cloudRevision: 7 },
+  },
+  {
+    name: "revision 0 boundary — confirmed rev0 + GET rev0 is valid same-revision authority, not misread as \"no revision\"",
+    confirmed: { status: "confirmed", fact: { revision: 0, value: "CLOUD-V0" } },
+    cloudRevision: 0,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "confirmed", value: "CLOUD-V0" },
+  },
+  {
+    name: "a null cloudRevision establishes no authority bound at all — even a low confirmed revision fails safe as stale-response",
+    confirmed: { status: "confirmed", fact: { revision: 1, value: "CLOUD-V1" } },
+    cloudRevision: null,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "stale-response", confirmedRevision: 1, cloudRevision: null },
+  },
+  {
+    name: "no confirmed baseline — falls back to the caller's own fallback value, no revision bound applies (nothing confirmed to bound)",
     confirmed: { status: "none" },
     cloudRevision: 7,
-    preFetch: { diskValue: "DISK-BYTES", outcome: { kind: "fallback", value: "FALLBACK-REF" } },
+    preFetch: { diskValue: "DISK-BYTES" },
     fallbackValue: "FALLBACK-REF",
     expected: { kind: "fallback", value: "FALLBACK-REF" },
   },
   {
-    name: "required — conflict + equal revision — never recovers from an equal response, stays gated",
-    confirmed: { status: "conflict", revision: 6 },
-    cloudRevision: 6,
-    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES", outcome: { kind: "gated", revision: 6 } },
-    fallbackValue: "FALLBACK-REF",
-    expected: { kind: "gated", revision: 6 },
-  },
-  {
-    name: "required — conflict + older revision — never falls back to an older confirmed revision, stays gated",
-    confirmed: { status: "conflict", revision: 6 },
-    cloudRevision: 5,
-    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES", outcome: { kind: "gated", revision: 6 } },
-    fallbackValue: "FALLBACK-REF",
-    expected: { kind: "gated", revision: 6 },
-  },
-  {
-    name: "conflict + no usable candidate revision (204/unparseable) — stays gated",
-    confirmed: { status: "conflict", revision: 6 },
-    cloudRevision: null,
-    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES", outcome: { kind: "gated", revision: 6 } },
-    fallbackValue: "FALLBACK-REF",
-    expected: { kind: "gated", revision: 6 },
-  },
-  {
-    name: "required — conflict + strictly newer revision recovers, reusing the FROZEN stage-1 disk snapshot, never a value from anywhere else (the actual P1 regression test: prior code reused a stale fallback ref here instead)",
+    name: "required case 6 — conflict rev6 + GET rev7: existing recovery unaffected by the revision-bound fix",
     confirmed: { status: "conflict", revision: 6 },
     cloudRevision: 7,
-    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES", outcome: { kind: "gated", revision: 6 } },
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
     fallbackValue: "FALLBACK-REF",
     expected: { kind: "recovered", value: "FROZEN-PRE-FETCH-BYTES", revision: 7 },
   },
+  {
+    name: "conflict + equal revision — never recovers from an equal response, stays gated",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 6,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "gated", revision: 6 },
+  },
+  {
+    name: "conflict + older revision — never falls back to an older confirmed revision, stays gated",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 5,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "gated", revision: 6 },
+  },
+  {
+    name: "conflict + no usable candidate revision (204/unparseable) — stays gated, not stale-response (conflict has its own, already-bounded, rule)",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: null,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "gated", revision: 6 },
+  },
 ];
+
+/**
+ * Required case 5 — per-domain independence: one domain's confirmed
+ * revision being newer than this pull's own cloudRevision must NOT cause an
+ * UNRELATED domain (a genuinely different confirmed revision, independently
+ * bounded) to be misclassified. Modeled here as two independent calls
+ * sharing the SAME cloudRevision, exactly as plans/page.tsx's and
+ * lightning/page.tsx's pull effect calls resolvePostFetchDomainBaseline
+ * once per domain. Run from Node:
+ *   import { DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   const c = DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE;
+ *   const stale = resolvePostFetchDomainBaseline(c.staleDomainConfirmed, c.cloudRevision, (r) => r, c.preFetch, c.fallbackValue);
+ *   const healthy = resolvePostFetchDomainBaseline(c.healthyDomainConfirmed, c.cloudRevision, (r) => r, c.preFetch, c.fallbackValue);
+ *   console.log(stale.kind === "stale-response" && healthy.kind === "confirmed" ? "✓" : "✗ FAIL", c.name);
+ */
+export const DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE: {
+  name: string;
+  cloudRevision: number;
+  staleDomainConfirmed: ConfirmedDomainResult<string>;
+  healthyDomainConfirmed: ConfirmedDomainResult<string>;
+  preFetch: DomainPreFetchSnapshot<string>;
+  fallbackValue: string;
+} = {
+  name: "rev8 on one domain (Plans) while another domain (Days) is only rev6, GET rev7 — Plans fails safe, Days proceeds normally",
+  cloudRevision: 7,
+  staleDomainConfirmed: { status: "confirmed", fact: { revision: 8, value: "PLANS-V8" } },
+  healthyDomainConfirmed: { status: "confirmed", fact: { revision: 6, value: "DAYS-V6" } },
+  preFetch: { diskValue: "DISK-BYTES" },
+  fallbackValue: "FALLBACK-REF",
+};
 

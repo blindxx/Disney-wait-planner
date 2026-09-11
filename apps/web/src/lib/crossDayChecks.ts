@@ -17,7 +17,7 @@ import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveDiningKey, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, ENTERTAINMENT_PLACES } from "@/lib/entertainmentSuggestions";
 import {
-  resolvePreFetchDomainBaseline,
+  capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
@@ -223,23 +223,27 @@ export const DEV_PICK_WINNING_ITEMS_CASES: Array<{
 
 /**
  * SH.2.1 — integration coverage for the conflict-recovery authority
- * abstraction (resolvePreFetchDomainBaseline/resolvePostFetchDomainBaseline
+ * abstraction (capturePreFetchDomainSnapshot/resolvePostFetchDomainBaseline
  * in syncPayload.ts) chained into pickWinningItems() above, exercising the
  * REAL two-stage production sequence a pull actually runs rather than a
  * reimplementation: stage 1 (pre-fetch capture) runs first, exactly as
  * plans/page.tsx's and lightning/page.tsx's pull effect run it before the
  * fetch is issued; its result feeds stage 2 (post-fetch resolution) exactly
- * as those pages run it once the authoritative response is known; stage 2's
- * outcome becomes pickWinningItems()'s own `baseline` argument, exactly as
- * both pages use `effectiveBaseline.items`/`days`/`lightningRaw`/`plansRaw`.
+ * as those pages run it once the authoritative response is known — with a
+ * FRESH `confirmed` read, called UNCONDITIONALLY on every pull (see
+ * syncPayload.ts's own P2 doc for why the old "only re-derive when
+ * justified" conditional is gone); stage 2's outcome becomes
+ * pickWinningItems()'s own `baseline` argument, exactly as both pages use
+ * `effectiveBaseline.items`/`days`/`lightningRaw`/`plansRaw`.
  *
- * This is what actually proves the SH.2 18th round's P1 is fixed
- * structurally (see syncPayload.ts's own module doc for the full root
- * cause): `preFetchDiskValue` stands in for the real on-disk bytes at the
- * moment stage 1 runs, and `currentAtResolution` stands in for the fresh
- * disk read the pull's `.then()` takes immediately before calling
- * pickWinningItems() — the two are deliberately SEPARATE inputs here (never
- * collapsed into one "current" value) specifically to distinguish:
+ * This is what actually proves both SH.2.1 P1 (conflict recovery) and P2
+ * (revision-bounded confirmed authority) are fixed structurally (see
+ * syncPayload.ts's own module doc for both root causes): `preFetchDiskValue`
+ * stands in for the real on-disk bytes at the moment stage 1 runs, and
+ * `currentAtResolution` stands in for the fresh disk read the pull's
+ * `.then()` takes immediately before calling pickWinningItems() — the two
+ * are deliberately SEPARATE inputs here (never collapsed into one "current"
+ * value) specifically to distinguish:
  *   • pre-existing, uncertain bytes that never changed during the fetch
  *     (`currentAtResolution === preFetchDiskValue`) — must lose to a
  *     strictly-newer authoritative cloud revision once recovered, never
@@ -247,24 +251,30 @@ export const DEV_PICK_WINNING_ITEMS_CASES: Array<{
  *   • a genuine local edit made WHILE the fetch/recovery was in flight
  *     (`currentAtResolution !== preFetchDiskValue`) — must win outright,
  *     protected exactly like any other local edit, even though this same
- *     domain was conflicted moments earlier.
+ *     domain was conflicted moments earlier;
+ *   • disk that ALREADY reflects an already-confirmed, but-newer-than-this-
+ *     pull's-own-response revision (`currentAtResolution` equal to that
+ *     newer confirmed value) — the Codex P2 scenario: must NEVER be treated
+ *     as "unchanged relative to baseline" and overwritten by this pull's own
+ *     stale cloud payload, because that "baseline" (the newer confirmed
+ *     fact) must never have been used as this pull's baseline in the first
+ *     place — see the "stale-response" cases below, where pickWinningItems()
+ *     is never even reached.
  */
 export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
   name: string;
-  confirmedAtPreFetch: ConfirmedDomainResult<string>;
-  confirmedAtPostFetch: ConfirmedDomainResult<string>;
+  confirmed: ConfirmedDomainResult<string>;
   cloudRevision: number | null;
   preFetchDiskValue: Array<{ id: string; dayId: string }>;
   currentAtResolution: Array<{ id: string; dayId: string }>;
   cloudItems: Array<{ id: string; dayId: string }> | null;
   fallbackValue: Array<{ id: string; dayId: string }>;
-  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "fallback";
-  expectedWinner: "current" | "cloud" | "none (stayed gated)";
+  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "stale-response" | "fallback";
+  expectedWinner: "current" | "cloud" | "none (unusable this pull)";
 }> = [
   {
     name: "required — stale pre-existing bytes cannot defeat authoritative recovery: conflicted rev6, authoritative rev7 recovers, disk never touched during the fetch — cloud (rev7) wins outright",
-    confirmedAtPreFetch: { status: "conflict", revision: 6 },
-    confirmedAtPostFetch: { status: "conflict", revision: 6 },
+    confirmed: { status: "conflict", revision: 6 },
     cloudRevision: 7,
     preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
     currentAtResolution: [{ id: "1", dayId: "day-1" }],
@@ -275,8 +285,7 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
   },
   {
     name: "required — genuine local edit made during the fetch/recovery window remains protected: same conflicted-then-recovered domain, but disk changed since stage 1's snapshot — local wins, cloud never overwrites it",
-    confirmedAtPreFetch: { status: "conflict", revision: 6 },
-    confirmedAtPostFetch: { status: "conflict", revision: 6 },
+    confirmed: { status: "conflict", revision: 6 },
     cloudRevision: 7,
     preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
     currentAtResolution: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-1" }],
@@ -287,20 +296,18 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
   },
   {
     name: "conflict + equal revision stays gated — no recovery attempted, no winner selection reachable",
-    confirmedAtPreFetch: { status: "conflict", revision: 6 },
-    confirmedAtPostFetch: { status: "conflict", revision: 6 },
+    confirmed: { status: "conflict", revision: 6 },
     cloudRevision: 6,
     preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
     currentAtResolution: [{ id: "1", dayId: "day-1" }],
     cloudItems: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-2" }],
     fallbackValue: [],
     expectedStageTwoKind: "gated",
-    expectedWinner: "none (stayed gated)",
+    expectedWinner: "none (unusable this pull)",
   },
   {
     name: "normal confirmed baseline (no conflict at all) — confirmed value used as pickWinningItems' baseline, cloud wins when local unchanged",
-    confirmedAtPreFetch: { status: "confirmed", fact: { revision: 5, value: JSON.stringify([{ id: "1", dayId: "day-1" }]) } },
-    confirmedAtPostFetch: { status: "confirmed", fact: { revision: 5, value: JSON.stringify([{ id: "1", dayId: "day-1" }]) } },
+    confirmed: { status: "confirmed", fact: { revision: 5, value: JSON.stringify([{ id: "1", dayId: "day-1" }]) } },
     cloudRevision: 5,
     preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
     currentAtResolution: [{ id: "1", dayId: "day-1" }],
@@ -311,8 +318,7 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
   },
   {
     name: "no confirmed baseline yet (fresh/offline profile) — falls back to the caller's own baseline ref value; a local edit made before this pull started (disk differs from that fallback ref) wins over cloud",
-    confirmedAtPreFetch: { status: "none" },
-    confirmedAtPostFetch: { status: "none" },
+    confirmed: { status: "none" },
     cloudRevision: null,
     preFetchDiskValue: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-1" }],
     currentAtResolution: [{ id: "1", dayId: "day-1" }, { id: "2", dayId: "day-1" }],
@@ -321,20 +327,42 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
     expectedStageTwoKind: "fallback",
     expectedWinner: "current",
   },
+  {
+    name: "required (Codex P2 regression) — confirmed rev8 + this pull's own GET rev7: even though disk EXACTLY matches the newer confirmed value (the dangerous \"looks unchanged\" condition that would let a naive comparison pick cloud), the pull fails safe as stale-response BEFORE pickWinningItems ever runs — rev7's cloud payload (missing the rev8 item) is never selected, never overwrites rev8",
+    confirmed: { status: "confirmed", fact: { revision: 8, value: JSON.stringify([{ id: "1", dayId: "day-1" }, { id: "9", dayId: "day-9" }]) } },
+    cloudRevision: 7,
+    preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
+    currentAtResolution: [{ id: "1", dayId: "day-1" }, { id: "9", dayId: "day-9" }],
+    cloudItems: [{ id: "1", dayId: "day-1" }],
+    fallbackValue: [],
+    expectedStageTwoKind: "stale-response",
+    expectedWinner: "none (unusable this pull)",
+  },
+  {
+    name: "a null cloudRevision (204/unparseable) establishes no authority bound — an existing confirmed fact still fails safe as stale-response rather than being trusted blindly",
+    confirmed: { status: "confirmed", fact: { revision: 1, value: JSON.stringify([{ id: "1", dayId: "day-1" }]) } },
+    cloudRevision: null,
+    preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
+    currentAtResolution: [{ id: "1", dayId: "day-1" }],
+    cloudItems: null,
+    fallbackValue: [],
+    expectedStageTwoKind: "stale-response",
+    expectedWinner: "none (unusable this pull)",
+  },
 ];
 
 /**
  * Run from Node:
  *   import { DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES, pickWinningItems } from "@/lib/crossDayChecks";
- *   import { resolvePreFetchDomainBaseline, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   import { capturePreFetchDomainSnapshot, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
  *   DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES.forEach(c => {
  *     const mapValue = (raw: string) => JSON.parse(raw);
- *     const stage1 = resolvePreFetchDomainBaseline(c.confirmedAtPreFetch, mapValue, c.preFetchDiskValue, c.fallbackValue);
- *     const stage2 = resolvePostFetchDomainBaseline(c.confirmedAtPostFetch, c.cloudRevision, mapValue, stage1, c.fallbackValue);
+ *     const stage1 = capturePreFetchDomainSnapshot(c.preFetchDiskValue);
+ *     const stage2 = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, mapValue, stage1, c.fallbackValue);
  *     const kindOk = stage2.kind === c.expectedStageTwoKind;
  *     let winnerOk: boolean;
- *     if (stage2.kind === "gated") {
- *       winnerOk = c.expectedWinner === "none (stayed gated)";
+ *     if (stage2.kind === "gated" || stage2.kind === "stale-response") {
+ *       winnerOk = c.expectedWinner === "none (unusable this pull)";
  *     } else {
  *       const { items, changedLocally } = pickWinningItems(stage2.value, c.currentAtResolution, c.cloudItems);
  *       const winner = changedLocally ? "current" : (items === c.cloudItems ? "cloud" : "current");
