@@ -37,6 +37,8 @@ import {
   commitLocalDomainRaw,
   forceCommitLocalDomainRaw,
   isLocalDomainCommitSuccess,
+  beginPullContext,
+  isPullContextCurrent,
 } from "@/lib/syncHelper";
 import {
   normalizeKey,
@@ -603,18 +605,26 @@ export default function LightningPage() {
   // SAME domain. Note this page's "items" is the LIGHTNING domain
   // (confirmed.lightning) and its "plansRaw" is the SIBLING domain
   // (confirmed.plans) — the mirror image of plans/page.tsx.
-  function captureConfirmedSnapshotForPull(contentOwnershipMismatch: boolean): {
+  // `identity` (Codex P1, 13th round) — optional override for WHICH
+  // user/profile to read confirmed state for. Mirrors plans/page.tsx
+  // exactly — see its own detailed doc for why a call made AFTER an
+  // awaited boundary must pass this pull's captured PullContext explicitly
+  // rather than defaulting to the live refs.
+  function captureConfirmedSnapshotForPull(
+    contentOwnershipMismatch: boolean,
+    identity?: { userId: string | null; profileId: string }
+  ): {
     items: LightningItem[];
     days: string[];
     plansRaw: string | null;
   } {
+    const userId = identity ? identity.userId : activeUserIdRef.current;
+    const profileId = identity ? identity.profileId : activeProfileIdRef.current;
     // Codex P1 (3rd round) — no durable confirmation can be read without a
     // known authenticated identity (see activeUserIdRef's own doc); falls
     // back to the in-memory refs exactly as when no confirmed fact exists
     // yet for any domain.
-    const confirmed = activeUserIdRef.current
-      ? getConfirmedState(activeUserIdRef.current, activeProfileIdRef.current)
-      : {};
+    const confirmed = userId ? getConfirmedState(userId, profileId) : {};
     // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
     // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. Mirrors
     // plans/page.tsx's own doc for this exact fix — see there for the full
@@ -663,6 +673,15 @@ export default function LightningPage() {
 
   // Auth session — used to trigger cloud pull on sign-in.
   const { data: session, status: sessionStatus } = useSession();
+  // SH.2 architecture (Codex P1, 13th round) — mirrors plans/page.tsx
+  // exactly, see its own detailed doc. The RESOLVED authenticated user id
+  // as its own primitive value, used as an auth-transition-effect
+  // dependency alongside `sessionStatus` so a genuine A -> B identity
+  // switch re-runs that effect even when `sessionStatus` never leaves
+  // "authenticated".
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const authenticatedUserId =
+    sessionStatus === "authenticated" ? ((session?.user as any)?.id ?? session?.user?.email ?? null) : null;
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Same semantics as plans/page.tsx syncReady.
   const [syncReady, setSyncReady] = useState(false);
@@ -760,20 +779,25 @@ export default function LightningPage() {
   useEffect(() => {
     if (sessionStatus === "loading") {
       cancelScheduledSync();
+      // Codex P1 fix (13th round) — mirrors plans/page.tsx exactly: retarget
+      // sync identity to "signed out" and advance the pull epoch, so any
+      // authenticated pull still in flight is invalidated immediately.
+      setSyncUserId(null);
       setSyncReady(false);
       return;
     }
     if (sessionStatus === "unauthenticated") {
+      setSyncUserId(null);
       setSyncReady(true);
       return;
     }
     // authenticated
     if (!loaded) return;
-    // SH.2 architecture (Codex P1, 3rd round) — resolve and record this
-    // session's authenticated identity BEFORE anything else in this
+    // SH.2 architecture (Codex P1, 3rd round; identity now sourced from the
+    // authenticatedUserId dependency — 13th round) — resolve and record
+    // this session's authenticated identity BEFORE anything else in this
     // branch. Mirrors plans/page.tsx exactly — see its own detailed doc.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const resolvedUserId = (session?.user as any)?.id ?? session?.user?.email ?? null;
+    const resolvedUserId = authenticatedUserId;
     // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
     // SESSION boundary. Mirrors plans/page.tsx exactly — see its own
     // detailed doc for the full root-cause explanation, why this
@@ -792,7 +816,16 @@ export default function LightningPage() {
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     cancelScheduledSync();
+    // SH.2 architecture (Codex P1, 13th round) — capture this pull's
+    // immutable execution context. Mirrors plans/page.tsx exactly — see its
+    // own detailed doc in the module doc of syncHelper.ts ("Pull execution
+    // context") for the full contract.
+    const pullCtx = beginPullContext();
     let cancelled = false;
+    // SH.2 architecture (Codex P1, 13th round) — the ONE helper every check
+    // in this pull uses instead of scattered `if (cancelled)` conditions.
+    // Mirrors plans/page.tsx exactly — see its own detailed doc.
+    const isPullCurrent = () => !cancelled && isPullContextCurrent(pullCtx);
     // SH.2 architecture — no ref resets here. Winner selection for this
     // pull is entirely a function of (a) itemsBaselineRef/daysBaselineRef
     // (stable across this whole mount — see their own doc) and (b) fresh
@@ -809,17 +842,20 @@ export default function LightningPage() {
     // round) — this is a floor, not necessarily what winner selection
     // actually uses: mirrors plans/page.tsx exactly, see `effectiveBaseline`
     // below.
-    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
+    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
+      userId: pullCtx.userId,
+      profileId: pullCtx.profileId,
+    });
     // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
     // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
     // batch of still-pending unload-beacon opIds BEFORE this pull's fetch
     // starts. Mirrors plans/page.tsx exactly — see its own doc.
-    const pendingOpIds = activeUserIdRef.current
-      ? selectPendingOpBatch(activeUserIdRef.current, activeProfileIdRef.current)
+    const pendingOpIds = pullCtx.userId
+      ? selectPendingOpBatch(pullCtx.userId, pullCtx.profileId)
       : [];
-    void pullPlanner(activeProfileIdRef.current, pendingOpIds)
+    void pullPlanner(pullCtx.profileId, pendingOpIds)
       .then(async (planner) => {
-        if (cancelled) return;
+        if (!isPullCurrent()) return;
         const cloud = planner?.lightning ?? null;
         let cloudLightningItems: LightningItem[] | null = null;
         if (cloud) {
@@ -835,23 +871,28 @@ export default function LightningPage() {
         // exactly — see its own detailed doc for the full rationale.
         const opStatuses = planner?.opStatuses ?? [];
         const anyAccepted = opStatuses.some((s) => s.found);
-        if (activeUserIdRef.current && pendingOpIds.length > 0) {
+        if (pullCtx.userId && pendingOpIds.length > 0) {
           await reconcilePendingOperations(
-            activeUserIdRef.current,
-            activeProfileIdRef.current,
+            pullCtx.userId,
+            pullCtx.profileId,
             opStatuses,
             planner?.revision ?? null,
             planner
           );
         }
-        // A newer pull may have started (and set `cancelled`) while the
-        // await above was in flight — re-check before this stale pull
-        // mutates anything further.
-        if (cancelled) return;
+        // A newer pull may have started, or this exact effect instance may
+        // have been cleaned up, while the await above was in flight —
+        // re-check before this stale pull mutates anything further (Codex
+        // P1, 13th round — mirrors plans/page.tsx exactly).
+        if (!isPullCurrent()) return;
         // This pull's EFFECTIVE baseline for winner selection — mirrors
-        // plans/page.tsx exactly.
+        // plans/page.tsx exactly, including scoping the re-derived read to
+        // pullCtx.userId/pullCtx.profileId rather than the live refs.
         const effectiveBaseline = anyAccepted
-          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch)
+          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
+              userId: pullCtx.userId,
+              profileId: pullCtx.profileId,
+            })
           : pullStartBaseline;
 
         // SH.2 architecture — read CURRENT local storage fresh, right now,
@@ -958,8 +999,13 @@ export default function LightningPage() {
         const itemsCommitStatus = await commitLocalDomainRaw(
           lightningKeyRef.current,
           currentItemsRaw,
-          nextItemsRaw
+          nextItemsRaw,
+          isPullCurrent
         );
+        // Codex P1 fix (13th round) — re-check after EVERY awaited
+        // local-domain commit, before using its result for anything.
+        // Mirrors plans/page.tsx exactly — see its own detailed doc.
+        if (!isPullCurrent()) return;
         const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
         // Only touch React state once the durable write is confirmed (or
         // confirmed unnecessary) AND the winning result actually differs
@@ -1011,8 +1057,10 @@ export default function LightningPage() {
         const plansCommitStatus = await commitLocalDomainRaw(
           profileKeysForPull.plans,
           currentPlansRaw,
-          winningPlansRawToWrite
+          winningPlansRawToWrite,
+          isPullCurrent
         );
+        if (!isPullCurrent()) return;
         const hydrationSucceeded = isLocalDomainCommitSuccess(plansCommitStatus);
         // Codex P1 fix (1st round; commit outcome generalized 12th) —
         // tracks specifically whether THIS pull's final durable Plans value
@@ -1031,8 +1079,10 @@ export default function LightningPage() {
         const daysCommitStatus = await commitLocalDomainRaw(
           daysKeyRef.current,
           currentDaysRaw,
-          nextDaysRaw
+          nextDaysRaw,
+          isPullCurrent
         );
+        if (!isPullCurrent()) return;
         const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
         if (!daysWriteFailed && winningDays.join(",") !== knownDaysRef.current.join(",")) {
           setKnownDays(winningDays);
@@ -1095,8 +1145,8 @@ export default function LightningPage() {
         // BOUNDARY. Mirrors plans/page.tsx exactly — see its own detailed
         // comment and getLocalContentOwner's doc in syncHelper.ts. Codex P1
         // fix (7th round) — also requires `primaryPersistSucceeded`.
-        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
-          setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
+        if (pullCtx.userId && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
+          setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
         }
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
@@ -1148,32 +1198,32 @@ export default function LightningPage() {
         if (itemsCloudWon && primaryPersistSucceeded && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
           acceptedForBaseline.days = winningDays;
         }
-        if (activeUserIdRef.current && planner?.revision != null) {
+        if (pullCtx.userId && planner?.revision != null) {
           // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
           // the 11th — see commitConfirmedBaseline's own doc); fired
           // without awaiting since nothing later in this callback depends
-          // on the commit having landed.
+          // on the commit having landed. Scoped to pullCtx.userId/
+          // pullCtx.profileId (13th round), not the live refs.
           void commitConfirmedBaseline(
-            activeUserIdRef.current,
-            activeProfileIdRef.current,
+            pullCtx.userId,
+            pullCtx.profileId,
             planner.revision,
             acceptedForBaseline
           );
         }
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!isPullCurrent()) return;
         // Cloud state is uncertain — keep push gate closed.
       });
     return () => { cancelled = true; };
-  // `session` is deliberately excluded: it changes identity on next-auth's
-  // periodic background revalidation even when the actual user id has not
-  // changed, and this effect must only re-run on genuine sessionStatus/
-  // loaded transitions — not on every such revalidation. The
-  // resolvedUserId read above is only ever consulted once sessionStatus is
-  // "authenticated", at which point `session` is guaranteed populated.
+  // `session` itself is deliberately excluded — mirrors plans/page.tsx
+  // exactly, see its own detailed doc. `authenticatedUserId` (Codex P1,
+  // 13th round) is included so this effect DOES still re-run on a genuine
+  // authenticated-identity change even when `sessionStatus` never leaves
+  // "authenticated".
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionStatus, loaded]);
+  }, [sessionStatus, loaded, authenticatedUserId]);
 
   // Register a best-effort sendBeacon push on page unload.
   useEffect(() => {

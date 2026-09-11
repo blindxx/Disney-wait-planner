@@ -993,3 +993,68 @@ export const DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES: Array<{
     expected: "superseded",
   },
 ];
+
+// ===== PULL EXECUTION CONTEXT (SH.2, 13th round) =====
+//
+// Codex found two P1s that are both instances of one failure class: a
+// durable write or gate transition executing under an execution context
+// that is no longer the one the operation started under — (1) an
+// authenticated identity switch (A -> B) that NextAuth can report without
+// `sessionStatus` ever leaving "authenticated", so nothing told the page's
+// effect to re-run and retarget; (2) an awaited local-domain commit that
+// resumes after cancellation/identity change and keeps performing further
+// writes/ownership transfer/confirmation/syncReady updates regardless.
+//
+// The fix is one immutable per-pull context — { epoch, userId, profileId }
+// (see PullContext/beginPullContext()/isPullContextCurrent() in
+// syncHelper.ts) — captured exactly once at pull start and re-validated
+// after every awaited boundary before any further durable step. This
+// function is the PURE comparison both the outer per-await check and the
+// commit primitive's own last-instant-before-write check reduce to: is the
+// epoch a pull captured still the current one?
+export function isPullEpochCurrent(capturedEpoch: number, currentEpoch: number): boolean {
+  return capturedEpoch === currentEpoch;
+}
+
+/**
+ * Reference cases for isPullEpochCurrent() — the REQUIRED cases from the
+ * 13th round's architectural contract, reduced to this function's pure
+ * inputs/outputs (a real identity/profile switch is exactly "the epoch
+ * counter has advanced since this pull captured it"). Run from Node:
+ *   import { DEV_IS_PULL_EPOCH_CURRENT_CASES, isPullEpochCurrent } from "@/lib/syncPayload";
+ *   DEV_IS_PULL_EPOCH_CURRENT_CASES.forEach(c => {
+ *     const got = isPullEpochCurrent(c.capturedEpoch, c.currentEpoch);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
+  name: string;
+  capturedEpoch: number;
+  currentEpoch: number;
+  expected: boolean;
+}> = [
+  {
+    name: "required — no transition happened since capture: still current",
+    capturedEpoch: 3,
+    currentEpoch: 3,
+    expected: true,
+  },
+  {
+    name: "required — one identity switch (A -> B) happened since capture: stale",
+    capturedEpoch: 3,
+    currentEpoch: 4,
+    expected: false,
+  },
+  {
+    name: "required — a profile switch AND an identity switch both happened since capture: stale",
+    capturedEpoch: 3,
+    currentEpoch: 5,
+    expected: false,
+  },
+  {
+    name: "the very first pull of a session: epoch 0 captured, nothing has changed",
+    capturedEpoch: 0,
+    currentEpoch: 0,
+    expected: true,
+  },
+];

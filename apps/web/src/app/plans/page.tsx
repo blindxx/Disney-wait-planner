@@ -92,6 +92,8 @@ import {
   commitLocalDomainRaw,
   forceCommitLocalDomainRaw,
   isLocalDomainCommitSuccess,
+  beginPullContext,
+  isPullContextCurrent,
 } from "@/lib/syncHelper";
 
 // Phase 9.0 — content type foundation
@@ -878,6 +880,22 @@ export default function PlansPage() {
 
   // Auth session — used to trigger cloud pull on sign-in
   const { data: session, status: sessionStatus } = useSession();
+  // SH.2 architecture (Codex P1, 13th round) — the RESOLVED authenticated
+  // user id, as its own primitive value (string | null), computed every
+  // render but STABLE unless the actual id changes. This exists specifically
+  // to be a dependency of the auth-transition effect below, alongside
+  // `sessionStatus`: NextAuth can switch the signed-in user A -> B while
+  // `sessionStatus` stays "authenticated" the entire time (no loading/
+  // unauthenticated edge for React to key an effect re-run on), which
+  // previously left that effect never re-running for a genuine identity
+  // switch. Depending on this primitive (not the whole `session` object —
+  // see that effect's own doc for why the object itself is still
+  // deliberately excluded) means a token-refresh revalidation that leaves
+  // the id unchanged still does NOT re-run the effect, while an actual A -> B
+  // switch DOES.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const authenticatedUserId =
+    sessionStatus === "authenticated" ? ((session?.user as any)?.id ?? session?.user?.email ?? null) : null;
   // SH.2 architecture — reconciliation-from-authoritative-state model.
   // Repeated Codex findings on the previous ref-per-event-type approach
   // (localPlansEditRef/localDaysEditRef reset-on-pull-start discarding a
@@ -951,20 +969,34 @@ export default function PlansPage() {
   // lightningRawBaselineRef — the mount-time load, or a previous pull's own
   // cloud-won resolution for that SAME domain (see the pull effect's
   // existing itemsCloudWon/daysCloudWon updates, unchanged by this fix).
-  function captureConfirmedSnapshotForPull(contentOwnershipMismatch: boolean): {
+  // `identity` (Codex P1, 13th round) — optional override for WHICH
+  // user/profile to read confirmed state for. Defaults to the live refs,
+  // correct for this function's FIRST call site each pull (synchronous,
+  // before any await, so the refs are still exactly this pull's identity).
+  // A call made AFTER an awaited boundary (the pull effect's own
+  // `effectiveBaseline` re-derivation, once a pending op is confirmed
+  // accepted) MUST instead pass this pull's captured PullContext
+  // explicitly — the refs could have already been retargeted to a NEWER
+  // transition by then, and reading them at that point would attribute
+  // this pull's own baseline to whichever identity happens to be current
+  // NOW rather than the one it actually started under.
+  function captureConfirmedSnapshotForPull(
+    contentOwnershipMismatch: boolean,
+    identity?: { userId: string | null; profileId: string }
+  ): {
     items: PlanItem[];
     days: string[];
     lightningRaw: string | null;
   } {
+    const userId = identity ? identity.userId : activeUserIdRef.current;
+    const profileId = identity ? identity.profileId : activeProfileIdRef.current;
     // Codex P1 (3rd round) — no durable confirmation can be read without a
     // known authenticated identity (see activeUserIdRef's own doc); falls
     // back to the in-memory refs exactly as when no confirmed fact exists
     // yet for any domain. This should not normally happen (the pull effect
     // only reaches here once sessionStatus is "authenticated"), but never
     // guesses an identity if it does.
-    const confirmed = activeUserIdRef.current
-      ? getConfirmedState(activeUserIdRef.current, activeProfileIdRef.current)
-      : {};
+    const confirmed = userId ? getConfirmedState(userId, profileId) : {};
     // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
     // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. A
     // mismatch (this profile's raw storage is attributed to a DIFFERENT,
@@ -1624,27 +1656,36 @@ export default function PlansPage() {
       // before entering the loading state — prevents stale local data from
       // being sent while we don't yet know the final auth state.
       cancelScheduledSync();
+      // Codex P1 fix (13th round) — retarget sync identity to "signed out"
+      // and advance the pull epoch, so any authenticated pull still in
+      // flight from before this transition is invalidated immediately
+      // (isPullContextCurrent will start returning false for it) rather
+      // than only whenever ITS OWN effect run happens to notice. A no-op
+      // when already null (nothing was authenticated to invalidate).
+      setSyncUserId(null);
       setSyncReady(false);
       return;
     }
     if (sessionStatus === "unauthenticated") {
+      // Codex P1 fix (13th round) — same rationale as the "loading" branch
+      // above: sign-out must invalidate any still-in-flight authenticated
+      // pull's context, not just reset local UI state.
+      setSyncUserId(null);
       setSyncReady(true);
       return;
     }
     // authenticated
     if (!initialized) return;
-    // SH.2 architecture (Codex P1, 3rd round) — resolve and record this
-    // session's authenticated identity BEFORE anything else in this
-    // branch: every confirmed-baseline read/write this pull performs (via
+    // SH.2 architecture (Codex P1, 3rd round; identity now sourced from the
+    // authenticatedUserId dependency — 13th round, see its own doc above —
+    // rather than re-derived here) — resolve and record this session's
+    // authenticated identity BEFORE anything else in this branch: every
+    // confirmed-baseline read/write this pull performs (via
     // captureConfirmedSnapshotForPull/commitConfirmedBaseline below) must
     // be scoped to the CURRENT account, never a previous one that used
     // this same local profile slot. Mirrors the server's own resolution
-    // order (getUserId() in api/sync/planner/route.ts). Read directly from
-    // `session` (not a ref) since sessionStatus === "authenticated"
-    // guarantees next-auth has already populated it by the time this
-    // branch runs.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const resolvedUserId = (session?.user as any)?.id ?? session?.user?.email ?? null;
+    // order (getUserId() in api/sync/planner/route.ts).
+    const resolvedUserId = authenticatedUserId;
     // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
     // SESSION boundary: "for every SH.2 conflict decision, the baseline
     // and local candidate MUST belong to the same authenticated conflict
@@ -1695,11 +1736,36 @@ export default function PlansPage() {
     // Cancel any pending debounced push before starting the cloud pull so a
     // queued stale PUT cannot fire during the initial pull window.
     cancelScheduledSync();
+    // SH.2 architecture (Codex P1, 13th round) — capture this pull's
+    // immutable execution context RIGHT AFTER the identity retarget above,
+    // so ctx.userId/ctx.epoch reflect the identity THIS transition is
+    // establishing. Every write/gate transition below this point uses
+    // ctx.userId/ctx.profileId instead of re-reading activeUserIdRef/
+    // activeProfileIdRef — those refs remain mutable and could already
+    // point at a NEWER transition's identity by the time an awaited step
+    // resolves; ctx cannot be retroactively changed by one. See
+    // beginPullContext's own doc in syncHelper.ts for the full contract.
+    const pullCtx = beginPullContext();
     // Cancellation flag: React sets this to true when the effect re-runs
-    // (i.e. sessionStatus or initialized changed). Any in-flight pullPlans()
-    // that resolves after the flag is set will be ignored, preventing stale
-    // cloud data from overwriting local state mid-auth-transition.
+    // (i.e. sessionStatus/initialized/authenticatedUserId changed) or
+    // unmounts. Any in-flight pullPlans() that resolves after the flag is
+    // set will be ignored, preventing stale cloud data from overwriting
+    // local state mid-auth-transition.
     let cancelled = false;
+    // SH.2 architecture (Codex P1, 13th round) — the ONE helper every check
+    // in this pull uses instead of scattered `if (cancelled)` conditions:
+    // false once EITHER this effect instance was cleaned up (`cancelled`)
+    // OR a genuine identity/profile transition has happened ANYWHERE in
+    // this tab since `pullCtx` was captured (the shared epoch moved — see
+    // isPullContextCurrent's own doc in syncHelper.ts), even if that
+    // transition's OWN effect run hasn't set `cancelled` yet for some
+    // other reason. Call this after EVERY awaited boundary below, before
+    // any further durable write or gate transition — passed directly as
+    // commitLocalDomainRaw's `isStillValid` argument too, so a commit that
+    // goes stale while queued for a Web Lock is caught at the last possible
+    // instant, inside the lock, rather than only after the whole call
+    // resolves back here.
+    const isPullCurrent = () => !cancelled && isPullContextCurrent(pullCtx);
     // SH.2 architecture — no ref resets here. Winner selection for this
     // pull is entirely a function of (a) itemsBaselineRef/daysBaselineRef
     // (stable across this whole mount — see their own doc) and (b) fresh
@@ -1719,7 +1785,10 @@ export default function PlansPage() {
     // actually uses: if THIS pull's own GET resolves an accepted beacon,
     // `.then()` re-derives an `effectiveBaseline` from the freshly-promoted
     // confirmed snapshot instead — see that block's own doc.
-    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch);
+    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
+      userId: pullCtx.userId,
+      profileId: pullCtx.profileId,
+    });
     // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
     // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
     // batch of still-pending unload-beacon opIds BEFORE this pull's fetch
@@ -1733,12 +1802,12 @@ export default function PlansPage() {
     // exceeds the server's per-pull cap — see selectPendingOpBatch's own
     // doc for why an unrotated truncation would starve ops beyond the cap
     // forever if the earlier ones never resolve (Codex P1, 10th round).
-    const pendingOpIds = activeUserIdRef.current
-      ? selectPendingOpBatch(activeUserIdRef.current, activeProfileIdRef.current)
+    const pendingOpIds = pullCtx.userId
+      ? selectPendingOpBatch(pullCtx.userId, pullCtx.profileId)
       : [];
-    void pullPlanner(activeProfileIdRef.current, pendingOpIds)
+    void pullPlanner(pullCtx.profileId, pendingOpIds)
       .then(async (planner) => {
-        if (cancelled) return;
+        if (!isPullCurrent()) return;
         // Extract the plans portion from the combined planner payload.
         const cloud = planner?.plans ?? null;
         let cloudItems: PlanItem[] | null = null;
@@ -1763,19 +1832,20 @@ export default function PlansPage() {
         // is durably proven — never speculatively retired ahead of that.
         const opStatuses = planner?.opStatuses ?? [];
         const anyAccepted = opStatuses.some((s) => s.found);
-        if (activeUserIdRef.current && pendingOpIds.length > 0) {
+        if (pullCtx.userId && pendingOpIds.length > 0) {
           await reconcilePendingOperations(
-            activeUserIdRef.current,
-            activeProfileIdRef.current,
+            pullCtx.userId,
+            pullCtx.profileId,
             opStatuses,
             planner?.revision ?? null,
             planner
           );
         }
-        // A newer pull may have started (and set `cancelled`) while the
-        // await above was in flight — re-check before this stale pull
-        // mutates anything further.
-        if (cancelled) return;
+        // A newer pull may have started, or this exact effect instance may
+        // have been cleaned up, while the await above was in flight —
+        // re-check before this stale pull mutates anything further (Codex
+        // P1, 13th round — see isPullCurrent's own doc above).
+        if (!isPullCurrent()) return;
         // This pull's EFFECTIVE baseline for winner selection: when at
         // least one pending op was just confirmed accepted, re-derive it
         // from the NOW-updated confirmed state (captureConfirmedSnapshotForPull
@@ -1789,8 +1859,18 @@ export default function PlansPage() {
         // reconcilePendingOperations' own doc — re-reading confirmed in
         // that case just reproduces the SAME value `pullStartBaseline`
         // already had, so no special-casing is needed here either way).
+        // Explicitly scoped to `pullCtx.userId`/`pullCtx.profileId` (Codex
+        // P1, 13th round) — this call happens AFTER the await above, so the
+        // live activeUserIdRef/activeProfileIdRef refs could already belong
+        // to a newer transition; the isPullCurrent() check just above
+        // guards against actually USING a result attributed to the wrong
+        // identity, but the identity passed into the read itself must still
+        // be THIS pull's own, never whatever is live right now.
         const effectiveBaseline = anyAccepted
-          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch)
+          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
+              userId: pullCtx.userId,
+              profileId: pullCtx.profileId,
+            })
           : pullStartBaseline;
 
         // SH.2 architecture — read CURRENT local storage fresh, right now,
@@ -1936,8 +2016,18 @@ export default function PlansPage() {
         const itemsCommitStatus = await commitLocalDomainRaw(
           planKeyRef.current,
           currentItemsRaw,
-          nextItemsRaw
+          nextItemsRaw,
+          isPullCurrent
         );
+        // Codex P1 fix (13th round) — re-check after EVERY awaited local-
+        // domain commit, before using its result for anything: a stale
+        // continuation must never advance React state or go on to the next
+        // domain's commit. This is what makes "cancellation between the
+        // first and second awaited domain commit" (required case 4) stop
+        // the REMAINING commits/ownership/confirmation/gate work entirely —
+        // nothing already durably committed above is undone, since it was
+        // genuinely valid the moment it landed.
+        if (!isPullCurrent()) return;
         const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
         // Only touch React state once the durable write is confirmed (or
         // confirmed unnecessary) AND the winning result actually differs
@@ -1984,8 +2074,10 @@ export default function PlansPage() {
         const daysCommitStatus = await commitLocalDomainRaw(
           daysKeyRef.current,
           currentDaysRaw,
-          nextDaysRaw
+          nextDaysRaw,
+          isPullCurrent
         );
+        if (!isPullCurrent()) return;
         const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
         if (!daysWriteFailed && winningDays.join(",") !== daysRef.current.join(",")) {
           setDays(winningDays);
@@ -2047,8 +2139,10 @@ export default function PlansPage() {
         const lightningCommitStatus = await commitLocalDomainRaw(
           profileKeysForPull.lightning,
           currentLightningRaw,
-          winningLightningRawToWrite
+          winningLightningRawToWrite,
+          isPullCurrent
         );
+        if (!isPullCurrent()) return;
         const hydrationSucceeded = isLocalDomainCommitSuccess(lightningCommitStatus);
         // Codex P1 fix (1st round; commit outcome generalized 12th) —
         // tracks specifically whether THIS pull's final durable Lightning
@@ -2087,8 +2181,8 @@ export default function PlansPage() {
         // `primaryPersistSucceeded` (#3): ownership must never transfer
         // before THIS page's own primary domain — not just the sibling's —
         // is confirmed durably persisted.
-        if (activeUserIdRef.current && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
-          setLocalContentOwner(activeProfileIdRef.current, activeUserIdRef.current);
+        if (pullCtx.userId && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
+          setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
         }
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
@@ -2109,9 +2203,9 @@ export default function PlansPage() {
         // decision (never "retroactively" changed by a later event).
         // Requires both a known revision (planner?.revision — null only if
         // the server response unexpectedly omitted it) and a known
-        // identity (activeUserIdRef.current); either missing means there
-        // is nothing safe to commit against, so the step is skipped
-        // entirely rather than guessing.
+        // identity (pullCtx.userId); either missing means there is nothing
+        // safe to commit against, so the step is skipped entirely rather
+        // than guessing.
         const acceptedForBaseline: {
           plans?: { version: number; items: unknown[] };
           lightning?: { version: number; items: unknown[] };
@@ -2143,35 +2237,40 @@ export default function PlansPage() {
         if (itemsCloudWon && primaryPersistSucceeded && !lightningChangedLocally && !daysChangedLocally && !daysWriteFailed) {
           acceptedForBaseline.days = winningDays;
         }
-        if (activeUserIdRef.current && planner?.revision != null) {
+        if (pullCtx.userId && planner?.revision != null) {
           // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
           // the 11th — see commitConfirmedBaseline's own doc); fired
           // without awaiting since nothing later in this callback depends
-          // on the commit having landed.
+          // on the commit having landed. Scoped to pullCtx.userId/
+          // pullCtx.profileId (13th round), not the live refs.
           void commitConfirmedBaseline(
-            activeUserIdRef.current,
-            activeProfileIdRef.current,
+            pullCtx.userId,
+            pullCtx.profileId,
             planner.revision,
             acceptedForBaseline
           );
         }
       })
       .catch(() => {
-        if (cancelled) return;
+        if (!isPullCurrent()) return;
         // Network or server error — cloud state is unknown (not definitively
         // empty). Keep the push gate closed to avoid overwriting cloud data
         // with potentially stale local plans. Gate reopens on the next auth
         // cycle (sign-out + sign-in, or page reload).
       });
     return () => { cancelled = true; };
-  // `session` is deliberately excluded: it changes identity on next-auth's
-  // periodic background revalidation even when the actual user id has not
-  // changed, and this effect must only re-run on genuine sessionStatus/
-  // initialized transitions — not on every such revalidation. The
-  // resolvedUserId read above is only ever consulted once sessionStatus is
-  // "authenticated", at which point `session` is guaranteed populated.
+  // `session` itself is deliberately excluded: it changes IDENTITY (a new
+  // object reference) on next-auth's periodic background revalidation even
+  // when the actual user id has not changed, and this effect must not
+  // re-run on every such revalidation. `authenticatedUserId` (Codex P1,
+  // 13th round) is included specifically so this effect DOES still re-run
+  // on a genuine authenticated-identity change (A -> B) even when
+  // `sessionStatus` itself never leaves "authenticated" — see that
+  // variable's own doc above for why depending on the whole `session`
+  // object would over-fire while depending on nothing at all would
+  // under-fire.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionStatus, initialized]);
+  }, [sessionStatus, initialized, authenticatedUserId]);
 
   // Register a best-effort sendBeacon push on page unload.
   // Requires both syncReady (initial pull resolved) AND authenticated session.

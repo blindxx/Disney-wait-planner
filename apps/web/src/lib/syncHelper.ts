@@ -116,27 +116,37 @@ Reviewers should check any changes affecting:
  *                                                         baseline BEFORE
  *                                                         winner selection)
  *   await commitLocalDomainRaw(key,                  — the shared LOCAL
- *     expectedPreviousRaw, nextRaw)                     persistence commit
- *                                                        primitive (12th
- *                                                        round; see its own
- *                                                        doc) — writes
+ *     expectedPreviousRaw, nextRaw,                     persistence commit
+ *     isStillValid?)                                    primitive (12th
+ *                                                        round; FAIL-CLOSED
+ *                                                        no-Web-Locks
+ *                                                        behavior and
+ *                                                        `isStillValid` added
+ *                                                        13th round; see its
+ *                                                        own doc) — writes
  *                                                        `nextRaw` to a
  *                                                        synced domain's
  *                                                        localStorage `key`
- *                                                        ONLY if the value
- *                                                        actually there right
- *                                                        now still equals
+ *                                                        ONLY if: Web Locks
+ *                                                        are actually
+ *                                                        available (else
+ *                                                        "unavailable" —
+ *                                                        no read, no write);
+ *                                                        the value there
+ *                                                        right now still
+ *                                                        equals
  *                                                        `expectedPreviousRaw`
- *                                                        (the value a
- *                                                        caller's winner
- *                                                        decision was based
- *                                                        on) — used by pull
- *                                                        hydration, which
- *                                                        must never clobber a
- *                                                        newer same-domain
- *                                                        write that landed
- *                                                        after its decision
- *                                                        was made
+ *                                                        (else "superseded");
+ *                                                        AND, checked LAST,
+ *                                                        still inside the
+ *                                                        lock, `isStillValid()`
+ *                                                        (else "aborted") —
+ *                                                        pass a closure over
+ *                                                        isPullContextCurrent(ctx)
+ *                                                        here so a commit
+ *                                                        that goes stale
+ *                                                        while queued for the
+ *                                                        lock never lands
  *   await forceCommitLocalDomainRaw(key, nextRaw)    — the same primitive's
  *                                                        unconditional
  *                                                        policy: always
@@ -149,13 +159,17 @@ Reviewers should check any changes affecting:
  *                                                        which always
  *                                                        represent the
  *                                                        user's own freshest
- *                                                        intent and so are
- *                                                        never subject to
- *                                                        rejection, but still
+ *                                                        intent, never claim
+ *                                                        cross-tab CAS safety,
+ *                                                        and so are NOT gated
+ *                                                        on Web Locks being
+ *                                                        present (13th
+ *                                                        round) — but still
  *                                                        participate in the
  *                                                        SAME per-key Web
  *                                                        Locks serialization
  *                                                        as commitLocalDomainRaw
+ *                                                        when one IS present,
  *                                                        so a concurrent
  *                                                        hydration commit to
  *                                                        the same key can
@@ -168,7 +182,9 @@ Reviewers should check any changes affecting:
  *                                                        already was, the
  *                                                        caller's intended
  *                                                        value); false for
- *                                                        "superseded" or
+ *                                                        "superseded",
+ *                                                        "aborted",
+ *                                                        "unavailable", or
  *                                                        "failed" — gates
  *                                                        that must only
  *                                                        advance once a
@@ -179,6 +195,29 @@ Reviewers should check any changes affecting:
  *                                                        confirmed-baseline)
  *                                                        should check this,
  *                                                        never React state
+ *   beginPullContext()                               — snapshot this pull's
+ *                                                        immutable execution
+ *                                                        context (13th round;
+ *                                                        see "Pull execution
+ *                                                        context" below) —
+ *                                                        call ONCE per pull,
+ *                                                        right after that
+ *                                                        transition's own
+ *                                                        setSyncUserId()/
+ *                                                        setSyncProfileId()
+ *                                                        calls
+ *   isPullContextCurrent(ctx)                        — true only if no
+ *                                                        genuine identity/
+ *                                                        profile transition
+ *                                                        has happened since
+ *                                                        `ctx` was captured
+ *                                                        (13th round) — check
+ *                                                        after every awaited
+ *                                                        boundary a pull
+ *                                                        performs, before any
+ *                                                        further durable
+ *                                                        write or gate
+ *                                                        transition
  *
  * localStorage keys:
  *   dwp:sync:{profileId}:lastSyncedAt                  — ISO timestamp of
@@ -486,19 +525,115 @@ Reviewers should check any changes affecting:
  * for a given key runs inside `navigator.locks.request(name, ...)`, giving
  * true mutual exclusion across every tab/writer contending for that SAME
  * key — closing even the narrow window where two commits could both
- * observe a matching baseline before either writes. When Web Locks are
- * UNAVAILABLE, the fail-safe is the SAME read-decide-write logic run
- * directly (never a blind, uncompared write — that was the original bug,
- * not merely "not yet atomic") — this alone is sufficient for every
- * required correctness case (a genuinely newer write is always detected via
- * the value comparison, whether or not it happened to race the exact
- * instant of this read), leaving only the theoretical simultaneous-
- * double-read race as a documented residual (see this round's own report).
+ * observe a matching baseline before either writes.
+ *
+ * Codex P1 fix (13th round) — the 12th round's own report mischaracterized
+ * the no-Web-Locks path as "sufficient for correctness": a plain
+ * read-decide-write is NOT compare-and-swap without a lock. The read and
+ * the write are two separate operations with a real gap between them; two
+ * tabs can both read a matching value before either writes, and the second
+ * write silently clobbers the first with neither side able to detect it —
+ * an unguarded lost update, not a rare residual. There is no lock-free way
+ * to close that gap against plain localStorage, so commitLocalDomainRaw()
+ * — the CAS policy whose result GATES ownership/confirmed-baseline/
+ * syncReady — now FAILS CLOSED as "unavailable" when Web Locks are absent:
+ * it neither reads nor writes anything, so no destructive overwrite is
+ * possible and (isLocalDomainCommitSuccess() treats "unavailable" exactly
+ * like "failed") no false confirmation is possible either. This is a
+ * permanent, environment-determined refusal — never a timing retry or a
+ * probability-based heuristic — so cross-tab conflict resolution for
+ * synced domains simply stays deferred in a browser lacking Web Locks,
+ * while ordinary local editing keeps working: forceCommitLocalDomainRaw()
+ * never claimed cross-tab CAS safety (there is no expectedPreviousRaw to
+ * violate — it is a plain last-write-wins write, exactly as any client-side
+ * app's localStorage usage has always behaved), so it is not gated on Web
+ * Locks at all; it still shares the same lock when one IS present, purely
+ * as a best-effort improvement over an already-honest baseline. See "Local
+ * domain commit" types and functions below for the "aborted" status this
+ * round also adds — see "Pull execution context" below for what that
+ * protects against.
+ *
  * isLocalDomainCommitSuccess(status) is the single "may gates advance"
  * predicate every caller uses afterward — true for "committed" or "noop",
- * false for "superseded" or "failed" — so ownership/syncReady/confirmed-
- * baseline advancement is always derived from what ACTUALLY happened on
- * disk, never from React memory.
+ * false for "superseded", "aborted", "unavailable", or "failed" — so
+ * ownership/syncReady/confirmed-baseline advancement is always derived from
+ * what ACTUALLY happened on disk, never from React memory.
+ *
+ * ── Pull execution context (SH.2, Codex P1, 13th round) ─────────────────────
+ *
+ * Codex found two more P1s, both instances of the SAME failure class as the
+ * Web-Locks finding above: a durable write or gate transition executing
+ * under an execution context that is no longer the one it started under.
+ *   (1) AUTH IDENTITY WITHOUT EPOCH. Each page's auth-transition effect
+ *       depended on `sessionStatus` but not the resolved authenticated user
+ *       id itself. NextAuth can switch the signed-in user A → B while
+ *       `sessionStatus` remains "authenticated" throughout (no
+ *       loading/unauthenticated edge for React to key an effect re-run on).
+ *       The effect never re-ran, so `activeUserIdRef`/`setSyncUserId` never
+ *       retargeted to B, and any pull already in flight for A kept running
+ *       under A's client conflict context indefinitely.
+ *   (2) NO REVALIDATION ACROSS AWAITED LOCAL-DOMAIN COMMITS. The 12th
+ *       round's reconciliation added several `await commitLocalDomainRaw(...)`
+ *       calls in sequence. If the surrounding auth/profile transition set
+ *       this pull's `cancelled` flag while one of those awaits was pending
+ *       (or, worse, while a commit sat queued waiting for a Web Lock held by
+ *       another writer), the callback resumed and could still perform
+ *       LATER writes, ownership transfer, confirmed-baseline commits, and
+ *       `syncReady` transitions — exactly the durable-state corruption the
+ *       Web-Locks fix was trying to prevent, just via a different unguarded
+ *       gap.
+ *
+ * Both are fixed by giving every pull ONE immutable execution context,
+ * captured exactly once at pull start, instead of re-deriving "who is this
+ * for" from mutable refs/session state after each await:
+ *   • currentPullEpoch (module-private) is a monotonic counter bumped by
+ *     setSyncUserId()/setSyncProfileId() whenever the value they are given
+ *     is ACTUALLY different from the current one (their existing early-
+ *     return-on-no-change guard is exactly the signal "a genuine identity
+ *     or profile transition is happening right now").
+ *   • beginPullContext() snapshots { epoch, userId, profileId } from that
+ *     module state — call this ONCE, synchronously, immediately after this
+ *     transition's own setSyncUserId()/setSyncProfileId() calls, and close
+ *     over the returned PullContext for the rest of that one pull. Never
+ *     re-read activeUserIdRef.current / currentSyncUserId / currentSyncProfileId
+ *     after an await to attribute a write — use the CAPTURED ctx.userId /
+ *     ctx.profileId instead, so a later identity switch cannot retroactively
+ *     change which account an in-flight pull's writes are scoped to.
+ *   • isPullContextCurrent(ctx) is a pure check: true only if no genuine
+ *     identity/profile transition has happened since ctx was captured (i.e.
+ *     the epoch hasn't moved). Each page's pull effect calls this — via one
+ *     shared `isPullCurrent()` closure that ALSO checks the effect's own
+ *     `cancelled` flag, so both "a NEW pull superseded this one" (epoch) and
+ *     "this exact effect run was cleaned up for any other reason" (cancelled)
+ *     are covered by ONE call site pattern instead of scattered ad hoc
+ *     conditions — after EVERY awaited boundary (reconcilePendingOperations,
+ *     each commitLocalDomainRaw) and BEFORE every subsequent durable write or
+ *     gate transition (the next domain's commit, setLocalContentOwner,
+ *     commitConfirmedBaseline, setSyncReady). A stale continuation's
+ *     `isPullCurrent()` starts returning false the instant the epoch moves,
+ *     so it stops before doing anything further — the REMAINING steps
+ *     simply never execute; nothing already durably committed is undone
+ *     (there is nothing unsafe about a write that was genuinely valid the
+ *     moment it landed).
+ *   • commitLocalDomainRaw() additionally accepts this SAME `isPullCurrent`
+ *     closure as its `isStillValid` parameter, re-checked as the LAST step
+ *     before the actual `localStorage.setItem` — still INSIDE the Web Lock's
+ *     critical section. This closes the specific gap a caller-side-only
+ *     check cannot: if the epoch moves WHILE a commit sits queued waiting
+ *     for the lock (held by some other writer), the outer "check after the
+ *     await resolves" pattern would only catch it AFTER the write already
+ *     happened. Re-checking at the last possible instant, before the
+ *     mutation itself, means an invalidated commit reports "aborted" and
+ *     never touches disk — no matter how long it waited for the lock.
+ *
+ * Each page's auth-transition effect also now depends on the resolved
+ * authenticated user id itself (a derived primitive, not the whole
+ * next-auth `session` object — see that effect's own doc for why the whole
+ * object is still deliberately excluded), so a genuine A → B switch re-runs
+ * the effect — cancelling A's lifecycle (cleanup sets `cancelled`),
+ * retargeting via setSyncUserId(B) (bumping the epoch), and starting B's
+ * pull under a freshly-captured PullContext — even though `sessionStatus`
+ * never left "authenticated" the whole time.
  */
 
 import { buildNamespacedKey } from "./profileStorage";
@@ -510,6 +645,7 @@ import {
   reduceConfirmedFacts,
   acceptedDomainFactsFromBeacon,
   decideLocalDomainCommit,
+  isPullEpochCurrent,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -564,40 +700,80 @@ function localContentOwnerKeyForProfile(profileId: string): string {
   return `dwp:sync:${profileId}:localContentOwner`;
 }
 
-// ── Local-domain commit (SH.2, Codex P1, 12th round) ────────────────────────
+// ── Local-domain commit (SH.2, Codex P1, 12th/13th rounds) ──────────────────
 // See the module doc's own "Local-domain commit" section above for the full
 // architecture. Keyed purely by the target localStorage key (which already
 // uniquely identifies profile+domain), so this primitive needs no separate
 // identity parameters and is callable from module-level pure helpers (e.g.
 // plans/page.tsx's saveToStorage/saveDays) with no React refs in scope.
+//
+// Codex P1 fix (13th round) — the 12th round's own report mischaracterized
+// the no-Web-Locks fallback as "sufficient for correctness": a plain
+// read-decide-write is NOT compare-and-swap without a lock, because the read
+// and the write are two SEPARATE operations with a real gap between them —
+// two tabs can both read a matching value before either writes, and the
+// second write silently clobbers the first with no way for either side to
+// detect it. That is a genuine unguarded lost-update, not a rare residual.
+// This round's fix does NOT try to patch that gap with a smarter read; there
+// is no lock-free way to close it against plain localStorage. Instead:
+//   • commitLocalDomainRaw() (the CAS policy hydration uses to gate
+//     ownership/confirmed-baseline/syncReady) now FAILS CLOSED when Web
+//     Locks are unavailable — it returns "unavailable" without reading OR
+//     writing anything at all. No destructive overwrite is possible (nothing
+//     is written) and no false confirmation is possible (isLocalDomainCommitSuccess
+//     is false for "unavailable", exactly like "failed"). This is
+//     deliberately NOT a timing retry or a probability-based heuristic — it
+//     is a permanent, environment-determined refusal: cross-tab conflict
+//     resolution for synced domains stays deferred in that browser until it
+//     gains genuine serialization, while ordinary local use keeps working
+//     (see forceCommitLocalDomainRaw below).
+//   • forceCommitLocalDomainRaw() (the policy ordinary user-edit writers
+//     use) never claimed cross-tab CAS safety in the first place — an
+//     ordinary edit is a plain last-write-wins localStorage write, exactly
+//     as any client-side app's local storage has always behaved, with or
+//     without SH.2. It keeps working with or without Web Locks; only the
+//     CAS policy's SAFETY CLAIM was the thing that needed correcting.
+//   • Both policies still serialize through the SAME per-key Web Lock when
+//     one exists, so ordinary edits and hydration can never interleave
+//     mid-write in that (now genuinely CAS-safe) environment.
+//
+// Codex P1 fix (13th round, finding #2) — commitLocalDomainRaw() also now
+// accepts an optional `isStillValid` predicate, re-checked as the LAST step
+// before the actual mutation, still INSIDE the lock's critical section. A
+// caller's own pull-context epoch (see "Pull execution context" below) can
+// invalidate WHILE this commit sits queued waiting for the lock (held by
+// some other writer) — checking validity only after the whole call resolves
+// would be too late; the write could already have landed under a since-
+// superseded identity/profile. Re-checking here, immediately before
+// `localStorage.setItem`, closes that window completely: an invalidated
+// caller's commit reports "aborted" and never touches disk.
 
-export type LocalDomainCommitStatus = "committed" | "noop" | "superseded" | "failed";
+export type LocalDomainCommitStatus = "committed" | "noop" | "superseded" | "failed" | "unavailable" | "aborted";
 
 function localDomainCommitLockName(key: string): string {
   return `dwp:localDomainCommit:${key}`;
 }
 
+/** True only when the Web Locks API is actually present and callable. */
+function hasLocalDomainSerialization(): boolean {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  return !!locks && typeof locks.request === "function";
+}
+
 /**
  * Runs `fn` (a synchronous read-decide-write) serialized against every
- * other caller contending for the SAME `key`, via the Web Locks API when
- * available. `navigator.locks.request` always resolves asynchronously (a
- * task hop is inherent to the API even when the lock is free), so callers
- * that need synchronous-feeling completion timing only get it in the
- * no-Web-Locks fallback path — which runs `fn` immediately, in this same
- * tick, and merely wraps its already-computed result in a resolved Promise.
- * That fallback is not "less safe" in a way that matters for correctness:
- * it is the EXACT SAME read-decide-write logic locking would also run, just
- * without the cross-tab mutual exclusion around the narrow gap between the
- * read and the write — see decideLocalDomainCommit's own doc in
- * syncPayload.ts for why a plain value comparison already catches every
- * required case regardless of that gap, leaving only the theoretical
- * simultaneous-double-read race as this design's documented residual (see
- * this round's own report).
+ * other caller contending for the SAME `key`, via the Web Locks API.
+ * Callers MUST check hasLocalDomainSerialization() themselves before
+ * relying on this for CAS safety — this helper does not fall back to an
+ * unlocked direct call, because that fallback is exactly what the 13th
+ * round's fix removed (see this section's own doc above). It is used
+ * unconditionally only by forceCommitLocalDomainRaw's ordinary-edit policy,
+ * which never claimed lock-derived safety and is content with the
+ * best-effort serialization this still provides when a lock IS present.
  */
 function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
-  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-  if (locks && typeof locks.request === "function") {
-    return locks.request(localDomainCommitLockName(key), () => fn());
+  if (hasLocalDomainSerialization()) {
+    return navigator.locks.request(localDomainCommitLockName(key), () => fn());
   }
   return Promise.resolve(fn());
 }
@@ -605,7 +781,8 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
 function commitLocalDomainCore(
   key: string,
   nextRaw: string,
-  resolveExpectedPrevious: (currentRaw: string | null) => string | null
+  resolveExpectedPrevious: (currentRaw: string | null) => string | null,
+  isStillValid: () => boolean
 ): Promise<LocalDomainCommitStatus> {
   if (typeof window === "undefined") return Promise.resolve("failed");
   return withLocalDomainCommitLock(key, (): LocalDomainCommitStatus => {
@@ -617,6 +794,11 @@ function commitLocalDomainCore(
     }
     const decision = decideLocalDomainCommit(currentRaw, resolveExpectedPrevious(currentRaw), nextRaw);
     if (decision !== "write") return decision;
+    // Codex P1 fix (13th round) — the LAST gate before mutation, evaluated
+    // here rather than by the caller after this Promise resolves, so a
+    // context that went stale while this commit sat queued for the lock is
+    // still caught before anything is written.
+    if (!isStillValid()) return "aborted";
     try {
       localStorage.setItem(key, nextRaw);
     } catch {
@@ -635,26 +817,44 @@ function commitLocalDomainCore(
  * ordinary edit, or another tab's, it makes no difference which — that
  * write is newer by construction and must survive: this call reports
  * "superseded" and never touches disk.
+ *
+ * Codex P1 fix (13th round) — FAILS CLOSED as "unavailable" (no read, no
+ * write) when Web Locks are not present: see this section's own module doc
+ * for why a plain read-decide-write is not genuinely CAS-safe without one.
+ *
+ * `isStillValid`, when provided, is re-checked as the last step before the
+ * actual write (see commitLocalDomainCore's own doc) — pass a closure over
+ * the caller's own pull-context epoch (isPullContextCurrent(ctx)) so a
+ * commit that went stale while queued for the lock never lands. Defaults to
+ * always-valid for callers with no such context (there are none among this
+ * codebase's current hydration call sites, which all have a pull context).
  */
 export function commitLocalDomainRaw(
   key: string,
   expectedPreviousRaw: string | null,
-  nextRaw: string
+  nextRaw: string,
+  isStillValid: () => boolean = () => true
 ): Promise<LocalDomainCommitStatus> {
-  return commitLocalDomainCore(key, nextRaw, () => expectedPreviousRaw);
+  if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
+  return commitLocalDomainCore(key, nextRaw, () => expectedPreviousRaw, isStillValid);
 }
 
 /**
  * Unconditional commit policy — used by ordinary user-edit writers. A live
  * edit is the user's own freshest intent, so it is never rejected: it
  * always writes `nextRaw` (a "noop" only when the durable value already
- * equals it — still a success, not a failure). Still acquires the SAME
- * per-key lock commitLocalDomainRaw does, so a concurrent hydration commit
- * to this exact key can never interleave with it — the gap a hydration-only
- * lock would otherwise leave open for every non-participating writer.
+ * equals it — still a success, not a failure). Never claims cross-tab CAS
+ * safety (there is no `expectedPreviousRaw` to violate), so — unlike
+ * commitLocalDomainRaw — it is NOT gated on Web Locks being present: an
+ * ordinary edit is a plain last-write-wins local write, exactly as
+ * client-side localStorage usage has always behaved. When a lock IS
+ * present, it still participates in the SAME per-key serialization
+ * commitLocalDomainRaw uses, so a concurrent hydration commit to this exact
+ * key can never interleave with it — the gap a hydration-only lock would
+ * otherwise leave open for every non-participating writer.
  */
 export function forceCommitLocalDomainRaw(key: string, nextRaw: string): Promise<LocalDomainCommitStatus> {
-  return commitLocalDomainCore(key, nextRaw, (currentRaw) => currentRaw);
+  return commitLocalDomainCore(key, nextRaw, (currentRaw) => currentRaw, () => true);
 }
 
 /**
@@ -662,9 +862,11 @@ export function forceCommitLocalDomainRaw(key: string, nextRaw: string): Promise
  * commit: true for "committed" (a real write just landed) or "noop" (the
  * durable value already was the intended one) — both mean the intended
  * value is CONFIRMED durable right now. False for "superseded" (a newer
- * write won the race) or "failed" (a real localStorage exception) — both
- * mean the intended value is NOT durable, so ownership/syncReady/
- * confirmed-baseline advancement must not proceed as if it were.
+ * write won the race), "aborted" (the caller's own context went stale
+ * before the write), "unavailable" (no safe serialization primitive exists
+ * in this environment), or "failed" (a real localStorage exception) — all
+ * four mean the intended value is NOT confirmed durable, so ownership/
+ * syncReady/confirmed-baseline advancement must not proceed as if it were.
  */
 export function isLocalDomainCommitSuccess(status: LocalDomainCommitStatus): boolean {
   return status === "committed" || status === "noop";
@@ -1284,12 +1486,60 @@ let currentSyncProfileId = "default";
  */
 let currentSyncUserId: string | null = null;
 
+/**
+ * SH.2 architecture (Codex P1, 13th round) — see "Pull execution context" in
+ * the module doc above for the full architecture. Bumped by
+ * setSyncUserId()/setSyncProfileId() below whenever the value they are
+ * given is a GENUINE change (their own early-return-on-no-change guard is
+ * exactly the signal). A pull's captured PullContext.epoch stops matching
+ * this counter the instant such a change happens, at any point during that
+ * pull's lifetime — including while an awaited step is in flight.
+ */
+let currentPullEpoch = 0;
+
+/**
+ * One pull's immutable execution context — capture ONCE via
+ * beginPullContext(), immediately after that transition's own
+ * setSyncUserId()/setSyncProfileId() calls, and close over the result for
+ * the rest of that pull. Never re-read currentSyncUserId/currentSyncProfileId
+ * (or a page's own activeUserIdRef/activeProfileIdRef) after an await to
+ * decide who a write is for — use ctx.userId/ctx.profileId, which cannot be
+ * retroactively changed by a later transition.
+ */
+export interface PullContext {
+  readonly epoch: number;
+  readonly userId: string | null;
+  readonly profileId: string;
+}
+
+/**
+ * Snapshot the current sync identity as one immutable pull context. Call
+ * this exactly once per pull/transition, after setSyncUserId()/
+ * setSyncProfileId() have already been called for it.
+ */
+export function beginPullContext(): PullContext {
+  return { epoch: currentPullEpoch, userId: currentSyncUserId, profileId: currentSyncProfileId };
+}
+
+/**
+ * True only if no genuine identity/profile transition has happened since
+ * `ctx` was captured. Check this after EVERY awaited boundary a pull
+ * performs, before any subsequent durable write or gate transition — see
+ * "Pull execution context" in the module doc above for the full contract
+ * and the DEV_* reference cases for the exact required scenarios.
+ */
+export function isPullContextCurrent(ctx: PullContext): boolean {
+  return isPullEpochCurrent(ctx.epoch, currentPullEpoch);
+}
+
 // ── setSyncProfileId ──────────────────────────────────────────────────────────
 
 /**
  * Set the active profile that sync operations should target.
  * If the profile changes, any pending debounced push for the prior profile
- * is immediately cancelled to prevent cross-profile contamination.
+ * is immediately cancelled to prevent cross-profile contamination, and the
+ * pull epoch (see above) advances — invalidating any PullContext captured
+ * under the prior profile.
  * The caller is responsible for triggering a cloud pull for the new profile
  * before re-opening the sync gate.
  */
@@ -1298,6 +1548,7 @@ export function setSyncProfileId(profileId: string): void {
   // Profile changed — cancel any pending work for the old profile.
   cancelScheduledSync();
   currentSyncProfileId = profileId;
+  currentPullEpoch += 1;
 }
 
 // ── setSyncUserId ─────────────────────────────────────────────────────────────
@@ -1311,12 +1562,15 @@ export function setSyncProfileId(profileId: string): void {
  * If the identity changes (including transitioning to/from null on
  * sign-out/sign-in), any pending debounced push is cancelled first — a
  * push scheduled under a PRIOR identity must never be allowed to commit a
- * confirmed baseline under a NEW one, or vice versa.
+ * confirmed baseline under a NEW one, or vice versa — and the pull epoch
+ * (see above) advances, invalidating any PullContext captured under the
+ * prior identity even if it is mid-await right now.
  */
 export function setSyncUserId(userId: string | null): void {
   if (userId === currentSyncUserId) return;
   cancelScheduledSync();
   currentSyncUserId = userId;
+  currentPullEpoch += 1;
 }
 
 // ── scheduleSync ──────────────────────────────────────────────────────────────
