@@ -28,7 +28,7 @@ import {
   pullPlanner,
   registerUnloadSync,
   cancelScheduledSync,
-  getConfirmedSnapshot,
+  getConfirmedState,
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
@@ -576,21 +576,28 @@ export default function LightningPage() {
   // re-derived at resolution time, never mutated for the lifetime of that
   // one pull.
   //
-  // Reads getConfirmedSnapshot(userId, profileId) — the durable,
-  // user+profile-scoped record syncHelper's doPush() (and this page's own
-  // pull-commit call below) write from the exact revision-gated payload
-  // most recently accepted as newest — and, when one exists, uses it AS
-  // this pull's baseline outright: never a fresh read of the current
-  // plans/lightning/days storage keys (Codex P1 #1, fixed last round and
-  // preserved here). getConfirmedSnapshot() is a plain localStorage read
-  // of a key shared across every tab for this exact user+profile pair, so
-  // no cross-tab message-passing is needed — a DIFFERENT tab's confirmed
-  // push is visible here as soon as this function is called, with no
-  // separate listener required.
+  // Reads getConfirmedState(userId, profileId) — the durable,
+  // user+profile-scoped PER-DOMAIN record syncHelper's
+  // doPush()/commitConfirmedBaseline() write from the exact accepted
+  // payload, gated by EACH domain's OWN server revision (Codex P1, 11th
+  // round — see getConfirmedState's own doc in syncHelper.ts for why
+  // plans/lightning/days are tracked independently rather than under one
+  // mixed revision) — and, for whichever domain has a confirmed fact, uses
+  // it AS this pull's baseline for THAT domain outright: never a fresh
+  // read of the current plans/lightning/days storage keys, which is what
+  // let a same-tab edit made after push-start get misclassified as
+  // confirmed (Codex P1, 1st round, preserved here). getConfirmedState() is
+  // a plain localStorage scan of keys shared across every tab for this
+  // exact user+profile, so no cross-tab message-passing is needed for
+  // correctness — a DIFFERENT tab's confirmed push is visible here as soon
+  // as this function is called, with no separate listener required.
   //
-  // When no confirmed snapshot exists yet, falls back to
-  // itemsBaselineRef/daysBaselineRef/plansRawBaselineRef — the mount-time
-  // load, or a previous pull's own cloud-won resolution.
+  // For a domain with no confirmed fact yet, falls back to that domain's
+  // OWN itemsBaselineRef/daysBaselineRef/plansRawBaselineRef — the
+  // mount-time load, or a previous pull's own cloud-won resolution for that
+  // SAME domain. Note this page's "items" is the LIGHTNING domain
+  // (confirmed.lightning) and its "plansRaw" is the SIBLING domain
+  // (confirmed.plans) — the mirror image of plans/page.tsx.
   function captureConfirmedSnapshotForPull(contentOwnershipMismatch: boolean): {
     items: LightningItem[];
     days: string[];
@@ -598,35 +605,53 @@ export default function LightningPage() {
   } {
     // Codex P1 (3rd round) — no durable confirmation can be read without a
     // known authenticated identity (see activeUserIdRef's own doc); falls
-    // back to the in-memory refs exactly as when no confirmed snapshot
-    // exists yet.
+    // back to the in-memory refs exactly as when no confirmed fact exists
+    // yet for any domain.
     const confirmed = activeUserIdRef.current
-      ? getConfirmedSnapshot(activeUserIdRef.current, activeProfileIdRef.current)
-      : null;
-    // SH.2 architecture (Codex P1, 7th round) — FOREIGN BYTES CAN NEVER
-    // BECOME A FALLBACK CANDIDATE. Mirrors plans/page.tsx's own doc for
-    // this exact fix — see there for the full rationale: a mismatch with
-    // no confirmed snapshot yet for THIS identity means
-    // itemsBaselineRef/daysBaselineRef/plansRawBaselineRef below still
-    // hold whatever the PREVIOUS identity's conflict session last saw,
-    // and trusting them (even only as a comparison baseline) lets that
+      ? getConfirmedState(activeUserIdRef.current, activeProfileIdRef.current)
+      : {};
+    // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
+    // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. Mirrors
+    // plans/page.tsx's own doc for this exact fix — see there for the full
+    // rationale: a mismatch with no confirmed fact yet for THIS identity's
+    // copy of a given domain means that domain's own baseline ref still
+    // holds whatever the PREVIOUS identity's conflict session last saw for
+    // it, and trusting it (even only as a comparison baseline) lets that
     // foreign content become indistinguishable from this identity's own
-    // local edit the moment cloud has no data for a domain. Returning
-    // NEUTRAL/EMPTY values instead (and overwriting the refs themselves)
+    // local edit the moment cloud has no data for that domain. Returning a
+    // NEUTRAL/EMPTY value for that domain instead (and overwriting its ref)
     // forecloses that.
-    if (!confirmed && contentOwnershipMismatch) {
+    let items: LightningItem[];
+    if (confirmed.lightning) {
+      items = migrateLightningDayIds(confirmed.lightning.value.items as LightningItem[]);
+    } else if (contentOwnershipMismatch) {
+      items = [];
       itemsBaselineRef.current = [];
-      daysBaselineRef.current = ["day-1"];
-      plansRawBaselineRef.current = null;
-      return { items: [], days: ["day-1"], plansRaw: null };
+    } else {
+      items = itemsBaselineRef.current;
     }
-    return {
-      items: confirmed
-        ? migrateLightningDayIds(confirmed.snapshot.lightning.items as LightningItem[])
-        : itemsBaselineRef.current,
-      days: confirmed?.snapshot.days ?? daysBaselineRef.current,
-      plansRaw: confirmed ? JSON.stringify(confirmed.snapshot.plans) : plansRawBaselineRef.current,
-    };
+
+    let days: string[];
+    if (confirmed.days) {
+      days = confirmed.days.value;
+    } else if (contentOwnershipMismatch) {
+      days = ["day-1"];
+      daysBaselineRef.current = ["day-1"];
+    } else {
+      days = daysBaselineRef.current;
+    }
+
+    let plansRaw: string | null;
+    if (confirmed.plans) {
+      plansRaw = JSON.stringify(confirmed.plans.value);
+    } else if (contentOwnershipMismatch) {
+      plansRaw = null;
+      plansRawBaselineRef.current = null;
+    } else {
+      plansRaw = plansRawBaselineRef.current;
+    }
+
+    return { items, days, plansRaw };
   }
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
@@ -1133,8 +1158,8 @@ export default function LightningPage() {
           acceptedForBaseline.days = winningDays;
         }
         if (activeUserIdRef.current && planner?.revision != null) {
-          // Async (Codex P1, 4th round — serialized across tabs via the
-          // Web Locks API, see commitConfirmedBaseline's own doc); fired
+          // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
+          // the 11th — see commitConfirmedBaseline's own doc); fired
           // without awaiting since nothing later in this callback depends
           // on the commit having landed.
           void commitConfirmedBaseline(

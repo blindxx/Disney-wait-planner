@@ -83,7 +83,7 @@ import {
   pullPlanner,
   registerUnloadSync,
   cancelScheduledSync,
-  getConfirmedSnapshot,
+  getConfirmedState,
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
@@ -917,28 +917,31 @@ export default function PlansPage() {
   // visible to this pull at all; it becomes the starting point for
   // whichever pull runs next.
   //
-  // Reads getConfirmedSnapshot(userId, profileId) — the durable,
-  // user+profile-scoped record syncHelper's doPush()/commitConfirmedBaseline()
-  // write from the exact accepted payload, gated by server revision — and,
-  // when one exists, uses it AS this pull's baseline outright: never a
-  // fresh read of the current plans/lightning/days storage keys, which is
-  // what let a same-tab edit made after push-start get misclassified as
+  // Reads getConfirmedState(userId, profileId) — the durable,
+  // user+profile-scoped PER-DOMAIN record syncHelper's
+  // doPush()/commitConfirmedBaseline() write from the exact accepted
+  // payload, gated by EACH domain's OWN server revision (Codex P1, 11th
+  // round — see getConfirmedState's own doc in syncHelper.ts for why
+  // plans/lightning/days are tracked independently rather than under one
+  // mixed revision) — and, for whichever domain has a confirmed fact, uses
+  // it AS this pull's baseline for THAT domain outright: never a fresh
+  // read of the current plans/lightning/days storage keys, which is what
+  // let a same-tab edit made after push-start get misclassified as
   // confirmed (Codex P1, 1st round, preserved here). Scoping by userId
   // (not just profileId) ensures a different account signing into this
   // same local profile slot never reads a prior account's confirmed
-  // record (Codex P1, 3rd round). getConfirmedSnapshot() is a plain
-  // localStorage read of a key shared across every tab for this exact
+  // record (Codex P1, 3rd round). getConfirmedState() is a plain
+  // localStorage scan of keys shared across every tab for this exact
   // user+profile, so no cross-tab message-passing is needed for
   // correctness — a DIFFERENT tab's confirmed push is visible here as soon
   // as this function is called, with no separate listener required.
   //
-  // When no confirmed snapshot exists yet (this profile has never had a
-  // successful push — fresh/offline/unauthenticated), falls back to
-  // itemsBaselineRef/daysBaselineRef/lightningRawBaselineRef — the
-  // mount-time load, or a previous pull's own cloud-won resolution (see
-  // the pull effect's existing itemsCloudWon/daysCloudWon updates, which
-  // are unchanged by this fix and remain this page's best assumption of
-  // "known-safe local content" absent an actual confirmed push).
+  // For a domain with no confirmed fact yet (this profile has never had a
+  // successful push/pull for THAT domain — fresh/offline/unauthenticated),
+  // falls back to that domain's OWN itemsBaselineRef/daysBaselineRef/
+  // lightningRawBaselineRef — the mount-time load, or a previous pull's own
+  // cloud-won resolution for that SAME domain (see the pull effect's
+  // existing itemsCloudWon/daysCloudWon updates, unchanged by this fix).
   function captureConfirmedSnapshotForPull(contentOwnershipMismatch: boolean): {
     items: PlanItem[];
     days: string[];
@@ -946,54 +949,75 @@ export default function PlansPage() {
   } {
     // Codex P1 (3rd round) — no durable confirmation can be read without a
     // known authenticated identity (see activeUserIdRef's own doc); falls
-    // back to the in-memory refs exactly as when no confirmed snapshot
-    // exists yet. This should not normally happen (the pull effect only
-    // reaches here once sessionStatus is "authenticated"), but never
+    // back to the in-memory refs exactly as when no confirmed fact exists
+    // yet for any domain. This should not normally happen (the pull effect
+    // only reaches here once sessionStatus is "authenticated"), but never
     // guesses an identity if it does.
     const confirmed = activeUserIdRef.current
-      ? getConfirmedSnapshot(activeUserIdRef.current, activeProfileIdRef.current)
-      : null;
-    // SH.2 architecture (Codex P1, 7th round) — FOREIGN BYTES CAN NEVER
-    // BECOME A FALLBACK CANDIDATE. A mismatch (this profile's raw storage
-    // is attributed to a DIFFERENT, known identity — see
-    // getLocalContentOwner's own doc) with no confirmed snapshot yet for
-    // THIS identity means itemsBaselineRef/daysBaselineRef/
-    // lightningRawBaselineRef below still hold whatever the PREVIOUS
-    // identity's conflict session last saw. Trusting them here — even only
-    // as a comparison baseline — lets that foreign content become
+      ? getConfirmedState(activeUserIdRef.current, activeProfileIdRef.current)
+      : {};
+    // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
+    // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. A
+    // mismatch (this profile's raw storage is attributed to a DIFFERENT,
+    // known identity — see getLocalContentOwner's own doc) with no
+    // confirmed fact yet for THIS identity's copy of a given domain means
+    // that domain's own baseline ref (itemsBaselineRef/daysBaselineRef/
+    // lightningRawBaselineRef) still holds whatever the PREVIOUS identity's
+    // conflict session last saw for it. Trusting it here — even only as a
+    // comparison baseline — lets that foreign content become
     // indistinguishable from "this identity's own local edit" the moment
-    // cloud has no data for a domain (a 204, or that domain simply absent):
-    // this baseline AND the real on-disk "current" read the pull effect
-    // takes moments later would be the SAME foreign-tainted value, so
-    // changedLocally computes false and the tainted value is adopted
+    // cloud has no data for that domain (a 204, or that domain simply
+    // absent): the baseline AND the real on-disk "current" read the pull
+    // effect takes moments later would be the SAME foreign-tainted value,
+    // so changedLocally computes false and the tainted value is adopted
     // outright as this identity's winner — eligible to be pushed the
     // instant syncReady reopens, leaking account A's data into account B.
-    // Returning NEUTRAL/EMPTY values here instead (never the tainted refs)
-    // forecloses that: a domain with no cloud data now falls through to an
-    // empty baseline carrying no foreign content to leak. The refs
-    // themselves are overwritten immediately below too, so every OTHER
-    // reader of them (not just this pull) sees the same neutral state from
-    // this point on — a narrowly-scoped, deliberate exception to this
-    // file's general preference against destructive clears, accepted
-    // because leaking one account's planner data into another's is a
-    // strictly worse outcome than losing a window of this identity's own
-    // edits, which cannot exist yet in this exact branch: a mismatch is
-    // only ever detected once, at the very start of this auth transition,
+    // Returning a NEUTRAL/EMPTY value for that domain instead (never the
+    // tainted ref) forecloses that. Each domain's ref is overwritten
+    // immediately when substituted, so every OTHER reader of it (not just
+    // this pull) sees the same neutral state from this point on — a
+    // narrowly-scoped, deliberate exception to this file's general
+    // preference against destructive clears, accepted because leaking one
+    // account's planner data into another's is a strictly worse outcome
+    // than losing a window of this identity's own edits, which cannot
+    // exist yet for a domain with no confirmed fact: a mismatch is only
+    // ever detected once, at the very start of this auth transition,
     // before this new identity has had any chance to write anything of its
-    // own into this profile's storage.
-    if (!confirmed && contentOwnershipMismatch) {
+    // own into this profile's storage. A domain that DOES already have a
+    // confirmed fact for this identity is used outright regardless of the
+    // mismatch flag — it is this identity's own genuine, server-verified
+    // state, not foreign content.
+    let items: PlanItem[];
+    if (confirmed.plans) {
+      items = migrateDayIds((confirmed.plans.value.items as unknown[]).map(normalizePlanItem));
+    } else if (contentOwnershipMismatch) {
+      items = [];
       itemsBaselineRef.current = [];
-      daysBaselineRef.current = ["day-1"];
-      lightningRawBaselineRef.current = null;
-      return { items: [], days: ["day-1"], lightningRaw: null };
+    } else {
+      items = itemsBaselineRef.current;
     }
-    return {
-      items: confirmed
-        ? migrateDayIds((confirmed.snapshot.plans.items as unknown[]).map(normalizePlanItem))
-        : itemsBaselineRef.current,
-      days: confirmed?.snapshot.days ?? daysBaselineRef.current,
-      lightningRaw: confirmed ? JSON.stringify(confirmed.snapshot.lightning) : lightningRawBaselineRef.current,
-    };
+
+    let days: string[];
+    if (confirmed.days) {
+      days = confirmed.days.value;
+    } else if (contentOwnershipMismatch) {
+      days = ["day-1"];
+      daysBaselineRef.current = ["day-1"];
+    } else {
+      days = daysBaselineRef.current;
+    }
+
+    let lightningRaw: string | null;
+    if (confirmed.lightning) {
+      lightningRaw = JSON.stringify(confirmed.lightning.value);
+    } else if (contentOwnershipMismatch) {
+      lightningRaw = null;
+      lightningRawBaselineRef.current = null;
+    } else {
+      lightningRaw = lightningRawBaselineRef.current;
+    }
+
+    return { items, days, lightningRaw };
   }
   // Gate: ensures context inference runs at most once per page load.
   const contextInferredRef = useRef(false);
@@ -1615,7 +1639,7 @@ export default function PlansPage() {
     // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
     // SESSION boundary: "for every SH.2 conflict decision, the baseline
     // and local candidate MUST belong to the same authenticated conflict
-    // context." getConfirmedSnapshot/commitConfirmedBaseline already scope
+    // context." getConfirmedState/commitConfirmedBaseline already scope
     // the BASELINE side by identity (3rd round); nothing scoped the
     // CANDIDATE side — a fresh read of plans/lightning/days localStorage
     // carries NO identity attribution, so it can be a DIFFERENT account's
@@ -1754,8 +1778,8 @@ export default function PlansPage() {
         if (cancelled) return;
         // This pull's EFFECTIVE baseline for winner selection: when at
         // least one pending op was just confirmed accepted, re-derive it
-        // from the NOW-updated confirmed snapshot (captureConfirmedSnapshotForPull
-        // reads getConfirmedSnapshot() fresh) rather than the frozen
+        // from the NOW-updated confirmed state (captureConfirmedSnapshotForPull
+        // reads getConfirmedState() fresh) rather than the frozen
         // pre-fetch `pullStartBaseline` — so a domain this device already
         // got acknowledged for is never mistaken for a fresh local edit
         // relative to a now-stale baseline. Falls back to
@@ -2113,8 +2137,8 @@ export default function PlansPage() {
           acceptedForBaseline.days = winningDays;
         }
         if (activeUserIdRef.current && planner?.revision != null) {
-          // Async (Codex P1, 4th round — serialized across tabs via the
-          // Web Locks API, see commitConfirmedBaseline's own doc); fired
+          // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
+          // the 11th — see commitConfirmedBaseline's own doc); fired
           // without awaiting since nothing later in this callback depends
           // on the commit having landed.
           void commitConfirmedBaseline(

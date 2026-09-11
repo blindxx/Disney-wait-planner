@@ -29,18 +29,31 @@ Reviewers should check any changes affecting:
  *   pullPlanner(profileId)       — fetch combined cloud planner on sign-in
  *   registerUnloadSync()         — best-effort beacon push on page unload
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
- *   getConfirmedSnapshot(userId, profileId)          — read the current
- *                                                       confirmed baseline
- *   await commitConfirmedBaseline(userId, profileId, — advance specific
- *     revision, accepted)                              domain(s) of that
- *                                                       baseline, gated by
- *                                                       server revision AND
- *                                                       serialized across
- *                                                       tabs (async — see
- *                                                       its own doc); fails
- *                                                       safe (no-op) if the
- *                                                       Web Locks API is
- *                                                       unavailable
+ *   getConfirmedState(userId, profileId)              — read the current
+ *                                                       PER-DOMAIN confirmed
+ *                                                       state (plans/
+ *                                                       lightning/days each
+ *                                                       independently, each
+ *                                                       with its OWN
+ *                                                       revision — 11th
+ *                                                       round; see its own
+ *                                                       doc; replaces the
+ *                                                       old single-mixed-
+ *                                                       snapshot
+ *                                                       getConfirmedSnapshot)
+ *   await commitConfirmedBaseline(userId, profileId, — record specific
+ *     revision, accepted)                              domain(s) as
+ *                                                       CONFIRMED at that
+ *                                                       revision — an
+ *                                                       immutable fact,
+ *                                                       never a locked
+ *                                                       read-modify-write
+ *                                                       (11th round; see
+ *                                                       its own doc);
+ *                                                       returns whether
+ *                                                       every attempted
+ *                                                       domain write
+ *                                                       durably succeeded
  *   getLocalContentOwner(profileId)                  — read which identity
  *                                                       this profile's raw
  *                                                       local content is
@@ -109,13 +122,35 @@ Reviewers should check any changes affecting:
  *   dwp:sync:{profileId}:localContentOwner             — see
  *                                                         getLocalContentOwner's
  *                                                         own doc
- *   dwp:sync:{userId}:{profileId}:confirmedSnapshot    — the durable
- *                                                         confirmed
- *                                                         ConfirmedPlannerSnapshot
- *                                                         for this user+
- *                                                         profile, mutated
- *                                                         ONLY under
- *                                                         withConfirmedSnapshotLock
+ *   dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision} — ONE
+ *                                                         KEY PER
+ *                                                         (domain,revision)
+ *                                                         confirmed fact
+ *                                                         (11th round; see
+ *                                                         the "Per-domain
+ *                                                         confirmed state"
+ *                                                         section below) —
+ *                                                         an immutable
+ *                                                         historical
+ *                                                         record, written
+ *                                                         with a plain
+ *                                                         unconditional
+ *                                                         setItem (no lock,
+ *                                                         no read-modify-
+ *                                                         write); the
+ *                                                         CURRENT confirmed
+ *                                                         value for a
+ *                                                         domain is
+ *                                                         computed at READ
+ *                                                         time as the
+ *                                                         max-revision fact
+ *                                                         among whatever
+ *                                                         exists for that
+ *                                                         domain, and
+ *                                                         opportunistically
+ *                                                         pruned down to
+ *                                                         just that max on
+ *                                                         every write
  *   dwp:sync:{userId}:{profileId}:pendingOp:{opId}     — ONE key PER
  *                                                         still-pending
  *                                                         unload beacon
@@ -162,60 +197,60 @@ Reviewers should check any changes affecting:
  *
  * ── Cloud-confirmed local snapshot contract (SH.2) ──────────────────────────
  *
- * "For authenticated user U and profile P, what exact planner snapshot is
- * the newest server-confirmed state?" — answered by
- * getConfirmedSnapshot(userId, profileId). A domain's confirmed value
- * represents "the state currently accepted as synchronized for this
- * domain" — NOT merely "the last successful PUT payload". It advances two
- * ways, both writing the SAME durable key:
- *   • doPush() (below) commits the literal request body of every
- *     SUCCESSFUL push, gated by the server-issued `revision` in that
+ * "For authenticated user U and profile P, what exact planner state is the
+ * newest server-confirmed state — PER DOMAIN?" — answered by
+ * getConfirmedState(userId, profileId), returning an independent
+ * `{ revision, value }` fact for each of plans/lightning/days that has ever
+ * been confirmed (any subset may be absent — "never confirmed yet for this
+ * domain"). A domain's confirmed value represents "the state currently
+ * accepted as synchronized for this domain" — NOT merely "the last
+ * successful PUT payload". It advances two ways, both recording facts under
+ * the SAME per-domain storage:
+ *   • doPush() (below) records the literal request body of every
+ *     SUCCESSFUL push, tagged with the server-issued `revision` in that
  *     push's response.
  *   • commitConfirmedBaseline() (below) is called by a page's pull effect
  *     after a pull resolves, for whichever domain(s) it determined were
  *     cloud-won AND successfully persisted this pull — a domain a pull
  *     hydrates from cloud is just as validly "confirmed" as one a push
- *     just sent, and must advance the SAME record so a LATER pull never
- *     misclassifies that already-hydrated state as an unsynced local edit
- *     (Codex P1, 1st round), gated by the same pull's GET response
- *     `revision`. It reads the CURRENT confirmed record fresh (never a
- *     frozen pull-start snapshot) and replaces only the domain(s) passed
- *     in, leaving every other domain's confirmation exactly as it was —
- *     so it can never let an older write clobber a domain some OTHER
- *     concurrent commit (a push, or another tab's pull) already advanced
- *     further than this one knows about.
+ *     just sent, and must advance the SAME per-domain record so a LATER
+ *     pull never misclassifies that already-hydrated state as an unsynced
+ *     local edit (Codex P1, 1st round), tagged with the same pull's GET
+ *     response `revision`. Domains NOT passed in this call are completely
+ *     unaffected — there is no "current record" this call reads or
+ *     replaces at all (see the 11th round's redesign below); a domain's
+ *     own facts simply accumulate independently of what any OTHER domain's
+ *     commit does.
  *
- * Codex P1 fix (3rd round) — TWO further guarantees, both enforced by
- * nextConfirmedBaseline() (syncPayload.ts), which both commit paths above
- * delegate to:
+ * Codex P1 fix (3rd round) — TWO further guarantees:
  *   • Identity scope: the storage key is keyed by BOTH userId and
- *     profileId (confirmedSnapshotKeyForIdentity below) — "profile" is a
- *     LOCAL, per-device concept independent of which cloud account is
- *     signed in, so a bare profileId key would let account B, signing in
- *     after account A signs out on the same device/profile, read (and
- *     potentially re-confirm) account A's leftover confirmed record. With
- *     userId in the key, B's read is a DIFFERENT key A never touched —
- *     B's own confirmed state (or lack thereof) is unaffected by A ever
- *     having used this profile slot.
+ *     profileId (confirmedFactKey below) — "profile" is a LOCAL, per-device
+ *     concept independent of which cloud account is signed in, so a bare
+ *     profileId key would let account B, signing in after account A signs
+ *     out on the same device/profile, read (and potentially re-confirm)
+ *     account A's leftover confirmed record. With userId in the key, B's
+ *     read is a DIFFERENT key A never touched — B's own confirmed state
+ *     (or lack thereof) is unaffected by A ever having used this profile
+ *     slot.
  *   • Revision ordering: every commit carries the server-issued `revision`
  *     that produced it (see api/sync/planner/route.ts's module doc for why
  *     this — not `updated_at`, not response arrival order — is the only
- *     authoritative ordering signal under concurrent writes). A commit
- *     whose revision is <= the currently-confirmed revision is rejected
- *     outright, so two concurrent pushes' responses arriving in EITHER
- *     order converge on the same final confirmed state — whichever
- *     server-committed LATER (higher revision), never whichever response
- *     happened to arrive at this tab last.
+ *     authoritative ordering signal under concurrent writes). Two
+ *     concurrent pushes' responses arriving in EITHER order converge on the
+ *     same final confirmed state per domain — whichever server-committed
+ *     LATER (higher revision) for THAT domain, never whichever response
+ *     happened to arrive at this tab last, and never blocked by some OTHER
+ *     domain's unrelated revision (see the 11th round below for why this
+ *     last guarantee needed a full redesign, not just a bigger lock).
  *
- * Codex P1 fix (4th round) — revision ordering above is only correct if
- * the read-compute-write sequence that applies it is itself atomic; see
- * commitConfirmedBaseline()'s own doc for why a plain read-then-write is
- * NOT atomic across tabs, and how the Web Locks API closes that gap.
- * Codex P1 fix (5th round) — re-audited and hardened to FAIL SAFE (skip
- * the commit entirely) when the Locks API is unavailable, rather than
- * fall back to the unserialized sequence — see commitConfirmedBaseline's
- * own doc for why a "graceful" fallback there would silently reintroduce
- * the exact regression this mechanism exists to prevent.
+ * Codex P1 fix (4th round) — revision ordering above is only correct if the
+ * read-compute-write sequence that applies it is itself atomic across tabs.
+ * Codex P1 fix (5th round) — hardened to FAIL SAFE (skip the commit
+ * entirely) when the Locks API is unavailable, rather than fall back to an
+ * unserialized sequence that could silently reintroduce a regression.
+ * (Both superseded by the 11th round's redesign below, which removes the
+ * Web-Locks dependency from this mechanism entirely — kept here as
+ * historical record of the problem these rounds were solving.)
  *
  * Codex P1 fix (5th round) — identity-scoping the BASELINE side of a
  * conflict decision (3rd round) is not sufficient on its own: the
@@ -251,87 +286,111 @@ Reviewers should check any changes affecting:
  * the server durably records as accepted (see `user_planner_writes` in
  * db-schema.sql), independent of the row's later content. A subsequent
  * pull's GET, given the pending opId as `lastOpId`, gets back a conclusive
- * `opStatus.found` fact from the server — see resolveConfirmedAfterBeacon()
- * (syncPayload.ts) and resolveConfirmedSnapshotAfterBeacon() (below).
+ * `opStatus.found` fact from the server — see
+ * acceptedDomainFactsFromBeacon() (syncPayload.ts) and
+ * reconcilePendingOperations() (below).
  *
  * This also required SEPARATING `pendingBeaconOpId` from `confirmed` onto
- * its own, independent, UNLOCKED key (pendingBeaconOpIdKeyForIdentity
- * below) — the 6th round's consolidation of both fields into one
- * Web-Locks-protected record required registerUnloadSync()'s beforeunload
- * write (which cannot reliably await a lock) to touch that SAME locked
- * record, which is exactly the metadata race Codex flagged for the 7th
- * round (pending-beacon state read-modify-written unlocked while confirmed
- * state used Web Locks). Now `pendingBeaconOpId` needs no read-modify-write
- * at all — it is a single opaque scalar, always fully overwritten by
- * whichever beacon fires last.
+ * its own, independent, UNLOCKED key — the 6th round's consolidation of
+ * both fields into one Web-Locks-protected record required
+ * registerUnloadSync()'s beforeunload write (which cannot reliably await a
+ * lock) to touch that SAME locked record, which is exactly the metadata
+ * race Codex flagged for the 7th round (pending-beacon state read-
+ * modify-written unlocked while confirmed state used Web Locks). Now
+ * `pendingBeaconOpId` needs no read-modify-write at all — it was a single
+ * opaque scalar, always fully overwritten by whichever beacon fired last.
  *
  * Codex P1 fix (9th round) — the 7th/8th rounds' "last-write-wins, only the
  * MOST RECENT beacon matters" assumption was itself a bug: it is a "latest
- * only" timing heuristic the round-8 directive already warns against, and
- * it actively DESTROYS evidence. If tab 1 registers pending beacon A and
- * tab 2 later registers pending beacon B (both still genuinely unresolved),
- * overwriting the single scalar key to B silently discards A — no pull will
- * ever check A's fate again, even though A might still be sitting,
- * unaccepted, in some queue. Separately, the 8th round's
- * resolveConfirmedSnapshotAfterBeacon() cleared the pending marker BEFORE
- * confirming that the paired confirmed-baseline promotion had durably
- * succeeded — if Web Locks were unavailable, or the lock request failed, or
- * the promotion was itself rejected as stale, the marker was already gone
- * while the baseline it was supposed to gate remained un-promoted, again
- * losing the evidence needed to retry later.
+ * only" timing heuristic that actively DESTROYS evidence. If tab 1
+ * registers pending beacon A and tab 2 later registers pending beacon B
+ * (both still genuinely unresolved), overwriting the single scalar key to
+ * B silently discards A — no pull will ever check A's fate again, even
+ * though A might still be sitting, unaccepted, in some queue. Separately,
+ * the 8th round's beacon-resolution helper cleared the pending marker
+ * BEFORE confirming that the paired confirmed-baseline promotion had
+ * durably succeeded — if Web Locks were unavailable, or the lock request
+ * failed, or the promotion was itself rejected as stale, the marker was
+ * already gone while the baseline it was supposed to gate remained
+ * un-promoted, again losing the evidence needed to retry later.
  *
- * Both bugs share one cause: treating "pending operations" as a single
- * mutable slot instead of a durable, per-operation SET. The fix replaces
+ * Both bugs shared one cause: treating "pending operations" as a single
+ * mutable slot instead of a durable, per-operation SET. The fix replaced
  * `pendingBeaconOpId` with one INDEPENDENT localStorage key PER pending
  * opId (`dwp:sync:{userId}:{profileId}:pendingOp:{opId}` — see the "Pending
- * operations" section below). Registering a new op is then a pure,
- * unconditional single-key write — no read of any existing set required,
- * so it can never race or clobber a DIFFERENT op's key, satisfying the
- * cross-tab requirement without any lock at all. Retiring an op is a pure,
+ * operations" section below). Registering a new op is a pure, unconditional
+ * single-key write — no read of any existing set required, so it can never
+ * race or clobber a DIFFERENT op's key. Retiring an op is a pure,
  * unconditional single-key delete, gated on the SAME op's confirmed-
- * baseline promotion having been PROVEN to run to completion under
- * withConfirmedSnapshotLock (see its updated return contract and
- * reconcilePendingOperations() below) — never before. `confirmed` remains
- * exclusively mutated under the lock; each pending-op key is exclusively
- * mutated by plain, unconditional, single-key writes/deletes. No field is
- * ever touched by both a locked and an unlocked writer, and no two
- * DIFFERENT operations' evidence ever shares a key.
+ * baseline promotion having been PROVEN to durably succeed (see
+ * commitConfirmedBaseline's return value and reconcilePendingOperations()
+ * below) — never before.
  *
- * Either way, the record is:
- *   • NEVER a fresh read of the current plans/lightning/days storage keys
- *     at the moment of commit — those are mutable and may already hold a
- *     newer, still-unaccepted edit; only the EXACT value this pull (or
- *     push) determined was accepted is ever written.
- *   • NEVER dependent on response/resolution timing — each commit is
- *     gated by server-issued revision, never by when the response happened
- *     to arrive or resolve.
- *   • NEVER dependent on which tab performed the push or pull —
- *     localStorage is shared across same-origin tabs, so any tab for this
- *     user+profile reads the identical value via a plain fresh read of the
- *     same durable key, and converges on the same newest revision
- *     regardless of which tab wrote it.
- * Consumers (plans/page.tsx, lightning/page.tsx) treat this as the single
- * source of truth for "was my current local content already accepted by
- * the cloud" — see captureConfirmedSnapshotForPull() in each page for how
- * a pull's OWN immutable baseline is frozen from it, and each page's pull
- * effect for how commitConfirmedBaseline() is called afterward.
+ * Codex P1 fix (11th round) — TWO further P1s in the confirmed-state
+ * architecture itself:
+ *   (1) MIXED-DOMAIN REVISION. The single `ConfirmedPlannerSnapshot
+ *       { revision; snapshot }` record covered plans+lightning+days
+ *       TOGETHER under one revision. Disjoint pulls/pushes can legitimately
+ *       confirm DIFFERENT domains at DIFFERENT server revisions (e.g. a
+ *       Days-only cloud win at revision 7, while Plans is still only
+ *       confirmed as of revision 5 from an earlier, unrelated commit) —
+ *       assigning the WHOLE mixed snapshot the newest revision made the
+ *       OLDER domain look newer than it genuinely was, so a later,
+ *       perfectly legitimate revision-6 update to Plans would be wrongly
+ *       rejected as "stale" against the borrowed revision 7 that Plans
+ *       itself was never actually confirmed at.
+ *   (2) WEB-LOCKS DEPENDENCY. When Web Locks were unavailable, the
+ *       read-compute-write mutation was skipped entirely (fail-safe, per
+ *       the 5th round). That was NOT safe enough on its own: after a
+ *       SUCCESSFUL push, skipping the confirmed-state update left the
+ *       durable/fallback baseline stale, and a LATER pull — in this same
+ *       browser, this same tab, possibly after a reload — would then
+ *       compare fresh local storage (already reflecting the pushed state)
+ *       against the STALE confirmed baseline, see a "difference", and
+ *       misclassify already-synced content as an unsynced local edit,
+ *       potentially overwriting newer cloud state written by another
+ *       device in the meantime. "Skip the write" is only safe if nothing
+ *       downstream can be destructive about the resulting staleness — here
+ *       it very much could be.
+ *
+ * Both are fixed by the SAME redesign: confirmed state is now a set of
+ * PER-DOMAIN, PER-REVISION, IMMUTABLE facts (see "Per-domain confirmed
+ * state" below) rather than one mutable mixed-domain slot. Each domain's
+ * OWN current confirmed value is computed at READ time as the max-revision
+ * fact recorded for it — this closes (1) structurally (there is no shared
+ * revision to borrow; each domain's revision is only ever compared against
+ * ITS OWN prior facts) and closes (2) by removing the Web-Locks dependency
+ * entirely: recording an immutable fact is a plain, unconditional
+ * `localStorage.setItem` — no read, no lock, no compare-then-write — so it
+ * is exactly as reliable with or without the Web Locks API. See
+ * "Per-domain confirmed state" below for the full mechanism.
+ *
+ * Consumers (plans/page.tsx, lightning/page.tsx) treat getConfirmedState()
+ * as the single source of truth for "was my current local content already
+ * accepted by the cloud", per domain — see captureConfirmedSnapshotForPull()
+ * in each page for how a pull's OWN immutable baseline is frozen from it
+ * (per domain, independently), and each page's pull effect for how
+ * commitConfirmedBaseline() is called afterward.
  */
 
 import { buildNamespacedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
-  parseConfirmedPlannerSnapshot,
-  nextConfirmedBaseline,
-  resolveConfirmedAfterBeacon,
+  parseConfirmedPlannerDomainFact,
+  parseConfirmedDaysFact,
+  reduceConfirmedFacts,
+  acceptedDomainFactsFromBeacon,
   type SyncedPlannerPayload,
-  type ConfirmedPlannerSnapshot,
+  type ConfirmedDomainFact,
+  type ConfirmedPlannerState,
+  type AcceptedPlannerDomains,
 } from "./syncPayload";
 
 /**
  * The server's conclusive answer (see api/sync/planner/route.ts's GET
  * handler) to "was the write tagged with this opId ever accepted" — see
- * resolveConfirmedAfterBeacon()'s own doc in syncPayload.ts for the full
+ * acceptedDomainFactsFromBeacon()'s own doc in syncPayload.ts for the full
  * decision this feeds into.
  */
 export interface OpStatus {
@@ -380,7 +439,7 @@ function localContentOwnerKeyForProfile(profileId: string): string {
  * SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT SESSION
  * boundary. "For every SH.2 conflict decision, the baseline and local
  * candidate MUST belong to the same authenticated conflict context."
- * getConfirmedSnapshot()/commitConfirmedBaseline() already scope the
+ * getConfirmedState()/commitConfirmedBaseline() already scope the
  * BASELINE side of every conflict decision by identity (userId+profileId).
  * Nothing, until this fix, scoped the CANDIDATE side: a fresh read of
  * plans/lightning/days localStorage carries no identity attribution at
@@ -482,213 +541,208 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
   } catch {}
 }
 
+// ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────
+
+/** The three synced domains this module tracks confirmed facts for. */
+type ConfirmedDomainName = "plans" | "lightning" | "days";
+const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightning", "days"];
+
 /**
- * Returns the localStorage key for the durable confirmed baseline
- * (ConfirmedPlannerSnapshot) for a given (userId, profileId) pair. Codex P1
- * fix (3rd round, carried forward) — keyed by BOTH: "profile" is a LOCAL,
- * per-device concept (e.g. a family member slot) entirely independent of
- * which cloud account is signed in, so a profileId-only key would let a
- * DIFFERENT account, signing into the same profile slot on the same
- * browser, read (and potentially build on) the previous account's
- * confirmed record. userId is resolved the same way the server does
- * (session.user.id, falling back to email) — see each page's
- * auth-transition effect for where this is read from useSession().
+ * SH.2 architecture (Codex P1, 11th round) — see the module doc's 11th-round
+ * paragraph for the full root-cause analysis this section closes. Every
+ * confirmed fact for a (userId, profileId, domain) is stored under its OWN
+ * key, namespaced by its OWN revision:
+ * `dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision}`.
  *
- * Codex P1 fix (7th round) — reverted the 6th round's consolidation of
- * this record with `pendingBeacon` into one `:state` key (formerly
- * SyncIdentityState). `pendingBeaconOpId` is now tracked completely
- * independently (see pendingBeaconOpIdKeyForIdentity below) — see the
- * module doc's 7th-round paragraph for why. A value written under the
- * 6th round's `:state` key name is a DIFFERENT shape and is never misread
- * as a bare ConfirmedPlannerSnapshot (parseConfirmedPlannerSnapshot
- * requires a top-level `revision`, which that shape never had) — this key
- * name reverts to the pre-6th-round name specifically so no stale `:state`
- * value is ever read from here at all.
+ * This is the entire mechanism that removes BOTH the mixed-domain-revision
+ * bug and the Web-Locks dependency:
+ *   • Per-domain: plans/lightning/days each scan and reduce ONLY their own
+ *     facts (see getConfirmedState() below) — a domain's confirmed revision
+ *     is never compared against, borrowed from, or blocked by another
+ *     domain's facts.
+ *   • Per-revision, immutable: recording a fact never reads or compares
+ *     anything — `revision` is server-assigned and, together with `domain`,
+ *     forms the key, so writing a NEW fact can never collide with or
+ *     require overwriting an EXISTING one (a genuine duplicate — the same
+ *     domain confirmed twice at the identical revision — simply writes the
+ *     same content to the same key again, a harmless no-op). Two tabs
+ *     recording DIFFERENT facts for the SAME domain "at the same instant"
+ *     can never race destructively: there is no shared mutable slot to
+ *     corrupt, only more facts for reduceConfirmedFacts() (syncPayload.ts)
+ *     to reduce over at READ time. Write order therefore never matters —
+ *     only which facts exist matters, and a fresh read always sees all of
+ *     them.
+ * This is precisely why NO Web Locks API involvement is needed anywhere in
+ * this section: correctness comes from immutability + read-time reduction,
+ * not from serializing a compound read-modify-write.
  */
-function confirmedSnapshotKeyForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot`;
+function confirmedFactPrefix(userId: string, profileId: string, domain: ConfirmedDomainName): string {
+  return `dwp:sync:${userId}:${profileId}:confirmedFact:${domain}:`;
 }
 
-// ── Confirmed snapshot (Web-Locks-protected) ────────────────────────────────────
-
-/**
- * Read just the confirmed baseline (revision + planner state) for this
- * authenticated user + profile — see the module doc's "Cloud-confirmed
- * local snapshot contract" above. Returns null when nothing has ever been
- * confirmed for this exact (userId, profileId) pair (fresh profile,
- * always-offline, never signed in, or a DIFFERENT account previously used
- * this profile slot) or the stored value is missing/corrupt — callers must
- * treat null as "nothing to compare against yet", not as an error.
- *
- * Safe to call from any tab: this is a plain localStorage read of a key
- * that is durable (survives reloads) and shared (every same-origin tab for
- * this browser sees the identical value), so it needs no message-passing
- * or event subscription to be correct — only a re-read at the moment the
- * caller wants an answer.
- */
-export function getConfirmedSnapshot(userId: string, profileId: string): ConfirmedPlannerSnapshot | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(confirmedSnapshotKeyForIdentity(userId, profileId));
-    if (!raw) return null;
-    return parseConfirmedPlannerSnapshot(JSON.parse(raw) as unknown);
-  } catch {
-    return null;
-  }
+function confirmedFactKey(userId: string, profileId: string, domain: ConfirmedDomainName, revision: number): string {
+  return `${confirmedFactPrefix(userId, profileId, domain)}${revision}`;
 }
 
-/**
- * The Web Locks API name a mutation of this (userId, profileId) pair's
- * confirmed snapshot acquires before its read-compute-write sequence — see
- * withConfirmedSnapshotLock()'s own doc (Codex P1, 4th/6th rounds) for why
- * this is needed. Scoped identically to confirmedSnapshotKeyForIdentity so
- * mutations for a DIFFERENT (userId, profileId) pair never contend with
- * each other, only concurrent mutations for the SAME pair (the only case
- * where regression is even possible).
- */
-function confirmedSnapshotLockNameForIdentity(userId: string, profileId: string): string {
-  return `dwp:sync:${userId}:${profileId}:confirmedSnapshot:lock`;
-}
-
-/**
- * SH.2 architecture (Codex P1, 4th round; scope narrowed back to just the
- * confirmed snapshot in the 7th round) — the SINGLE critical section every
- * mutation of a (userId, profileId)'s confirmed snapshot goes through:
- * commitConfirmedBaseline() and reconcilePendingOperations() (both below)
- * are thin wrappers around this, passing a pure `mutate` function that
- * computes the next snapshot from the current one (or null to signal
- * "no change" — see below).
- *
- * Codex P1 fix (4th round) — the read, compute, and write here form a
- * single compound operation whose correctness depends on nothing else
- * changing the SAME durable record in between. Within one tab that's
- * automatic (JS is single-threaded and nothing here awaits mid-sequence),
- * but ACROSS TABS it is not: two tabs can each call this function at
- * effectively the same wall-clock moment, both read the SAME "current"
- * value before either has written, both independently compute a `next`
- * that looks valid relative to that shared stale read, and then both
- * write — whichever write lands LAST wins outright, even if it should have
- * lost (a plain read-then-write sequence has no way to detect that a
- * different write landed in the gap between this tab's own read and
- * write). The fix is to make the whole read-compute-write sequence a
- * single critical section, serialized across every tab of this origin,
- * using the Web Locks API (`navigator.locks`) — `navigator.locks.request(name, fn)`
- * queues concurrent requests for the same `name` and runs `fn` for only one
- * requester at a time, in every tab, with no window for two `fn` bodies to
- * interleave. Under the lock, whichever mutation runs SECOND always
- * re-reads the OTHER's just-written value as `current`, so the final
- * result is deterministic regardless of which tab's request was queued
- * first — there is no unserialized window left to race in, not a smaller
- * one.
- *
- * Codex P1 fix (5th round) — re-audited whether falling back to an
- * unserialized sequence when `navigator.locks` is unavailable was an
- * acceptable trade-off for a CORRECTNESS invariant. It is not: "graceful
- * degradation" here means silently reintroducing the exact cross-tab
- * regression the lock exists to close, with no signal that the safety
- * property no longer holds. This function therefore FAILS SAFE: when
- * `navigator.locks` is unavailable (older browsers, or a non-secure
- * context — Locks API requires a secure context), it does NOT mutate
- * anything, rather than mutate through an unprotected path that could
- * regress. The practical effect in that environment is that
- * confirmed-baseline hardening simply never activates — every pull falls
- * back to the pre-confirmation baseline/ownership-tag tiers (see
- * getLocalContentOwner()'s own doc), a known, narrower, and strictly safer
- * degradation than knowingly permitting the monotonic-revision invariant
- * to be violated.
- *
- * `mutate` receives the CURRENT confirmed snapshot fresh (never a value the
- * caller captured earlier) and must return the next snapshot to persist,
- * or `null` to mean "nothing to persist" — either because there is
- * genuinely no change (nextConfirmedBaseline rejected a stale/duplicate
- * revision) or because `current` was already null and stays null. A `null`
- * return never triggers a write — this is what makes "reject, keep
- * whatever is already stored" and "there was never anything to store"
- * indistinguishable in effect, which is correct here since neither case
- * ever needs `confirmedSnapshot`'s key to change.
- *
- * Codex P1 fix (9th round) — RETURN CONTRACT for callers that need to know
- * whether the mutation actually ran (reconcilePendingOperations() below is
- * exactly such a caller: retiring a pending op's evidence must never happen
- * before its paired promotion is PROVEN to have run to completion under
- * this lock). Returns:
- *   • `undefined` — did NOT run under the lock at all: no Web Locks API
- *     (SSR, older browser, non-secure context), or the `locks.request()`
- *     call itself failed, or `mutate`/the write threw inside the locked
- *     section. The caller must treat this as "unknown — nothing was
- *     durably established," never as a successful no-op.
- *   • the resulting `ConfirmedPlannerSnapshot | null` — the lock WAS
- *     acquired and `mutate` DID run to completion: either a NEW value was
- *     computed and durably written (returned here), or `mutate` returned
- *     `null` (no change needed — `current` is returned instead, itself
- *     still a fully valid, freshly-read value, e.g. because a CONCURRENT
- *     commit already advanced confirmed past what this call would have
- *     written — see nextConfirmedBaseline's own doc). Either way the
- *     caller can trust this return value as an accurate post-lock read.
- * commitConfirmedBaseline() (below) simply awaits and discards this value
- * (an ordinary cloud-won-domain commit has no follow-on evidence to
- * retire); reconcilePendingOperations() inspects it directly.
- */
-async function withConfirmedSnapshotLock(
+/** Scans every stored fact-key for one (userId, profileId, domain), best-effort. */
+function scanConfirmedFactEntries(
   userId: string,
   profileId: string,
-  mutate: (current: ConfirmedPlannerSnapshot | null) => ConfirmedPlannerSnapshot | null
-): Promise<ConfirmedPlannerSnapshot | null | undefined> {
-  if (typeof window === "undefined") return undefined;
-  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-  // Codex P1 fix (5th round) — fail safe: no lock, no mutation. See this
-  // function's own doc above for why an unserialized fallback is never an
-  // acceptable substitute for atomicity here.
-  if (!locks) return undefined;
+  domain: ConfirmedDomainName
+): Array<{ key: string; raw: unknown }> {
+  const entries: Array<{ key: string; raw: unknown }> = [];
   try {
-    return await locks.request(confirmedSnapshotLockNameForIdentity(userId, profileId), () => {
+    const prefix = confirmedFactPrefix(userId, profileId, domain);
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(prefix)) continue;
       try {
-        const current = getConfirmedSnapshot(userId, profileId);
-        const next = mutate(current);
-        if (next) {
-          localStorage.setItem(confirmedSnapshotKeyForIdentity(userId, profileId), JSON.stringify(next));
-          return next;
-        }
-        return current;
+        entries.push({ key, raw: JSON.parse(localStorage.getItem(key) as string) });
       } catch {
-        return undefined;
+        // Corrupted entry — included with raw left unset would be wrong;
+        // simplest safe handling is to just skip it from the candidate
+        // set (it can never be parsed into a valid fact, so it can never
+        // be the max either). Best-effort pruning below removes such
+        // debris opportunistically.
       }
-    });
-  } catch {
-    // Locks API present but the request itself failed unexpectedly — the
-    // mutation is simply dropped (best-effort tier), never retried through
-    // an unprotected path.
-    return undefined;
-  }
+    }
+  } catch {}
+  return entries;
+}
+
+function parseConfirmedFactForDomain(
+  domain: ConfirmedDomainName,
+  raw: unknown
+): ConfirmedDomainFact<unknown> | null {
+  return domain === "days" ? parseConfirmedDaysFact(raw) : parseConfirmedPlannerDomainFact(raw);
 }
 
 /**
- * Advance the confirmed baseline for whichever domain(s) a pull (or push —
- * see doPush() below) just determined were cloud-won AND successfully
- * persisted, gated by the server-issued `revision` that produced them —
- * see the module doc's "Cloud-confirmed local snapshot contract" above and
- * nextConfirmedBaseline()'s own doc in syncPayload.ts for the full merge +
- * revision-ordering rule.
+ * Read the CURRENT per-domain confirmed state for this authenticated user +
+ * profile — see the module doc's "Cloud-confirmed local snapshot contract"
+ * above. Each of plans/lightning/days is independently computed as the
+ * max-revision fact among whatever has been recorded for it (via
+ * reduceConfirmedFacts() in syncPayload.ts) — a domain with no recorded
+ * facts at all is simply absent from the returned object ("nothing
+ * confirmed yet for this domain"), never inferred from another domain's
+ * state.
+ *
+ * Safe to call from any tab: this is a plain localStorage scan of keys that
+ * are durable (survive reloads) and shared (every same-origin tab for this
+ * browser sees the identical set), so it needs no message-passing or event
+ * subscription to be correct — only a fresh scan at the moment the caller
+ * wants an answer. No Web Locks involvement — see this section's own doc.
+ */
+export function getConfirmedState(userId: string, profileId: string): ConfirmedPlannerState {
+  if (typeof window === "undefined") return {};
+  const state: ConfirmedPlannerState = {};
+  for (const domain of CONFIRMED_DOMAIN_NAMES) {
+    const facts = scanConfirmedFactEntries(userId, profileId, domain)
+      .map(({ raw }) => parseConfirmedFactForDomain(domain, raw))
+      .filter((f): f is ConfirmedDomainFact<unknown> => f !== null);
+    const max = reduceConfirmedFacts(facts);
+    if (max) {
+      // Safe cast: parseConfirmedFactForDomain's per-domain branch already
+      // guarantees the value shape matches this domain's own slot type.
+      (state as Record<string, unknown>)[domain] = max;
+    }
+  }
+  return state;
+}
+
+/**
+ * Records ONE immutable confirmed fact for a single domain — a plain,
+ * unconditional `localStorage.setItem`, never a read-modify-write, never
+ * lock-protected (see this section's own doc for why that's safe). Returns
+ * whether the write itself succeeded (false only on a thrown
+ * localStorage.setItem — quota, private-mode, security errors) so callers
+ * can gate follow-on effects (e.g. retiring a pending op's evidence — see
+ * reconcilePendingOperations() below) on genuine durable success, exactly
+ * like every other "failed persistence must not advance metadata" rule
+ * elsewhere in this module.
+ *
+ * Opportunistically PRUNES this domain's OTHER facts down to just the new
+ * max after a successful write — bounds storage growth to O(1) per domain
+ * in the steady state. This is a pure optimization, never a correctness
+ * dependency: pruning failure (or being skipped entirely, e.g. by an older
+ * code path) never affects getConfirmedState()'s own correctness, since
+ * reduceConfirmedFacts() reduces over however many facts happen to exist.
+ */
+function recordConfirmedFact(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  revision: number,
+  value: unknown
+): boolean {
+  try {
+    localStorage.setItem(confirmedFactKey(userId, profileId, domain, revision), JSON.stringify({ revision, value }));
+  } catch {
+    return false;
+  }
+  try {
+    const entries = scanConfirmedFactEntries(userId, profileId, domain);
+    const parsed = entries
+      .map((e) => ({ key: e.key, fact: parseConfirmedFactForDomain(domain, e.raw) }))
+      .filter((e): e is { key: string; fact: ConfirmedDomainFact<unknown> } => e.fact !== null);
+    const max = reduceConfirmedFacts(parsed.map((p) => p.fact));
+    const maxKey = max ? confirmedFactKey(userId, profileId, domain, max.revision) : null;
+    for (const { key } of entries) {
+      if (key !== maxKey) {
+        try {
+          localStorage.removeItem(key);
+        } catch {}
+      }
+    }
+  } catch {
+    // Pruning is best-effort only — the fact was already durably written
+    // above regardless of whether cleanup succeeds.
+  }
+  return true;
+}
+
+/**
+ * Record whichever domain(s) a pull (or push — see doPush() below) just
+ * determined were cloud-won AND successfully persisted, as confirmed at the
+ * server-issued `revision` that produced them — see the module doc's
+ * "Cloud-confirmed local snapshot contract" above. Each domain present in
+ * `accepted` is recorded as its OWN independent immutable fact (see
+ * recordConfirmedFact()); domains NOT present are completely untouched —
+ * there is no "current record" this call reads, merges into, or could ever
+ * reject as stale, since a fact is always simply true on its own terms (see
+ * this section's own doc for why the old "reject the whole stale mixed
+ * commit" step no longer exists).
  *
  * Call this AFTER persistence for the accepted domain(s) has already
  * succeeded — never speculatively before a write is known to have landed
- * ("failed persistence must not advance the baseline").
+ * ("failed persistence must not advance the baseline"). Returns whether
+ * EVERY domain actually present in `accepted` was durably recorded — a
+ * caller with follow-on evidence to retire (reconcilePendingOperations()
+ * below) must check this before doing so; ordinary callers (doPush(), the
+ * pull effects' per-domain commits) may safely ignore the return value,
+ * exactly as they did when this returned `Promise<void>`.
  */
 export async function commitConfirmedBaseline(
   userId: string,
   profileId: string,
   revision: number,
-  accepted: {
-    plans?: { version: number; items: unknown[] };
-    lightning?: { version: number; items: unknown[] };
-    days?: string[];
+  accepted: AcceptedPlannerDomains
+): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  if (accepted.plans === undefined && accepted.lightning === undefined && accepted.days === undefined) {
+    return true;
   }
-): Promise<void> {
-  if (typeof window === "undefined") return;
-  if (!accepted.plans && !accepted.lightning && !accepted.days) return;
-  await withConfirmedSnapshotLock(userId, profileId, (current) =>
-    nextConfirmedBaseline(current, revision, accepted)
-  );
+  let allOk = true;
+  if (accepted.plans !== undefined) {
+    allOk = recordConfirmedFact(userId, profileId, "plans", revision, accepted.plans) && allOk;
+  }
+  if (accepted.lightning !== undefined) {
+    allOk = recordConfirmedFact(userId, profileId, "lightning", revision, accepted.lightning) && allOk;
+  }
+  if (accepted.days !== undefined) {
+    allOk = recordConfirmedFact(userId, profileId, "days", revision, accepted.days) && allOk;
+  }
+  return allOk;
 }
 
 // ── Pending operations (one UNLOCKED key PER opId — see module doc, 9th round) ──
@@ -862,12 +916,12 @@ export function selectPendingOpBatch(
 }
 
 /**
- * SH.2 architecture (Codex P1, 7th–9th rounds) — BEACON UNCERTAINTY
- * resolution via server-verified operation identity, generalized to a
- * pending-operation SET. Call this after EVERY successful pull (a
- * genuinely resolved GET — never from a `.catch()` branch, which teaches
- * nothing about any pending op's fate) for the SAME (userId, profileId) the
- * pull was for, passing:
+ * SH.2 architecture (Codex P1, 7th–9th rounds; per-domain facts in the
+ * 11th) — BEACON UNCERTAINTY resolution via server-verified operation
+ * identity, generalized to a pending-operation SET. Call this after EVERY
+ * successful pull (a genuinely resolved GET — never from a `.catch()`
+ * branch, which teaches nothing about any pending op's fate) for the SAME
+ * (userId, profileId) the pull was for, passing:
  *   • `opStatuses` — this SAME GET response's own server-verified fact for
  *     EVERY opId this pull queried (see pullPlanner()'s own doc) — one
  *     entry per opId in `listPendingOps()`'s result at the time this pull's
@@ -885,30 +939,31 @@ export function selectPendingOpBatch(
  * not", never to select which content to adopt). This is what lets an
  * older accepted op (e.g. opA, server revision 5) retire safely once a
  * newer op (opB, revision 6) has ALSO been accepted and this pull's own GET
- * reports the row at revision 6: promoting confirmed to revision 6 (via
- * resolveConfirmedAfterBeacon(), which routes through the existing
- * monotonic nextConfirmedBaseline() gate) is what BOTH opA's and opB's
- * "accepted" status resolve into — opA's own promotion attempt, if it were
- * separately tried against revision 6, would simply be rejected as stale
- * by nextConfirmedBaseline() and reduce to "already subsumed", which
- * withConfirmedSnapshotLock's return contract (see its own doc) reports
- * identically to "just wrote it" — a REAL server revision fact, never a
- * client ordering assumption, is what proves the older op is subsumed.
+ * reports the row at revision 6: recording plans/lightning/days facts at
+ * revision 6 (via acceptedDomainFactsFromBeacon() + commitConfirmedBaseline())
+ * is what BOTH opA's and opB's "accepted" status resolve into — opA's own
+ * revision (5) never even enters this call, since only THIS pull's own
+ * current cloudRevision (6) is ever recorded; reduceConfirmedFacts()
+ * (syncPayload.ts) is what proves, at READ time, that revision 6 correctly
+ * supersedes anything opA might separately have contributed.
  *
  * REMOVE-AFTER-PROMOTION RULE (fixes Codex P1 finding #1 from the 9th
- * round): an accepted op's pending entry is retired ONLY when
- * withConfirmedSnapshotLock's return value (see its own doc) is NOT
- * `undefined` — i.e. the lock was actually acquired and the mutation
- * (write, or a proven-already-subsumed no-op) ran to completion. If Web
- * Locks are unavailable, or the lock request fails, or an internal error
- * occurs, the return is `undefined` and EVERY accepted op from this pull is
- * left pending for a later pull to retry — never retired speculatively
- * ahead of durable proof. An op the server reports as NOT found (not yet
- * accepted) is never touched either way, positively or negatively — it
- * simply remains pending, exactly matching "an unaccepted/not-yet-seen op
- * remains pending".
+ * round; re-grounded in the 11th): an accepted op's pending entry is
+ * retired ONLY when commitConfirmedBaseline()'s return value is `true` —
+ * i.e. EVERY domain fact this call attempted to record was durably
+ * written (see recordConfirmedFact()'s own doc for the only way this can
+ * fail: a thrown localStorage.setItem — quota, private-mode, security
+ * errors). If any domain's write failed, every accepted op from this pull
+ * is left pending for a later pull to retry — never retired speculatively
+ * ahead of durable proof. Codex P1 fix (11th round) — this no longer has
+ * ANY dependency on Web Locks: recording a fact is always attempted,
+ * regardless of the Locks API's availability, so this mechanism is exactly
+ * as reliable with or without it (see recordConfirmedFact's own doc). An
+ * op the server reports as NOT found (not yet accepted) is never touched
+ * either way, positively or negatively — it simply remains pending,
+ * exactly matching "an unaccepted/not-yet-seen op remains pending".
  *
- * The promotion attempt itself runs at most ONCE per pull (not once per
+ * The recording attempt itself runs at most ONCE per pull (not once per
  * accepted op) since — per the policy above — every accepted op in one
  * pull shares the same target; its single result is then applied to
  * retire every accepted-and-found op from `opStatuses` together. This is
@@ -924,13 +979,13 @@ export async function reconcilePendingOperations(
   const acceptedOpIds = opStatuses.filter((s) => s.found).map((s) => s.opId);
   if (acceptedOpIds.length === 0) return;
   if (typeof window === "undefined") return;
-  const result = await withConfirmedSnapshotLock(userId, profileId, (current) =>
-    resolveConfirmedAfterBeacon(current, true, cloudRevision, cloudSnapshot)
-  );
-  // `undefined` means the lock was never acquired / the mutation never ran
-  // to completion — durable proof does not exist, so every accepted op
-  // from this pull stays pending rather than being retired speculatively.
-  if (result === undefined) return;
+  const resolved = acceptedDomainFactsFromBeacon(true, cloudRevision, cloudSnapshot);
+  if (!resolved) return;
+  const allOk = await commitConfirmedBaseline(userId, profileId, resolved.revision, resolved.accepted);
+  // A failed write means durable proof does not exist for at least one
+  // domain — every accepted op from this pull stays pending rather than
+  // being retired speculatively.
+  if (!allOk) return;
   for (const opId of acceptedOpIds) {
     removePendingOp(userId, profileId, opId);
   }
@@ -984,10 +1039,10 @@ let currentSyncProfileId = "default";
 
 /**
  * The authenticated user id that sync is currently targeting, used to
- * scope confirmed-baseline commits (Codex P1, 3rd round) and pending-op
- * registration (Codex P1, 6th/7th/9th rounds) — see
- * confirmedSnapshotKeyForIdentity's and pendingOpKeyForIdentity's own docs.
- * null while signed out or before the session has resolved; doPush()
+ * scope confirmed-baseline commits (Codex P1, 3rd/11th rounds) and
+ * pending-op registration (Codex P1, 6th/7th/9th rounds) — see
+ * confirmedFactKey's and pendingOpKeyForIdentity's own docs. null while
+ * signed out or before the session has resolved; doPush()
  * and registerUnloadSync() both skip their respective identity-scoped
  * writes entirely when null (neither ever guesses an identity).
  * Updated by setSyncUserId().
@@ -1162,7 +1217,7 @@ export async function pullPlans(): Promise<{
 /**
  * Generates the opaque, client-side write-identity token
  * (`clientOpId`/`lastOpId`) a beacon is tagged with — see the module doc's
- * 7th-round paragraph and resolveConfirmedAfterBeacon()'s own doc in
+ * 7th-round paragraph and acceptedDomainFactsFromBeacon()'s own doc in
  * syncPayload.ts for why this must be a random, opaque, order-independent
  * value, NEVER a timestamp: it is compared for exact equality against a
  * server-recorded fact, never used to infer ordering. `crypto.randomUUID()`

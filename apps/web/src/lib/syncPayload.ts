@@ -142,577 +142,423 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
   };
 }
 
-// ===== CLIENT-SIDE CONFIRMED-BASELINE COMMIT (SH.2) =====
+// ===== PER-DOMAIN CONFIRMED STATE (SH.2, Codex P1 11th round) =====
 
 /**
- * SH.2 architecture — the durably-stored record of "the exact planner
- * state most recently acknowledged by the server for this authenticated
- * user + profile, ordered by server-authoritative revision" (see
- * syncHelper.ts's confirmedSnapshotKeyForIdentity/getConfirmedSnapshot/
- * commitConfirmedBaseline). `revision` is the server's
- * `user_planner.revision` value (see api/sync/planner/route.ts) that
- * produced `snapshot` — a monotonically increasing integer, NEVER a
- * client timestamp or response-arrival-order proxy. Comparing two
- * ConfirmedPlannerSnapshots' `revision` values is always meaningful for
- * the SAME (user, profile) pair: strictly higher always means "the server
- * accepted this write/read later", regardless of which tab or request
- * observed it first (Codex P1, 3rd round).
+ * SH.2 architecture (Codex P1, 11th round) — REPLACES the single mixed-
+ * domain `ConfirmedPlannerSnapshot { revision; snapshot }` (one global
+ * revision covering plans+lightning+days together). Codex found this
+ * unsound: disjoint pulls/pushes can confirm DIFFERENT domains at
+ * DIFFERENT server revisions (e.g. a Days-only cloud win at revision 7,
+ * while Plans is still only confirmed as of revision 5 from an earlier,
+ * separate commit) — assigning the WHOLE mixed snapshot a single "newest"
+ * revision makes the OLDER domain look newer than it genuinely is,
+ * silently blocking a later, perfectly legitimate update to that domain
+ * (its real revision is lower than the mixed snapshot's borrowed one, so a
+ * correct future commit at, say, revision 6 for Plans would be wrongly
+ * rejected as "stale" against the borrowed revision 7).
+ *
+ * The fix: confirmed state is tracked PER DOMAIN. Each of plans/lightning/
+ * days independently carries its OWN `{ revision, value }` fact — see
+ * `ConfirmedPlannerState` below. A confirmation at revision R may advance
+ * ONLY the domain(s) actually accepted at R; every other domain retains
+ * its own prior revision/value completely untouched. A later response
+ * with a LOWER revision than some OTHER domain's confirmed revision may
+ * still legitimately advance a domain whose OWN confirmed revision is
+ * lower — there is no "reject the whole mixed commit" step anymore,
+ * because there is no whole mixed commit to reject: each domain's fate is
+ * decided independently, using ONLY that domain's own revision history.
  */
-export interface ConfirmedPlannerSnapshot {
+export interface ConfirmedDomainFact<T> {
   revision: number;
-  snapshot: SyncedPlannerPayload;
+  value: T;
+}
+
+export interface ConfirmedPlannerState {
+  plans?: ConfirmedDomainFact<{ version: number; items: unknown[] }>;
+  lightning?: ConfirmedDomainFact<{ version: number; items: unknown[] }>;
+  days?: ConfirmedDomainFact<string[]>;
+}
+
+function isPlannerDomainValue(v: unknown): v is { version: number; items: unknown[] } {
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    typeof (v as Record<string, unknown>).version === "number" &&
+    Array.isArray((v as Record<string, unknown>).items)
+  );
+}
+
+function isDaysValue(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((id) => typeof id === "string");
 }
 
 /**
- * Parse and validate a raw unknown value as a ConfirmedPlannerSnapshot.
- * Returns null if the shape is missing or invalid — callers treat null as
- * "nothing confirmed yet", not as an error. A non-finite/non-numeric
- * `revision` is rejected outright (never coerced to 0 or any other
- * sentinel) since a malformed revision can never be safely compared.
+ * Parse and validate a raw unknown value as a plans/lightning
+ * ConfirmedDomainFact (both domains share the identical
+ * `{ version, items[] }` value shape). Returns null if the shape is
+ * missing or invalid — callers (syncHelper.ts's getConfirmedState) treat
+ * null as "no confirmed fact here", never as an error. A non-finite/non-
+ * numeric `revision` is rejected outright (never coerced to 0) since
+ * reduceConfirmedFacts()'s whole max-revision comparison depends on
+ * genuine server-issued revisions — treating a corrupted fact as revision
+ * 0 would make it look OLDER than everything, silently discarding it
+ * instead of just refusing to trust it (it is simply excluded from the
+ * candidate set reduceConfirmedFacts() reduces over).
  */
-export function parseConfirmedPlannerSnapshot(raw: unknown): ConfirmedPlannerSnapshot | null {
+export function parseConfirmedPlannerDomainFact(
+  raw: unknown
+): ConfirmedDomainFact<{ version: number; items: unknown[] }> | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const r = raw as Record<string, unknown>;
   if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
-  const snapshot = parseSyncedPlannerPayload(r.snapshot);
-  if (!snapshot) return null;
-  return { revision: r.revision, snapshot };
+  if (!isPlannerDomainValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
 }
 
 /**
- * Reference cases for parseConfirmedPlannerSnapshot() — the gate every page
- * consumer (getConfirmedSnapshot in syncHelper.ts) goes through before
- * trusting a stored confirmedSnapshot localStorage value as a pull baseline
- * or as nextConfirmedBaseline()'s `currentConfirmed` input. A malformed
- * `revision` must be rejected outright (never coerced to 0) since
- * nextConfirmedBaseline()'s whole ordering guarantee depends on comparing
- * two genuine server-issued revisions — treating a corrupted record as
- * revision 0 would make it look OLDER than everything, silently discarding
- * a real confirmation instead of just refusing to trust the corrupted one.
+ * Parse and validate a raw unknown value as a `days` ConfirmedDomainFact —
+ * same contract as parseConfirmedPlannerDomainFact(), just for the `days`
+ * domain's own value shape (a plain string array).
+ */
+export function parseConfirmedDaysFact(raw: unknown): ConfirmedDomainFact<string[]> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  if (!isDaysValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
+}
+
+/**
+ * Reference cases for parseConfirmedPlannerDomainFact()/parseConfirmedDaysFact().
  * Run from Node:
- *   import { DEV_PARSE_CONFIRMED_SNAPSHOT_CASES, parseConfirmedPlannerSnapshot } from "@/lib/syncPayload";
- *   DEV_PARSE_CONFIRMED_SNAPSHOT_CASES.forEach(c => {
- *     const got = parseConfirmedPlannerSnapshot(c.raw);
+ *   import { DEV_PARSE_CONFIRMED_FACT_CASES, parseConfirmedPlannerDomainFact, parseConfirmedDaysFact } from "@/lib/syncPayload";
+ *   DEV_PARSE_CONFIRMED_FACT_CASES.forEach(c => {
+ *     const parse = c.domain === "days" ? parseConfirmedDaysFact : parseConfirmedPlannerDomainFact;
+ *     const got = parse(c.raw);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_PARSE_CONFIRMED_SNAPSHOT_CASES: Array<{
+export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
   name: string;
+  domain: "plannerDomain" | "days";
   raw: unknown;
-  expected: ConfirmedPlannerSnapshot | null;
+  expected: ConfirmedDomainFact<unknown> | null;
 }> = [
   {
-    name: "valid confirmed snapshot — parses as-is",
-    raw: {
-      revision: 12,
-      snapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
-    },
-    expected: {
-      revision: 12,
-      snapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
-    },
+    name: "valid plans/lightning fact — parses as-is",
+    domain: "plannerDomain",
+    raw: { revision: 12, value: { version: 1, items: ["p"] } },
+    expected: { revision: 12, value: { version: 1, items: ["p"] } },
   },
   {
     name: "revision 0 is a legitimate value, not treated as missing",
-    raw: {
-      revision: 0,
-      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
-    },
-    expected: {
-      revision: 0,
-      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
-    },
+    domain: "plannerDomain",
+    raw: { revision: 0, value: { version: 1, items: [] } },
+    expected: { revision: 0, value: { version: 1, items: [] } },
   },
   {
     name: "missing revision — rejected, never coerced to 0",
-    raw: { snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } } },
+    domain: "plannerDomain",
+    raw: { value: { version: 1, items: [] } },
     expected: null,
   },
   {
     name: "non-numeric revision — rejected",
-    raw: {
-      revision: "6",
-      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
-    },
+    domain: "plannerDomain",
+    raw: { revision: "6", value: { version: 1, items: [] } },
     expected: null,
   },
   {
     name: "non-finite revision (NaN) — rejected",
-    raw: {
-      revision: NaN,
-      snapshot: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
-    },
+    domain: "plannerDomain",
+    raw: { revision: NaN, value: { version: 1, items: [] } },
     expected: null,
   },
   {
-    name: "revision valid but embedded snapshot invalid — whole record rejected",
-    raw: { revision: 3, snapshot: { version: 2, plans: {}, lightning: {} } },
+    name: "revision valid but value shape invalid — whole fact rejected",
+    domain: "plannerDomain",
+    raw: { revision: 3, value: { items: "not-an-array" } },
     expected: null,
   },
   {
     name: "non-object raw — rejected",
+    domain: "plannerDomain",
     raw: "not an object",
     expected: null,
   },
   {
     name: "array raw — rejected",
+    domain: "plannerDomain",
     raw: [1, 2, 3],
     expected: null,
   },
+  {
+    name: "valid days fact — parses as-is",
+    domain: "days",
+    raw: { revision: 7, value: ["day-1", "day-2"] },
+    expected: { revision: 7, value: ["day-1", "day-2"] },
+  },
+  {
+    name: "days value not a string array — rejected",
+    domain: "days",
+    raw: { revision: 7, value: [1, 2, 3] },
+    expected: null,
+  },
 ];
 
 /**
- * SH.2 architecture — a domain's confirmed baseline represents "the state
- * currently accepted as synchronized for this domain", not merely "the
- * last successful PUT payload". A PUSH is one way a domain becomes
- * accepted; a PULL that hydrates cloud data into local storage (because
- * local hadn't changed) is another, equally valid way — both must be able
- * to advance the same confirmed record, per-domain, independently.
+ * SH.2 architecture (Codex P1, 11th round) — the PURE reduction at the
+ * heart of the no-Web-Locks-dependent design: given a set of independently
+ * recorded, immutable `ConfirmedDomainFact`s for ONE domain (each an
+ * objective historical record — "revision R produced value V" — never
+ * mutated once written), returns the one with the MAX revision, or `null`
+ * if the set is empty.
  *
- * Computes the new confirmed snapshot to commit, merging forward from
- * `currentConfirmed` (read FRESH at commit time by the caller — never a
- * frozen pull-start snapshot, so this can never revert a domain some
- * OTHER concurrent commit already advanced further than this one knows
- * about). Only the domains present in `accepted` are replaced; every
- * domain NOT present keeps whatever `currentConfirmed` already has for it,
- * completely untouched — this is what lets a caller commit just the
- * domain(s) it actually determined were cloud-won AND successfully
- * persisted this pull, while a locally-won domain's prior confirmation
- * status is left exactly as it was (see the pull effects in
- * plans/page.tsx and lightning/page.tsx for the per-domain conditions).
- *
- * Codex P1 fix (3rd round) — `revision` is the server-authoritative
- * ordering signal for the response this `accepted` data came from (a
- * push's PUT response, or a pull's GET response). Returns `null` — a
- * REJECTION, applying nothing — whenever `currentConfirmed` already exists
- * AND its `revision` is `>= revision`: an older (or duplicate) server
- * write/read can never regress or redundantly re-apply a snapshot the
- * confirmed record has already moved past, REGARDLESS of which order two
- * concurrent responses happen to arrive in on the client (this is what
- * makes the final confirmed state deterministic from server commit order
- * alone, never response arrival order). The whole candidate commit is
- * rejected atomically when stale — never partially applied — since
- * `accepted`'s domains all describe ONE specific server response; a stale
- * response teaches nothing new about ANY domain.
- *
- * `currentConfirmed` null (nothing confirmed yet for this profile) always
- * accepts — a profile's first-ever confirmation can originate from a
- * pull's cloud-hydration just as validly as from a push.
+ * This is what lets syncHelper.ts's confirmed-state storage do away with
+ * Web Locks entirely for THIS mechanism: because facts are immutable and
+ * keyed by their own revision (see syncHelper.ts's confirmedFactKey), two
+ * tabs recording DIFFERENT facts for the same domain at "the same moment"
+ * can never race destructively — there is no shared mutable slot to
+ * corrupt, only more facts for this pure function to reduce over. The
+ * reduction itself is order-independent (a `.forEach` accumulator that
+ * only ever keeps the running max), so it produces the SAME correct answer
+ * regardless of which order the facts happen to be enumerated in — which
+ * in turn is why WRITE order (racy, unlocked) never matters: only the
+ * VALUES of the facts that exist matter, and the read-time reduction sees
+ * them all.
  */
-export function nextConfirmedBaseline(
-  currentConfirmed: ConfirmedPlannerSnapshot | null,
-  revision: number,
-  accepted: {
-    plans?: { version: number; items: unknown[] };
-    lightning?: { version: number; items: unknown[] };
-    days?: string[];
+export function reduceConfirmedFacts<T>(facts: Array<ConfirmedDomainFact<T>>): ConfirmedDomainFact<T> | null {
+  let best: ConfirmedDomainFact<T> | null = null;
+  for (const fact of facts) {
+    if (!best || fact.revision > best.revision) {
+      best = fact;
+    }
   }
-): ConfirmedPlannerSnapshot | null {
-  if (currentConfirmed && revision <= currentConfirmed.revision) {
-    return null;
-  }
-  const baseSnapshot: SyncedPlannerPayload = currentConfirmed?.snapshot ?? {
-    version: 1,
-    plans: { version: 1, items: [] },
-    lightning: { version: 1, items: [] },
-  };
-  const days = accepted.days ?? baseSnapshot.days;
-  return {
-    revision,
-    snapshot: {
-      version: 1,
-      plans: accepted.plans ?? baseSnapshot.plans,
-      lightning: accepted.lightning ?? baseSnapshot.lightning,
-      ...(days ? { days } : {}),
-    },
-  };
+  return best;
 }
 
 /**
- * Reference cases for nextConfirmedBaseline() — the per-domain,
- * revision-gated merge rule that closes two Codex P1 findings: (1) a
- * pull-accepted domain must durably advance the SAME confirmed record a
- * push would, without ever touching a domain it didn't itself resolve
- * this pull; (2) an older server write's response arriving after a newer
- * one must never regress the confirmed record, regardless of arrival
- * order. Run from Node:
- *   import { DEV_NEXT_CONFIRMED_BASELINE_CASES, nextConfirmedBaseline } from "@/lib/syncPayload";
- *   DEV_NEXT_CONFIRMED_BASELINE_CASES.forEach(c => {
- *     const got = nextConfirmedBaseline(c.currentConfirmed, c.revision, c.accepted);
+ * Reference cases for reduceConfirmedFacts() — pinning the max-revision
+ * reduction rule the whole no-Web-Locks confirmed-state design depends on.
+ * Run from Node:
+ *   import { DEV_REDUCE_CONFIRMED_FACTS_CASES, reduceConfirmedFacts } from "@/lib/syncPayload";
+ *   DEV_REDUCE_CONFIRMED_FACTS_CASES.forEach(c => {
+ *     const got = reduceConfirmedFacts(c.facts);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_NEXT_CONFIRMED_BASELINE_CASES: Array<{
+export const DEV_REDUCE_CONFIRMED_FACTS_CASES: Array<{
   name: string;
-  currentConfirmed: ConfirmedPlannerSnapshot | null;
-  revision: number;
-  accepted: {
-    plans?: { version: number; items: unknown[] };
-    lightning?: { version: number; items: unknown[] };
-    days?: string[];
-  };
-  expected: ConfirmedPlannerSnapshot | null;
+  facts: Array<ConfirmedDomainFact<unknown>>;
+  expected: ConfirmedDomainFact<unknown> | null;
 }> = [
   {
-    name: "nothing confirmed yet, plans accepted from a pull — starts a fresh confirmed record at that revision",
-    currentConfirmed: null,
-    revision: 1,
-    accepted: { plans: { version: 1, items: ["p1"] } },
-    expected: {
-      revision: 1,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: [] },
-      },
-    },
-  },
-  {
-    name: "plans accepted at a newer revision — lightning and days untouched, keep whatever was already confirmed",
-    currentConfirmed: {
-      revision: 5,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["old"] },
-        lightning: { version: 1, items: ["ll1"] },
-        days: ["day-1", "day-2"],
-      },
-    },
-    revision: 6,
-    accepted: { plans: { version: 1, items: ["new"] } },
-    expected: {
-      revision: 6,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["new"] },
-        lightning: { version: 1, items: ["ll1"] },
-        days: ["day-1", "day-2"],
-      },
-    },
-  },
-  {
-    name: "Codex P1 (3rd round) — an OLDER revision arriving after a newer one is confirmed is rejected outright (null), regardless of accepted content",
-    currentConfirmed: {
-      revision: 6,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["new-B"] },
-        lightning: { version: 1, items: [] },
-      },
-    },
-    revision: 5,
-    accepted: { plans: { version: 1, items: ["stale-A"] } },
+    name: "empty set — nothing confirmed for this domain yet",
+    facts: [],
     expected: null,
   },
   {
-    name: "Codex P1 (3rd round) — a DUPLICATE (equal) revision is also rejected, never re-applied",
-    currentConfirmed: {
-      revision: 6,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["B"] },
-        lightning: { version: 1, items: [] },
-      },
-    },
-    revision: 6,
-    accepted: { plans: { version: 1, items: ["B-again"] } },
-    expected: null,
+    name: "single fact — that one wins trivially",
+    facts: [{ revision: 5, value: "A" }],
+    expected: { revision: 5, value: "A" },
   },
   {
-    name: "Codex P1 (3rd round) — responses arriving A(rev5) then B(rev6): B commits cleanly over A",
-    currentConfirmed: {
-      revision: 5,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["A"] },
-        lightning: { version: 1, items: [] },
-      },
-    },
-    revision: 6,
-    accepted: { plans: { version: 1, items: ["B"] } },
-    expected: {
-      revision: 6,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["B"] },
-        lightning: { version: 1, items: [] },
-      },
-    },
+    name: "facts in ASCENDING revision order — max (last) wins",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 6, value: "B" },
+    ],
+    expected: { revision: 6, value: "B" },
   },
   {
-    name: "days accepted alone at a newer revision (e.g. days-only cloud win) — plans/lightning untouched",
-    currentConfirmed: {
-      revision: 2,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: ["ll1"] },
-        days: ["day-1"],
-      },
-    },
-    revision: 3,
-    accepted: { days: ["day-1", "day-2"] },
-    expected: {
-      revision: 3,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: ["ll1"] },
-        days: ["day-1", "day-2"],
-      },
-    },
+    name: "facts in DESCENDING revision order (e.g. a delayed older response recorded AFTER a newer one) — max (first) still wins, insertion/arrival order is irrelevant",
+    facts: [
+      { revision: 7, value: "C" },
+      { revision: 6, value: "B-delayed" },
+    ],
+    expected: { revision: 7, value: "C" },
   },
   {
-    name: "lightning accepted via the OPPOSITE page's own hydration write (Plans committing Lightning's baseline)",
-    currentConfirmed: {
-      revision: 4,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: ["stale"] },
-      },
-    },
-    revision: 7,
-    accepted: { lightning: { version: 1, items: ["fresh"] } },
-    expected: {
-      revision: 7,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: ["fresh"] },
-      },
-    },
+    name: "three facts, max in the middle — order-independent",
+    facts: [
+      { revision: 3, value: "A" },
+      { revision: 9, value: "C" },
+      { revision: 6, value: "B" },
+    ],
+    expected: { revision: 9, value: "C" },
   },
   {
-    name: "all three accepted together at a newer revision (a clean, fully cloud-sourced pull) — whole record replaced",
-    currentConfirmed: {
-      revision: 1,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["old"] },
-        lightning: { version: 1, items: ["old"] },
-        days: ["day-1"],
-      },
-    },
-    revision: 9,
-    accepted: {
-      plans: { version: 1, items: ["new"] },
-      lightning: { version: 1, items: ["new"] },
-      days: ["day-1", "day-2"],
-    },
-    expected: {
-      revision: 9,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["new"] },
-        lightning: { version: 1, items: ["new"] },
-        days: ["day-1", "day-2"],
-      },
-    },
-  },
-  {
-    name: "empty accepted at a newer revision — snapshot passes through byte-identical, only revision advances (callers normally skip this call entirely; pinned here for the pure function's own behavior)",
-    currentConfirmed: {
-      revision: 1,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: ["ll1"] },
-        days: ["day-1"],
-      },
-    },
-    revision: 2,
-    accepted: {},
-    expected: {
-      revision: 2,
-      snapshot: {
-        version: 1,
-        plans: { version: 1, items: ["p1"] },
-        lightning: { version: 1, items: ["ll1"] },
-        days: ["day-1"],
-      },
-    },
+    name: "duplicate max revision (should not happen server-side — a revision is assigned once per accepted write — but handled gracefully: first-seen wins, never a crash)",
+    facts: [
+      { revision: 5, value: "first" },
+      { revision: 5, value: "second" },
+    ],
+    expected: { revision: 5, value: "first" },
   },
 ];
 
-// ===== BEACON RESOLUTION VIA SERVER-VERIFIABLE OPERATION IDENTITY (SH.2, Codex P1 7th round) =====
+/**
+ * SH.2 architecture (Codex P1, 11th round) — the per-domain accepted-facts
+ * a caller should record, given a set of domain values all confirmed
+ * together at ONE server revision (a single push's response, or a single
+ * pull's GET response). This replaces the old `nextConfirmedBaseline()`
+ * merge function: there is no "current state" input anymore, and no
+ * accept/reject decision to make here at all — recording an immutable fact
+ * is ALWAYS valid (it is simply a true historical record of what revision
+ * R produced), and whether it ends up being the domain's CURRENT confirmed
+ * value is entirely up to reduceConfirmedFacts() at READ time. This
+ * function exists only to describe, per domain, WHAT to record — never
+ * whether it's "allowed".
+ */
+export interface AcceptedPlannerDomains {
+  plans?: { version: number; items: unknown[] };
+  lightning?: { version: number; items: unknown[] };
+  days?: string[];
+}
 
 /**
- * SH.2 architecture (Codex P1, 7th round) — REPLACES the 6th round's
- * content-comparison beacon resolution (formerly SyncIdentityState /
- * resolveSyncIdentityStateAfterPull, both removed). That approach compared
- * a pendingBeacon's PAYLOAD against a subsequent GET's current snapshot and
- * treated a mismatch as "the beacon failed". This is unsound: `user_planner`
- * (see db-schema.sql) stores only the LATEST state per (user, profile) — no
- * history — so "beacon B failed" and "beacon B succeeded, then a newer
- * write C superseded it" are OBSERVATIONALLY IDENTICAL from a single GET's
- * content alone. Both cases show up as "current cloud content differs from
- * what B sent". No amount of client-side heuristics (timing, retry counts,
- * event ordering) can distinguish them, because the information needed —
- * "was B specifically ever accepted" — simply does not exist in a
- * content-only GET response. Closing this required a SERVER-VERIFIABLE
- * write-acknowledgment: see user_planner_writes (db-schema.sql) and
- * lastOpId/clientOpId (api/sync/planner/route.ts) for the minimal
- * additive mechanism — an append-only table recording, per client-generated
- * opaque opId, whether that specific write was ever accepted, independent
- * of whatever the row looks like now.
+ * SH.2 architecture (Codex P1, 7th round; generalized 11th) — REPLACES the
+ * 6th round's content-comparison beacon resolution (formerly
+ * SyncIdentityState / resolveSyncIdentityStateAfterPull, both removed).
+ * That approach compared a pendingBeacon's PAYLOAD against a subsequent
+ * GET's current snapshot and treated a mismatch as "the beacon failed".
+ * This is unsound: `user_planner` (see db-schema.sql) stores only the
+ * LATEST state per (user, profile) — no history — so "beacon B failed" and
+ * "beacon B succeeded, then a newer write C superseded it" are
+ * OBSERVATIONALLY IDENTICAL from a single GET's content alone. Both cases
+ * show up as "current cloud content differs from what B sent". No amount
+ * of client-side heuristics (timing, retry counts, event ordering) can
+ * distinguish them, because the information needed — "was B specifically
+ * ever accepted" — simply does not exist in a content-only GET response.
+ * Closing this required a SERVER-VERIFIABLE write-acknowledgment: see
+ * user_planner_writes (db-schema.sql) and lastOpId/clientOpId
+ * (api/sync/planner/route.ts) for the minimal additive mechanism — an
+ * append-only table recording, per client-generated opaque opId, whether
+ * that specific write was ever accepted, independent of whatever the row
+ * looks like now.
  *
- * This function is the pure decision core for that resolved contract, given
- * the GET response's own `opStatus.found` (a direct, deterministic server
- * fact — never inferred from timing or content comparison):
+ * This function is the pure decision core for that resolved contract,
+ * given the GET response's own `opStatus.found` (a direct, deterministic
+ * server fact — never inferred from timing or content comparison):
  *   • `beaconAccepted` true (server confirms opId was recorded): the
  *     beacon's contribution is, by definition, already reflected in
  *     whatever `cloudSnapshot`/`cloudRevision` this SAME GET response
  *     returned (accepted-then-possibly-superseded is still "this pull's
- *     cloud state already accounts for it") — unconditionally adopt the
- *     CURRENT cloud snapshot as confirmed, at the CURRENT cloud revision,
- *     routed through nextConfirmedBaseline() so a concurrent commit that
- *     already advanced further is never regressed. This correctly resolves
- *     BOTH "accepted, not yet superseded" and "accepted, then superseded by
- *     C" identically and correctly: either way, `cloudSnapshot` IS the
- *     accurate current truth to confirm.
+ *     cloud state already accounts for it") — returns the per-domain facts
+ *     to record at `cloudRevision`, bundled with that revision. This
+ *     correctly resolves BOTH "accepted, not yet superseded" and
+ *     "accepted, then superseded by C" identically and correctly: either
+ *     way, `cloudSnapshot` IS the accurate current truth to record.
  *   • `beaconAccepted` false (server confirms opId was never recorded, or
- *     no opId was pending at all): `confirmed` is left completely
- *     untouched. The caller's ORDINARY pickWinningItems/pickWinningDays
- *     comparison decides the rest, exactly as it would for any other
- *     unresolved local edit — the local unsynced state remains free to
- *     push on the next debounce cycle.
+ *     no opId was pending at all), or `cloudRevision`/`cloudSnapshot` null
+ *     (a 204): returns `null` — nothing to record. The caller's ORDINARY
+ *     pickWinningItems/pickWinningDays comparison decides the rest, exactly
+ *     as it would for any other unresolved local edit.
  * Never fabricates a revision (always uses this GET's own live
- * `cloudRevision`) and never consults arrival order or timing — `found` is
- * a direct fact query against user_planner_writes, computed once by the
- * server for this exact request.
+ * `cloudRevision`) and never consults arrival order or timing.
+ *
+ * Codex P1 fix (11th round) — no longer routes through a "current state"
+ * merge/rejection step (the old nextConfirmedBaseline()): recording a fact
+ * is always valid regardless of what's currently confirmed for any domain,
+ * per-domain OR mixed together — see reduceConfirmedFacts()'s own doc for
+ * why this is what removes the Web-Locks dependency for confirmed state.
  */
-export function resolveConfirmedAfterBeacon(
-  currentConfirmed: ConfirmedPlannerSnapshot | null,
+export function acceptedDomainFactsFromBeacon(
   beaconAccepted: boolean,
   cloudRevision: number | null,
   cloudSnapshot: SyncedPlannerPayload | null
-): ConfirmedPlannerSnapshot | null {
+): { revision: number; accepted: AcceptedPlannerDomains } | null {
   if (!beaconAccepted || cloudRevision === null || cloudSnapshot === null) {
-    return currentConfirmed;
+    return null;
   }
-  const promoted = nextConfirmedBaseline(currentConfirmed, cloudRevision, {
-    plans: cloudSnapshot.plans,
-    lightning: cloudSnapshot.lightning,
-    days: cloudSnapshot.days,
-  });
-  return promoted ?? currentConfirmed;
+  return {
+    revision: cloudRevision,
+    accepted: {
+      plans: cloudSnapshot.plans,
+      lightning: cloudSnapshot.lightning,
+      days: cloudSnapshot.days,
+    },
+  };
 }
 
 /**
- * Reference cases for resolveConfirmedAfterBeacon() — the two REQUIRED
+ * Reference cases for acceptedDomainFactsFromBeacon() — the two REQUIRED
  * beacon-resolution cases per the round-7 directive (accepted, accepted-
  * then-superseded, failed, failed-while-newer-C-exists), plus the
- * surrounding edge cases. Run from Node:
- *   import { DEV_RESOLVE_CONFIRMED_AFTER_BEACON_CASES, resolveConfirmedAfterBeacon } from "@/lib/syncPayload";
- *   DEV_RESOLVE_CONFIRMED_AFTER_BEACON_CASES.forEach(c => {
- *     const got = resolveConfirmedAfterBeacon(c.currentConfirmed, c.beaconAccepted, c.cloudRevision, c.cloudSnapshot);
+ * surrounding edge cases, re-pinned against the round-11 per-domain
+ * contract (no more "current confirmed" input/rejection — see the
+ * function's own doc for why). Run from Node:
+ *   import { DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES, acceptedDomainFactsFromBeacon } from "@/lib/syncPayload";
+ *   DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES.forEach(c => {
+ *     const got = acceptedDomainFactsFromBeacon(c.beaconAccepted, c.cloudRevision, c.cloudSnapshot);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_RESOLVE_CONFIRMED_AFTER_BEACON_CASES: Array<{
+export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
   name: string;
-  currentConfirmed: ConfirmedPlannerSnapshot | null;
   beaconAccepted: boolean;
   cloudRevision: number | null;
   cloudSnapshot: SyncedPlannerPayload | null;
-  expected: ConfirmedPlannerSnapshot | null;
+  expected: { revision: number; accepted: AcceptedPlannerDomains } | null;
 }> = [
   {
-    name: "required — beacon accepted, not yet superseded: adopts the GET's own snapshot/revision",
-    currentConfirmed: {
-      revision: 4,
-      snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    },
+    name: "required — beacon accepted, not yet superseded: records the GET's own snapshot/revision",
     beaconAccepted: true,
     cloudRevision: 5,
     cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
     expected: {
       revision: 5,
-      snapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+      accepted: { plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] }, days: undefined },
     },
   },
   {
-    name: "required — beacon accepted, then SUPERSEDED by a newer cloud write C: still adopts CURRENT cloud (C), the accurate accounting of the beacon's contribution",
-    currentConfirmed: {
-      revision: 4,
-      snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    },
+    name: "required — beacon accepted, then SUPERSEDED by a newer cloud write C: still records CURRENT cloud (C), the accurate accounting of the beacon's contribution",
     beaconAccepted: true,
     cloudRevision: 7,
     cloudSnapshot: { version: 1, plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] } },
     expected: {
       revision: 7,
-      snapshot: { version: 1, plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] } },
+      accepted: { plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] }, days: undefined },
     },
   },
   {
-    name: "required — beacon failed (opId never recorded): confirmed left untouched, local unsynced state stays free to push",
-    currentConfirmed: {
-      revision: 4,
-      snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    },
+    name: "required — beacon failed (opId never recorded): nothing to record",
     beaconAccepted: false,
     cloudRevision: 4,
     cloudSnapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    expected: {
-      revision: 4,
-      snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    },
+    expected: null,
   },
   {
-    name: "required — beacon failed WHILE a newer cloud write C exists (from another device): confirmed still untouched here — ordinary pull logic handles C separately via commitConfirmedBaseline",
-    currentConfirmed: {
-      revision: 4,
-      snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    },
+    name: "required — beacon failed WHILE a newer cloud write C exists (from another device): still nothing to record HERE — ordinary pull logic (commitConfirmedBaseline) handles C separately",
     beaconAccepted: false,
     cloudRevision: 9,
     cloudSnapshot: { version: 1, plans: { version: 1, items: ["C-unrelated"] }, lightning: { version: 1, items: [] } },
-    expected: {
-      revision: 4,
-      snapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
-    },
+    expected: null,
   },
   {
-    name: "no beacon was pending at all (beaconAccepted false, nothing else changes) — harmless no-op pass-through",
-    currentConfirmed: null,
+    name: "no beacon was pending at all (beaconAccepted false) — nothing to record",
     beaconAccepted: false,
     cloudRevision: 3,
     cloudSnapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
     expected: null,
   },
   {
-    name: "beacon accepted but a CONCURRENT commit already advanced past this revision — promotion rejected via nextConfirmedBaseline, confirmed keeps the newer value (never regresses)",
-    currentConfirmed: {
-      revision: 9,
-      snapshot: { version: 1, plans: { version: 1, items: ["newer-from-elsewhere"] }, lightning: { version: 1, items: [] } },
-    },
-    beaconAccepted: true,
-    cloudRevision: 5,
-    cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
-    expected: {
-      revision: 9,
-      snapshot: { version: 1, plans: { version: 1, items: ["newer-from-elsewhere"] }, lightning: { version: 1, items: [] } },
-    },
-  },
-  {
-    name: "definitive 204 (cloudRevision/cloudSnapshot both null) even though beaconAccepted somehow true (defensive — should not happen against this server build) — never promoted, confirmed untouched",
-    currentConfirmed: null,
+    name: "definitive 204 (cloudRevision/cloudSnapshot both null) even though beaconAccepted somehow true (defensive) — nothing to record",
     beaconAccepted: true,
     cloudRevision: null,
     cloudSnapshot: null,
     expected: null,
   },
   {
-    name: "nothing confirmed yet, beacon accepted — starts a fresh confirmed record from the GET's own snapshot",
-    currentConfirmed: null,
+    name: "accepted, with a days[] present — days included in the recorded facts",
     beaconAccepted: true,
     cloudRevision: 1,
-    cloudSnapshot: { version: 1, plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] } },
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
     expected: {
       revision: 1,
-      snapshot: { version: 1, plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] } },
+      accepted: { plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
     },
   },
 ];
