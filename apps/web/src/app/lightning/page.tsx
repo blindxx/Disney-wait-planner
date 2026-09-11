@@ -186,6 +186,10 @@ function loadKnownDays(key: string): string[] {
  * SH.2.1 P3 — THE authority-bearing read for the days domain. Mirrors
  * plans/page.tsx's own loadEffectiveDurableDays() exactly, see its doc
  * there for the full rationale.
+ *
+ * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
+ * mount-time UI hydration; see loadEffectiveDurableLightningItems()'s own
+ * doc above for the full rationale.
  */
 function loadEffectiveDurableDays(key: string): string[] {
   return parseDaysRaw(readLatestDurableValue(key));
@@ -420,6 +424,11 @@ function parseDurableLightningItemsRaw(raw: string | null): LightningItem[] {
  * plans/page.tsx's own loadEffectiveDurablePlanItems() exactly, see its
  * doc there for the full rationale. Use this — never loadFromStorage()
  * directly — for any sync/conflict decision touching the Lightning domain.
+ *
+ * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
+ * mount-time UI hydration, for the same reason: rendering canonical bytes
+ * alone at mount could show a stale value when a newer local-edit fact
+ * survives unresolved (the documented cross-tab hydration race).
  */
 function loadEffectiveDurableLightningItems(key: string): LightningItem[] {
   return parseDurableLightningItemsRaw(readLatestDurableValue(key));
@@ -856,7 +865,12 @@ export default function LightningPage() {
     setActiveDayId(normalizeDayId(localStorage.getItem(activeDayKeyRef.current)));
     // Phase 8.3.2 — load known planner days for safe display-day validation.
     daysKeyRef.current = buildNamespacedKey(currentProfileId, "days");
-    const loadedKnownDays = loadKnownDays(daysKeyRef.current);
+    // SH.2.1 P1 fix (this round, Codex finding #1) — reads the days
+    // domain's EFFECTIVE DURABLE value (see loadEffectiveDurableDays()'s own
+    // doc above), never canonical-only loadKnownDays(): rendering canonical
+    // bytes alone at mount could show a stale value when a newer local-edit
+    // fact survives unresolved (the documented cross-tab hydration race).
+    const loadedKnownDays = loadEffectiveDurableDays(daysKeyRef.current);
     setKnownDays(loadedKnownDays);
     // Phase 8.8 — load day park overrides and metadata (read-only context display).
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
@@ -870,7 +884,12 @@ export default function LightningPage() {
     setAllPlanItems(loadAllPlanItems(plansKeyRef.current));
     // Retarget the module-level sync to this profile.
     setSyncProfileId(currentProfileId);
-    const loadedItems = loadFromStorage(lightningKeyRef.current);
+    // SH.2.1 P1 fix (this round, Codex finding #1) — same rationale as
+    // `loadedKnownDays` just above: reads the Lightning domain's effective
+    // durable value (see loadEffectiveDurableLightningItems()'s own doc
+    // above), never canonical-only loadFromStorage(), so mount-time
+    // rendering can never regress behind a surviving local-edit fact.
+    const loadedItems = loadEffectiveDurableLightningItems(lightningKeyRef.current);
     setItems(loadedItems);
     // SH.2 architecture — capture this page's own FALLBACK baselines from
     // the values just loaded above. This is only a STARTING assumption for

@@ -352,11 +352,18 @@ function parseDurablePlanItemsRaw(raw: string | null): PlanItem[] {
  * Use this — never loadFromStorage() directly — for any sync/conflict
  * decision touching the Plans domain: the pre-fetch frozen snapshot, the
  * post-fetch "current" candidate compared against baseline, and therefore
- * changed-locally/winner-selection itself. loadFromStorage() remains
- * correct for materialization/UI-only reads (mount-time hydration, general
- * item loading, the cross-day-duplicate/backup/export helpers elsewhere in
- * this file) where the canonical key IS the intended source and no
- * sync/conflict decision is being made.
+ * changed-locally/winner-selection itself.
+ *
+ * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
+ * mount-time UI hydration: rendering canonical bytes alone (the previous
+ * behavior) could show the user a stale value when an unresolved local-edit
+ * fact — left behind by the documented cross-tab hydration race — is
+ * actually newer, letting further offline/unauthenticated editing build on
+ * top of the wrong base and permanently supersede the fact that should have
+ * won. There is exactly one definition of "current local value" now;
+ * loadFromStorage() remains correct only for reads that are genuinely
+ * canonical-key-scoped and never feed UI state or a sync/conflict decision
+ * (the cross-day-duplicate/backup/export helpers elsewhere in this file).
  */
 function loadEffectiveDurablePlanItems(key: string): PlanItem[] {
   return parseDurablePlanItemsRaw(readLatestDurableValue(key));
@@ -638,9 +645,15 @@ function loadDays(key: string): string[] {
  * syncPayload.ts for the full rationale). Use this — never loadDays()
  * directly — for any sync/conflict decision: the pre-fetch frozen
  * snapshot, the post-fetch "current" candidate, changed-locally/winner
- * selection. loadDays() remains correct for materialization/UI-only reads
- * (mount-time hydration, the cross-tab 'storage' listener's own display
- * refresh).
+ * selection.
+ *
+ * SH.2.1 P1 fix (this round, Codex finding #1) — ALSO the correct read for
+ * mount-time UI hydration (see loadEffectiveDurablePlanItems()'s own doc
+ * above for the full rationale — the same stale-canonical-at-mount risk
+ * applies identically to this domain). loadDays() remains correct for the
+ * cross-tab 'storage' listener's own display refresh, which is reflecting
+ * what another tab just canonically wrote, not resolving this tab's own
+ * local authority.
  */
 function loadEffectiveDurableDays(key: string): string[] {
   return parseDaysRaw(readLatestDurableValue(key));
@@ -1671,7 +1684,14 @@ export default function PlansPage() {
     setSyncProfileId(currentProfileId);
 
     // Load plans, run Phase 8.0 dayId migration (idempotent), persist if needed.
-    const rawLoaded = loadFromStorage(planKeyRef.current);
+    // SH.2.1 P1 fix (this round, Codex finding #1) — reads the domain's
+    // EFFECTIVE DURABLE value (see loadEffectiveDurablePlanItems()'s own doc
+    // above), never canonical-only loadFromStorage(): rendering canonical
+    // bytes alone at mount could show a stale value when a newer local-edit
+    // fact survives unresolved (the documented cross-tab hydration race),
+    // letting further offline/unauthenticated editing build on the wrong
+    // base and permanently supersede the fact that should have won.
+    const rawLoaded = loadEffectiveDurablePlanItems(planKeyRef.current);
     const loaded = migrateDayIds(rawLoaded);
     if (loaded !== rawLoaded) {
       // Migration ran — persist migrated items so next load is clean.
@@ -1687,7 +1707,11 @@ export default function PlansPage() {
     // Phase 8.0 — Load days list and active day for this profile.
     // Phase 8.0.1 — Merge dayIds actually present in items into stored list
     // so synced/imported items with day-2/day-3 always appear in the selector.
-    const storedDays = loadDays(daysKeyRef.current);
+    // SH.2.1 P1 fix (this round, Codex finding #1) — same rationale as the
+    // items read just above: use the effective durable value, not canonical
+    // alone, so mount-time rendering can never regress behind a surviving
+    // local-edit fact.
+    const storedDays = loadEffectiveDurableDays(daysKeyRef.current);
     const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
     // Phase 11.2 — preserve storedDays' persisted (positional) order; only
     // append day IDs found on items but missing from the stored list (a

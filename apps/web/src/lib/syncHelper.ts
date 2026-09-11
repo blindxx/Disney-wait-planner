@@ -1093,6 +1093,21 @@ export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
  * A live edit is the user's own freshest intent, so it is never rejected:
  * "noop" only when the durable value already equals it (still a success).
  *
+ * SH.2.1 P1 fix (Codex finding #2, this round) — "the durable value" for
+ * that noop check means the EFFECTIVE DURABLE value (canonical + any still-
+ * unresolved edit fact for this key — see readLatestDurableValue()'s own
+ * doc above), never the canonical key's raw bytes alone. Canonical storage
+ * can be stale relative to a surviving edit fact (the documented cross-tab
+ * hydration race); comparing `nextRaw` against canonical alone let a
+ * genuine user action — deliberately setting this key back to canonical's
+ * stale value — look like a no-op, silently leaving that unrelated, older
+ * edit fact as durable authority instead of publishing the user's actual,
+ * fresher intent. Comparing against the effective durable value instead
+ * means a true no-op is still recognized whenever `nextRaw` already IS
+ * durable authority (whichever key holds it), while any genuine divergence
+ * — including a value that happens to match stale canonical bytes — always
+ * publishes a fresh edit fact, exactly as an ordinary edit should.
+ *
  * Codex P1 fix (17th round) — before writing the canonical key, first
  * publishes this edit as its own permanently-unique, append-only
  * local-edit-fact entry (see this section's own module doc above) — a
@@ -1110,13 +1125,21 @@ export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
  */
 export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
   if (typeof window === "undefined") return "failed";
-  let currentRaw: string | null;
   try {
-    currentRaw = localStorage.getItem(key);
+    localStorage.getItem(key);
   } catch {
     return "failed";
   }
-  const decision = decideLocalDomainCommit(currentRaw, currentRaw, nextRaw);
+  // SH.2.1 P1 fix (Codex finding #2, this round) — the noop check below
+  // compares against the EFFECTIVE DURABLE value (canonical + any still-
+  // unresolved edit fact), never canonical bytes alone. See this
+  // function's own doc above for the full rationale. This is a force-
+  // commit policy — the durable value read here also stands in as its own
+  // "expected previous" baseline — so decideLocalDomainCommit() can still
+  // only return "write" or "noop", never "superseded": an ordinary edit is
+  // always the user's freshest intent and is never rejected.
+  const durableRaw = readLatestDurableValue(key);
+  const decision = decideLocalDomainCommit(durableRaw, durableRaw, nextRaw);
   if (decision === "noop") return "noop";
   const editId = generateOpId();
   const editFactKey = localEditFactKey(key, editId);

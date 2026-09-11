@@ -1880,3 +1880,94 @@ export const DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES: Array<{
   },
 ];
 
+// ===== ORDINARY-EDIT NOOP DECISION (SH.2.1 P1, this round) =====
+//
+// Codex found a second violation of the SH.2.1 P3 standing rule:
+// commitLocalDomainRawSync() (syncHelper.ts) — the primitive EVERY ordinary
+// user edit across Plans/Lightning/days routes through — decided "noop"
+// (nothing to write) by comparing the caller's requested `nextRaw` against
+// the canonical key's raw bytes ALONE, via decideLocalDomainCommit(
+// currentRaw, currentRaw, nextRaw) with `currentRaw` a plain
+// localStorage.getItem(key). If canonical held a stale value B while an
+// unresolved edit fact C was the true durable authority (the same
+// documented cross-tab hydration race SH.2.1 P3 already covers for pull
+// winner selection), a user who deliberately edited the field back to B —
+// a genuine, fresh user action — would see `nextRaw === currentRaw` (both
+// B) and get "noop": no new edit fact published, canonical left untouched,
+// and the OLDER, unrelated fact C left standing as durable authority
+// forever, even though the user's own newest intent was actually B.
+//
+// The fix (in commitLocalDomainRawSync() itself — see its own doc in
+// syncHelper.ts) reuses exactly the two existing shared primitives SH.2.1
+// P3 already established, composed the SAME way readLatestDurableValue()
+// already composes them: resolveEffectiveDurableRaw() (canonical + edit
+// facts -> effective durable value) feeds decideLocalDomainCommit() (the
+// noop/write/superseded decision) as BOTH its `currentRaw` and
+// `expectedPreviousRaw` — a force-commit, so the outcome can only be
+// "write" or "noop", never "superseded". No new interpretation of local
+// authority is introduced; this is the identical resolver, reused. The
+// cases below exercise that exact composition of the two real,
+// already-covered production functions — not a reimplementation.
+//
+/**
+ * Reference cases for the ORDINARY-EDIT noop decision commitLocalDomainRawSync()
+ * now makes — the REQUIRED cases from the SH.2.1 P1 (this round)
+ * architectural contract. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_COMMIT_CASES, resolveEffectiveDurableRaw, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_COMMIT_CASES.forEach(c => {
+ *     const durable = resolveEffectiveDurableRaw(c.canonicalRaw, c.factRawValues);
+ *     const got = decideLocalDomainCommit(durable, durable, c.nextRaw);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  factRawValues: string[];
+  nextRaw: string;
+  expected: LocalDomainCommitDecision;
+}> = [
+  {
+    name: "required case 3 — canonical B + durable fact C + user deliberately chooses B: must WRITE (publish B as the newest durable intent), never a silent noop against stale canonical bytes",
+    canonicalRaw: "B",
+    factRawValues: ["C"],
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "required case 4 — requested value already equals the effective durable value (the surviving fact itself): true noop",
+    canonicalRaw: "B",
+    factRawValues: ["C"],
+    nextRaw: "C",
+    expected: "noop",
+  },
+  {
+    name: "required case 5 — normal case, no edit facts: noop rule reduces to plain canonical comparison, unchanged from before this fix",
+    canonicalRaw: "B",
+    factRawValues: [],
+    nextRaw: "B",
+    expected: "noop",
+  },
+  {
+    name: "required case 5 (companion) — normal case, no edit facts, genuinely new value: still writes exactly as before this fix",
+    canonicalRaw: "B",
+    factRawValues: [],
+    nextRaw: "D",
+    expected: "write",
+  },
+  {
+    name: "no canonical yet, no facts yet (first-ever edit for this key): writes",
+    canonicalRaw: null,
+    factRawValues: [],
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "ambiguous 2-fact tie falls back to canonical for the noop decision too — same tie-break resolveEffectiveDurableRaw always applies, never a special case here",
+    canonicalRaw: "B",
+    factRawValues: ["C", "E"],
+    nextRaw: "B",
+    expected: "noop",
+  },
+];
+
