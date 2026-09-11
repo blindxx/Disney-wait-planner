@@ -40,7 +40,12 @@ import {
   beginPullContext,
   isPullContextCurrent,
 } from "@/lib/syncHelper";
-import { isConflictRepairableByRevision } from "@/lib/syncPayload";
+import {
+  resolvePreFetchDomainBaseline,
+  resolvePostFetchDomainBaseline,
+  type DomainPreFetchSnapshot,
+  type DomainBaselineOutcome,
+} from "@/lib/syncPayload";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -553,13 +558,14 @@ export default function LightningPage() {
   //
   // itemsBaselineRef/daysBaselineRef hold this page's own FALLBACK
   // baseline — used only when no confirmed snapshot exists yet for this
-  // profile (see captureConfirmedSnapshotForPull() below). Captured once
-  // at mount, and updated ONLY when a pull resolves and cloud wins a
-  // domain (local was unchanged, so adopting cloud's value is safe) —
-  // NEVER merely because a pull effect re-ran, and NEVER when local won a
-  // domain's conflict. Each pull captures its OWN immutable baseline once,
-  // at pull start (see captureConfirmedSnapshotForPull()), preferring a
-  // real confirmed snapshot over these refs whenever one exists.
+  // profile (see buildPreFetchPullBaseline()/buildPostFetchPullBaseline()
+  // below). Captured once at mount, and updated ONLY when a pull resolves
+  // and cloud wins a domain (local was unchanged, so adopting cloud's
+  // value is safe) — NEVER merely because a pull effect re-ran, and NEVER
+  // when local won a domain's conflict. Each pull captures its OWN
+  // immutable baseline once, at pull start (see
+  // buildPreFetchPullBaseline()), preferring a real confirmed snapshot
+  // over these refs whenever one exists.
   const itemsBaselineRef = useRef<LightningItem[]>([]);
   const daysBaselineRef = useRef<string[]>([]);
   // Same fallback concept, applied to the OPPOSITE dataset (Plans' raw
@@ -570,161 +576,165 @@ export default function LightningPage() {
   // read.
   const plansRawBaselineRef = useRef<string | null>(null);
 
-  // SH.2 architecture — capture ONE pull's immutable causal baseline.
-  // Mirrors plans/page.tsx exactly (see its own detailed doc for the full
-  // rationale). Codex P1 fix (#2 of this round) — the PREVIOUS version of
-  // this mechanism (resyncConfirmedBaselines) was called at GET COMPLETION
-  // time, which meant a push confirmation that completed WHILE the GET was
-  // in flight could be consumed by that same pull — making an already-
-  // stale GET response look "unchanged" relative to the now-advanced
-  // baseline and incorrectly overwrite the just-confirmed local state. The
-  // fix is purely about WHEN this runs: called ONCE, synchronously, before
-  // pullPlanner() is even invoked (see the pull effect below), and its
-  // return value is closed over by that pull's `.then()` — never
-  // re-derived at resolution time, never mutated for the lifetime of that
-  // one pull.
+  // SH.2.1 — mirrors plans/page.tsx exactly (see its own detailed doc for
+  // the full architecture and the SH.2 18th round's P1 this replaces: a
+  // single dual-purpose function whose "capture fresh disk bytes for
+  // recovery" branch could never actually run on the pre-fetch call that
+  // was supposed to run it). buildPreFetchPullBaseline()/
+  // buildPostFetchPullBaseline() below are pure page-local GLUE only,
+  // wired into the shared resolvePreFetchDomainBaseline()/
+  // resolvePostFetchDomainBaseline() resolvers (syncPayload.ts) — no
+  // baseline/conflict/recovery DECISION lives in this file. Note this
+  // page's "items" is the LIGHTNING domain (confirmed.lightning) and its
+  // "plansRaw" is the SIBLING domain (confirmed.plans) — the mirror image
+  // of plans/page.tsx throughout.
   //
-  // Reads getConfirmedState(userId, profileId) — the durable,
-  // user+profile-scoped PER-DOMAIN record syncHelper's
-  // doPush()/commitConfirmedBaseline() write from the exact accepted
-  // payload, gated by EACH domain's OWN server revision (Codex P1, 11th
-  // round — see getConfirmedState's own doc in syncHelper.ts for why
-  // plans/lightning/days are tracked independently rather than under one
-  // mixed revision) — and, for whichever domain has a confirmed fact, uses
-  // it AS this pull's baseline for THAT domain outright: never a fresh
-  // read of the current plans/lightning/days storage keys, which is what
-  // let a same-tab edit made after push-start get misclassified as
-  // confirmed (Codex P1, 1st round, preserved here). getConfirmedState() is
-  // a plain localStorage scan of keys shared across every tab for this
-  // exact user+profile, so no cross-tab message-passing is needed for
-  // correctness — a DIFFERENT tab's confirmed push is visible here as soon
-  // as this function is called, with no separate listener required.
-  //
-  // For a domain with no confirmed fact yet, falls back to that domain's
-  // OWN itemsBaselineRef/daysBaselineRef/plansRawBaselineRef — the
-  // mount-time load, or a previous pull's own cloud-won resolution for that
-  // SAME domain. Note this page's "items" is the LIGHTNING domain
-  // (confirmed.lightning) and its "plansRaw" is the SIBLING domain
-  // (confirmed.plans) — the mirror image of plans/page.tsx.
-  // `identity` (Codex P1, 13th round) — optional override for WHICH
-  // user/profile to read confirmed state for. Mirrors plans/page.tsx
-  // exactly — see its own detailed doc for why a call made AFTER an
-  // awaited boundary must pass this pull's captured PullContext explicitly
-  // rather than defaulting to the live refs.
-  // Codex P1 fix (16th round) — mirrors plans/page.tsx exactly, see its own
-  // detailed doc. `conflicts` reports every domain whose confirmed state
-  // came back "conflict"; the pull effect below MUST bail out entirely
-  // before ever using items/days/plansRaw for winner selection whenever
-  // `conflicts` is non-empty.
-  // CONFIRMED-CONFLICT RECOVERY (Codex P1, 17th round) — `cloudRevision`,
-  // when supplied, is THIS pull's own authoritative GET response revision
-  // (null for the pre-fetch call, or for a 204/unparseable response).
-  // Mirrors plans/page.tsx exactly — see its own detailed doc.
-  //
-  // CONFLICT-RECOVERY AUTHORITY (Codex P1, 18th round) — `preFetchSnapshot`
-  // mirrors plans/page.tsx exactly, see its own detailed doc: a repaired
-  // conflict must never fall back to the stale baseline ref, and must never
-  // be re-read from disk AFTER the fetch (which would already have absorbed
-  // a mid-fetch edit). It reuses this SAME pull's own `pullStartBaseline`
-  // (captured pre-fetch by the first call to this function) when supplied;
-  // the first call itself (no `preFetchSnapshot`) is what captures that
-  // fresh pre-fetch read for any conflicted domain.
-  function captureConfirmedSnapshotForPull(
+  // `identity` is REQUIRED on both — never defaults to the live
+  // activeUserIdRef/activeProfileIdRef refs, for the same reason as
+  // plans/page.tsx (see its own doc).
+
+  /**
+   * FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE — mirrors
+   * plans/page.tsx's own domainFallbackValue() exactly, see its doc there
+   * for the full rationale.
+   */
+  function domainFallbackValue<T>(ref: { current: T }, neutral: T, contentOwnershipMismatch: boolean): T {
+    return contentOwnershipMismatch ? neutral : ref.current;
+  }
+
+  /** Mirrors plans/page.tsx's own clearRefOnFallbackMismatch() exactly. */
+  function clearRefOnFallbackMismatch<T>(
+    ref: { current: T },
+    outcome: DomainBaselineOutcome<T>,
+    neutral: T,
+    contentOwnershipMismatch: boolean
+  ): void {
+    if (contentOwnershipMismatch && outcome.kind === "fallback") {
+      ref.current = neutral;
+    }
+  }
+
+  /**
+   * STAGE 1 (pre-fetch) — mirrors plans/page.tsx's own
+   * buildPreFetchPullBaseline() exactly, see its doc there for the full
+   * rationale (this IS the actual SH.2.1 fix: disk reads are taken
+   * UNCONDITIONALLY here, never gated on this domain's confirmed status).
+   */
+  function buildPreFetchPullBaseline(
     contentOwnershipMismatch: boolean,
-    identity?: { userId: string | null; profileId: string },
-    cloudRevision: number | null = null,
-    preFetchSnapshot?: { items: LightningItem[]; days: string[]; plansRaw: string | null }
+    identity: { userId: string | null; profileId: string }
   ): {
-    items: LightningItem[];
-    days: string[];
-    plansRaw: string | null;
-    conflicts: Array<{ domain: "plans" | "lightning" | "days"; revision: number }>;
+    items: DomainPreFetchSnapshot<LightningItem[]>;
+    days: DomainPreFetchSnapshot<string[]>;
+    plansRaw: DomainPreFetchSnapshot<string | null>;
   } {
-    const userId = identity ? identity.userId : activeUserIdRef.current;
-    const profileId = identity ? identity.profileId : activeProfileIdRef.current;
-    // Codex P1 (3rd round) — no durable confirmation can be read without a
-    // known authenticated identity (see activeUserIdRef's own doc); falls
-    // back to the in-memory refs exactly as when no confirmed fact exists
-    // yet for any domain.
-    const confirmed = userId
-      ? getConfirmedState(userId, profileId)
+    const confirmed = identity.userId
+      ? getConfirmedState(identity.userId, identity.profileId)
       : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
-    const conflicts: Array<{ domain: "plans" | "lightning" | "days"; revision: number }> = [];
-    const plansRepaired =
-      confirmed.plans.status === "conflict" && isConflictRepairableByRevision(confirmed.plans.revision, cloudRevision);
-    const lightningRepaired =
-      confirmed.lightning.status === "conflict" &&
-      isConflictRepairableByRevision(confirmed.lightning.revision, cloudRevision);
-    const daysRepaired =
-      confirmed.days.status === "conflict" && isConflictRepairableByRevision(confirmed.days.revision, cloudRevision);
-    if (confirmed.plans.status === "conflict" && !plansRepaired) {
-      conflicts.push({ domain: "plans", revision: confirmed.plans.revision });
-    }
-    if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
-      conflicts.push({ domain: "lightning", revision: confirmed.lightning.revision });
-    }
-    if (confirmed.days.status === "conflict" && !daysRepaired) {
-      conflicts.push({ domain: "days", revision: confirmed.days.revision });
-    }
-    // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
-    // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. Mirrors
-    // plans/page.tsx's own doc for this exact fix — see there for the full
-    // rationale: a mismatch with no confirmed fact yet for THIS identity's
-    // copy of a given domain means that domain's own baseline ref still
-    // holds whatever the PREVIOUS identity's conflict session last saw for
-    // it, and trusting it (even only as a comparison baseline) lets that
-    // foreign content become indistinguishable from this identity's own
-    // local edit the moment cloud has no data for that domain. Returning a
-    // NEUTRAL/EMPTY value for that domain instead (and overwriting its ref)
-    // forecloses that.
-    let items: LightningItem[];
-    if (confirmed.lightning.status === "confirmed") {
-      items = migrateLightningDayIds(confirmed.lightning.fact.value.items as LightningItem[]);
-    } else if (confirmed.lightning.status === "conflict" && lightningRepaired) {
-      // CONFLICT RECOVERY (18th round) — mirrors plans/page.tsx exactly,
-      // see its own detailed doc.
-      items = preFetchSnapshot ? preFetchSnapshot.items : migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
-    } else if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
-      // Never used as a real baseline — the pull effect bails out entirely
-      // for a conflicted (and not-yet-repairable) domain before this value
-      // could matter.
-      items = itemsBaselineRef.current;
-    } else if (contentOwnershipMismatch) {
-      items = [];
-      itemsBaselineRef.current = [];
-    } else {
-      items = itemsBaselineRef.current;
-    }
 
-    let days: string[];
-    if (confirmed.days.status === "confirmed") {
-      days = confirmed.days.fact.value;
-    } else if (confirmed.days.status === "conflict" && daysRepaired) {
-      days = preFetchSnapshot ? preFetchSnapshot.days : loadKnownDays(daysKeyRef.current);
-    } else if (confirmed.days.status === "conflict" && !daysRepaired) {
-      days = daysBaselineRef.current;
-    } else if (contentOwnershipMismatch) {
-      days = ["day-1"];
-      daysBaselineRef.current = ["day-1"];
-    } else {
-      days = daysBaselineRef.current;
-    }
+    const items = resolvePreFetchDomainBaseline(
+      confirmed.lightning,
+      (raw) => migrateLightningDayIds(raw.items as LightningItem[]),
+      migrateLightningDayIds(loadFromStorage(lightningKeyRef.current)),
+      domainFallbackValue(itemsBaselineRef, [] as LightningItem[], contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(itemsBaselineRef, items.outcome, [], contentOwnershipMismatch);
 
-    let plansRaw: string | null;
-    if (confirmed.plans.status === "confirmed") {
-      plansRaw = JSON.stringify(confirmed.plans.fact.value);
-    } else if (confirmed.plans.status === "conflict" && plansRepaired) {
-      plansRaw = preFetchSnapshot ? preFetchSnapshot.plansRaw : localStorage.getItem(getActiveProfileKeys().plans);
-    } else if (confirmed.plans.status === "conflict" && !plansRepaired) {
-      plansRaw = plansRawBaselineRef.current;
-    } else if (contentOwnershipMismatch) {
-      plansRaw = null;
-      plansRawBaselineRef.current = null;
-    } else {
-      plansRaw = plansRawBaselineRef.current;
-    }
+    const days = resolvePreFetchDomainBaseline(
+      confirmed.days,
+      (raw) => raw,
+      loadKnownDays(daysKeyRef.current),
+      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(daysBaselineRef, days.outcome, ["day-1"], contentOwnershipMismatch);
 
-    return { items, days, plansRaw, conflicts };
+    const plansRaw = resolvePreFetchDomainBaseline(
+      confirmed.plans,
+      (raw) => JSON.stringify(raw),
+      localStorage.getItem(getActiveProfileKeys().plans),
+      domainFallbackValue(plansRawBaselineRef, null, contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(plansRawBaselineRef, plansRaw.outcome, null, contentOwnershipMismatch);
+
+    return { items, days, plansRaw };
+  }
+
+  /**
+   * STAGE 2 (post-fetch) — mirrors plans/page.tsx's own
+   * buildPostFetchPullBaseline() exactly, see its doc there for the full
+   * rationale.
+   */
+  function buildPostFetchPullBaseline(
+    contentOwnershipMismatch: boolean,
+    identity: { userId: string | null; profileId: string },
+    cloudRevision: number | null,
+    preFetch: {
+      items: DomainPreFetchSnapshot<LightningItem[]>;
+      days: DomainPreFetchSnapshot<string[]>;
+      plansRaw: DomainPreFetchSnapshot<string | null>;
+    }
+  ): {
+    items: DomainBaselineOutcome<LightningItem[]>;
+    days: DomainBaselineOutcome<string[]>;
+    plansRaw: DomainBaselineOutcome<string | null>;
+  } {
+    const confirmed = identity.userId
+      ? getConfirmedState(identity.userId, identity.profileId)
+      : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+
+    const items = resolvePostFetchDomainBaseline(
+      confirmed.lightning,
+      cloudRevision,
+      (raw) => migrateLightningDayIds(raw.items as LightningItem[]),
+      preFetch.items,
+      domainFallbackValue(itemsBaselineRef, [] as LightningItem[], contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(itemsBaselineRef, items, [], contentOwnershipMismatch);
+
+    const days = resolvePostFetchDomainBaseline(
+      confirmed.days,
+      cloudRevision,
+      (raw) => raw,
+      preFetch.days,
+      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(daysBaselineRef, days, ["day-1"], contentOwnershipMismatch);
+
+    const plansRaw = resolvePostFetchDomainBaseline(
+      confirmed.plans,
+      cloudRevision,
+      (raw) => JSON.stringify(raw),
+      preFetch.plansRaw,
+      domainFallbackValue(plansRawBaselineRef, null, contentOwnershipMismatch)
+    );
+    clearRefOnFallbackMismatch(plansRawBaselineRef, plansRaw, null, contentOwnershipMismatch);
+
+    return { items, days, plansRaw };
+  }
+
+  /**
+   * Mirrors plans/page.tsx's own collectGatedDomains() exactly.
+   */
+  function collectGatedDomains(outcomes: {
+    items: DomainBaselineOutcome<unknown>;
+    days: DomainBaselineOutcome<unknown>;
+    plansRaw: DomainBaselineOutcome<unknown>;
+  }): Array<{ domain: "plans" | "lightning" | "days"; revision: number }> {
+    const gated: Array<{ domain: "plans" | "lightning" | "days"; revision: number }> = [];
+    if (outcomes.items.kind === "gated") gated.push({ domain: "lightning", revision: outcomes.items.revision });
+    if (outcomes.plansRaw.kind === "gated") gated.push({ domain: "plans", revision: outcomes.plansRaw.revision });
+    if (outcomes.days.kind === "gated") gated.push({ domain: "days", revision: outcomes.days.revision });
+    return gated;
+  }
+
+  /**
+   * Mirrors plans/page.tsx's own requireResolvedValue() exactly.
+   */
+  function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
+    if (outcome.kind === "gated") {
+      throw new Error("SH.2.1: requireResolvedValue() called on a gated domain outcome");
+    }
+    return outcome.value;
   }
   // Phase 8.9.2 — captured target day ID for Clear Day Lightning confirmation (null = not pending).
   const [clearDayLightningTarget, setClearDayLightningTarget] = useState<string | null>(null);
@@ -799,9 +809,10 @@ export default function LightningPage() {
     // SH.2 architecture — capture this page's own FALLBACK baselines from
     // the values just loaded above. This is only a STARTING assumption for
     // a profile that has never had a successful push yet (or is offline/
-    // unauthenticated) — captureConfirmedSnapshotForPull() (declared
-    // above) prefers a real confirmed snapshot the moment one exists,
-    // falling back to these refs only until then.
+    // unauthenticated) — buildPreFetchPullBaseline()/
+    // buildPostFetchPullBaseline() (declared above) prefer a real confirmed
+    // snapshot the moment one exists, falling back to these refs only
+    // until then.
     itemsBaselineRef.current = loadedItems;
     daysBaselineRef.current = loadedKnownDays;
     // Same baseline concept for the opposite (Plans) dataset this page
@@ -893,16 +904,21 @@ export default function LightningPage() {
     // edit get silently discarded by a later pull (Codex finding).
     setSyncReady(false);
     const profileKeysForPull = getActiveProfileKeys();
-    // SH.2 architecture — freeze this pull's causal baseline NOW, before
-    // the GET is even issued (Codex P1 #2). `pullStartBaseline` is closed
-    // over by `.then()` below and consulted there instead of any ref — see
-    // captureConfirmedSnapshotForPull()'s own doc above. Codex P1 fix (8th
-    // round) — this is a floor, not necessarily what winner selection
-    // actually uses: mirrors plans/page.tsx exactly, see `effectiveBaseline`
+    // SH.2.1 — STAGE 1: freeze this pull's causal baseline NOW, before the
+    // GET is even issued (Codex P1 #2, preserved). `preFetchBaseline` is
+    // closed over by `.then()` below and consulted there instead of any
+    // ref — see buildPreFetchPullBaseline()'s own doc above. This is a
+    // floor, not necessarily what winner selection actually uses: mirrors
+    // plans/page.tsx exactly, see `baselineOutcomes`/`effectiveBaseline`
     // below.
-    const pullStartBaseline = captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
+    const preFetchBaseline = buildPreFetchPullBaseline(contentOwnershipMismatch, {
       userId: pullCtx.userId,
       profileId: pullCtx.profileId,
+    });
+    const preFetchGatedDomains = collectGatedDomains({
+      items: preFetchBaseline.items.outcome,
+      days: preFetchBaseline.days.outcome,
+      plansRaw: preFetchBaseline.plansRaw.outcome,
     });
     // SH.2 architecture (Codex P1, 7th round; generalized to a set in the
     // 9th; fairly bounded in the 10th) — read a BOUNDED, FAIRLY ROTATED
@@ -950,38 +966,42 @@ export default function LightningPage() {
           } catch {}
           return;
         }
-        // This pull's EFFECTIVE baseline for winner selection — mirrors
-        // plans/page.tsx exactly, including scoping the re-derived read to
-        // pullCtx.userId/pullCtx.profileId rather than the live refs, and
-        // (17th round) re-deriving whenever the pre-fetch baseline itself
-        // already had a conflict this pull's own revision might repair.
-        const effectiveBaseline =
-          anyAccepted || pullStartBaseline.conflicts.length > 0
-            ? captureConfirmedSnapshotForPull(
-                contentOwnershipMismatch,
-                {
-                  userId: pullCtx.userId,
-                  profileId: pullCtx.profileId,
-                },
-                planner?.revision ?? null,
-                // CONFLICT-RECOVERY AUTHORITY (18th round) — mirrors
-                // plans/page.tsx exactly, see its own detailed doc.
-                pullStartBaseline
-              )
-            : pullStartBaseline;
+        // This pull's EFFECTIVE baseline for winner selection — SH.2.1
+        // STAGE 2. Mirrors plans/page.tsx exactly, including scoping the
+        // re-derived read to pullCtx.userId/pullCtx.profileId rather than
+        // the live refs, and re-deriving ONLY when at least one pending op
+        // was just confirmed accepted OR the pre-fetch baseline itself
+        // already reported a gated domain — never unconditionally, which
+        // would reintroduce the exact race the 2nd round's "freeze before
+        // the fetch" fix closed. See plans/page.tsx's own detailed doc.
+        const shouldRederiveBaseline = anyAccepted || preFetchGatedDomains.length > 0;
+        const baselineOutcomes = shouldRederiveBaseline
+          ? buildPostFetchPullBaseline(
+              contentOwnershipMismatch,
+              { userId: pullCtx.userId, profileId: pullCtx.profileId },
+              planner?.revision ?? null,
+              preFetchBaseline
+            )
+          : {
+              items: preFetchBaseline.items.outcome,
+              days: preFetchBaseline.days.outcome,
+              plansRaw: preFetchBaseline.plansRaw.outcome,
+            };
 
         // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
-        // added 17th) — mirrors plans/page.tsx exactly, see its own detailed
-        // doc: a conflict at ANY domain's newest confirmed revision that
-        // this pull could NOT repair means the entire pull bails out here
-        // rather than proceeding for the healthy domains while leaving
+        // added 17th; SH.2.1 now enforced by DomainBaselineOutcome's own
+        // discriminated union) — mirrors plans/page.tsx exactly, see its own
+        // detailed doc: a conflict at ANY domain's newest confirmed revision
+        // that this pull could NOT repair means the entire pull bails out
+        // here rather than proceeding for the healthy domains while leaving
         // syncReady closed — since push always sends plans+lightning+days
         // combined in one request. Local storage is left completely
         // untouched; the next pull resolves the conflict automatically once
-        // a later unambiguous (or, as of this round, this pull's own
-        // repairing) revision supersedes it.
-        if (effectiveBaseline.conflicts.length > 0) {
-          for (const conflict of effectiveBaseline.conflicts) {
+        // a later unambiguous (or this pull's own repairing) revision
+        // supersedes it.
+        const gatedDomains = collectGatedDomains(baselineOutcomes);
+        if (gatedDomains.length > 0) {
+          for (const conflict of gatedDomains) {
             try {
               console.error(
                 `SH.2: pull deferred — ${conflict.domain}'s confirmed state is conflicted at revision ${conflict.revision}.`
@@ -990,6 +1010,13 @@ export default function LightningPage() {
           }
           return;
         }
+        // Every outcome above is now proven non-"gated" — safe to read
+        // `.value` off each. Mirrors plans/page.tsx exactly.
+        const effectiveBaseline = {
+          items: requireResolvedValue(baselineOutcomes.items),
+          days: requireResolvedValue(baselineOutcomes.days),
+          plansRaw: requireResolvedValue(baselineOutcomes.plansRaw),
+        };
 
         // SH.2 architecture — read CURRENT local storage fresh, right now,
         // for both domains this page owns. This is what actually closes
@@ -1253,7 +1280,7 @@ export default function LightningPage() {
         // DURABLE confirmed baseline for whichever domain(s) this pull
         // determined were cloud-won AND successfully persisted. This is
         // what makes a pull-hydrated domain just as "confirmed" as a
-        // pushed one, so a LATER pull's captureConfirmedSnapshotForPull()
+        // pushed one, so a LATER pull's buildPreFetchPullBaseline()
         // never misclassifies it as an unsynced local edit — see
         // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
         // domains are simply omitted: their prior confirmation status is
@@ -1478,7 +1505,7 @@ export default function LightningPage() {
       // SH.2 architecture — no confirmed-snapshot listener here (removed —
       // obsolete under the pull-start-baseline model). Each pull captures
       // its own causal baseline fresh, once, at pull start (see
-      // captureConfirmedSnapshotForPull()) — a live cross-tab listener
+      // buildPreFetchPullBaseline()) — a live cross-tab listener
       // that could update an in-use baseline mid-pull is exactly the
       // mechanism Codex P1 #2 flagged.
     }
