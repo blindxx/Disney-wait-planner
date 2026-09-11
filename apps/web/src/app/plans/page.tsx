@@ -99,6 +99,7 @@ import {
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
+  decideStaleResponseRecovery,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
 } from "@/lib/syncPayload";
@@ -1309,6 +1310,31 @@ export default function PlansPage() {
   // while the GET /api/sync/plans request is in-flight. Set true after pull
   // completes (authenticated path) or immediately (unauthenticated path).
   const [syncReady, setSyncReady] = useState(false);
+  // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. A pull that
+  // rejects its OWN response as stale (SH.2.1 P2's revision bound — see
+  // UnusableDomain's own doc below) previously just returned, leaving
+  // syncReady false with nothing scheduled to recover it — the page could
+  // sit with cloud sync disabled until an unrelated auth cycle or reload.
+  // Bumping this counter is the ONE way this page schedules a replacement
+  // pull: it is a dependency of the pull effect below, so incrementing it
+  // forces that effect to re-run under the CURRENT (re-read at that later
+  // render, never captured/stale) sessionStatus/authenticatedUserId — an
+  // ordinary React re-render/effect-dependency cycle, never a setTimeout or
+  // poll. See decideStaleResponseRecovery()'s own doc in syncPayload.ts for
+  // exactly when this fires (stale-response ONLY, never a real conflict).
+  const [staleRetryTick, setStaleRetryTick] = useState(0);
+  // Guards against scheduling more than one pending replacement pull at a
+  // time: set true the instant a retry is scheduled, reset to false
+  // unconditionally at the TOP of every run of the pull effect below (i.e.
+  // the moment ANY new pull cycle begins — whether it is the scheduled
+  // replacement itself, or an unrelated auth/profile transition that
+  // superseded it). See the effect's own doc for why resetting
+  // unconditionally — not only in the authenticated branch — is what makes
+  // required case 3 (auth/profile changes before retry -> old retry does
+  // nothing) safe: a stale-triggered retry that never actually gets to run
+  // a pull (e.g. the user signed out first) must not leave this guard
+  // stuck "true" forever and silently swallow a later, genuine retry need.
+  const staleRetryPendingRef = useRef(false);
   // Incremented whenever Lightning localStorage data is written by this page
   // (cloud pull hydration) so crossDayChecks reruns without waiting for a
   // plan/day change to happen first.
@@ -1891,6 +1917,11 @@ export default function PlansPage() {
   // authenticated → gate resets to false, pull resolves, then gate opens.
   // unauthenticated → gate opens immediately (local-only, no cloud pull needed).
   useEffect(() => {
+    // SH.2.1 (this round) — unconditionally clear the stale-retry pending
+    // guard at the TOP of every run of this effect, before any branch: see
+    // staleRetryPendingRef's own doc above for why this must happen
+    // regardless of which branch below actually runs.
+    staleRetryPendingRef.current = false;
     if (sessionStatus === "loading") {
       // Cancel any queued debounced push from a prior signed-out session
       // before entering the loading state — prevents stale local data from
@@ -2174,6 +2205,34 @@ export default function PlansPage() {
                 );
               }
             } catch {}
+          }
+          // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Rejecting a
+          // stale response is correct, but leaving syncReady closed forever
+          // is not: decideStaleResponseRecovery() (syncPayload.ts) is the
+          // ONE shared, pure decision for whether THIS bail-out is safe to
+          // recover from automatically — "retry" only when EVERY unusable
+          // domain is "stale-response" (this pull's own response is simply
+          // older than already-confirmed, durable authority), never when
+          // ANY domain is "conflict" (required case 5 — a real conflict has
+          // its own, separate recovery contract and must never silently
+          // inherit this one). `isPullCurrent()` and `!staleRetryPendingRef.
+          // current` together are what keep this to exactly ONE scheduled
+          // replacement: isPullCurrent() catches a context change that
+          // already happened by this point in the SAME pull (nothing
+          // awaited since the last check above, but cheap and consistent
+          // with every other gate in this effect); the pending guard stops
+          // this exact pull instance from scheduling a second replacement
+          // even if this block were ever reached more than once. Bumping
+          // staleRetryTick is the ONLY action taken — no local write, no
+          // syncReady change, no hydration: this pull's own outcome is
+          // otherwise identical to before this round's fix.
+          if (
+            isPullCurrent() &&
+            !staleRetryPendingRef.current &&
+            decideStaleResponseRecovery(unusableDomains) === "retry"
+          ) {
+            staleRetryPendingRef.current = true;
+            setStaleRetryTick((t) => t + 1);
           }
           return;
         }
@@ -2596,9 +2655,13 @@ export default function PlansPage() {
   // `sessionStatus` itself never leaves "authenticated" — see that
   // variable's own doc above for why depending on the whole `session`
   // object would over-fire while depending on nothing at all would
-  // under-fire.
+  // under-fire. `staleRetryTick` (SH.2.1, this round) is included so a
+  // stale-response bail-out's own scheduled replacement pull actually runs
+  // this effect again — see staleRetryTick's own doc above; it never
+  // changes on its own, only ever via setStaleRetryTick inside this same
+  // effect, so it cannot cause any OTHER unrelated re-run.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionStatus, initialized, authenticatedUserId]);
+  }, [sessionStatus, initialized, authenticatedUserId, staleRetryTick]);
 
   // Register a best-effort sendBeacon push on page unload.
   // Requires both syncReady (initial pull resolved) AND authenticated session.

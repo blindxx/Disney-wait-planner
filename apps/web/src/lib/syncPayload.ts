@@ -2107,3 +2107,84 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
   },
 ];
 
+// ===== STALE-RESPONSE PULL RECOVERY (SH.2.1, this round) =====
+//
+// Codex found that a pull correctly REJECTING a stale response (a confirmed
+// revision newer than this pull's own GET, per SH.2.1 P2's revision bound —
+// see UnusableDomain's own doc in each page) had no RECOVERY: the pull
+// effect simply returned, leaving syncReady false and scheduling nothing
+// further. The page could then sit indefinitely with cloud sync disabled
+// until an unrelated auth cycle or reload happened to re-run the pull
+// effect for some other reason.
+//
+// Root cause: "gated" (an ambiguous/conflicted confirmed revision this
+// pull's response could not repair) and "stale-response" (this pull's OWN
+// response is simply OLDER than already-confirmed authority) were both
+// treated as identical, permanent-until-something-else-changes bail-out
+// conditions — correct for "gated" (a real conflict needs a genuinely NEW
+// server state to resolve, which nothing here can force), but wrong for
+// "stale-response": that domain's true current state is now KNOWN to this
+// tab (the confirmed fact that made the response stale IS a real, already-
+// durable answer) — there is no reason to wait for an unrelated event; a
+// fresh GET will simply see it.
+//
+// decideStaleResponseRecovery() is the ONE shared, pure decision: a
+// replacement pull is warranted if and only if EVERY unusable domain this
+// pull bailed out on is "stale-response" — never when ANY domain is
+// "gated" (required case 5: a real conflict must not silently reuse retry
+// behavior it never asked for; recovering a conflict already has its own,
+// separate contract — a later pull's own confirmed-state read repairing it
+// via isConflictRepairableByRevision, untouched by this round). An empty
+// input is "no-retry" — defensively correct (there is nothing to recover
+// from), though the pull effect only ever calls this once it has already
+// confirmed `unusableDomains.length > 0`.
+export type UnusableDomainReason = "conflict" | "stale-response";
+
+export function decideStaleResponseRecovery(
+  unusableDomains: Array<{ reason: UnusableDomainReason }>
+): "retry" | "no-retry" {
+  if (unusableDomains.length === 0) return "no-retry";
+  return unusableDomains.every((d) => d.reason === "stale-response") ? "retry" : "no-retry";
+}
+
+/**
+ * Reference cases for decideStaleResponseRecovery() — the REQUIRED cases
+ * from the SH.2.1 (this round) architectural contract. Run from Node:
+ *   import { DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES, decideStaleResponseRecovery } from "@/lib/syncPayload";
+ *   DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES.forEach(c => {
+ *     const got = decideStaleResponseRecovery(c.unusableDomains);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
+  name: string;
+  unusableDomains: Array<{ reason: UnusableDomainReason }>;
+  expected: "retry" | "no-retry";
+}> = [
+  {
+    name: "required case 1 — a single stale-response domain (rev7 rejected in favor of confirmed rev8): retry",
+    unusableDomains: [{ reason: "stale-response" }],
+    expected: "retry",
+  },
+  {
+    name: "all unusable domains stale-response (plans+lightning+days all stale together): retry",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "stale-response" }, { reason: "stale-response" }],
+    expected: "retry",
+  },
+  {
+    name: "required case 5 — a conflicted ('gated') domain must NEVER auto-retry via this mechanism, even alone",
+    unusableDomains: [{ reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "required case 5 — ANY conflicted domain blocks retry even when every other domain is merely stale-response — conflict recovery has its own separate contract, never silently inherited",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "no unusable domains — nothing to recover from",
+    unusableDomains: [],
+    expected: "no-retry",
+  },
+];
+

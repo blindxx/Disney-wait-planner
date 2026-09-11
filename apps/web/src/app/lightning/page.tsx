@@ -44,6 +44,7 @@ import {
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
+  decideStaleResponseRecovery,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
 } from "@/lib/syncPayload";
@@ -828,6 +829,12 @@ export default function LightningPage() {
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Same semantics as plans/page.tsx syncReady.
   const [syncReady, setSyncReady] = useState(false);
+  // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
+  // plans/page.tsx's own staleRetryTick/staleRetryPendingRef exactly — see
+  // their doc there for the full rationale (required case 6: Plans and
+  // Lightning stay symmetric).
+  const [staleRetryTick, setStaleRetryTick] = useState(0);
+  const staleRetryPendingRef = useRef(false);
 
   // Form state
   const [rideName, setRideName] = useState("");
@@ -931,6 +938,9 @@ export default function LightningPage() {
 
   // Manage syncReady gate based on auth state transitions — mirrors plans/page.tsx.
   useEffect(() => {
+    // SH.2.1 (this round) — see plans/page.tsx's own doc on
+    // staleRetryPendingRef for why this reset is unconditional.
+    staleRetryPendingRef.current = false;
     if (sessionStatus === "loading") {
       cancelScheduledSync();
       // Codex P1 fix (13th round) — mirrors plans/page.tsx exactly: retarget
@@ -1089,6 +1099,18 @@ export default function LightningPage() {
                 );
               }
             } catch {}
+          }
+          // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
+          // plans/page.tsx exactly, see its own detailed doc: retry only
+          // when EVERY unusable domain is "stale-response", never when ANY
+          // is "conflict" (required cases 5 & 6).
+          if (
+            isPullCurrent() &&
+            !staleRetryPendingRef.current &&
+            decideStaleResponseRecovery(unusableDomains) === "retry"
+          ) {
+            staleRetryPendingRef.current = true;
+            setStaleRetryTick((t) => t + 1);
           }
           return;
         }
@@ -1428,9 +1450,11 @@ export default function LightningPage() {
   // exactly, see its own detailed doc. `authenticatedUserId` (Codex P1,
   // 13th round) is included so this effect DOES still re-run on a genuine
   // authenticated-identity change even when `sessionStatus` never leaves
-  // "authenticated".
+  // "authenticated". `staleRetryTick` (SH.2.1, this round) is included so a
+  // stale-response bail-out's own scheduled replacement pull actually runs
+  // this effect again — mirrors plans/page.tsx exactly, see its own doc.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionStatus, loaded, authenticatedUserId]);
+  }, [sessionStatus, loaded, authenticatedUserId, staleRetryTick]);
 
   // Register a best-effort sendBeacon push on page unload.
   useEffect(() => {
