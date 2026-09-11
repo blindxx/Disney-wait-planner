@@ -977,6 +977,36 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
  * above, even in the narrow window where the raw-value check alone would
  * have missed it (the edit's fact key already visible, its canonical write
  * not yet, or vice versa).
+ *
+ * LOCAL-EDIT FACT LIFECYCLE (Codex P1, 18th round) — a local-edit fact means
+ * "unresolved local intent", not "a local edit happened at some point". A
+ * successful "committed" write here durably supersedes whatever content was
+ * on disk before it, so it must ALSO retire the edit fact(s) that described
+ * that now-superseded content — otherwise readLatestDurableValue() (which
+ * prefers a surviving edit fact over the canonical key) keeps resurrecting
+ * the stale pre-hydration value forever, capable of later being pushed back
+ * over the very cloud state that just won. This closes Codex P1 finding #1,
+ * 18th round.
+ *
+ * `baselineEditFactIds` is exactly the right retire set: it is the COMPLETE
+ * and CURRENT edit-fact keyspace for this key as of decision time, proven
+ * so by the re-validation loop immediately above (any key outside it would
+ * already have made this commit report "superseded" instead of reaching the
+ * write) — an "explicit edit-fact frontier", snapshotted, validated, then
+ * consumed. Retiring exactly this set — never a blind "clear every fact for
+ * this key right now" — is what guarantees a fact published AFTER this
+ * snapshot (required case 2: a genuinely newer local edit that appeared
+ * while this hydration was in flight) is never touched: such a fact either
+ * already aborted this commit via the loop above (most cases), or, in the
+ * single-threaded window between that loop and this retirement running (no
+ * `await` between them), cannot exist at all.
+ *
+ * Retirement runs ONLY on "committed" (an actual write landed) — never on
+ * "noop" (the durable value already equalled the winner; any edit fact
+ * describing it still accurately describes CURRENT content, so it is left
+ * alone rather than guessed at) and never on any other outcome (nothing was
+ * written, so nothing was superseded — required case 3: a failed
+ * persistence must leave edit facts and gates untouched).
  */
 export function commitLocalDomainRaw(
   key: string,
@@ -1013,6 +1043,18 @@ export function commitLocalDomainRaw(
       localStorage.setItem(key, nextRaw);
     } catch {
       return "failed";
+    }
+    // Codex P1 fix (18th round) — LOCAL-EDIT FACT LIFECYCLE: this write just
+    // durably superseded exactly the facts captured in `baselineEditFactIds`
+    // (proven complete and current by the re-validation loop above) — see
+    // this function's own doc above for why retiring precisely this set,
+    // and only on a genuine "committed" write, is what keeps
+    // readLatestDurableValue() resolving to the new winner instead of a
+    // stale pre-hydration edit.
+    for (const factKey of baselineEditFactIds) {
+      try {
+        localStorage.removeItem(factKey);
+      } catch {}
     }
     return "committed";
   });

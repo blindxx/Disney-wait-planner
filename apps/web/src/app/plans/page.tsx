@@ -1008,10 +1008,41 @@ export default function PlansPage() {
   // revision matters" rule — no special recovery code path is needed
   // anywhere else. A domain whose conflict is NOT repairable by this
   // response still fails closed exactly as the 16th round already ensured.
+  //
+  // CONFLICT-RECOVERY AUTHORITY (Codex P1, 18th round) — a repaired
+  // conflict must NOT fall back to `itemsBaselineRef.current`/etc.: that
+  // ref was never trustworthy DURING the conflict (nothing kept it in sync
+  // with disk while the domain's confirmed state was ambiguous), so
+  // comparing fresh on-disk bytes against it would misclassify uncertain
+  // pre-existing local content as a genuine unsynced edit, letting it beat
+  // the authoritative recovery revision (exactly the Codex finding this
+  // round closes). Root cause: recovery needs a baseline that reflects
+  // "what was on disk BEFORE this pull's fetch began" — captured once,
+  // synchronously, before any await — so that ANY edit landing during the
+  // fetch (a genuinely new local edit made mid-recovery) reads as
+  // "changed" relative to it, while content that was merely SITTING there
+  // beforehand (uncertain, unconfirmed, but not NEW) reads as "unchanged"
+  // and correctly loses to the authoritative GET.
+  //
+  // `preFetchSnapshot`, when supplied, is exactly that: this SAME pull's
+  // own `pullStartBaseline` (captured by the FIRST, pre-fetch call to this
+  // function, before `pullPlanner()`'s fetch or reconcilePendingOperations()'s
+  // await ever ran). The SECOND call (after the fetch resolves, when a
+  // repair or a beacon promotion requires re-deriving confirmed state)
+  // passes it in so a repaired domain reuses that frozen pre-fetch value
+  // instead of re-reading disk NOW — a read taken here, after the fetch's
+  // own await, would already have absorbed any edit that landed DURING
+  // that await, silently erasing the very signal recovery needs to detect
+  // it (required case 6). The FIRST call itself (no `preFetchSnapshot`
+  // supplied) is what actually captures that fresh pre-fetch read, for ANY
+  // conflicted domain — whether or not it turns out to be repairable is
+  // irrelevant at that point (cloudRevision is not known yet); the value is
+  // simply unused if the domain ends up staying blocked.
   function captureConfirmedSnapshotForPull(
     contentOwnershipMismatch: boolean,
     identity?: { userId: string | null; profileId: string },
-    cloudRevision: number | null = null
+    cloudRevision: number | null = null,
+    preFetchSnapshot?: { items: PlanItem[]; days: string[]; lightningRaw: string | null }
   ): {
     items: PlanItem[];
     days: string[];
@@ -1080,6 +1111,12 @@ export default function PlansPage() {
     let items: PlanItem[];
     if (confirmed.plans.status === "confirmed") {
       items = migrateDayIds((confirmed.plans.fact.value.items as unknown[]).map(normalizePlanItem));
+    } else if (confirmed.plans.status === "conflict" && plansRepaired) {
+      // CONFLICT RECOVERY (18th round) — see this function's own doc above:
+      // reuse the frozen pre-fetch snapshot when this is the post-fetch
+      // recompute; otherwise (this IS the pre-fetch call) capture it fresh,
+      // right now, before anything else about this pull has happened.
+      items = preFetchSnapshot ? preFetchSnapshot.items : migrateDayIds(loadFromStorage(planKeyRef.current));
     } else if (confirmed.plans.status === "conflict" && !plansRepaired) {
       // Never used as a real baseline — the pull effect bails out entirely
       // for a conflicted (and not-yet-repairable) domain before this value
@@ -1095,6 +1132,8 @@ export default function PlansPage() {
     let days: string[];
     if (confirmed.days.status === "confirmed") {
       days = confirmed.days.fact.value;
+    } else if (confirmed.days.status === "conflict" && daysRepaired) {
+      days = preFetchSnapshot ? preFetchSnapshot.days : loadDays(daysKeyRef.current);
     } else if (confirmed.days.status === "conflict" && !daysRepaired) {
       days = daysBaselineRef.current;
     } else if (contentOwnershipMismatch) {
@@ -1107,6 +1146,8 @@ export default function PlansPage() {
     let lightningRaw: string | null;
     if (confirmed.lightning.status === "confirmed") {
       lightningRaw = JSON.stringify(confirmed.lightning.fact.value);
+    } else if (confirmed.lightning.status === "conflict" && lightningRepaired) {
+      lightningRaw = preFetchSnapshot ? preFetchSnapshot.lightningRaw : localStorage.getItem(getActiveProfileKeys().lightning);
     } else if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
       lightningRaw = lightningRawBaselineRef.current;
     } else if (contentOwnershipMismatch) {
@@ -1962,7 +2003,14 @@ export default function PlansPage() {
                   userId: pullCtx.userId,
                   profileId: pullCtx.profileId,
                 },
-                planner?.revision ?? null
+                planner?.revision ?? null,
+                // CONFLICT-RECOVERY AUTHORITY (18th round) — pass this SAME
+                // pull's own frozen pre-fetch snapshot so a repaired domain
+                // reuses it instead of re-reading disk now (see this
+                // function's own doc above for why a read taken here would
+                // already have absorbed a mid-fetch edit, erasing the very
+                // signal recovery needs to detect it).
+                pullStartBaseline
               )
             : pullStartBaseline;
 

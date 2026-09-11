@@ -620,10 +620,20 @@ export default function LightningPage() {
   // when supplied, is THIS pull's own authoritative GET response revision
   // (null for the pre-fetch call, or for a 204/unparseable response).
   // Mirrors plans/page.tsx exactly — see its own detailed doc.
+  //
+  // CONFLICT-RECOVERY AUTHORITY (Codex P1, 18th round) — `preFetchSnapshot`
+  // mirrors plans/page.tsx exactly, see its own detailed doc: a repaired
+  // conflict must never fall back to the stale baseline ref, and must never
+  // be re-read from disk AFTER the fetch (which would already have absorbed
+  // a mid-fetch edit). It reuses this SAME pull's own `pullStartBaseline`
+  // (captured pre-fetch by the first call to this function) when supplied;
+  // the first call itself (no `preFetchSnapshot`) is what captures that
+  // fresh pre-fetch read for any conflicted domain.
   function captureConfirmedSnapshotForPull(
     contentOwnershipMismatch: boolean,
     identity?: { userId: string | null; profileId: string },
-    cloudRevision: number | null = null
+    cloudRevision: number | null = null,
+    preFetchSnapshot?: { items: LightningItem[]; days: string[]; plansRaw: string | null }
   ): {
     items: LightningItem[];
     days: string[];
@@ -670,6 +680,10 @@ export default function LightningPage() {
     let items: LightningItem[];
     if (confirmed.lightning.status === "confirmed") {
       items = migrateLightningDayIds(confirmed.lightning.fact.value.items as LightningItem[]);
+    } else if (confirmed.lightning.status === "conflict" && lightningRepaired) {
+      // CONFLICT RECOVERY (18th round) — mirrors plans/page.tsx exactly,
+      // see its own detailed doc.
+      items = preFetchSnapshot ? preFetchSnapshot.items : migrateLightningDayIds(loadFromStorage(lightningKeyRef.current));
     } else if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
       // Never used as a real baseline — the pull effect bails out entirely
       // for a conflicted (and not-yet-repairable) domain before this value
@@ -685,6 +699,8 @@ export default function LightningPage() {
     let days: string[];
     if (confirmed.days.status === "confirmed") {
       days = confirmed.days.fact.value;
+    } else if (confirmed.days.status === "conflict" && daysRepaired) {
+      days = preFetchSnapshot ? preFetchSnapshot.days : loadKnownDays(daysKeyRef.current);
     } else if (confirmed.days.status === "conflict" && !daysRepaired) {
       days = daysBaselineRef.current;
     } else if (contentOwnershipMismatch) {
@@ -697,6 +713,8 @@ export default function LightningPage() {
     let plansRaw: string | null;
     if (confirmed.plans.status === "confirmed") {
       plansRaw = JSON.stringify(confirmed.plans.fact.value);
+    } else if (confirmed.plans.status === "conflict" && plansRepaired) {
+      plansRaw = preFetchSnapshot ? preFetchSnapshot.plansRaw : localStorage.getItem(getActiveProfileKeys().plans);
     } else if (confirmed.plans.status === "conflict" && !plansRepaired) {
       plansRaw = plansRawBaselineRef.current;
     } else if (contentOwnershipMismatch) {
@@ -945,7 +963,10 @@ export default function LightningPage() {
                   userId: pullCtx.userId,
                   profileId: pullCtx.profileId,
                 },
-                planner?.revision ?? null
+                planner?.revision ?? null,
+                // CONFLICT-RECOVERY AUTHORITY (18th round) — mirrors
+                // plans/page.tsx exactly, see its own detailed doc.
+                pullStartBaseline
               )
             : pullStartBaseline;
 
