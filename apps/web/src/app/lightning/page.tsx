@@ -773,11 +773,17 @@ export default function LightningPage() {
         domain: "plans" | "lightning" | "days";
         reason: "stale-response";
         confirmedRevision: number;
-        cloudRevision: number | null;
+        cloudRevision: number;
+      }
+    | {
+        domain: "plans" | "lightning" | "days";
+        reason: "unusable-response";
+        confirmedRevision: number;
       };
 
   /**
-   * Mirrors plans/page.tsx's own collectUnusableDomains() exactly.
+   * Mirrors plans/page.tsx's own collectUnusableDomains() exactly, including
+   * this round's "unusable-response" split (see that function's own doc).
    */
   function collectUnusableDomains(outcomes: {
     items: DomainBaselineOutcome<unknown>;
@@ -795,6 +801,12 @@ export default function LightningPage() {
           confirmedRevision: outcome.confirmedRevision,
           cloudRevision: outcome.cloudRevision,
         });
+      } else if (outcome.kind === "unusable-response") {
+        unusable.push({
+          domain,
+          reason: "unusable-response",
+          confirmedRevision: outcome.confirmedRevision,
+        });
       }
     };
     check("lightning", outcomes.items);
@@ -807,7 +819,7 @@ export default function LightningPage() {
    * Mirrors plans/page.tsx's own requireResolvedValue() exactly.
    */
   function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
-    if (outcome.kind === "gated" || outcome.kind === "stale-response") {
+    if (outcome.kind === "gated" || outcome.kind === "stale-response" || outcome.kind === "unusable-response") {
       throw new Error("SH.2.1: requireResolvedValue() called on an unusable domain outcome");
     }
     return outcome.value;
@@ -1093,9 +1105,13 @@ export default function LightningPage() {
                 console.error(
                   `SH.2: pull deferred — ${unusable.domain}'s confirmed state is conflicted at revision ${unusable.revision}.`
                 );
+              } else if (unusable.reason === "stale-response") {
+                console.error(
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision}); refusing to hydrate an older response over it. Scheduling a replacement pull.`
+                );
               } else {
                 console.error(
-                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision ?? "none"}); refusing to hydrate an older response over it.`
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is at revision ${unusable.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
                 );
               }
             } catch {}
@@ -1103,7 +1119,8 @@ export default function LightningPage() {
           // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
           // plans/page.tsx exactly, see its own detailed doc: retry only
           // when EVERY unusable domain is "stale-response", never when ANY
-          // is "conflict" (required cases 5 & 6).
+          // is "conflict" or "unusable-response" (this pull's own response
+          // carried no usable revision at all — retrying cannot help).
           if (
             isPullCurrent() &&
             !staleRetryPendingRef.current &&

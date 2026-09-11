@@ -1498,6 +1498,39 @@ export const DEV_CANONICALIZE_JSON_CASES: Array<{
  * an unrelated, genuinely-current domain as stale too (see this section's
  * own DEV_* per-domain-independence case, and required case 5).
  *
+ * SH.2.1 (Codex, stale-response retry round) — UNUSABLE-RESPONSE SPLIT.
+ * A later round added automatic recovery for "stale-response": rejecting a
+ * pull that is genuinely older than confirmed authority is correct, but
+ * leaving syncReady closed forever with nothing scheduled to reopen it was
+ * not — see decideStaleResponseRecovery()'s own doc further down. That
+ * retry mechanism's contract requires a RETRYABLE stale response to
+ * represent a REAL, usable server snapshot whose KNOWN revision is simply
+ * older than already-confirmed authority: retrying is safe there because a
+ * fresh GET will see the newer state. The original "stale-response" kind
+ * above bundled TWO structurally different situations under one label —
+ * `cloudRevision === null` (this pull's OWN response carries no usable
+ * revision at all: a 204, an unparseable/malformed payload, or any other
+ * shape pullPlanner() could not turn into a real revision) treated
+ * identically to `confirmed.fact.revision > cloudRevision` (a REAL, known,
+ * strictly-older revision). Retrying the FIRST case cannot help — the next
+ * GET is exactly as likely to be empty/malformed again, since nothing about
+ * why this response was unusable is revision-related at all — so folding it
+ * into "stale-response" let the retry mechanism repeat that same unusable
+ * GET indefinitely while sync stayed gated the whole time.
+ *
+ * `"unusable-response"` is the new, separate outcome for exactly the
+ * `cloudRevision === null` case (with a confirmed fact present — the ONLY
+ * situation this branch is reached at all; see the "none"/`"fallback"`
+ * branch below for when no confirmed fact exists yet, which never needed
+ * bounding in the first place). `"stale-response"` now ONLY ever carries a
+ * non-null `cloudRevision` — a real, known, older revision — enforced by
+ * the type itself (`cloudRevision: number`, no longer `number | null`) so
+ * a caller can never "invent" a revision for a response that didn't carry
+ * one. Both kinds remain identically unusable-this-pull for hydration
+ * purposes (same whole-pull bail-out, same "never read .value" contract);
+ * they diverge ONLY in whether the automatic retry mechanism may act on
+ * them — see decideStaleResponseRecovery()'s own updated doc.
+ *
  * Because this bound now lives entirely inside resolvePostFetchDomainBaseline
  * and is checked on EVERY call, it is now safe — indeed necessary, to catch
  * a race landing between pre-fetch and post-fetch (required case 4) — for
@@ -1517,7 +1550,8 @@ export type DomainBaselineOutcome<T> =
   | { kind: "confirmed"; value: T }
   | { kind: "recovered"; value: T; revision: number }
   | { kind: "gated"; revision: number }
-  | { kind: "stale-response"; confirmedRevision: number; cloudRevision: number | null }
+  | { kind: "stale-response"; confirmedRevision: number; cloudRevision: number }
+  | { kind: "unusable-response"; confirmedRevision: number }
   | { kind: "fallback"; value: T };
 
 /**
@@ -1574,7 +1608,20 @@ export function resolvePostFetchDomainBaseline<Raw, T>(
     // must actually exist (a null response establishes no bound at all, so
     // nothing can be proven "within" it). Equal revisions are explicitly
     // fine (required case 2: this response IS/matches that confirmation).
-    if (cloudRevision === null || confirmed.fact.revision > cloudRevision) {
+    //
+    // UNUSABLE-RESPONSE SPLIT (this round) — `cloudRevision === null` is
+    // checked FIRST and separately: this pull's own response carries no
+    // usable revision at all (204, unparseable/malformed payload), so
+    // there is nothing to compare `confirmed.fact.revision` against —
+    // "stale" would claim knowledge (a real, older revision) this pull
+    // does not have. See UNUSABLE-RESPONSE SPLIT in this section's own
+    // module doc above for the full rationale (this is what stops the
+    // automatic stale-response retry mechanism from repeating the SAME
+    // unusable GET indefinitely).
+    if (cloudRevision === null) {
+      return { kind: "unusable-response", confirmedRevision: confirmed.fact.revision };
+    }
+    if (confirmed.fact.revision > cloudRevision) {
       return { kind: "stale-response", confirmedRevision: confirmed.fact.revision, cloudRevision };
     }
     return { kind: "confirmed", value: mapConfirmedValue(confirmed.fact.value) };
@@ -1666,17 +1713,25 @@ export const DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES: Array<{
     expected: { kind: "confirmed", value: "CLOUD-V0" },
   },
   {
-    name: "a null cloudRevision establishes no authority bound at all — even a low confirmed revision fails safe as stale-response",
+    name: "unusable-response round, required cases 3 & 4 — a null cloudRevision establishes no authority bound at all: fails safe as unusable-response, NOT stale-response (this pull's own response carries no known revision to claim as 'older'; a confirmed fact being present is exactly what makes this branch reachable at all)",
     confirmed: { status: "confirmed", fact: { revision: 1, value: "CLOUD-V1" } },
     cloudRevision: null,
     preFetch: { diskValue: "DISK-BYTES" },
     fallbackValue: "FALLBACK-REF",
-    expected: { kind: "stale-response", confirmedRevision: 1, cloudRevision: null },
+    expected: { kind: "unusable-response", confirmedRevision: 1 },
   },
   {
     name: "no confirmed baseline — falls back to the caller's own fallback value, no revision bound applies (nothing confirmed to bound)",
     confirmed: { status: "none" },
     cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "fallback", value: "FALLBACK-REF" },
+  },
+  {
+    name: "unusable-response round — a structurally unusable ({} / 204) response with NO confirmed baseline at all is unaffected by the unusable-response split: nothing was ever confirmed to bound, so this stays plain fallback, exactly as before",
+    confirmed: { status: "none" },
+    cloudRevision: null,
     preFetch: { diskValue: "DISK-BYTES" },
     fallbackValue: "FALLBACK-REF",
     expected: { kind: "fallback", value: "FALLBACK-REF" },
@@ -2131,14 +2186,23 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
 // decideStaleResponseRecovery() is the ONE shared, pure decision: a
 // replacement pull is warranted if and only if EVERY unusable domain this
 // pull bailed out on is "stale-response" — never when ANY domain is
-// "gated" (required case 5: a real conflict must not silently reuse retry
+// "gated" (required case 6: a real conflict must not silently reuse retry
 // behavior it never asked for; recovering a conflict already has its own,
 // separate contract — a later pull's own confirmed-state read repairing it
-// via isConflictRepairableByRevision, untouched by this round). An empty
-// input is "no-retry" — defensively correct (there is nothing to recover
-// from), though the pull effect only ever calls this once it has already
-// confirmed `unusableDomains.length > 0`.
-export type UnusableDomainReason = "conflict" | "stale-response";
+// via isConflictRepairableByRevision, untouched by this round) and never
+// when ANY domain is "unusable-response" (this round's Codex finding —
+// required cases 3 & 4: a pull whose OWN response carried no usable
+// revision at all — a 204, or an unparseable/malformed payload, the kind
+// of response `{}` or similar structurally-broken JSON produces — is not
+// "a real snapshot that is merely older"; retrying it is not safe, since
+// the very next GET is exactly as likely to be unusable again for the SAME
+// reason, and nothing about that reason is revision-related — repeating it
+// automatically would recreate an unbounded GET loop while sync stays
+// gated the whole time). An empty input is "no-retry" — defensively
+// correct (there is nothing to recover from), though the pull effect only
+// ever calls this once it has already confirmed
+// `unusableDomains.length > 0`.
+export type UnusableDomainReason = "conflict" | "stale-response" | "unusable-response";
 
 export function decideStaleResponseRecovery(
   unusableDomains: Array<{ reason: UnusableDomainReason }>
@@ -2149,7 +2213,8 @@ export function decideStaleResponseRecovery(
 
 /**
  * Reference cases for decideStaleResponseRecovery() — the REQUIRED cases
- * from the SH.2.1 (this round) architectural contract. Run from Node:
+ * from the SH.2.1 (this round, and the stale-response-retry round before
+ * it) architectural contract. Run from Node:
  *   import { DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES, decideStaleResponseRecovery } from "@/lib/syncPayload";
  *   DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES.forEach(c => {
  *     const got = decideStaleResponseRecovery(c.unusableDomains);
@@ -2172,13 +2237,23 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
     expected: "retry",
   },
   {
-    name: "required case 5 — a conflicted ('gated') domain must NEVER auto-retry via this mechanism, even alone",
+    name: "required case 6 — a conflicted ('gated') domain must NEVER auto-retry via this mechanism, even alone",
     unusableDomains: [{ reason: "conflict" }],
     expected: "no-retry",
   },
   {
-    name: "required case 5 — ANY conflicted domain blocks retry even when every other domain is merely stale-response — conflict recovery has its own separate contract, never silently inherited",
+    name: "required case 6 — ANY conflicted domain blocks retry even when every other domain is merely stale-response — conflict recovery has its own separate contract, never silently inherited",
     unusableDomains: [{ reason: "stale-response" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "required case 3 — a structurally unusable response (this pull's own GET carried no usable revision at all) must NEVER auto-retry, even alone: retrying cannot help and would repeat the same unusable GET indefinitely",
+    unusableDomains: [{ reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "required case 4 — an unusable-response domain blocks retry even when every other domain is merely stale-response (confirmed facts present elsewhere does not make THIS domain's unusable response safe to retry)",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "unusable-response" }],
     expected: "no-retry",
   },
   {

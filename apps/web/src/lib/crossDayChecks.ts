@@ -271,7 +271,7 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
   currentAtResolution: Array<{ id: string; dayId: string }>;
   cloudItems: Array<{ id: string; dayId: string }> | null;
   fallbackValue: Array<{ id: string; dayId: string }>;
-  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "stale-response" | "fallback";
+  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "stale-response" | "unusable-response" | "fallback";
   expectedWinner: "current" | "cloud" | "none (unusable this pull)";
 }> = [
   {
@@ -341,14 +341,14 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
     expectedWinner: "none (unusable this pull)",
   },
   {
-    name: "a null cloudRevision (204/unparseable) establishes no authority bound — an existing confirmed fact still fails safe as stale-response rather than being trusted blindly",
+    name: "unusable-response round, required cases 3 & 4 — a null cloudRevision (204/unparseable) establishes no authority bound — an existing confirmed fact fails safe as unusable-response (NOT stale-response: this pull's own response carries no known revision at all, so it must never enter the automatic stale-response retry chain — see decideStaleResponseRecovery()'s own doc in syncPayload.ts)",
     confirmed: { status: "confirmed", fact: { revision: 1, value: JSON.stringify([{ id: "1", dayId: "day-1" }]) } },
     cloudRevision: null,
     preFetchDiskValue: [{ id: "1", dayId: "day-1" }],
     currentAtResolution: [{ id: "1", dayId: "day-1" }],
     cloudItems: null,
     fallbackValue: [],
-    expectedStageTwoKind: "stale-response",
+    expectedStageTwoKind: "unusable-response",
     expectedWinner: "none (unusable this pull)",
   },
 ];
@@ -363,7 +363,7 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
  *     const stage2 = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, mapValue, stage1, c.fallbackValue);
  *     const kindOk = stage2.kind === c.expectedStageTwoKind;
  *     let winnerOk: boolean;
- *     if (stage2.kind === "gated" || stage2.kind === "stale-response") {
+ *     if (stage2.kind === "gated" || stage2.kind === "stale-response" || stage2.kind === "unusable-response") {
  *       winnerOk = c.expectedWinner === "none (unusable this pull)";
  *     } else {
  *       const { items, changedLocally } = pickWinningItems(stage2.value, c.currentAtResolution, c.cloudItems);
@@ -404,7 +404,7 @@ export const DEV_DURABLE_LOCAL_AUTHORITY_INTEGRATION_CASES: Array<{
   postFetchFactRawValues: string[];
   cloudItems: Array<{ id: string; dayId: string }> | null;
   fallbackValue: Array<{ id: string; dayId: string }>;
-  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "stale-response" | "fallback";
+  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "stale-response" | "unusable-response" | "fallback";
   expectedWinner: "current" | "cloud" | "none (unusable this pull)";
 }> = [
   {
@@ -474,7 +474,7 @@ export const DEV_DURABLE_LOCAL_AUTHORITY_INTEGRATION_CASES: Array<{
  *     const stage2 = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, mapValue, stage1, c.fallbackValue);
  *     const kindOk = stage2.kind === c.expectedStageTwoKind;
  *     let winnerOk;
- *     if (stage2.kind === "gated" || stage2.kind === "stale-response") {
+ *     if (stage2.kind === "gated" || stage2.kind === "stale-response" || stage2.kind === "unusable-response") {
  *       winnerOk = c.expectedWinner === "none (unusable this pull)";
  *     } else {
  *       const { items, changedLocally } = pickWinningItems(stage2.value, current, c.cloudItems);

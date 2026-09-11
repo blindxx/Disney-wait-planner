@@ -1225,23 +1225,40 @@ export default function PlansPage() {
         domain: "plans" | "lightning" | "days";
         reason: "stale-response";
         confirmedRevision: number;
-        cloudRevision: number | null;
+        cloudRevision: number;
+      }
+    | {
+        domain: "plans" | "lightning" | "days";
+        reason: "unusable-response";
+        confirmedRevision: number;
       };
 
   /**
-   * Gathers every domain whose outcome is "gated" or "stale-response" —
-   * see UnusableDomain's own doc for why both trigger the SAME whole-pull
-   * bail-out. Since this page's push always sends plans+lightning+days
-   * combined in ONE request, letting winner selection/local writes proceed
-   * normally for the OTHER, healthy domains this pull while leaving
-   * syncReady closed for the whole page would still risk that a later push
-   * bundles the unresolved domain's untouched-but-unverified local content
-   * alongside them — so ANY unusable domain defers the ENTIRE pull, never
-   * just that one domain (unchanged from SH.2's own 16th-round rule).
-   * Detection itself, however, IS per-domain: each domain's own confirmed
-   * revision is checked independently against this pull's SAME
-   * cloudRevision, so one domain being stale never misclassifies a
-   * genuinely healthy, unrelated domain as stale too.
+   * Gathers every domain whose outcome is "gated", "stale-response", or
+   * "unusable-response" — see UnusableDomain's own doc for why all three
+   * trigger the SAME whole-pull bail-out. Since this page's push always
+   * sends plans+lightning+days combined in ONE request, letting winner
+   * selection/local writes proceed normally for the OTHER, healthy domains
+   * this pull while leaving syncReady closed for the whole page would still
+   * risk that a later push bundles the unresolved domain's
+   * untouched-but-unverified local content alongside them — so ANY
+   * unusable domain defers the ENTIRE pull, never just that one domain
+   * (unchanged from SH.2's own 16th-round rule). Detection itself, however,
+   * IS per-domain: each domain's own confirmed revision is checked
+   * independently against this pull's SAME cloudRevision, so one domain
+   * being unusable never misclassifies a genuinely healthy, unrelated
+   * domain as unusable too.
+   *
+   * SH.2.1 (Codex, this round) — "unusable-response" is a THIRD, distinct
+   * unusable-this-pull reason, split out of what "stale-response" used to
+   * also cover: this pull's OWN response carried no usable revision at all
+   * (a 204, or an unparseable/malformed payload — see
+   * resolvePostFetchDomainBaseline()'s own doc in syncPayload.ts for the
+   * full split rationale). It bails out identically to "conflict"/
+   * "stale-response" for THIS pull, but — unlike "stale-response" — must
+   * never enter the automatic replacement-pull retry chain (see
+   * decideStaleResponseRecovery() below): retrying an unusable response
+   * cannot help, since nothing about why it was unusable is revision-related.
    */
   function collectUnusableDomains(outcomes: {
     items: DomainBaselineOutcome<unknown>;
@@ -1259,6 +1276,12 @@ export default function PlansPage() {
           confirmedRevision: outcome.confirmedRevision,
           cloudRevision: outcome.cloudRevision,
         });
+      } else if (outcome.kind === "unusable-response") {
+        unusable.push({
+          domain,
+          reason: "unusable-response",
+          confirmedRevision: outcome.confirmedRevision,
+        });
       }
     };
     check("plans", outcomes.items);
@@ -1270,17 +1293,17 @@ export default function PlansPage() {
   /**
    * Narrows a DomainBaselineOutcome to its `.value` — callers must already
    * have proven (via collectUnusableDomains(), checked BEFORE this is
-   * called) that no domain in this same outcome set is "gated" or
-   * "stale-response". This is what makes "conflicted/unusable state cannot
-   * accidentally be consumed as a valid baseline" (SH.2.1's own
-   * discriminated-result requirement) a compile-time property rather than a
-   * convention: TypeScript will not let a caller read `.value` off a
-   * DomainBaselineOutcome without first narrowing away both unusable kinds
-   * (neither has a `.value` field), and this function is the ONE place
-   * that narrowing happens for this pull.
+   * called) that no domain in this same outcome set is "gated",
+   * "stale-response", or "unusable-response". This is what makes
+   * "conflicted/unusable state cannot accidentally be consumed as a valid
+   * baseline" (SH.2.1's own discriminated-result requirement) a
+   * compile-time property rather than a convention: TypeScript will not let
+   * a caller read `.value` off a DomainBaselineOutcome without first
+   * narrowing away all three unusable kinds (none has a `.value` field),
+   * and this function is the ONE place that narrowing happens for this pull.
    */
   function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
-    if (outcome.kind === "gated" || outcome.kind === "stale-response") {
+    if (outcome.kind === "gated" || outcome.kind === "stale-response" || outcome.kind === "unusable-response") {
       // Unreachable in practice — the pull effect always calls
       // collectUnusableDomains() on this same outcome set and bails out
       // before ever reaching this call. Guarded rather than asserted away
@@ -2199,9 +2222,13 @@ export default function PlansPage() {
                 console.error(
                   `SH.2: pull deferred — ${unusable.domain}'s confirmed state is conflicted at revision ${unusable.revision}.`
                 );
+              } else if (unusable.reason === "stale-response") {
+                console.error(
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision}); refusing to hydrate an older response over it. Scheduling a replacement pull.`
+                );
               } else {
                 console.error(
-                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision ?? "none"}); refusing to hydrate an older response over it.`
+                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is at revision ${unusable.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
                 );
               }
             } catch {}
@@ -2211,12 +2238,16 @@ export default function PlansPage() {
           // is not: decideStaleResponseRecovery() (syncPayload.ts) is the
           // ONE shared, pure decision for whether THIS bail-out is safe to
           // recover from automatically — "retry" only when EVERY unusable
-          // domain is "stale-response" (this pull's own response is simply
-          // older than already-confirmed, durable authority), never when
-          // ANY domain is "conflict" (required case 5 — a real conflict has
-          // its own, separate recovery contract and must never silently
-          // inherit this one). `isPullCurrent()` and `!staleRetryPendingRef.
-          // current` together are what keep this to exactly ONE scheduled
+          // domain is "stale-response" (this pull's own response is a REAL,
+          // KNOWN, simply-older revision than already-confirmed durable
+          // authority), never when ANY domain is "conflict" (a real conflict
+          // has its own, separate recovery contract) or "unusable-response"
+          // (this pull's OWN response carried no usable revision at all —
+          // retrying cannot help and would repeat the same unusable GET
+          // indefinitely — see that function's own updated doc for the full
+          // rationale Codex's follow-up finding required). `isPullCurrent()`
+          // and `!staleRetryPendingRef.current` together are what keep this
+          // to exactly ONE scheduled
           // replacement: isPullCurrent() catches a context change that
           // already happened by this point in the SAME pull (nothing
           // awaited since the last check above, but cheap and consistent
