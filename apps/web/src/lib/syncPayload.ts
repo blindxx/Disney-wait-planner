@@ -201,11 +201,11 @@ function isDaysValue(v: unknown): v is string[] {
  * missing or invalid — callers (syncHelper.ts's getConfirmedState) treat
  * null as "no confirmed fact here", never as an error. A non-finite/non-
  * numeric `revision` is rejected outright (never coerced to 0) since
- * reduceConfirmedFacts()'s whole max-revision comparison depends on
+ * reduceConfirmedFactRecords()'s whole revision comparison depends on
  * genuine server-issued revisions — treating a corrupted fact as revision
  * 0 would make it look OLDER than everything, silently discarding it
  * instead of just refusing to trust it (it is simply excluded from the
- * candidate set reduceConfirmedFacts() reduces over).
+ * candidate set reduceConfirmedFactRecords() reduces over).
  */
 export function parseConfirmedPlannerDomainFact(
   raw: unknown
@@ -309,93 +309,236 @@ export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
 ];
 
 /**
- * SH.2 architecture (Codex P1, 11th round) — the PURE reduction at the
- * heart of the no-Web-Locks-dependent design: given a set of independently
- * recorded, immutable `ConfirmedDomainFact`s for ONE domain (each an
- * objective historical record — "revision R produced value V" — never
- * mutated once written), returns the one with the MAX revision, or `null`
- * if the set is empty.
- *
- * This is what lets syncHelper.ts's confirmed-state storage do away with
- * Web Locks entirely for THIS mechanism: because facts are immutable and
- * keyed by their own revision (see syncHelper.ts's confirmedFactKey), two
- * tabs recording DIFFERENT facts for the same domain at "the same moment"
- * can never race destructively — there is no shared mutable slot to
- * corrupt, only more facts for this pure function to reduce over. The
- * reduction itself is order-independent (a `.forEach` accumulator that
- * only ever keeps the running max), so it produces the SAME correct answer
- * regardless of which order the facts happen to be enumerated in — which
- * in turn is why WRITE order (racy, unlocked) never matters: only the
- * VALUES of the facts that exist matter, and the read-time reduction sees
- * them all.
+ * SH.2 architecture (Codex P1, 15th round) — REPLACES the 11th round's
+ * reduceConfirmedFacts() (removed). That function assumed AT MOST ONE fact
+ * would ever exist per (domain, revision), and picked the max revision with
+ * no regard for whether two DIFFERENT values had been recorded for the
+ * SAME revision. Round 14 tried to prevent that upstream, by having the
+ * WRITE side read-then-compare before deciding to write — but that read-
+ * then-write sequence is itself exactly the un-atomic check-then-act
+ * pattern round 13 already established localStorage cannot safely provide
+ * without a lock: two tabs can both observe a key absent, both decide to
+ * write, and the later setItem() silently replaces the earlier one. Round
+ * 15's fix removes the assumption entirely, at the storage-primitive
+ * level: a domain+revision may now legitimately have MULTIPLE recorded
+ * facts (see syncHelper.ts's confirmedFactKey — each recording gets its
+ * own permanently-unique physical key, so the WRITE side never reads
+ * before writing and can never race at all), and this function is where
+ * they get reconciled, at READ time, into one logical answer:
+ *   1. Group all facts by revision.
+ *   2. Walk revisions HIGHEST first. For each revision's group, compare
+ *      every fact's CANONICAL value (canonicalizeJSON() above): if they
+ *      are ALL identical, that revision is UNAMBIGUOUS — return it as
+ *      `confirmed` immediately (it is the highest such revision, which is
+ *      exactly what "confirmed" means) and stop.
+ *   3. A revision whose group disagrees is a CONFLICT — a genuine
+ *      same-revision inconsistency (never a legitimate "which is newer"
+ *      question, since a single server revision has exactly one true
+ *      accepted content) — it is recorded in `conflictedRevisions` and
+ *      skipped; the search continues at the next-lower revision. This is
+ *      the "fail closed for that domain" the architectural contract
+ *      requires: a contested revision is never arbitrarily resolved by
+ *      picking whichever fact happens to be first/last/lock-order-
+ *      determined — it is simply not trusted, and an older, genuinely
+ *      unambiguous revision (or nothing) is reported instead.
+ * The reduction is a pure function of WHICH facts exist, never of write
+ * order or arrival timing — exactly like the 11th round's version, just
+ * generalized to tolerate (and correctly reconcile) more than one fact per
+ * revision instead of assuming it away.
  */
-export function reduceConfirmedFacts<T>(facts: Array<ConfirmedDomainFact<T>>): ConfirmedDomainFact<T> | null {
-  let best: ConfirmedDomainFact<T> | null = null;
+export interface ConfirmedFactReduction<T> {
+  confirmed: ConfirmedDomainFact<T> | null;
+  /** Revisions strictly above `confirmed`'s (or, if `confirmed` is null,
+   * every revision present) whose recorded facts disagree — see this
+   * function's own doc. Exposed for logging/pruning; ordinary callers only
+   * need `confirmed`. */
+  conflictedRevisions: number[];
+}
+
+export function reduceConfirmedFactRecords<T>(
+  facts: Array<ConfirmedDomainFact<T>>
+): ConfirmedFactReduction<T> {
+  const byRevision = new Map<number, Array<ConfirmedDomainFact<T>>>();
   for (const fact of facts) {
-    if (!best || fact.revision > best.revision) {
-      best = fact;
+    const group = byRevision.get(fact.revision);
+    if (group) {
+      group.push(fact);
+    } else {
+      byRevision.set(fact.revision, [fact]);
     }
   }
-  return best;
+  const revisionsDesc = Array.from(byRevision.keys()).sort((a, b) => b - a);
+  const conflictedRevisions: number[] = [];
+  let confirmed: ConfirmedDomainFact<T> | null = null;
+  for (const revision of revisionsDesc) {
+    const group = byRevision.get(revision) as Array<ConfirmedDomainFact<T>>;
+    const canonicalValues = new Set(group.map((f) => canonicalizeJSON(f.value)));
+    if (canonicalValues.size > 1) {
+      conflictedRevisions.push(revision);
+      continue;
+    }
+    confirmed = group[0];
+    break;
+  }
+  return { confirmed, conflictedRevisions };
 }
 
 /**
- * Reference cases for reduceConfirmedFacts() — pinning the max-revision
- * reduction rule the whole no-Web-Locks confirmed-state design depends on.
- * Run from Node:
- *   import { DEV_REDUCE_CONFIRMED_FACTS_CASES, reduceConfirmedFacts } from "@/lib/syncPayload";
- *   DEV_REDUCE_CONFIRMED_FACTS_CASES.forEach(c => {
- *     const got = reduceConfirmedFacts(c.facts);
+ * True if every fact recorded for `revision` within `facts` shares the SAME
+ * canonical value (including the trivial case of exactly one fact, or none
+ * — absence is never itself a conflict). Used by recordConfirmedFact()
+ * (syncHelper.ts) to decide, immediately after writing its own new fact,
+ * whether THIS SPECIFIC revision is durably confirmed as unambiguous — the
+ * per-call success signal reconcilePendingOperations() depends on to decide
+ * whether it is safe to retire a pending op's evidence. Deliberately
+ * independent of reduceConfirmedFactRecords()'s "stop at the first
+ * unambiguous revision" search: a revision below the domain's current
+ * overall max can still be perfectly unambiguous on its own terms (e.g. a
+ * legitimately delayed lower-revision response — see this round's own
+ * report), and this function must say so correctly regardless of what a
+ * HIGHER revision's group looks like.
+ */
+export function confirmedFactRevisionIsUnambiguous<T>(
+  facts: Array<ConfirmedDomainFact<T>>,
+  revision: number
+): boolean {
+  const group = facts.filter((f) => f.revision === revision);
+  if (group.length === 0) return false;
+  const canonicalValues = new Set(group.map((f) => canonicalizeJSON(f.value)));
+  return canonicalValues.size === 1;
+}
+
+/**
+ * Reference cases for reduceConfirmedFactRecords() — the REQUIRED cases
+ * from the 15th round's architectural contract. Run from Node:
+ *   import { DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES, reduceConfirmedFactRecords } from "@/lib/syncPayload";
+ *   DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES.forEach(c => {
+ *     const got = reduceConfirmedFactRecords(c.facts);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_REDUCE_CONFIRMED_FACTS_CASES: Array<{
+export const DEV_REDUCE_CONFIRMED_FACT_RECORDS_CASES: Array<{
   name: string;
   facts: Array<ConfirmedDomainFact<unknown>>;
-  expected: ConfirmedDomainFact<unknown> | null;
+  expected: ConfirmedFactReduction<unknown>;
 }> = [
   {
     name: "empty set — nothing confirmed for this domain yet",
     facts: [],
-    expected: null,
+    expected: { confirmed: null, conflictedRevisions: [] },
   },
   {
     name: "single fact — that one wins trivially",
     facts: [{ revision: 5, value: "A" }],
-    expected: { revision: 5, value: "A" },
+    expected: { confirmed: { revision: 5, value: "A" }, conflictedRevisions: [] },
   },
   {
-    name: "facts in ASCENDING revision order — max (last) wins",
+    name: "required — two tabs record IDENTICAL rev5 value (as separate physical facts) — one equivalent confirmed result",
+    facts: [
+      { revision: 5, value: { version: 1, items: ["a"] } },
+      { revision: 5, value: { version: 1, items: ["a"] } },
+    ],
+    expected: { confirmed: { revision: 5, value: { version: 1, items: ["a"] } }, conflictedRevisions: [] },
+  },
+  {
+    name: "required — two tabs record DIFFERENT rev5 values — conflict, neither wins, no lower revision to fall back to",
     facts: [
       { revision: 5, value: "A" },
-      { revision: 6, value: "B" },
+      { revision: 5, value: "B" },
     ],
-    expected: { revision: 6, value: "B" },
+    expected: { confirmed: null, conflictedRevisions: [5] },
   },
   {
-    name: "facts in DESCENDING revision order (e.g. a delayed older response recorded AFTER a newer one) — max (first) still wins, insertion/arrival order is irrelevant",
+    name: "required — a conflicted HIGHER revision falls back to the next unambiguous lower one",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 7, value: "B" },
+      { revision: 7, value: "C" },
+    ],
+    expected: { confirmed: { revision: 5, value: "A" }, conflictedRevisions: [7] },
+  },
+  {
+    name: "required — different revisions recorded concurrently — highest valid (unconflicted) revision wins",
+    facts: [
+      { revision: 6, value: "B" },
+      { revision: 9, value: "D" },
+      { revision: 3, value: "A" },
+    ],
+    expected: { confirmed: { revision: 9, value: "D" }, conflictedRevisions: [] },
+  },
+  {
+    name: "delayed lower revision arriving after a higher unambiguous one remains harmless — still resolves to the higher revision",
     facts: [
       { revision: 7, value: "C" },
       { revision: 6, value: "B-delayed" },
     ],
-    expected: { revision: 7, value: "C" },
+    expected: { confirmed: { revision: 7, value: "C" }, conflictedRevisions: [] },
   },
   {
-    name: "three facts, max in the middle — order-independent",
+    name: "all revisions conflicted — nothing confirmed, every revision reported",
     facts: [
-      { revision: 3, value: "A" },
-      { revision: 9, value: "C" },
-      { revision: 6, value: "B" },
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+      { revision: 6, value: "C" },
+      { revision: 6, value: "D" },
     ],
-    expected: { revision: 9, value: "C" },
+    expected: { confirmed: null, conflictedRevisions: [6, 5] },
+  },
+];
+
+/**
+ * Reference cases for confirmedFactRevisionIsUnambiguous(). Run from Node:
+ *   import { DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES, confirmedFactRevisionIsUnambiguous } from "@/lib/syncPayload";
+ *   DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES.forEach(c => {
+ *     const got = confirmedFactRevisionIsUnambiguous(c.facts, c.revision);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES: Array<{
+  name: string;
+  facts: Array<ConfirmedDomainFact<unknown>>;
+  revision: number;
+  expected: boolean;
+}> = [
+  {
+    name: "no facts at all for this revision — not unambiguous (nothing to confirm)",
+    facts: [{ revision: 9, value: "X" }],
+    revision: 5,
+    expected: false,
   },
   {
-    name: "duplicate max revision (should not happen server-side — a revision is assigned once per accepted write — but handled gracefully: first-seen wins, never a crash)",
+    name: "exactly one fact for this revision — unambiguous",
+    facts: [{ revision: 5, value: "A" }],
+    revision: 5,
+    expected: true,
+  },
+  {
+    name: "multiple facts, same canonical value — unambiguous",
     facts: [
-      { revision: 5, value: "first" },
-      { revision: 5, value: "second" },
+      { revision: 5, value: { b: 2, a: 1 } },
+      { revision: 5, value: { a: 1, b: 2 } },
     ],
-    expected: { revision: 5, value: "first" },
+    revision: 5,
+    expected: true,
+  },
+  {
+    name: "multiple facts, different values — NOT unambiguous, regardless of a higher revision existing elsewhere",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+      { revision: 9, value: "Z" },
+    ],
+    revision: 5,
+    expected: false,
+  },
+  {
+    name: "a lower revision is unambiguous on its own terms even though a HIGHER revision is the domain's overall confirmed max",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 9, value: "Z" },
+    ],
+    revision: 5,
+    expected: true,
   },
 ];
 
@@ -408,7 +551,7 @@ export const DEV_REDUCE_CONFIRMED_FACTS_CASES: Array<{
  * accept/reject decision to make here at all — recording an immutable fact
  * is ALWAYS valid (it is simply a true historical record of what revision
  * R produced), and whether it ends up being the domain's CURRENT confirmed
- * value is entirely up to reduceConfirmedFacts() at READ time. This
+ * value is entirely up to reduceConfirmedFactRecords() at READ time. This
  * function exists only to describe, per domain, WHAT to record — never
  * whether it's "allowed".
  */
@@ -462,8 +605,8 @@ export interface AcceptedPlannerDomains {
  * Codex P1 fix (11th round) — no longer routes through a "current state"
  * merge/rejection step (the old nextConfirmedBaseline()): recording a fact
  * is always valid regardless of what's currently confirmed for any domain,
- * per-domain OR mixed together — see reduceConfirmedFacts()'s own doc for
- * why this is what removes the Web-Locks dependency for confirmed state.
+ * per-domain OR mixed together — see reduceConfirmedFactRecords()'s own doc
+ * for why this is what removes the Web-Locks dependency for confirmed state.
  */
 export function acceptedDomainFactsFromBeacon(
   beaconAccepted: boolean,
@@ -1059,48 +1202,30 @@ export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
   },
 ];
 
-// ===== CONFIRMED-FACT CANONICALIZATION & CONFLICT DETECTION (SH.2, 14th round) =====
+// ===== CONFIRMED-FACT CANONICALIZATION (SH.2, 14th round; storage model
+// replaced 15th round) =====
 //
-// Codex found two P1s in the per-domain confirmed-fact store (11th round):
-//   (1) NOT ACTUALLY IMMUTABLE. recordConfirmedFact() (syncHelper.ts)
-//       unconditionally `setItem()`s the (user, profile, domain, revision)
-//       key. Two callers — most concretely, plans/page.tsx confirming the
-//       "plans" domain from ITS OWN primary-domain reconciliation vs.
-//       lightning/page.tsx confirming the SAME "plans" domain from ITS OWN
-//       sibling-domain reconciliation, for the SAME server revision — can
-//       write DIFFERENT byte representations for that one revision, and
-//       whichever call's setItem lands last silently replaces the other.
-//       A fact "called immutable" that can still be overwritten is not
-//       actually immutable.
-//   (2) SCAN-DURING-PRUNE INDEX SHIFT. Confirmed-state reads enumerate
-//       localStorage by index (length/key(i)) while opportunistic pruning
-//       (also inside recordConfirmedFact) can concurrently remove matching
-//       keys. Removing an earlier index shifts every LATER key down by one;
-//       a forward index scan that has already consumed that later index
-//       silently skips the key now occupying it — including, in the worst
-//       case, the true max-revision fact.
-//
-// Both are fixed at the confirmed-fact store's own architectural level:
-//   • canonicalizeJSON() below gives every fact's value ONE deterministic
-//     serialization regardless of which code path (or which page's own
-//     mirrored-but-independent reconciliation) constructed the JS object —
-//     recordConfirmedFact() (syncHelper.ts) compares CANONICAL values, so
-//     incidental differences (object key construction order) can never
-//     manufacture a false "conflict", and a genuine logical difference is
-//     never hidden by picking whichever write happened to land first or
-//     last. See decideConfirmedFactWrite() below for what happens on an
-//     actual mismatch: the existing fact is never silently replaced.
-//   • The scan itself (scanConfirmedFactEntries() in syncHelper.ts) is
-//     restructured into two phases — snapshot every matching KEY first
-//     (index-based, but scanned backward from one captured length, which
-//     cannot skip a live key the way forward iteration can — see that
-//     function's own doc), THEN read each key's VALUE by its exact string
-//     (immune to any further index shifting, since getItem addresses by
-//     key, never by position). Pruning is untouched by this: it still runs
-//     only after a fact's value is durably written, and a key vanishing
-//     between the snapshot and the value-read (because a concurrent prune
-//     removed it) can only ever be a NON-max fact — see this round's own
-//     report for the invariant that makes that true.
+// The 14th round gave every fact's value ONE deterministic canonical
+// serialization (canonicalizeJSON() below) so two code paths constructing
+// logically-identical content never manufacture a false conflict merely
+// from incidental object-key-order differences — that part still holds and
+// is unchanged. What the 14th round got WRONG was HOW it used
+// canonicalization: recordConfirmedFact() read whatever existed at the
+// (user, profile, domain, revision) key, canonically compared it against
+// the new value, and only THEN decided whether to write
+// (decideConfirmedFactWrite() — REMOVED this round). That read-then-decide-
+// then-write sequence is exactly the un-atomic check-then-act pattern round
+// 13 already established localStorage cannot safely provide without a
+// lock: two tabs can both read the key as absent, both independently decide
+// "write", and the later setItem() silently replaces the earlier fact —
+// Codex's 15th-round finding. See reduceConfirmedFactRecords() and
+// confirmedFactRevisionIsUnambiguous() below, and confirmedFactKey()'s own
+// doc in syncHelper.ts, for the replacement: every recorded fact now gets
+// its own permanently-unique physical key (an append-only representation),
+// so the write side is a single unconditional setItem with no read-before-
+// write at all — genuinely un-raceable — and canonical-value reconciliation
+// happens entirely at READ time instead, over however many facts a
+// revision ends up with.
 
 /**
  * Deterministic, canonical JSON serialization: object keys are recursively
@@ -1167,69 +1292,3 @@ export const DEV_CANONICALIZE_JSON_CASES: Array<{
   },
 ];
 
-/** What recording a NEW confirmed-fact value should do, given whichever
- * canonical value (if any) is already stored at that exact
- * (user, profile, domain, revision) key. */
-export type ConfirmedFactWriteDecision = "write" | "idempotent" | "conflict";
-
-/**
- * Pure decision core for recordConfirmedFact() (syncHelper.ts) — the
- * CONFIRMED-FACT CONTRACT's own rules, reduced to canonical-value
- * comparison:
- *   • no existing fact at this key yet -> "write" (the fact is being
- *     established for the first time; always safe).
- *   • an existing fact's canonical value equals the new one -> "idempotent"
- *     (the SAME logical fact recorded again — a harmless no-op, not a
- *     conflict, however many times or from however many callers it
- *     happens).
- *   • an existing fact's canonical value DIFFERS -> "conflict" (two
- *     different values for the SAME server revision — an upstream
- *     reconciliation inconsistency, never a stale-vs-fresh ordering
- *     question, since a single server revision has exactly one true
- *     accepted content). The existing fact must never be silently
- *     replaced; see recordConfirmedFact's own doc for how this is
- *     reported to callers.
- */
-export function decideConfirmedFactWrite(
-  existingCanonicalValue: string | null,
-  newCanonicalValue: string
-): ConfirmedFactWriteDecision {
-  if (existingCanonicalValue === null) return "write";
-  if (existingCanonicalValue === newCanonicalValue) return "idempotent";
-  return "conflict";
-}
-
-/**
- * Reference cases for decideConfirmedFactWrite() — the REQUIRED cases from
- * the 14th round's architectural contract. Run from Node:
- *   import { DEV_DECIDE_CONFIRMED_FACT_WRITE_CASES, decideConfirmedFactWrite } from "@/lib/syncPayload";
- *   DEV_DECIDE_CONFIRMED_FACT_WRITE_CASES.forEach(c => {
- *     const got = decideConfirmedFactWrite(c.existingCanonicalValue, c.newCanonicalValue);
- *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
- *   });
- */
-export const DEV_DECIDE_CONFIRMED_FACT_WRITE_CASES: Array<{
-  name: string;
-  existingCanonicalValue: string | null;
-  newCanonicalValue: string;
-  expected: ConfirmedFactWriteDecision;
-}> = [
-  {
-    name: "required — no existing fact yet: safe to write",
-    existingCanonicalValue: null,
-    newCanonicalValue: '{"items":[],"version":1}',
-    expected: "write",
-  },
-  {
-    name: "required — recording the SAME canonical value twice: idempotent no-op",
-    existingCanonicalValue: '{"items":[],"version":1}',
-    newCanonicalValue: '{"items":[],"version":1}',
-    expected: "idempotent",
-  },
-  {
-    name: "required — two callers attempt DIFFERENT values for the same revision: conflict, never silently overwritten",
-    existingCanonicalValue: '{"items":[{"id":"a"}],"version":1}',
-    newCanonicalValue: '{"items":[{"id":"b"}],"version":1}',
-    expected: "conflict",
-  },
-];

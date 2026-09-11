@@ -642,12 +642,12 @@ import {
   parseSyncedPlannerPayload,
   parseConfirmedPlannerDomainFact,
   parseConfirmedDaysFact,
-  reduceConfirmedFacts,
+  reduceConfirmedFactRecords,
+  confirmedFactRevisionIsUnambiguous,
   acceptedDomainFactsFromBeacon,
   decideLocalDomainCommit,
   isPullEpochCurrent,
   canonicalizeJSON,
-  decideConfirmedFactWrite,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -980,83 +980,48 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
   } catch {}
 }
 
-// ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────
-
-/** The three synced domains this module tracks confirmed facts for. */
-type ConfirmedDomainName = "plans" | "lightning" | "days";
-const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightning", "days"];
+// ── Shared stable-prefix key snapshot (SH.2, Codex P1, 15th round) ──────────────
 
 /**
- * SH.2 architecture (Codex P1, 11th round) — see the module doc's 11th-round
- * paragraph for the full root-cause analysis this section closes. Every
- * confirmed fact for a (userId, profileId, domain) is stored under its OWN
- * key, namespaced by its OWN revision:
- * `dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision}`.
+ * Snapshot every localStorage KEY currently starting with `prefix` — the
+ * ONE shared stable-enumeration primitive every SH.2 mutable-set scan in
+ * this module uses (confirmed facts below, pending operations further
+ * down) — see the ARCHITECTURAL RULE this round's own report cites: a
+ * bespoke enumeration loop per call site is exactly how the confirmed-fact
+ * scan (13th/14th rounds) and listPendingOps() (9th round) drifted apart
+ * and ended up with two different bugs from the SAME root cause.
  *
- * This is the entire mechanism that removes BOTH the mixed-domain-revision
- * bug and the Web-Locks dependency:
- *   • Per-domain: plans/lightning/days each scan and reduce ONLY their own
- *     facts (see getConfirmedState() below) — a domain's confirmed revision
- *     is never compared against, borrowed from, or blocked by another
- *     domain's facts.
- *   • Per-revision, immutable: `revision` is server-assigned and, together
- *     with `domain`, forms the key, so a NEW revision's fact can never
- *     collide with an EXISTING one. Two tabs recording facts for
- *     DIFFERENT revisions of the SAME domain "at the same instant" can
- *     never race destructively: there is no shared mutable slot to
- *     corrupt, only more facts for reduceConfirmedFacts() (syncPayload.ts)
- *     to reduce over at READ time. Write order therefore never matters
- *     across DIFFERENT revisions — only which facts exist matters, and a
- *     fresh read always sees all of them.
+ * Scans BACKWARD from a single captured `length`, never forward:
+ * `localStorage` has no atomic enumeration primitive, so an index-based
+ * scan is exposed to a concurrent `removeItem` (another tab's opportunistic
+ * prune or pending-op retirement, or one interleaved with this very call)
+ * shifting later indices down by one. A FORWARD scan that has already
+ * consumed an index silently skips whatever key shifts into it — including,
+ * in the worst case, the one fact/op a caller most needed to see. A
+ * BACKWARD scan cannot lose a live key this way: removing an index behind
+ * the current position only shifts NOT-YET-VISITED keys forward into the
+ * remaining scan range (at worst visited twice — harmless; `seen` dedupes
+ * it, and every reduction this module performs over the result is order/
+ * duplicate-independent regardless), never out of it; removing an index
+ * already visited cannot affect indices still to be scanned at all.
  *
- * Codex P1 fix (14th round) — recording a fact for the SAME (domain,
- * revision) more than once is NOT simply "never happens" or "always the
- * same bytes": see recordConfirmedFact()'s own doc below for why it now
- * compares CANONICAL values before writing (idempotent no-op on a genuine
- * duplicate, refused as a CONFLICT — never silently overwritten — on a
- * genuine mismatch), and scanConfirmedFactEntries()'s own doc for why the
- * scan this all depends on is now safe against concurrent pruning.
+ * A key INSERTED during the scan (e.g. a pending op added by this same tab,
+ * or a fact recorded by another one) is either captured (if it lands at an
+ * index still to be visited) or simply not part of THIS snapshot (if it
+ * lands where the scan has already passed, or beyond the captured
+ * `length`) — never a correctness problem, since "a write that happened
+ * concurrently with a read may or may not be reflected in that SAME read"
+ * is the ordinary, expected behavior of any snapshot read; the write is
+ * always durably visible to the NEXT scan regardless.
  *
- * This is precisely why NO Web Locks API involvement is needed anywhere in
- * this section: correctness comes from immutability (now genuinely
- * enforced, not merely assumed) + read-time reduction over a
- * concurrency-safe scan, not from serializing a compound read-modify-write.
+ * Deliberately returns KEY STRINGS only, not values — every call site reads
+ * each key's VALUE in a separate pass, by its exact string via `getItem`,
+ * which is immune to any further index shifting entirely (getItem addresses
+ * by key, never by position).
  */
-function confirmedFactPrefix(userId: string, profileId: string, domain: ConfirmedDomainName): string {
-  return `dwp:sync:${userId}:${profileId}:confirmedFact:${domain}:`;
-}
-
-function confirmedFactKey(userId: string, profileId: string, domain: ConfirmedDomainName, revision: number): string {
-  return `${confirmedFactPrefix(userId, profileId, domain)}${revision}`;
-}
-
-/**
- * Snapshot every localStorage KEY currently matching one (userId,
- * profileId, domain)'s fact prefix — Codex P1 fix (14th round). Scans
- * BACKWARD from a single captured `length`, never forward: `localStorage`
- * has no atomic enumeration primitive, so an index-based scan is exposed to
- * a concurrent `removeItem` (this same domain's own opportunistic prune,
- * running in another tab, or interleaved with this one) shifting later
- * indices down by one. A FORWARD scan that has already consumed an index
- * silently skips whatever key shifts into it — including, in the worst
- * case, the true max-revision fact. A BACKWARD scan cannot lose a live key
- * this way: removing an index behind the current position only shifts
- * NOT-YET-VISITED keys forward into the remaining scan range (at worst
- * visited twice — harmless, `seen` dedupes it, and reduceConfirmedFacts()
- * is order/duplicate-independent regardless), never out of it; removing an
- * index already visited cannot affect indices still to be scanned at all.
- * Deliberately returns KEY STRINGS only, not values — see
- * scanConfirmedFactEntries() below for why the value read is a SEPARATE
- * pass.
- */
-function snapshotConfirmedFactKeys(
-  userId: string,
-  profileId: string,
-  domain: ConfirmedDomainName
-): string[] {
+function snapshotKeysWithPrefix(prefix: string): string[] {
   const keys: string[] = [];
   try {
-    const prefix = confirmedFactPrefix(userId, profileId, domain);
     const seen = new Set<string>();
     const length = localStorage.length;
     for (let i = length - 1; i >= 0; i--) {
@@ -1069,41 +1034,77 @@ function snapshotConfirmedFactKeys(
   return keys;
 }
 
+// ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────
+
+/** The three synced domains this module tracks confirmed facts for. */
+type ConfirmedDomainName = "plans" | "lightning" | "days";
+const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightning", "days"];
+
 /**
- * Read + parse every currently-recorded fact for one (userId, profileId,
- * domain): first snapshot the matching KEYS (see snapshotConfirmedFactKeys
- * — index-based, made safe against concurrent pruning by scanning
- * backward), THEN read each key's VALUE by its exact string via
- * `getItem`. This second pass is immune to any further index shifting
- * entirely, since `getItem` addresses by key, never by position — no
- * amount of concurrent removal of OTHER keys can make it return the wrong
- * key's value. A key that disappears between the snapshot and this read
- * (pruned by a concurrent writer in the gap between the two passes) is
- * simply excluded, which can never change the logical max: pruning only
- * ever removes a NON-max fact for a domain, determined by a scan of the
- * FULL keyspace at prune time (see recordConfirmedFact's own doc) — so a
- * fact this read misses because it was JUST pruned is, by construction,
- * one reduceConfirmedFacts() would not have selected as the max anyway.
+ * SH.2 architecture (Codex P1, 11th round; storage representation replaced
+ * 15th round) — see the module doc's 11th-round paragraph for the full
+ * mixed-domain-revision root-cause analysis this section originally closed.
+ * Every confirmed fact for a (userId, profileId, domain) is stored under
+ * its own key, namespaced by its own revision AND (as of the 15th round) a
+ * per-recording unique instance id:
+ * `dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision}:{instanceId}`
+ * — see confirmedFactKey()'s own doc below for why the instance id exists.
+ *
+ * This is the entire mechanism that removes the mixed-domain-revision bug,
+ * the Web-Locks dependency, AND (15th round) the write-side race the 14th
+ * round's version still had:
+ *   • Per-domain: plans/lightning/days each scan and reduce ONLY their own
+ *     facts (see getConfirmedState() below) — a domain's confirmed revision
+ *     is never compared against, borrowed from, or blocked by another
+ *     domain's facts.
+ *   • Per-recording, physically immutable: every call to recordConfirmedFact()
+ *     writes to a key NO OTHER CALL — from any tab, for any domain+revision,
+ *     even a literal duplicate recording — could ever also target. There is
+ *     no read-before-write, so there is no TOCTOU window for two concurrent
+ *     callers to both observe "absent" and race to write: unlike the 14th
+ *     round's read-then-compare-then-write sequence (itself an un-atomic
+ *     check-then-act localStorage cannot safely provide without a lock —
+ *     Codex's 15th-round finding), a plain unconditional `setItem` to an
+ *     already-unique key cannot race with anything.
+ *   • Reconciliation moves ENTIRELY to READ time: reduceConfirmedFactRecords()
+ *     (syncPayload.ts) groups whatever facts exist for a domain by revision
+ *     and walks them highest-first, treating a revision whose recorded
+ *     facts all canonically agree as that domain's confirmed value, and a
+ *     revision whose facts DISAGREE as an unresolved conflict — skipped in
+ *     favor of the next-lower unambiguous revision, never resolved by
+ *     picking an arbitrary winner. Write order therefore never matters at
+ *     all, for identical OR conflicting values alike — only which facts
+ *     exist matters, and a fresh read always sees all of them (via the
+ *     shared, concurrency-safe snapshotKeysWithPrefix() primitive above).
+ *
+ * This is precisely why NO Web Locks API involvement is needed anywhere in
+ * this section: correctness comes from genuine per-write physical
+ * immutability + read-time reduction over a concurrency-safe scan, never
+ * from serializing a compound read-modify-write.
  */
-function scanConfirmedFactEntries(
+function confirmedFactPrefix(userId: string, profileId: string, domain: ConfirmedDomainName): string {
+  return `dwp:sync:${userId}:${profileId}:confirmedFact:${domain}:`;
+}
+
+/**
+ * Codex P1 fix (15th round) — each RECORDED ATTEMPT gets its own
+ * permanently-unique physical key (`instanceId`, a fresh generateOpId() per
+ * call — see that function's own doc), never shared with any other
+ * recordConfirmedFact() call, even for the SAME domain+revision, even from
+ * the SAME tab. This is what makes writing a fact a single unconditional
+ * `setItem` with NO read-before-write, ever: there is no key two callers
+ * could ever contend for, so there is no TOCTOU window left to close. See
+ * reduceConfirmedFactRecords() (syncPayload.ts) for how multiple facts
+ * recorded for the same revision are reconciled at READ time instead.
+ */
+function confirmedFactKey(
   userId: string,
   profileId: string,
-  domain: ConfirmedDomainName
-): Array<{ key: string; raw: unknown }> {
-  const entries: Array<{ key: string; raw: unknown }> = [];
-  for (const key of snapshotConfirmedFactKeys(userId, profileId, domain)) {
-    try {
-      const raw = localStorage.getItem(key);
-      if (raw === null) continue; // pruned/removed since the snapshot — see doc above
-      entries.push({ key, raw: JSON.parse(raw) });
-    } catch {
-      // Corrupted entry, or a transient localStorage error — simplest safe
-      // handling is to skip it from the candidate set (it can never be
-      // parsed into a valid fact, so it can never be the max either).
-      // Best-effort pruning elsewhere removes such debris opportunistically.
-    }
-  }
-  return entries;
+  domain: ConfirmedDomainName,
+  revision: number,
+  instanceId: string
+): string {
+  return `${confirmedFactPrefix(userId, profileId, domain)}${revision}:${instanceId}`;
 }
 
 function parseConfirmedFactForDomain(
@@ -1114,14 +1115,49 @@ function parseConfirmedFactForDomain(
 }
 
 /**
+ * Read + parse every currently-recorded fact for one (userId, profileId,
+ * domain): first snapshot the matching KEYS via snapshotKeysWithPrefix()
+ * (the shared stable-enumeration primitive — see its own doc), THEN read
+ * each key's VALUE by its exact string via `getItem`. This second pass is
+ * immune to any further index shifting entirely, since `getItem` addresses
+ * by key, never by position. A key that disappears between the snapshot
+ * and this read (pruned by a concurrent writer in the gap between the two
+ * passes) is simply excluded — see selectConfirmedFactPruneKeys()'s own doc
+ * for why a fact this read misses because it was JUST pruned can never
+ * have been the domain's confirmed value anyway.
+ */
+function scanConfirmedFactEntries(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName
+): Array<{ key: string; raw: unknown }> {
+  const entries: Array<{ key: string; raw: unknown }> = [];
+  for (const key of snapshotKeysWithPrefix(confirmedFactPrefix(userId, profileId, domain))) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === null) continue; // pruned/removed since the snapshot — see doc above
+      entries.push({ key, raw: JSON.parse(raw) });
+    } catch {
+      // Corrupted entry, or a transient localStorage error — simplest safe
+      // handling is to skip it from the candidate set (it can never be
+      // parsed into a valid fact, so it can never be selected either).
+      // Best-effort pruning elsewhere removes such debris opportunistically.
+    }
+  }
+  return entries;
+}
+
+/**
  * Read the CURRENT per-domain confirmed state for this authenticated user +
  * profile — see the module doc's "Cloud-confirmed local snapshot contract"
- * above. Each of plans/lightning/days is independently computed as the
- * max-revision fact among whatever has been recorded for it (via
- * reduceConfirmedFacts() in syncPayload.ts) — a domain with no recorded
- * facts at all is simply absent from the returned object ("nothing
- * confirmed yet for this domain"), never inferred from another domain's
- * state.
+ * above. Each of plans/lightning/days is independently computed by
+ * reduceConfirmedFactRecords() (syncPayload.ts) over whatever facts have
+ * been recorded for it: the highest revision whose recorded fact(s) all
+ * agree canonically — a domain with no recorded facts, or whose every
+ * recorded revision is conflicted, is simply absent from the returned
+ * object ("nothing confirmed yet for this domain"), never inferred from
+ * another domain's state and never resolved by picking an arbitrary
+ * conflicting value.
  *
  * Safe to call from any tab: this is a plain localStorage scan of keys that
  * are durable (survive reloads) and shared (every same-origin tab for this
@@ -1136,49 +1172,94 @@ export function getConfirmedState(userId: string, profileId: string): ConfirmedP
     const facts = scanConfirmedFactEntries(userId, profileId, domain)
       .map(({ raw }) => parseConfirmedFactForDomain(domain, raw))
       .filter((f): f is ConfirmedDomainFact<unknown> => f !== null);
-    const max = reduceConfirmedFacts(facts);
-    if (max) {
+    const { confirmed } = reduceConfirmedFactRecords(facts);
+    if (confirmed) {
       // Safe cast: parseConfirmedFactForDomain's per-domain branch already
       // guarantees the value shape matches this domain's own slot type.
-      (state as Record<string, unknown>)[domain] = max;
+      (state as Record<string, unknown>)[domain] = confirmed;
     }
   }
   return state;
 }
 
 /**
- * Records ONE immutable confirmed fact for a single domain. Codex P1 fix
- * (14th round) — a fact is now GENUINELY immutable, not merely called that:
- * before writing, this reads whatever is already stored at this EXACT
- * (userId, profileId, domain, revision) key and compares its CANONICAL
- * value (canonicalizeJSON() in syncPayload.ts — stable regardless of which
- * code path constructed the JS object) against the new one being recorded:
- *   • no existing fact -> writes it (the common case — establishing the
- *     fact for the first time).
- *   • existing fact's canonical value is IDENTICAL -> idempotent no-op
- *     success; recording the SAME logical fact any number of times, from
- *     any number of callers/tabs, is always safe.
- *   • existing fact's canonical value DIFFERS -> CONFLICT. The existing
- *     fact is never silently replaced — a single server revision has
- *     exactly one true accepted content, so two different values here mean
- *     an upstream reconciliation inconsistency (e.g. plans/page.tsx and
- *     lightning/page.tsx computing different content for the SAME shared
- *     "plans"/"days" domain at the SAME revision), never a legitimate
- *     "newer" value to prefer. Reported to the caller as failure — exactly
- *     like a thrown localStorage.setItem — so it blocks ownership/
- *     syncReady/pending-op-retirement gating the same way any other
- *     "not durably confirmed" outcome does, and is surfaced via
- *     console.error so the underlying inconsistency is at least observable
- *     rather than silently hidden by a first/last-writer-wins pick.
+ * Selects which of this domain's currently-recorded fact keys are safe to
+ * prune (delete), given the domain's current confirmed revision (`null` if
+ * nothing is unambiguous yet):
+ *   • any fact whose revision is STRICTLY LESS than the confirmed revision
+ *     is fully superseded — a higher revision is already unambiguously
+ *     confirmed, so an older revision's fact(s), conflicted or not, can
+ *     never affect getConfirmedState()'s result again. Deleted outright.
+ *   • within each revision AT OR ABOVE the confirmed one (the confirmed
+ *     revision itself, plus any higher CONFLICTED revisions still being
+ *     contested), facts are grouped by canonical value and only ONE
+ *     representative per distinct value is kept — duplicates carry no
+ *     additional information (see reduceConfirmedFactRecords()'s doc: it
+ *     only needs to know a revision's set of DISTINCT canonical values, not
+ *     how many times each was recorded), but at least one representative of
+ *     every distinct value at a conflicted revision must survive, or the
+ *     conflict itself would become undetectable.
+ * Pruning is a pure optimization: skipping it entirely (or it failing
+ * mid-way) never changes what getConfirmedState() computes, since
+ * reduceConfirmedFactRecords() reduces correctly over however many facts —
+ * duplicate or conflicting — happen to still exist.
+ */
+function selectConfirmedFactPruneKeys(
+  entries: Array<{ key: string; fact: ConfirmedDomainFact<unknown> }>,
+  confirmedRevision: number | null
+): string[] {
+  const toDelete: string[] = [];
+  const keptCanonicalValuesByRevision = new Map<number, Set<string>>();
+  for (const { key, fact } of entries) {
+    if (confirmedRevision !== null && fact.revision < confirmedRevision) {
+      toDelete.push(key);
+      continue;
+    }
+    const canonical = canonicalizeJSON(fact.value);
+    let kept = keptCanonicalValuesByRevision.get(fact.revision);
+    if (!kept) {
+      kept = new Set<string>();
+      keptCanonicalValuesByRevision.set(fact.revision, kept);
+    }
+    if (kept.has(canonical)) {
+      toDelete.push(key); // a duplicate of an already-kept value — redundant
+    } else {
+      kept.add(canonical);
+    }
+  }
+  return toDelete;
+}
+
+/**
+ * Records ONE immutable confirmed fact for a single domain — Codex P1 fix
+ * (15th round): a single unconditional `setItem` to a permanently-unique
+ * key (see confirmedFactKey's own doc) — no read-before-write, no
+ * TOCTUOU window, no Web Locks needed, ever.
  *
- * Opportunistically PRUNES this domain's OTHER facts down to just the
- * current max after every call (write, idempotent, or conflict) — bounds
- * storage growth to O(1) per domain in the steady state. This is a pure
- * optimization, never a correctness dependency: pruning failure (or being
- * skipped entirely, e.g. by an older code path) never affects
- * getConfirmedState()'s own correctness, since reduceConfirmedFacts()
- * reduces over however many facts happen to exist, read via
- * scanConfirmedFactEntries()'s own concurrency-safe two-phase scan.
+ * Immediately afterward, checks whether THIS revision (not necessarily the
+ * domain's overall max — see confirmedFactRevisionIsUnambiguous()'s own doc
+ * in syncPayload.ts) is unambiguous among everything now recorded for it:
+ *   • yes -> returns true. Whether or not it ends up being the domain's
+ *     CURRENT confirmed value (a higher revision may already be
+ *     unambiguously confirmed) is irrelevant to THIS call's own success —
+ *     it durably, unambiguously recorded what it was asked to.
+ *   • no (a DIFFERENT canonical value is also recorded for this exact
+ *     revision — an upstream reconciliation inconsistency, e.g.
+ *     plans/page.tsx and lightning/page.tsx computing different content for
+ *     the SAME shared "plans"/"days" domain at the SAME revision, never a
+ *     legitimate "which is newer" question) -> returns false, exactly like
+ *     a thrown localStorage.setItem, so it blocks ownership/syncReady/
+ *     pending-op-retirement gating the same way any other "not durably
+ *     confirmed" outcome does — this is the CONFIRMED-FACT CONTRACT's
+ *     "fail closed for that domain" requirement, enforced at READ time
+ *     rather than by refusing the write (which round 14's version tried,
+ *     and which round 13 already established cannot be done safely without
+ *     a lock). Surfaced via console.error so the inconsistency is at least
+ *     observable rather than silently hidden.
+ *
+ * Opportunistically PRUNES this domain's redundant/superseded facts after
+ * every call — see selectConfirmedFactPruneKeys()'s own doc. Pure
+ * optimization; never a correctness dependency.
  */
 function recordConfirmedFact(
   userId: string,
@@ -1187,60 +1268,40 @@ function recordConfirmedFact(
   revision: number,
   value: unknown
 ): boolean {
-  const key = confirmedFactKey(userId, profileId, domain, revision);
-  const newCanonicalValue = canonicalizeJSON(value);
-  let existingCanonicalValue: string | null = null;
+  const key = confirmedFactKey(userId, profileId, domain, revision, generateOpId());
   try {
-    const existingRaw = localStorage.getItem(key);
-    if (existingRaw !== null) {
-      const existingFact = parseConfirmedFactForDomain(domain, JSON.parse(existingRaw));
-      // A corrupted/unparseable existing entry is treated as absent — this
-      // write establishes a clean fact in its place rather than blocking
-      // forever on debris that could never have been a valid fact anyway.
-      existingCanonicalValue = existingFact ? canonicalizeJSON(existingFact.value) : null;
-    }
+    localStorage.setItem(key, JSON.stringify({ revision, value }));
   } catch {
-    existingCanonicalValue = null;
-  }
-  const decision = decideConfirmedFactWrite(existingCanonicalValue, newCanonicalValue);
-  if (decision === "conflict") {
-    try {
-      console.error(
-        `SH.2: confirmed-fact conflict for ${domain} at revision ${revision} — existing fact left untouched.`
-      );
-    } catch {}
     return false;
   }
-  if (decision === "write") {
-    try {
-      localStorage.setItem(key, JSON.stringify({ revision, value }));
-    } catch {
-      return false;
-    }
-  }
-  // decision === "idempotent" — nothing to write; fall through to pruning,
-  // which is unconditionally safe to run regardless of which branch above
-  // executed.
+  let success = true;
   try {
     const entries = scanConfirmedFactEntries(userId, profileId, domain);
     const parsed = entries
       .map((e) => ({ key: e.key, fact: parseConfirmedFactForDomain(domain, e.raw) }))
       .filter((e): e is { key: string; fact: ConfirmedDomainFact<unknown> } => e.fact !== null);
-    const max = reduceConfirmedFacts(parsed.map((p) => p.fact));
-    const maxKey = max ? confirmedFactKey(userId, profileId, domain, max.revision) : null;
-    for (const { key: entryKey } of entries) {
-      if (entryKey !== maxKey) {
-        try {
-          localStorage.removeItem(entryKey);
-        } catch {}
-      }
+    const facts = parsed.map((p) => p.fact);
+    if (!confirmedFactRevisionIsUnambiguous(facts, revision)) {
+      success = false;
+      try {
+        console.error(
+          `SH.2: confirmed-fact conflict for ${domain} at revision ${revision} — deferring confirmation until resolved.`
+        );
+      } catch {}
+    }
+    const { confirmed } = reduceConfirmedFactRecords(facts);
+    const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmed ? confirmed.revision : null);
+    for (const pruneKey of pruneKeys) {
+      try {
+        localStorage.removeItem(pruneKey);
+      } catch {}
     }
   } catch {
-    // Pruning is best-effort only — the fact was already durably written
-    // (or already durably present, in the idempotent case) regardless of
-    // whether cleanup succeeds.
+    // Best-effort scan/prune failure never flips an already-durable write
+    // to a failure, and never blocks pruning from being retried on a later
+    // call.
   }
-  return true;
+  return success;
 }
 
 /**
@@ -1321,11 +1382,15 @@ export async function commitConfirmedBaseline(
  *     DIFFERENT still-pending op Y's key, unlike a compare-and-clear (or
  *     any read-modify-write) against a single shared scalar or a compound
  *     set/array value would.
- * `listPendingOps` reads the CURRENT full set by scanning localStorage for
- * this prefix — a plain, unlocked enumeration is safe here because each
- * entry's own presence/absence is independently, atomically true or false
- * at any instant; there is no cross-entry invariant a scan could observe
- * "half-updated".
+ * `listPendingOps` reads the CURRENT full set via the shared
+ * snapshotKeysWithPrefix() primitive (see its own doc above) — each
+ * entry's own presence/absence IS independently, atomically true or false
+ * at any instant (there is no cross-entry invariant a scan could observe
+ * "half-updated"), but the ENUMERATION mechanism itself still needed to be
+ * safe against a concurrent retirement shifting indices mid-scan — see
+ * Codex P1 fix (15th round): the previous version of this function used
+ * its own bespoke forward index loop, which could silently skip a
+ * still-pending op if another tab retired an earlier one during the scan.
  */
 const PENDING_OP_PREFIX_TEMPLATE = (userId: string, profileId: string): string =>
   `dwp:sync:${userId}:${profileId}:pendingOp:`;
@@ -1345,19 +1410,14 @@ function pendingOpKeyForIdentity(userId: string, profileId: string, opId: string
  */
 export function listPendingOps(userId: string, profileId: string): string[] {
   if (typeof window === "undefined") return [];
-  try {
-    const prefix = PENDING_OP_PREFIX_TEMPLATE(userId, profileId);
-    const opIds: string[] = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(prefix)) {
-        opIds.push(key.slice(prefix.length));
-      }
-    }
-    return opIds;
-  } catch {
-    return [];
-  }
+  const prefix = PENDING_OP_PREFIX_TEMPLATE(userId, profileId);
+  // Codex P1 fix (15th round) — routes through the SAME shared
+  // snapshotKeysWithPrefix() the confirmed-fact scan uses, replacing the
+  // bespoke forward index loop this function used to have: another tab
+  // retiring op A (removePendingOp — a plain removeItem) WHILE this scan
+  // was enumerating could shift op B/C down into an already-consumed
+  // index, silently skipping them. See snapshotKeysWithPrefix's own doc.
+  return snapshotKeysWithPrefix(prefix).map((key) => key.slice(prefix.length));
 }
 
 function addPendingOp(userId: string, profileId: string, opId: string): void {
@@ -1492,7 +1552,7 @@ export function selectPendingOpBatch(
  * revision 6 (via acceptedDomainFactsFromBeacon() + commitConfirmedBaseline())
  * is what BOTH opA's and opB's "accepted" status resolve into — opA's own
  * revision (5) never even enters this call, since only THIS pull's own
- * current cloudRevision (6) is ever recorded; reduceConfirmedFacts()
+ * current cloudRevision (6) is ever recorded; reduceConfirmedFactRecords()
  * (syncPayload.ts) is what proves, at READ time, that revision 6 correctly
  * supersedes anything opA might separately have contributed.
  *
