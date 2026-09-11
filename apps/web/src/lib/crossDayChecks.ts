@@ -19,6 +19,7 @@ import { resolveEntertainmentKey, ENTERTAINMENT_PLACES } from "@/lib/entertainme
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
+  resolveEffectiveDurableRaw,
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
 
@@ -370,6 +371,138 @@ export const DEV_PULL_BASELINE_RECOVERY_INTEGRATION_CASES: Array<{
  *     }
  *     console.log(kindOk && winnerOk ? "✓" : "✗ FAIL", c.name);
  *   });
+ */
+
+/**
+ * SH.2.1 P3 — integration coverage for the DURABLE LOCAL AUTHORITY fix
+ * (resolveEffectiveDurableRaw in syncPayload.ts, the same pure core
+ * syncHelper.ts's readLatestDurableValue() now reduces to) chained into the
+ * REAL pre-fetch → post-fetch winner sequence above (capturePreFetchDomainSnapshot
+ * / resolvePostFetchDomainBaseline / pickWinningItems) — proving the exact
+ * scenario Codex described: a genuine local edit ("C") that survives ONLY
+ * in the local-edit-fact log while the canonical key still holds a STALE
+ * value ("B", left behind by the documented cross-tab hydration race) must
+ * be recognized as this pull's true current local authority, at every
+ * point the pull lifecycle asks "what is local state right now" — never
+ * silently outranked by the stale canonical bytes.
+ *
+ * Each case models the domain's storage state as `canonicalRaw` +
+ * `factRawValues` (exactly what readLatestDurableValue() itself reads) at
+ * up to two points in time — PRE-FETCH (stage 1's frozen snapshot) and
+ * POST-FETCH/resolution (stage 2's "current" candidate) — deliberately
+ * kept as SEPARATE inputs, mirroring the real pull effect's own two
+ * distinct read sites, never collapsed into one.
+ */
+export const DEV_DURABLE_LOCAL_AUTHORITY_INTEGRATION_CASES: Array<{
+  name: string;
+  confirmed: ConfirmedDomainResult<string>;
+  cloudRevision: number | null;
+  preFetchCanonicalRaw: string | null;
+  preFetchFactRawValues: string[];
+  postFetchCanonicalRaw: string | null;
+  postFetchFactRawValues: string[];
+  cloudItems: Array<{ id: string; dayId: string }> | null;
+  fallbackValue: Array<{ id: string; dayId: string }>;
+  expectedStageTwoKind: "confirmed" | "recovered" | "gated" | "stale-response" | "fallback";
+  expectedWinner: "current" | "cloud" | "none (unusable this pull)";
+}> = [
+  {
+    name: "required cases 1 & 2 — edit C survives only in the edit-fact log while canonical still holds stale B, and baseline itself equals that SAME stale B (the actual Codex regression shape: a naive canonical-only read would see current===baseline===B and wrongly call it 'unchanged'): this pull must still see C as current local authority, and C cannot be silently retired by cloud D",
+    confirmed: { status: "none" },
+    cloudRevision: null,
+    preFetchCanonicalRaw: JSON.stringify([{ id: "B", dayId: "day-1" }]),
+    preFetchFactRawValues: [JSON.stringify([{ id: "C", dayId: "day-1" }])],
+    postFetchCanonicalRaw: JSON.stringify([{ id: "B", dayId: "day-1" }]),
+    postFetchFactRawValues: [JSON.stringify([{ id: "C", dayId: "day-1" }])],
+    cloudItems: [{ id: "D", dayId: "day-1" }],
+    fallbackValue: [{ id: "B", dayId: "day-1" }],
+    expectedStageTwoKind: "fallback",
+    expectedWinner: "current",
+  },
+  {
+    name: "required case 3 (part a) — edit C already durably CONFIRMED (an earlier pull recorded it): baseline already matches C, so cloud D legitimately wins even though C's fact has not been retired yet",
+    confirmed: { status: "confirmed", fact: { revision: 5, value: JSON.stringify([{ id: "C", dayId: "day-1" }]) } },
+    cloudRevision: 5,
+    preFetchCanonicalRaw: JSON.stringify([{ id: "C", dayId: "day-1" }]),
+    preFetchFactRawValues: [JSON.stringify([{ id: "C", dayId: "day-1" }])],
+    postFetchCanonicalRaw: JSON.stringify([{ id: "C", dayId: "day-1" }]),
+    postFetchFactRawValues: [JSON.stringify([{ id: "C", dayId: "day-1" }])],
+    cloudItems: [{ id: "D", dayId: "day-1" }],
+    fallbackValue: [],
+    expectedStageTwoKind: "confirmed",
+    expectedWinner: "cloud",
+  },
+  {
+    name: "required case 5 — normal case, no edit facts anywhere: durable read equals canonical value, ordinary cloud-wins-when-unchanged behavior unaffected",
+    confirmed: { status: "none" },
+    cloudRevision: null,
+    preFetchCanonicalRaw: JSON.stringify([{ id: "B", dayId: "day-1" }]),
+    preFetchFactRawValues: [],
+    postFetchCanonicalRaw: JSON.stringify([{ id: "B", dayId: "day-1" }]),
+    postFetchFactRawValues: [],
+    cloudItems: [{ id: "D", dayId: "day-1" }],
+    fallbackValue: [{ id: "B", dayId: "day-1" }],
+    expectedStageTwoKind: "fallback",
+    expectedWinner: "cloud",
+  },
+  {
+    name: "required case 6 — pre-fetch conflict-recovery snapshot uses durable authority (C), not stale canonical bytes (B): recovered baseline correctly equals C, so an unchanged post-fetch read (also C) lets cloud D legitimately win — were the bug present (baseline wrongly B), this SAME unchanged read would look spuriously 'changed' (B≠C) and wrongly block cloud, so this case's expected winner ('cloud') only holds when recovery truly used C",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 7,
+    preFetchCanonicalRaw: JSON.stringify([{ id: "B", dayId: "day-1" }]),
+    preFetchFactRawValues: [JSON.stringify([{ id: "C", dayId: "day-1" }])],
+    postFetchCanonicalRaw: JSON.stringify([{ id: "B", dayId: "day-1" }]),
+    postFetchFactRawValues: [JSON.stringify([{ id: "C", dayId: "day-1" }])],
+    cloudItems: [{ id: "D", dayId: "day-1" }],
+    fallbackValue: [],
+    expectedStageTwoKind: "recovered",
+    expectedWinner: "cloud",
+  },
+];
+
+/**
+ * Run from Node:
+ *   import { DEV_DURABLE_LOCAL_AUTHORITY_INTEGRATION_CASES, pickWinningItems } from "@/lib/crossDayChecks";
+ *   import { resolveEffectiveDurableRaw, capturePreFetchDomainSnapshot, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   DEV_DURABLE_LOCAL_AUTHORITY_INTEGRATION_CASES.forEach(c => {
+ *     const mapValue = (raw) => JSON.parse(raw);
+ *     const preFetchDurableRaw = resolveEffectiveDurableRaw(c.preFetchCanonicalRaw, c.preFetchFactRawValues);
+ *     const stage1 = capturePreFetchDomainSnapshot(preFetchDurableRaw ? mapValue(preFetchDurableRaw) : []);
+ *     const postFetchDurableRaw = resolveEffectiveDurableRaw(c.postFetchCanonicalRaw, c.postFetchFactRawValues);
+ *     const current = postFetchDurableRaw ? mapValue(postFetchDurableRaw) : [];
+ *     const stage2 = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, mapValue, stage1, c.fallbackValue);
+ *     const kindOk = stage2.kind === c.expectedStageTwoKind;
+ *     let winnerOk;
+ *     if (stage2.kind === "gated" || stage2.kind === "stale-response") {
+ *       winnerOk = c.expectedWinner === "none (unusable this pull)";
+ *     } else {
+ *       const { items, changedLocally } = pickWinningItems(stage2.value, current, c.cloudItems);
+ *       const winner = changedLocally ? "current" : (items === c.cloudItems ? "cloud" : "current");
+ *       winnerOk = winner === c.expectedWinner;
+ *     }
+ *     console.log(kindOk && winnerOk ? "✓" : "✗ FAIL", c.name);
+ *   });
+ *
+ * Required case 3 (part b) — once hydration legitimately retires C's fact
+ * (this pull's own commitLocalDomainRaw success, unaffected by this round —
+ * see syncHelper.ts's own doc), a SUBSEQUENT durable read resolves to the
+ * hydrated value with NO fact log left to consult:
+ *   resolveEffectiveDurableRaw(JSON.stringify([{id:"D",dayId:"day-1"}]), [])
+ *     === JSON.stringify([{id:"D",dayId:"day-1"}])   // hydrated D, not stale C
+ *
+ * Required case 4 — a new edit E appearing DURING hydration (between the
+ * baseline fact-keyspace snapshot and the write) makes the fact log
+ * AMBIGUOUS (two facts, no ordering information): resolveEffectiveDurableRaw
+ * itself safely refuses to guess between them and falls back to the
+ * (older) canonical value rather than fabricating a winner —
+ *   resolveEffectiveDurableRaw(canonicalB, [factC, factE]) === canonicalB
+ * — this is NOT what protects E from being retired (E itself remains fully
+ * intact in the fact log; nothing here deletes it). The actual "E is not
+ * retired" guarantee is commitLocalDomainRaw's own untouched
+ * `baselineEditFactIds` re-scan (syncHelper.ts) — a STRUCTURAL check (did
+ * the fact KEYSPACE grow) independent of this function, which this round
+ * does not modify. See DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES/that function's
+ * own doc for its existing, unaffected coverage.
  */
 
 /**

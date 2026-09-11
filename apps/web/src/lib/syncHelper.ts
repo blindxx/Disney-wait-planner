@@ -688,6 +688,7 @@ import {
   decideLocalDomainCommit,
   isPullEpochCurrent,
   canonicalizeJSON,
+  resolveEffectiveDurableRaw,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -895,32 +896,42 @@ function localEditFactKey(key: string, editId: string): string {
  * fact key exists" is the overwhelmingly common case and its value is
  * always at least as fresh as the canonical key's own current value — even
  * if a concurrent hydration race (see this section's own doc above)
- * transiently clobbers the canonical key itself. Falls back to the
- * canonical key directly when zero or more-than-one fact keys exist (no
- * edit has ever been recorded this way yet, or a rare genuine same-instant
- * multi-tab-edit race with no ordering information available — an
- * acceptable "last write wins among peers" tie-break, same as any other
- * concurrent write to the same logical value). Used by buildPayloadFromStorage()
- * below (doPush() and registerUnloadSync() alike) so "unload serializes the
- * newest durable edit state, not merely the canonical key" holds for both.
+ * transiently clobbers the canonical key itself.
+ *
+ * SH.2.1 P3 — this is now a thin localStorage I/O wrapper around
+ * resolveEffectiveDurableRaw() (syncPayload.ts), the PURE decision this
+ * function reduces to: read every currently-recorded edit-fact key's raw
+ * value plus the canonical key's own raw value, then let that pure
+ * function decide which one is authoritative. Extracted specifically so
+ * the SAME decision plans/page.tsx's and lightning/page.tsx's pull effect
+ * now ALSO makes (for pre-fetch snapshots, post-fetch "current" candidates,
+ * and winner selection — see resolveEffectiveDurableRaw()'s own doc for
+ * the full SH.2.1 P3 rationale) is provably identical to the one this
+ * function has always made for the unload/push path
+ * (buildPayloadFromStorage() below, via doPush()/registerUnloadSync()) —
+ * ONE shared resolver, not two separate interpretations of "current local
+ * value" for different parts of the sync state machine.
  *
  * Exported (like getConfirmedState/commitConfirmedBaseline and the other
  * primitives in this module) purely so DEV_*-style Node coverage can
- * exercise it directly against the real production implementation.
+ * exercise the pure core directly against the real production
+ * implementation.
  */
 export function readLatestDurableValue(key: string): string | null {
-  const factKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
-  if (factKeys.length === 1) {
+  const factRawValues: string[] = [];
+  for (const factKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
     try {
-      const raw = localStorage.getItem(factKeys[0]);
-      if (raw !== null) return raw;
+      const raw = localStorage.getItem(factKey);
+      if (raw !== null) factRawValues.push(raw);
     } catch {}
   }
+  let canonicalRaw: string | null;
   try {
-    return localStorage.getItem(key);
+    canonicalRaw = localStorage.getItem(key);
   } catch {
-    return null;
+    canonicalRaw = null;
   }
+  return resolveEffectiveDurableRaw(canonicalRaw, factRawValues);
 }
 
 function localDomainCommitLockName(key: string): string {

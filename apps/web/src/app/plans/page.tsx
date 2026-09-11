@@ -94,6 +94,7 @@ import {
   isLocalDomainCommitSuccess,
   beginPullContext,
   isPullContextCurrent,
+  readLatestDurableValue,
 } from "@/lib/syncHelper";
 import {
   capturePreFetchDomainSnapshot,
@@ -305,6 +306,60 @@ function loadFromStorage(key: string = STORAGE_KEY): PlanItem[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * SH.2.1 P3 — parses the SAME v1/v0-array plan-item shapes loadFromStorage()
+ * recognizes, but from an already-read raw string rather than reading
+ * localStorage itself, and WITHOUT loadFromStorage's one-time v0->v1
+ * migration write side-effect: irrelevant here, since every edit-fact
+ * value (readLatestDurableValue()'s edit-aware source — see
+ * loadEffectiveDurablePlanItems() below) is always written by
+ * commitLocalDomainRawSync/commitLocalDomainRaw in the current v1 shape,
+ * and a stale legacy v0 canonical key would already have been migrated the
+ * first time any ordinary loadFromStorage() call touched it.
+ */
+function parseDurablePlanItemsRaw(raw: string | null): PlanItem[] {
+  try {
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      typeof parsed.version === "number" &&
+      Array.isArray(parsed.items)
+    ) {
+      return parsed.version === 1 ? (parsed.items as unknown[]).map(normalizePlanItem) : [];
+    }
+    if (Array.isArray(parsed)) return (parsed as unknown[]).map(normalizePlanItem);
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * SH.2.1 P3 — THE authority-bearing read for the Plans domain: canonical
+ * key value + unresolved local-edit facts → effective durable local value
+ * (see resolveEffectiveDurableRaw's own doc in syncPayload.ts for the full
+ * rationale and the P1 this closes). Built directly on
+ * readLatestDurableValue() (syncHelper.ts) — the SAME primitive
+ * buildPayloadFromStorage() already uses for the unload/push path — so
+ * this page's pull-lifecycle decisions and the unload/push path now agree
+ * on exactly one definition of "current local value" for this domain.
+ *
+ * Use this — never loadFromStorage() directly — for any sync/conflict
+ * decision touching the Plans domain: the pre-fetch frozen snapshot, the
+ * post-fetch "current" candidate compared against baseline, and therefore
+ * changed-locally/winner-selection itself. loadFromStorage() remains
+ * correct for materialization/UI-only reads (mount-time hydration, general
+ * item loading, the cross-day-duplicate/backup/export helpers elsewhere in
+ * this file) where the canonical key IS the intended source and no
+ * sync/conflict decision is being made.
+ */
+function loadEffectiveDurablePlanItems(key: string): PlanItem[] {
+  return parseDurablePlanItemsRaw(readLatestDurableValue(key));
 }
 
 // SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
@@ -530,9 +585,15 @@ function dayLabelFromId(dayId: string, days: string[]): string {
   return idx === -1 ? dayId : `Day ${idx + 1}`;
 }
 
-function loadDays(key: string): string[] {
+/**
+ * SH.2.1 P3 — parses the SAME sanitize/dedupe/day-1-baseline rules
+ * loadDays() applies, but from an already-read raw string rather than
+ * reading localStorage itself — shared by loadDays() (canonical) and
+ * loadEffectiveDurableDays() (below) so both apply IDENTICAL rules to
+ * whichever raw source they're given.
+ */
+function parseDaysRaw(raw: string | null): string[] {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return ["day-1"];
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed) && parsed.length > 0) {
@@ -559,6 +620,30 @@ function loadDays(key: string): string[] {
   } catch {
     return ["day-1"];
   }
+}
+
+function loadDays(key: string): string[] {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    return ["day-1"];
+  }
+  return parseDaysRaw(raw);
+}
+
+/**
+ * SH.2.1 P3 — THE authority-bearing read for the days domain (shared by
+ * Plans and Lightning — see resolveEffectiveDurableRaw's own doc in
+ * syncPayload.ts for the full rationale). Use this — never loadDays()
+ * directly — for any sync/conflict decision: the pre-fetch frozen
+ * snapshot, the post-fetch "current" candidate, changed-locally/winner
+ * selection. loadDays() remains correct for materialization/UI-only reads
+ * (mount-time hydration, the cross-tab 'storage' listener's own display
+ * refresh).
+ */
+function loadEffectiveDurableDays(key: string): string[] {
+  return parseDaysRaw(readLatestDurableValue(key));
 }
 
 // SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
@@ -1015,12 +1100,22 @@ export default function PlansPage() {
 
   /**
    * STAGE 1 (pre-fetch) — called once, synchronously, before this pull's
-   * fetch is even issued. Takes a genuine fresh disk read for every
-   * domain, UNCONDITIONALLY — this is the SH.2.1 P1 fix: whether that read
-   * will be NEEDED (a later repair) cannot be known until stage 2 runs, so
-   * it must always be taken here regardless. No confirmed-state read, no
-   * decision: see this section's own module doc above for why that would
-   * be redundant with stage 2, which now always re-derives it anyway.
+   * fetch is even issued. Takes a genuine fresh read for every domain,
+   * UNCONDITIONALLY — this is the SH.2.1 P1 fix: whether that read will be
+   * NEEDED (a later repair) cannot be known until stage 2 runs, so it must
+   * always be taken here regardless. No confirmed-state read, no decision:
+   * see this section's own module doc above for why that would be
+   * redundant with stage 2, which now always re-derives it anyway.
+   *
+   * SH.2.1 P3 — this read is the domain's EFFECTIVE DURABLE value (via
+   * loadEffectiveDurablePlanItems()/loadEffectiveDurableDays()/
+   * readLatestDurableValue(), never loadFromStorage()/loadDays()/a raw
+   * localStorage.getItem() directly): required case 6 — a conflict-recovery
+   * "recovered" outcome reuses THIS frozen value (see
+   * resolvePostFetchDomainBaseline's own doc), so it must already reflect
+   * durable local intent (canonical + unresolved edit facts), never merely
+   * the canonical key's own bytes, which the documented cross-tab hydration
+   * race can leave stale relative to a surviving edit.
    */
   function buildPreFetchPullBaseline(): {
     items: DomainPreFetchSnapshot<PlanItem[]>;
@@ -1028,9 +1123,9 @@ export default function PlansPage() {
     lightningRaw: DomainPreFetchSnapshot<string | null>;
   } {
     return {
-      items: capturePreFetchDomainSnapshot(migrateDayIds(loadFromStorage(planKeyRef.current))),
-      days: capturePreFetchDomainSnapshot(loadDays(daysKeyRef.current)),
-      lightningRaw: capturePreFetchDomainSnapshot(localStorage.getItem(getActiveProfileKeys().lightning)),
+      items: capturePreFetchDomainSnapshot(migrateDayIds(loadEffectiveDurablePlanItems(planKeyRef.current))),
+      days: capturePreFetchDomainSnapshot(loadEffectiveDurableDays(daysKeyRef.current)),
+      lightningRaw: capturePreFetchDomainSnapshot(readLatestDurableValue(getActiveProfileKeys().lightning)),
     };
   }
 
@@ -2067,35 +2162,50 @@ export default function PlansPage() {
           lightningRaw: requireResolvedValue(baselineOutcomes.lightningRaw),
         };
 
-        // SH.2 architecture — read CURRENT local storage fresh, right now,
-        // for both domains this page owns. This is what actually closes
-        // the Codex findings: a domain's winner is determined by comparing
-        // this fresh read against a STABLE baseline (never reset merely
-        // because this effect re-ran), not by consulting a flag that could
-        // have been reset or never set at all. See pickWinningItems/
+        // SH.2 architecture — read CURRENT local state fresh, right now, for
+        // both domains this page owns. This is what actually closes the
+        // Codex findings: a domain's winner is determined by comparing this
+        // fresh read against a STABLE baseline (never reset merely because
+        // this effect re-ran), not by consulting a flag that could have
+        // been reset or never set at all. See pickWinningItems/
         // pickWinningDays/reconcilePlannerSnapshot in crossDayChecks.ts
         // (and their DEV_*_CASES) for the full model and its regression
-        // cases. `currentItems`/`currentDays`/`currentLightningRaw` are the
-        // REAL on-disk values — always used for write-skip checks below, so
-        // a genuinely differing winner always actually overwrites whatever
-        // is really on disk (contaminated or not).
+        // cases.
         //
-        // Codex P1 fix (12th round) — `currentItemsRaw`/`currentDaysRaw`
-        // capture the EXACT raw bytes alongside the parsed forms. These raw
-        // strings become the compare-and-swap baseline commitLocalDomainRaw
-        // (below) checks against immediately before writing — so a same-tab
-        // or cross-tab write that lands between THIS read and that commit is
-        // detected and this pull's write is abandoned rather than
-        // clobbering it (see commitLocalDomainRaw's own doc in
-        // syncHelper.ts). This baseline is always the REAL on-disk bytes,
-        // never substituted for the ownership-mismatch case below — that
-        // substitution only changes which winner conflict resolution picks,
-        // never what "has disk changed since we looked" means.
+        // SH.2.1 P3 — TWO DELIBERATELY SEPARATE reads per domain now, never
+        // conflated (see resolveEffectiveDurableRaw's own doc in
+        // syncPayload.ts for the full rationale this closes):
+        //   • `currentItemsRaw`/`currentDaysRaw`/`currentLightningRaw` —
+        //     the LITERAL canonical key's raw bytes, read via a plain
+        //     localStorage.getItem(). Used ONLY as commitLocalDomainRaw's
+        //     `expectedPreviousRaw` CAS argument below — a write-safety
+        //     concern ("did the CANONICAL KEY change since I looked"),
+        //     unrelated to authority, and this is the one place a literal
+        //     canonical read remains correct: the CAS's own internal
+        //     re-check always re-reads the canonical key too, so both sides
+        //     of that comparison must speak the same literal-bytes
+        //     language.
+        //   • `current{Items,Days}`/`currentLightningRawDurable` — THE
+        //     authority-bearing reads, via loadEffectiveDurablePlanItems()/
+        //     loadEffectiveDurableDays()/readLatestDurableValue() (never
+        //     loadFromStorage()/loadDays()/a raw canonical read): these
+        //     prefer a surviving local-edit fact over the canonical key,
+        //     exactly like the unload/push path already does, so a fact the
+        //     documented cross-tab hydration race left stranded ahead of a
+        //     stale canonical key is never invisible to THIS pull's own
+        //     winner selection. Used for `changedLocally`/winner selection
+        //     below (`itemsForComparison`/`daysForComparison`/
+        //     `lightningRawForComparison`) — never for the CAS.
+        // Neither is ever substituted for the ownership-mismatch case below
+        // — that substitution only changes which winner conflict resolution
+        // picks, never what "has disk changed since we looked" (the CAS) or
+        // "what is durably true locally right now" (authority) mean.
         const currentItemsRaw = localStorage.getItem(planKeyRef.current);
-        const currentItems = migrateDayIds(loadFromStorage(planKeyRef.current));
+        const currentItems = migrateDayIds(loadEffectiveDurablePlanItems(planKeyRef.current));
         const currentDaysRaw = localStorage.getItem(daysKeyRef.current);
-        const currentDays = loadDays(daysKeyRef.current);
+        const currentDays = loadEffectiveDurableDays(daysKeyRef.current);
         const currentLightningRaw = localStorage.getItem(profileKeysForPull.lightning);
+        const currentLightningRawDurable = readLatestDurableValue(profileKeysForPull.lightning);
 
         // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
         // SESSION substitution: when this transition's ownership check
@@ -2121,7 +2231,7 @@ export default function PlansPage() {
         const daysForComparison = contentOwnershipMismatch ? effectiveBaseline.days : currentDays;
         const lightningRawForComparison = contentOwnershipMismatch
           ? effectiveBaseline.lightningRaw
-          : currentLightningRaw;
+          : currentLightningRawDurable;
 
         // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
         // (Lightning) dataset's own local-vs-cloud CANDIDATE (winning

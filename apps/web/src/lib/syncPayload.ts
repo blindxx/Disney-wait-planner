@@ -1745,3 +1745,138 @@ export const DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE: {
   fallbackValue: "FALLBACK-REF",
 };
 
+// ===== DURABLE LOCAL AUTHORITY (SH.2.1 P3) =====
+
+/**
+ * SH.2.1 P3 (Codex) — a third audit found that pull winner selection
+ * (plans/page.tsx's and lightning/page.tsx's pull effect) still read the
+ * canonical plans/lightning/days keys DIRECTLY (`localStorage.getItem`/
+ * `loadFromStorage`/`loadDays`) for every sync/conflict decision: the
+ * pre-fetch frozen snapshot (stage 1), the post-fetch "current" candidate
+ * compared against baseline (stage 2 / winner selection), and therefore
+ * `changedLocally` itself. This is a DIFFERENT interpretation of "current
+ * local state" than the one syncHelper.ts's own readLatestDurableValue()
+ * already uses for the unload/push payload path (buildPayloadFromStorage):
+ * that function — see its own doc in syncHelper.ts — prefers a surviving
+ * local-edit-fact over the canonical key, specifically because the
+ * documented cross-tab hydration race (a genuinely concurrent OTHER tab's
+ * plain, unlocked write landing inside pull hydration's own synchronous
+ * lock callback) can leave the canonical key transiently — or, if a PRIOR
+ * pull's hydration incorrectly trusted it, durably — stale relative to an
+ * edit the local-edit-fact log still records faithfully (the log is never
+ * touched by hydration except on a write that actually, provably,
+ * incorporates the exact fact being retired — see
+ * commitLocalDomainRaw()'s own doc).
+ *
+ * Root cause: TWO different "what is local state right now" answers
+ * coexisted in the same sync state machine. The unload/push path asked
+ * readLatestDurableValue() and got the edit-aware answer; pull winner
+ * selection asked the canonical key directly and could get the stale one.
+ * A pull that reads the stale answer can conclude "local unchanged"
+ * (canonical == baseline) even though the true durable local value (the
+ * surviving edit fact) genuinely differs from both baseline AND cloud —
+ * letting cloud win, and — because the write that follows durably matches
+ * what winner selection decided — legitimately (by commitLocalDomainRaw's
+ * OWN rules) retiring the very edit fact that should have won instead.
+ * This is not a bug in commitLocalDomainRaw's CAS or edit-fact retirement
+ * (untouched by this fix, still correct on its own terms — see below); the
+ * bug is entirely in what value winner selection FED it as the decision.
+ *
+ * STANDING RULE (this round) — every sync/conflict decision must use the
+ * SAME definition of local authority: canonical value + unresolved
+ * local-edit facts → effective durable local value, via ONE shared
+ * resolver, consistently, everywhere the pull lifecycle reasons about
+ * "current local state": pre-fetch frozen snapshots, post-fetch current
+ * candidates, changed-locally comparisons, conflict recovery, and winner
+ * selection (unload/push construction already complied — see above).
+ *
+ * resolveEffectiveDurableRaw() below is the PURE core of
+ * readLatestDurableValue() — extracted (not reimplemented: read-
+ * LatestDurableValue() is now a thin I/O wrapper around this exact
+ * function, so every production caller of either gets the identical
+ * decision) so it can carry real DEV_* coverage the way every other pure
+ * decision in this module does. `factRawValues` is the raw string content
+ * of every currently-recorded local-edit-fact key for this domain's
+ * canonical key (0, 1, or — rarely, a genuine same-instant multi-tab
+ * tie — more); exactly one surviving fact outranks the canonical value
+ * (it is durable unresolved intent, by construction more authoritative
+ * than whatever the canonical key happens to contain right now); zero or
+ * more than one falls back to the canonical value itself (nothing
+ * recorded yet, or an ambiguous tie with no ordering information — "last
+ * write wins among peers", same tie-break every other concurrent write to
+ * one value gets).
+ *
+ * WHY commitLocalDomainRaw()'s OWN CAS is intentionally left untouched —
+ * its `expectedPreviousRaw`/internal re-read must both stay the LITERAL
+ * canonical key's bytes, not this effective value: that CAS exists purely
+ * to detect "did the CANONICAL KEY change since I decided what to write
+ * it" (a write-safety concern), which is orthogonal to "what should this
+ * pull have treated as authoritative for ITS OWN decision" (this fix's
+ * concern). A caller now takes TWO separate reads at decision time — the
+ * effective durable value (via this resolver, for the decision itself)
+ * and the literal canonical raw bytes (for commitLocalDomainRaw's CAS
+ * argument) — never conflating them. The write that follows, when local's
+ * effective-durable value wins, naturally carries that exact value as
+ * `nextRaw`; commitLocalDomainRaw's own untouched `baselineEditFactIds`
+ * re-scan (see its own doc) already guarantees the write is abandoned
+ * ("superseded") if a genuinely NEWER edit fact appears between decision
+ * and write — required case 4 needs no change here, it was already
+ * correct, independent of which raw value winner selection compared.
+ */
+export function resolveEffectiveDurableRaw(canonicalRaw: string | null, factRawValues: string[]): string | null {
+  return factRawValues.length === 1 ? factRawValues[0] : canonicalRaw;
+}
+
+/**
+ * Reference cases for resolveEffectiveDurableRaw() — the REQUIRED cases
+ * from the SH.2.1 P3 architectural contract. Run from Node:
+ *   import { DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES.forEach(c => {
+ *     const got = resolveEffectiveDurableRaw(c.canonicalRaw, c.factRawValues);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  factRawValues: string[];
+  expected: string | null;
+}> = [
+  {
+    name: "required case 5 — normal case, no edit facts: durable read equals canonical value",
+    canonicalRaw: "CANONICAL-B",
+    factRawValues: [],
+    expected: "CANONICAL-B",
+  },
+  {
+    name: "required cases 1/6 — exactly one surviving edit fact outranks a stale canonical value",
+    canonicalRaw: "STALE-CANONICAL-B",
+    factRawValues: ["EDIT-FACT-C"],
+    expected: "EDIT-FACT-C",
+  },
+  {
+    name: "no canonical value yet, one edit fact — fact still wins (a fresh domain's very first edit)",
+    canonicalRaw: null,
+    factRawValues: ["EDIT-FACT-C"],
+    expected: "EDIT-FACT-C",
+  },
+  {
+    name: "zero edit facts, canonical absent too — null, same as a plain canonical-only read would give",
+    canonicalRaw: null,
+    factRawValues: [],
+    expected: null,
+  },
+  {
+    name: "ambiguous tie — two facts recorded with no ordering information: falls back to canonical rather than guessing which wins (commitLocalDomainRaw's own edit-fact re-scan is the mechanism that actually protects a genuinely newer one — see this function's own doc)",
+    canonicalRaw: "CANONICAL-B",
+    factRawValues: ["EDIT-FACT-C", "EDIT-FACT-E"],
+    expected: "CANONICAL-B",
+  },
+  {
+    name: "one fact whose content happens to already equal canonical — still resolves via the fact (harmless: same value either way, but proves the rule is purely structural (fact count), never a value comparison)",
+    canonicalRaw: "SAME-VALUE",
+    factRawValues: ["SAME-VALUE"],
+    expected: "SAME-VALUE",
+  },
+];
+
