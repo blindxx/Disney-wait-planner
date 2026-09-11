@@ -95,6 +95,7 @@ import {
   beginPullContext,
   isPullContextCurrent,
 } from "@/lib/syncHelper";
+import { isConflictRepairableByRevision } from "@/lib/syncPayload";
 
 // Phase 9.0 — content type foundation
 type PlannerItemType = "attraction" | "dining" | "entertainment";
@@ -992,9 +993,25 @@ export default function PlansPage() {
   // well-formed — the pull effect below MUST bail out entirely before ever
   // using them for winner selection whenever `conflicts` is non-empty (see
   // its own doc at the call site).
+  //
+  // CONFIRMED-CONFLICT RECOVERY (Codex P1, 17th round) — `cloudRevision`,
+  // when supplied, is THIS pull's own authoritative GET response revision
+  // (null for the pre-fetch call, or for a 204/unparseable response). A
+  // conflicted domain whose conflict is REPAIRABLE by this revision (see
+  // isConflictRepairableByRevision's own doc in syncPayload.ts — strictly
+  // newer than the conflict's own revision, never equal/older) is treated
+  // EXACTLY like "none" below: it falls through to the ordinary baseline-
+  // ref/ownership-mismatch path instead of being collected into
+  // `conflicts`, letting this pull's own normal winner-selection/commit
+  // machinery record a new fact at `cloudRevision` that supersedes the
+  // conflict via resolveConfirmedDomainState()'s existing "only the highest
+  // revision matters" rule — no special recovery code path is needed
+  // anywhere else. A domain whose conflict is NOT repairable by this
+  // response still fails closed exactly as the 16th round already ensured.
   function captureConfirmedSnapshotForPull(
     contentOwnershipMismatch: boolean,
-    identity?: { userId: string | null; profileId: string }
+    identity?: { userId: string | null; profileId: string },
+    cloudRevision: number | null = null
   ): {
     items: PlanItem[];
     days: string[];
@@ -1013,9 +1030,22 @@ export default function PlansPage() {
       ? getConfirmedState(userId, profileId)
       : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
     const conflicts: Array<{ domain: "plans" | "lightning" | "days"; revision: number }> = [];
-    if (confirmed.plans.status === "conflict") conflicts.push({ domain: "plans", revision: confirmed.plans.revision });
-    if (confirmed.lightning.status === "conflict") conflicts.push({ domain: "lightning", revision: confirmed.lightning.revision });
-    if (confirmed.days.status === "conflict") conflicts.push({ domain: "days", revision: confirmed.days.revision });
+    const plansRepaired =
+      confirmed.plans.status === "conflict" && isConflictRepairableByRevision(confirmed.plans.revision, cloudRevision);
+    const lightningRepaired =
+      confirmed.lightning.status === "conflict" &&
+      isConflictRepairableByRevision(confirmed.lightning.revision, cloudRevision);
+    const daysRepaired =
+      confirmed.days.status === "conflict" && isConflictRepairableByRevision(confirmed.days.revision, cloudRevision);
+    if (confirmed.plans.status === "conflict" && !plansRepaired) {
+      conflicts.push({ domain: "plans", revision: confirmed.plans.revision });
+    }
+    if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
+      conflicts.push({ domain: "lightning", revision: confirmed.lightning.revision });
+    }
+    if (confirmed.days.status === "conflict" && !daysRepaired) {
+      conflicts.push({ domain: "days", revision: confirmed.days.revision });
+    }
     // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
     // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. A
     // mismatch (this profile's raw storage is attributed to a DIFFERENT,
@@ -1050,10 +1080,10 @@ export default function PlansPage() {
     let items: PlanItem[];
     if (confirmed.plans.status === "confirmed") {
       items = migrateDayIds((confirmed.plans.fact.value.items as unknown[]).map(normalizePlanItem));
-    } else if (confirmed.plans.status === "conflict") {
+    } else if (confirmed.plans.status === "conflict" && !plansRepaired) {
       // Never used as a real baseline — the pull effect bails out entirely
-      // for a conflicted domain before this value could matter. See this
-      // function's own doc above.
+      // for a conflicted (and not-yet-repairable) domain before this value
+      // could matter. See this function's own doc above.
       items = itemsBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       items = [];
@@ -1065,7 +1095,7 @@ export default function PlansPage() {
     let days: string[];
     if (confirmed.days.status === "confirmed") {
       days = confirmed.days.fact.value;
-    } else if (confirmed.days.status === "conflict") {
+    } else if (confirmed.days.status === "conflict" && !daysRepaired) {
       days = daysBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       days = ["day-1"];
@@ -1077,7 +1107,7 @@ export default function PlansPage() {
     let lightningRaw: string | null;
     if (confirmed.lightning.status === "confirmed") {
       lightningRaw = JSON.stringify(confirmed.lightning.fact.value);
-    } else if (confirmed.lightning.status === "conflict") {
+    } else if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
       lightningRaw = lightningRawBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       lightningRaw = null;
@@ -1860,20 +1890,37 @@ export default function PlansPage() {
         // is durably proven — never speculatively retired ahead of that.
         const opStatuses = planner?.opStatuses ?? [];
         const anyAccepted = opStatuses.some((s) => s.found);
-        if (pullCtx.userId && pendingOpIds.length > 0) {
-          await reconcilePendingOperations(
-            pullCtx.userId,
-            pullCtx.profileId,
-            opStatuses,
-            planner?.revision ?? null,
-            planner
-          );
-        }
+        // PULL OUTCOME CONTRACT (Codex P1, 17th round) — reconcilePendingOperations
+        // now reports whether this pull may continue past promotion: `true`
+        // when nothing needed promoting or promotion durably succeeded,
+        // `false` when an accepted beacon's promotion could not be durably
+        // proven (see its own doc in syncHelper.ts). Defaults to `true`
+        // when there was nothing to reconcile at all (no pending op, or no
+        // userId yet) — there is no promotion step to fail in that case.
+        const promotionOk =
+          pullCtx.userId && pendingOpIds.length > 0
+            ? await reconcilePendingOperations(pullCtx.userId, pullCtx.profileId, opStatuses, planner?.revision ?? null, planner)
+            : true;
         // A newer pull may have started, or this exact effect instance may
         // have been cleaned up, while the await above was in flight —
         // re-check before this stale pull mutates anything further (Codex
         // P1, 13th round — see isPullCurrent's own doc above).
         if (!isPullCurrent()) return;
+        // PULL OUTCOME CONTRACT (Codex P1, 17th round) — an accepted beacon
+        // whose promotion could not be durably proven means this pull's own
+        // view of confirmed state is not trustworthy: proceeding to winner
+        // selection against it risks treating a stale/partial baseline as
+        // current truth. Fail the ENTIRE pull closed here — no winner
+        // selection, no ownership transfer, no confirmed-baseline commit,
+        // no syncReady — leaving the pending op exactly as it already was
+        // (reconcilePendingOperations never retires it without durable
+        // proof) for a later pull to retry.
+        if (!promotionOk) {
+          try {
+            console.error("SH.2: pull deferred — accepted beacon promotion could not be durably confirmed; pending op retained for retry.");
+          } catch {}
+          return;
+        }
         // This pull's EFFECTIVE baseline for winner selection: when at
         // least one pending op was just confirmed accepted, re-derive it
         // from the NOW-updated confirmed state (captureConfirmedSnapshotForPull
@@ -1894,27 +1941,48 @@ export default function PlansPage() {
         // guards against actually USING a result attributed to the wrong
         // identity, but the identity passed into the read itself must still
         // be THIS pull's own, never whatever is live right now.
-        const effectiveBaseline = anyAccepted
-          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
-              userId: pullCtx.userId,
-              profileId: pullCtx.profileId,
-            })
-          : pullStartBaseline;
+        // CONFIRMED-CONFLICT RECOVERY (Codex P1, 17th round) — re-derived
+        // (rather than reusing the frozen pre-fetch `pullStartBaseline`)
+        // whenever a promotion just happened (unchanged from prior rounds)
+        // OR the pre-fetch baseline itself already reported a conflict:
+        // `pullStartBaseline` was captured BEFORE this pull's own fetch, so
+        // it always passed `cloudRevision: null` and could never have
+        // attempted repair — this pull's own actual `planner?.revision` is
+        // only known now. Re-deriving here (a plain fresh getConfirmedState()
+        // scan — see captureConfirmedSnapshotForPull's own doc) is what lets
+        // a repairable conflict actually get repaired even when no pending
+        // op was involved at all (required case 3: confirmed rev6
+        // conflicted + authoritative GET rev7 → resumes, with no beacon
+        // promotion in the picture).
+        const effectiveBaseline =
+          anyAccepted || pullStartBaseline.conflicts.length > 0
+            ? captureConfirmedSnapshotForPull(
+                contentOwnershipMismatch,
+                {
+                  userId: pullCtx.userId,
+                  profileId: pullCtx.profileId,
+                },
+                planner?.revision ?? null
+              )
+            : pullStartBaseline;
 
-        // CONFIRMED-STATE CONTRACT (Codex P1, 16th round) — a conflict at
-        // ANY domain's newest confirmed revision means that domain's true
-        // confirmed state is presently unknowable (see getConfirmedState's
-        // own doc in syncHelper.ts): there is no trustworthy baseline this
-        // pull could use for it. Since this page's push always sends
-        // plans+lightning+days combined in ONE request, letting winner
-        // selection/local writes proceed normally for the OTHER, healthy
-        // domains this pull while leaving syncReady closed for the whole
-        // page would still risk that a later push bundles the unresolved
-        // domain's untouched-but-unverified local content alongside them —
-        // so the entire pull bails out here: no winner selection, no local
-        // write, no ownership transfer, no confirmed-baseline commit, no
-        // syncReady, for ANY domain, this pull. Local storage is left
-        // completely untouched (nothing already durably committed is
+        // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
+        // added 17th) — a conflict at ANY domain's newest confirmed
+        // revision that this pull could NOT repair (see
+        // captureConfirmedSnapshotForPull's own doc above) means that
+        // domain's true confirmed state is presently unknowable (see
+        // getConfirmedState's own doc in syncHelper.ts): there is no
+        // trustworthy baseline this pull could use for it. Since this
+        // page's push always sends plans+lightning+days combined in ONE
+        // request, letting winner selection/local writes proceed normally
+        // for the OTHER, healthy domains this pull while leaving syncReady
+        // closed for the whole page would still risk that a later push
+        // bundles the unresolved domain's untouched-but-unverified local
+        // content alongside them — so the entire pull bails out here: no
+        // winner selection, no local write, no ownership transfer, no
+        // confirmed-baseline commit, no syncReady, for ANY domain, this
+        // pull. Local storage is left completely untouched (nothing already
+        // durably committed is
         // undone — there is simply nothing new to commit). The NEXT pull
         // (next mount/auth-transition) re-reads confirmed state fresh and
         // proceeds normally the moment a later unambiguous revision

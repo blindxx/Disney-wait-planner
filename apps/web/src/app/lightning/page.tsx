@@ -40,6 +40,7 @@ import {
   beginPullContext,
   isPullContextCurrent,
 } from "@/lib/syncHelper";
+import { isConflictRepairableByRevision } from "@/lib/syncPayload";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -615,9 +616,14 @@ export default function LightningPage() {
   // came back "conflict"; the pull effect below MUST bail out entirely
   // before ever using items/days/plansRaw for winner selection whenever
   // `conflicts` is non-empty.
+  // CONFIRMED-CONFLICT RECOVERY (Codex P1, 17th round) — `cloudRevision`,
+  // when supplied, is THIS pull's own authoritative GET response revision
+  // (null for the pre-fetch call, or for a 204/unparseable response).
+  // Mirrors plans/page.tsx exactly — see its own detailed doc.
   function captureConfirmedSnapshotForPull(
     contentOwnershipMismatch: boolean,
-    identity?: { userId: string | null; profileId: string }
+    identity?: { userId: string | null; profileId: string },
+    cloudRevision: number | null = null
   ): {
     items: LightningItem[];
     days: string[];
@@ -634,9 +640,22 @@ export default function LightningPage() {
       ? getConfirmedState(userId, profileId)
       : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
     const conflicts: Array<{ domain: "plans" | "lightning" | "days"; revision: number }> = [];
-    if (confirmed.plans.status === "conflict") conflicts.push({ domain: "plans", revision: confirmed.plans.revision });
-    if (confirmed.lightning.status === "conflict") conflicts.push({ domain: "lightning", revision: confirmed.lightning.revision });
-    if (confirmed.days.status === "conflict") conflicts.push({ domain: "days", revision: confirmed.days.revision });
+    const plansRepaired =
+      confirmed.plans.status === "conflict" && isConflictRepairableByRevision(confirmed.plans.revision, cloudRevision);
+    const lightningRepaired =
+      confirmed.lightning.status === "conflict" &&
+      isConflictRepairableByRevision(confirmed.lightning.revision, cloudRevision);
+    const daysRepaired =
+      confirmed.days.status === "conflict" && isConflictRepairableByRevision(confirmed.days.revision, cloudRevision);
+    if (confirmed.plans.status === "conflict" && !plansRepaired) {
+      conflicts.push({ domain: "plans", revision: confirmed.plans.revision });
+    }
+    if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
+      conflicts.push({ domain: "lightning", revision: confirmed.lightning.revision });
+    }
+    if (confirmed.days.status === "conflict" && !daysRepaired) {
+      conflicts.push({ domain: "days", revision: confirmed.days.revision });
+    }
     // SH.2 architecture (Codex P1, 7th round; applied PER DOMAIN in the
     // 11th) — FOREIGN BYTES CAN NEVER BECOME A FALLBACK CANDIDATE. Mirrors
     // plans/page.tsx's own doc for this exact fix — see there for the full
@@ -651,9 +670,10 @@ export default function LightningPage() {
     let items: LightningItem[];
     if (confirmed.lightning.status === "confirmed") {
       items = migrateLightningDayIds(confirmed.lightning.fact.value.items as LightningItem[]);
-    } else if (confirmed.lightning.status === "conflict") {
+    } else if (confirmed.lightning.status === "conflict" && !lightningRepaired) {
       // Never used as a real baseline — the pull effect bails out entirely
-      // for a conflicted domain before this value could matter.
+      // for a conflicted (and not-yet-repairable) domain before this value
+      // could matter.
       items = itemsBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       items = [];
@@ -665,7 +685,7 @@ export default function LightningPage() {
     let days: string[];
     if (confirmed.days.status === "confirmed") {
       days = confirmed.days.fact.value;
-    } else if (confirmed.days.status === "conflict") {
+    } else if (confirmed.days.status === "conflict" && !daysRepaired) {
       days = daysBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       days = ["day-1"];
@@ -677,7 +697,7 @@ export default function LightningPage() {
     let plansRaw: string | null;
     if (confirmed.plans.status === "confirmed") {
       plansRaw = JSON.stringify(confirmed.plans.fact.value);
-    } else if (confirmed.plans.status === "conflict") {
+    } else if (confirmed.plans.status === "conflict" && !plansRepaired) {
       plansRaw = plansRawBaselineRef.current;
     } else if (contentOwnershipMismatch) {
       plansRaw = null;
@@ -891,38 +911,54 @@ export default function LightningPage() {
         // exactly — see its own detailed doc for the full rationale.
         const opStatuses = planner?.opStatuses ?? [];
         const anyAccepted = opStatuses.some((s) => s.found);
-        if (pullCtx.userId && pendingOpIds.length > 0) {
-          await reconcilePendingOperations(
-            pullCtx.userId,
-            pullCtx.profileId,
-            opStatuses,
-            planner?.revision ?? null,
-            planner
-          );
-        }
+        // PULL OUTCOME CONTRACT (Codex P1, 17th round) — mirrors
+        // plans/page.tsx exactly, see its own detailed doc.
+        const promotionOk =
+          pullCtx.userId && pendingOpIds.length > 0
+            ? await reconcilePendingOperations(pullCtx.userId, pullCtx.profileId, opStatuses, planner?.revision ?? null, planner)
+            : true;
         // A newer pull may have started, or this exact effect instance may
         // have been cleaned up, while the await above was in flight —
         // re-check before this stale pull mutates anything further (Codex
         // P1, 13th round — mirrors plans/page.tsx exactly).
         if (!isPullCurrent()) return;
+        // PULL OUTCOME CONTRACT (Codex P1, 17th round) — mirrors
+        // plans/page.tsx exactly, see its own detailed doc: an accepted
+        // beacon whose promotion could not be durably proven fails this
+        // entire pull closed, leaving the pending op untouched for retry.
+        if (!promotionOk) {
+          try {
+            console.error("SH.2: pull deferred — accepted beacon promotion could not be durably confirmed; pending op retained for retry.");
+          } catch {}
+          return;
+        }
         // This pull's EFFECTIVE baseline for winner selection — mirrors
         // plans/page.tsx exactly, including scoping the re-derived read to
-        // pullCtx.userId/pullCtx.profileId rather than the live refs.
-        const effectiveBaseline = anyAccepted
-          ? captureConfirmedSnapshotForPull(contentOwnershipMismatch, {
-              userId: pullCtx.userId,
-              profileId: pullCtx.profileId,
-            })
-          : pullStartBaseline;
+        // pullCtx.userId/pullCtx.profileId rather than the live refs, and
+        // (17th round) re-deriving whenever the pre-fetch baseline itself
+        // already had a conflict this pull's own revision might repair.
+        const effectiveBaseline =
+          anyAccepted || pullStartBaseline.conflicts.length > 0
+            ? captureConfirmedSnapshotForPull(
+                contentOwnershipMismatch,
+                {
+                  userId: pullCtx.userId,
+                  profileId: pullCtx.profileId,
+                },
+                planner?.revision ?? null
+              )
+            : pullStartBaseline;
 
-        // CONFIRMED-STATE CONTRACT (Codex P1, 16th round) — mirrors
-        // plans/page.tsx exactly, see its own detailed doc: a conflict at
-        // ANY domain's newest confirmed revision means the entire pull
-        // bails out here rather than proceeding for the healthy domains
-        // while leaving syncReady closed — since push always sends
-        // plans+lightning+days combined in one request. Local storage is
-        // left completely untouched; the next pull resolves the conflict
-        // automatically once a later unambiguous revision supersedes it.
+        // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
+        // added 17th) — mirrors plans/page.tsx exactly, see its own detailed
+        // doc: a conflict at ANY domain's newest confirmed revision that
+        // this pull could NOT repair means the entire pull bails out here
+        // rather than proceeding for the healthy domains while leaving
+        // syncReady closed — since push always sends plans+lightning+days
+        // combined in one request. Local storage is left completely
+        // untouched; the next pull resolves the conflict automatically once
+        // a later unambiguous (or, as of this round, this pull's own
+        // repairing) revision supersedes it.
         if (effectiveBaseline.conflicts.length > 0) {
           for (const conflict of effectiveBaseline.conflicts) {
             try {

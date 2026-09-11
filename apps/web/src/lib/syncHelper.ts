@@ -829,6 +829,100 @@ function localContentOwnerKeyForProfile(profileId: string): string {
 
 export type LocalDomainCommitStatus = "committed" | "noop" | "superseded" | "failed" | "unavailable" | "aborted";
 
+// ── Local edit facts (SH.2, Codex P1, 17th round) ───────────────────────────
+// LOCAL-FIRST + CROSS-TAB SERIALIZATION — durable, unconditional, lock-free
+// publication of ordinary-edit intent, separate from the canonical domain
+// key those edits also still write directly (unchanged for every existing
+// reader — loadFromStorage, buildSyncedPlannerPayload, mount-time hydration
+// — none of which need to know this log exists).
+//
+// Root cause this closes — Codex P1 finding #3, 17th round: since the 16th
+// round made ordinary edits unlocked and synchronous (see this section's own
+// doc above), a genuinely concurrent CROSS-TAB interleaving is possible in
+// principle: hydration (tab H) reads the canonical key's current value
+// inside its Web Lock, an ordinary edit in a DIFFERENT tab (E, which never
+// requests this lock) writes a newer value in between, and H's own
+// setItem — still inside the SAME synchronous, non-yielding lock callback —
+// overwrites it. A single-tab race is not possible here (H's lock callback
+// has no `await` in it, so nothing else in THAT tab can run between its own
+// read and write), but nothing stops a truly concurrent OTHER tab's plain,
+// unlocked setItem from landing in that window.
+//
+// Each ordinary edit (commitLocalDomainRawSync) additionally publishes an
+// append-only, permanently-unique "edit fact" key — `editId` a fresh
+// generateOpId() per call, mirroring confirmedFactKey's own physical-
+// immutability argument: a plain, unconditional setItem to an
+// already-unique key can never race with anything, from any tab. Hydration
+// (commitLocalDomainRaw) snapshots this keyspace BEFORE it even requests
+// its lock, then re-validates that snapshot as the LAST step before its own
+// write, still inside the lock: if any edit-fact key now exists that was
+// not present in the baseline snapshot, some tab's edit landed after this
+// commit's own decision was made (whether or not the plain raw-value CAS
+// above happened to also catch it), and this commit reports "superseded"
+// instead of overwriting it. This is a supplement to the existing raw-value
+// CAS, not a replacement: the raw check already catches the ordinary case
+// where the edit's canonical write landed before hydration's own read; the
+// edit-fact check exists specifically for the narrower window where it did
+// not (edit's own canonical write not yet visible, but its edit-fact
+// already is, or the reverse).
+//
+// This does not achieve a FORMALLY zero-probability race (two back-to-back,
+// non-yielding synchronous statements in H's own lock callback — the final
+// edit-fact re-scan and the write immediately after it — still bound a
+// residual window with no JS yield point inside it, unclosable by any
+// mechanism plain localStorage read/write registers can provide without
+// every writer, including ordinary edits, sharing true mutual exclusion,
+// which the task explicitly forbids requiring of them). What it closes
+// completely is the PRACTICALLY significant concern: the edit-fact log
+// itself is NEVER touched by hydration, so a user's true edit is NEVER
+// unrecoverably lost even in that worst case — see readLatestDurableValue()
+// below for how the unload/push path reads this log as authoritative
+// specifically so a transient canonical-key clobber can never cause a lost
+// push, regardless of this residual window.
+function localEditFactPrefix(key: string): string {
+  return `dwp:localEditFact:${key}:`;
+}
+
+function localEditFactKey(key: string, editId: string): string {
+  return `${localEditFactPrefix(key)}${editId}`;
+}
+
+/**
+ * Reads the newest DURABLE value published for `key` — preferring the
+ * local-edit-fact log over the canonical key itself. commitLocalDomainRawSync()
+ * always prunes a canonical key's edit-fact log down to exactly one entry
+ * (the edit it just published) on every successful call, so "exactly one
+ * fact key exists" is the overwhelmingly common case and its value is
+ * always at least as fresh as the canonical key's own current value — even
+ * if a concurrent hydration race (see this section's own doc above)
+ * transiently clobbers the canonical key itself. Falls back to the
+ * canonical key directly when zero or more-than-one fact keys exist (no
+ * edit has ever been recorded this way yet, or a rare genuine same-instant
+ * multi-tab-edit race with no ordering information available — an
+ * acceptable "last write wins among peers" tie-break, same as any other
+ * concurrent write to the same logical value). Used by buildPayloadFromStorage()
+ * below (doPush() and registerUnloadSync() alike) so "unload serializes the
+ * newest durable edit state, not merely the canonical key" holds for both.
+ *
+ * Exported (like getConfirmedState/commitConfirmedBaseline and the other
+ * primitives in this module) purely so DEV_*-style Node coverage can
+ * exercise it directly against the real production implementation.
+ */
+export function readLatestDurableValue(key: string): string | null {
+  const factKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
+  if (factKeys.length === 1) {
+    try {
+      const raw = localStorage.getItem(factKeys[0]);
+      if (raw !== null) return raw;
+    } catch {}
+  }
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 function localDomainCommitLockName(key: string): string {
   return `dwp:localDomainCommit:${key}`;
 }
@@ -872,6 +966,17 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
  * over the caller's own pull-context epoch (isPullContextCurrent(ctx)) so a
  * commit that went stale while queued for the lock never lands. Defaults to
  * always-valid for callers with no such context.
+ *
+ * Codex P1 fix (17th round) — a SECOND, independent gate immediately before
+ * that same write: `baselineEditFactIds` snapshots this key's local-edit-fact
+ * keyspace (see this section's own module doc above) SYNCHRONOUSLY at call
+ * time, before the lock is even requested. If the keyspace has GROWN by the
+ * time this commit is about to write — some tab's ordinary edit landed
+ * after this decision's inputs were captured — this commit reports
+ * "superseded" and never writes, exactly like the existing raw-value CAS
+ * above, even in the narrow window where the raw-value check alone would
+ * have missed it (the edit's fact key already visible, its canonical write
+ * not yet, or vice versa).
  */
 export function commitLocalDomainRaw(
   key: string,
@@ -880,6 +985,7 @@ export function commitLocalDomainRaw(
   isStillValid: () => boolean = () => true
 ): Promise<LocalDomainCommitStatus> {
   if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
+  const baselineEditFactIds = new Set(snapshotKeysWithPrefix(localEditFactPrefix(key)));
   return withLocalDomainCommitLock(key, (): LocalDomainCommitStatus => {
     let currentRaw: string | null;
     try {
@@ -894,6 +1000,15 @@ export function commitLocalDomainRaw(
     // context that went stale while this commit sat queued for the lock is
     // still caught before anything is written.
     if (!isStillValid()) return "aborted";
+    // Codex P1 fix (17th round) — the LAST gate of all, evaluated as the
+    // final statement before the write itself: any edit-fact key not in
+    // the baseline snapshot means a concurrent edit — from ANY tab, since
+    // ordinary edits never participate in this lock — is newer than this
+    // decision and must survive. See this section's own module doc above
+    // for the residual window this does and does not close.
+    for (const factKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
+      if (!baselineEditFactIds.has(factKey)) return "superseded";
+    }
     try {
       localStorage.setItem(key, nextRaw);
     } catch {
@@ -924,6 +1039,21 @@ export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
  * durability" requirement by construction rather than by awaiting anything.
  * A live edit is the user's own freshest intent, so it is never rejected:
  * "noop" only when the durable value already equals it (still a success).
+ *
+ * Codex P1 fix (17th round) — before writing the canonical key, first
+ * publishes this edit as its own permanently-unique, append-only
+ * local-edit-fact entry (see this section's own module doc above) — a
+ * single unconditional setItem to a key nothing else could ever also
+ * target, so it can never race with anything, from any tab. This is what
+ * lets hydration's own commitLocalDomainRaw() detect "an edit landed after
+ * my decision was made" even in the narrow window its raw-value CAS alone
+ * could miss, and what lets readLatestDurableValue() (below) always recover
+ * this edit's true content even if a concurrent hydration race transiently
+ * clobbers the canonical key afterward. Opportunistically prunes this
+ * key's OTHER edit-fact entries down to just the one just written — pure
+ * storage-growth bookkeeping, never a correctness dependency (the log is
+ * read only by "how many entries exist right now", never by which specific
+ * one is oldest/newest beyond that count).
  */
 export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
   if (typeof window === "undefined") return "failed";
@@ -935,11 +1065,27 @@ export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDom
   }
   const decision = decideLocalDomainCommit(currentRaw, currentRaw, nextRaw);
   if (decision === "noop") return "noop";
+  const editId = generateOpId();
+  const editFactKey = localEditFactKey(key, editId);
+  try {
+    localStorage.setItem(editFactKey, nextRaw);
+  } catch {
+    return "failed";
+  }
   try {
     localStorage.setItem(key, nextRaw);
   } catch {
     return "failed";
   }
+  try {
+    for (const oldKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
+      if (oldKey !== editFactKey) {
+        try {
+          localStorage.removeItem(oldKey);
+        } catch {}
+      }
+    }
+  } catch {}
   return "committed";
 }
 
@@ -1683,6 +1829,31 @@ export function selectPendingOpBatch(
  * pull shares the same target; its single result is then applied to
  * retire every accepted-and-found op from `opStatuses` together. This is
  * both simpler and correct.
+ *
+ * PULL OUTCOME CONTRACT (Codex P1, 17th round) — returns whether the PULL
+ * that called this may continue past this point: `true` when there was
+ * nothing to promote, or promotion (commitConfirmedBaseline) durably
+ * succeeded; `false` ONLY when at least one op was found accepted by this
+ * SAME GET response but its promotion could not be durably proven (a real
+ * localStorage write failure, or a recordConfirmedFact() conflict — see
+ * commitConfirmedBaseline's own doc). A caller MUST fail the entire pull
+ * closed on `false`: no winner selection, no ownership transfer, no
+ * confirmed-baseline commit, no syncReady — the accepted-but-unpromoted
+ * evidence is real (the server DID accept this write) but this device has
+ * not yet durably recorded what it resolved into, so proceeding as if
+ * `getConfirmedState()` already reflected it would let the pull select a
+ * winner, and potentially overwrite local content, against a stale/partial
+ * baseline. The pending op itself is deliberately left untouched either
+ * way (removePendingOp is only ever reached after a successful promotion,
+ * unchanged from prior rounds) — a `false` return is purely a SIGNAL for
+ * this pull to stop; the evidence for the NEXT pull to retry is already
+ * exactly as durable as it always was.
+ *
+ * A GET that returned no usable snapshot at all (a 204, or an unparseable
+ * response — `acceptedDomainFactsFromBeacon` returns null) is NOT a
+ * promotion failure: there is nothing this pull could have promoted to, so
+ * it returns `true` — the accepted op(s) simply remain pending for a later
+ * pull that DOES receive a usable snapshot, exactly as before this round.
  */
 export async function reconcilePendingOperations(
   userId: string,
@@ -1690,20 +1861,21 @@ export async function reconcilePendingOperations(
   opStatuses: OpStatus[],
   cloudRevision: number | null,
   cloudSnapshot: SyncedPlannerPayload | null
-): Promise<void> {
+): Promise<boolean> {
   const acceptedOpIds = opStatuses.filter((s) => s.found).map((s) => s.opId);
-  if (acceptedOpIds.length === 0) return;
-  if (typeof window === "undefined") return;
+  if (acceptedOpIds.length === 0) return true;
+  if (typeof window === "undefined") return true;
   const resolved = acceptedDomainFactsFromBeacon(true, cloudRevision, cloudSnapshot);
-  if (!resolved) return;
+  if (!resolved) return true;
   const allOk = await commitConfirmedBaseline(userId, profileId, resolved.revision, resolved.accepted);
   // A failed write means durable proof does not exist for at least one
   // domain — every accepted op from this pull stays pending rather than
-  // being retired speculatively.
-  if (!allOk) return;
+  // being retired speculatively, and the caller must fail this pull closed.
+  if (!allOk) return false;
   for (const opId of acceptedOpIds) {
     removePendingOp(userId, profileId, opId);
   }
+  return true;
 }
 
 // ── Sync state observer ───────────────────────────────────────────────────────
@@ -2122,7 +2294,10 @@ function parseLocalDatasetEntry(
  */
 function readLocalDaysOrder(profileId: string): unknown[] | undefined {
   try {
-    const raw = localStorage.getItem(buildNamespacedKey(profileId, "days"));
+    // Codex P1 fix (17th round) — reads the newest DURABLE edit for the
+    // days key, not merely whatever the canonical key currently holds; see
+    // readLatestDurableValue()'s own doc above.
+    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "days"));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed : undefined;
@@ -2148,8 +2323,16 @@ function readLocalDaysOrder(profileId: string): unknown[] | undefined {
 function buildPayloadFromStorage(profileId: string): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
   try {
-    const plansRaw = localStorage.getItem(buildNamespacedKey(profileId, "plans"));
-    const lightningRaw = localStorage.getItem(buildNamespacedKey(profileId, "lightning"));
+    // Codex P1 fix (17th round) — LOCAL-FIRST + CROSS-TAB SERIALIZATION:
+    // "unload serializes the newest durable edit state, not merely the
+    // canonical key" (used by both doPush() and registerUnloadSync()'s
+    // beforeunload handler below, since both route through this same
+    // function) — see readLatestDurableValue()'s own doc above for why this
+    // is guaranteed to reflect the user's true latest edit even in the rare
+    // window where a concurrent hydration race has transiently clobbered
+    // the canonical key itself.
+    const plansRaw = readLatestDurableValue(buildNamespacedKey(profileId, "plans"));
+    const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
 
     const plans = parseLocalDatasetEntry(plansRaw);
     const lightning = parseLocalDatasetEntry(lightningRaw);

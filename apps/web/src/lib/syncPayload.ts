@@ -546,6 +546,95 @@ export const DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES: Array<{
   },
 ];
 
+// ===== CONFIRMED-CONFLICT RECOVERY (SH.2, Codex P1, 17th round) =====
+
+/**
+ * CONFIRMED-CONFLICT RECOVERY CONTRACT — a conflicted newest-confirmed
+ * revision (resolveConfirmedDomainState() above returning "conflict") must
+ * fail closed, but must not permanently deadlock. Codex P1, 17th round:
+ * the 16th round's own fix made this deadlock structurally guaranteed —
+ * the pull unconditionally bails out the instant ANY domain is conflicted,
+ * but the ONLY way a conflict is ever superseded is a NEW, higher-revision
+ * fact getting recorded, which only happens via the winner-selection/commit
+ * code path the bail-out itself prevents from ever running. A conflict
+ * could never resolve.
+ *
+ * The fix: a conflict at `conflictRevision` is REPAIRABLE by a given pull
+ * if and only if that pull's own authoritative server response carries a
+ * STRICTLY NEWER revision than the conflict itself — never an equal or
+ * older one ("Do not recover from an equal/older response"; "Do not
+ * silently fall back to an older confirmed revision" — both from the 17th
+ * round's own directive). `candidateRevision` is `null` for a response with
+ * no usable revision at all (a 204, or an unparseable GET) — never
+ * repairable, since there is no authoritative newer fact to repair with.
+ *
+ * This is a PURE, per-domain decision only — see each page's
+ * captureConfirmedSnapshotForPull() for how a "repairable" domain is then
+ * treated exactly like "none" (falls through to the ordinary baseline-ref/
+ * ownership-mismatch path), letting the EXISTING winner-selection/
+ * reconciliation/commit machinery record a new fact at the (higher)
+ * candidate revision with zero special-casing — that new fact is what
+ * actually supersedes the conflict, via resolveConfirmedDomainState()'s own
+ * existing "only the highest revision matters" rule, not any special
+ * recovery code path here. A domain that is NOT repairable by this pull's
+ * response still fails closed exactly as the 16th round already ensured.
+ */
+export function isConflictRepairableByRevision(
+  conflictRevision: number,
+  candidateRevision: number | null
+): boolean {
+  return candidateRevision !== null && candidateRevision > conflictRevision;
+}
+
+/**
+ * Reference cases for isConflictRepairableByRevision() — the REQUIRED
+ * cases 3 and 4 from the 17th round's architectural contract (conflicted
+ * rev6 + authoritative rev7 repairs; conflicted rev6 + rev6/rev5 stays
+ * fail-closed), plus the surrounding edge cases. Run from Node:
+ *   import { DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES, isConflictRepairableByRevision } from "@/lib/syncPayload";
+ *   DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES.forEach(c => {
+ *     const got = isConflictRepairableByRevision(c.conflictRevision, c.candidateRevision);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES: Array<{
+  name: string;
+  conflictRevision: number;
+  candidateRevision: number | null;
+  expected: boolean;
+}> = [
+  {
+    name: "required — conflicted rev6 + authoritative GET rev7 — strictly newer, repairs the conflict",
+    conflictRevision: 6,
+    candidateRevision: 7,
+    expected: true,
+  },
+  {
+    name: "required — conflicted rev6 + GET rev6 (equal) — never recovers from an equal response",
+    conflictRevision: 6,
+    candidateRevision: 6,
+    expected: false,
+  },
+  {
+    name: "required — conflicted rev6 + GET rev5 (older) — never falls back to an older confirmed revision",
+    conflictRevision: 6,
+    candidateRevision: 5,
+    expected: false,
+  },
+  {
+    name: "no usable candidate revision at all (204 / unparseable GET) — never repairable",
+    conflictRevision: 6,
+    candidateRevision: null,
+    expected: false,
+  },
+  {
+    name: "candidate far newer — still repairs (any strictly-newer revision suffices)",
+    conflictRevision: 3,
+    candidateRevision: 100,
+    expected: true,
+  },
+];
+
 /**
  * SH.2 architecture (Codex P1, 11th round) — the per-domain accepted-facts
  * a caller should record, given a set of domain values all confirmed
