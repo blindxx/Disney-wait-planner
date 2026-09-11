@@ -48,6 +48,20 @@ CREATE TABLE IF NOT EXISTS user_plans (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- SH.2 — single global sequence backing the monotonic `revision` column
+-- below. A shared sequence across ALL (user_id, profile_id) rows is
+-- sufficient: revisions are only ever compared WITHIN one (user,profile)
+-- pair, so global uniqueness (a strict superset of what's needed) is fine,
+-- and it avoids any per-row counter bookkeeping. `NOW()`/`updated_at`
+-- reflects TRANSACTION START time in Postgres, not actual write-execution
+-- order, so two writes serialized by the advisory lock in
+-- api/sync/planner/route.ts can still commit with a non-monotonic
+-- `updated_at` under contention — `revision` (assigned via nextval() at
+-- the moment each write actually executes) is what the client uses as the
+-- authoritative ordering signal instead (see syncHelper.ts's
+-- commitConfirmedBaseline / nextConfirmedBaseline).
+CREATE SEQUENCE IF NOT EXISTS user_planner_revision_seq;
+
 -- Custom table: per-user, per-profile planner sync blob (Phase 7.6)
 -- Stores the combined Plans + Lightning payload for each (user, profile) pair.
 CREATE TABLE IF NOT EXISTS user_planner (
@@ -55,5 +69,57 @@ CREATE TABLE IF NOT EXISTS user_planner (
   profile_id  TEXT        NOT NULL,
   planner_json TEXT       NOT NULL,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  revision    BIGINT      NOT NULL DEFAULT 0,
   PRIMARY KEY (user_id, profile_id)
 );
+
+-- Idempotent — self-heals a `user_planner` table created before `revision`
+-- existed (CREATE TABLE IF NOT EXISTS above is a no-op against an
+-- already-deployed table, so this re-runnable ALTER is what actually picks
+-- up the new column on an existing database).
+ALTER TABLE user_planner ADD COLUMN IF NOT EXISTS revision BIGINT NOT NULL DEFAULT 0;
+
+-- SH.2 (Codex P1, 7th round) — append-only record of accepted writes,
+-- keyed by the CLIENT-SUPPLIED opaque operation id (see syncPayload.ts's
+-- module doc on server-verifiable write acknowledgment). `user_planner`
+-- above stores only the LATEST state per (user, profile) — no history — so
+-- a later query against it alone can never distinguish "this write never
+-- reached the server" from "this write reached the server, then a newer
+-- write superseded it": both look identical (the current row simply
+-- doesn't match what was sent). This table exists purely to answer "was
+-- client operation X ever accepted", independent of whatever the row looks
+-- like now. Populated only when a PUT/POST supplies an optional
+-- `clientOpId` query parameter (ordinary pushes that don't pass one are
+-- completely unaffected); queried only when a GET supplies a matching
+-- `lastOpId` query parameter. `client_op_id` is a client-generated random
+-- UUID (crypto.randomUUID() — see registerUnloadSync in syncHelper.ts),
+-- NEVER a timestamp and never used for ordering — `revision` (copied from
+-- the write that produced it) remains the only ordering signal. ON
+-- CONFLICT DO NOTHING at the insert site makes a retried write with the
+-- same opId idempotent. Deliberately unbounded/unpruned — see this
+-- feature's own round-7 report for the accepted operational tradeoff.
+-- Codex P1 fix (8th round) — `updated_at` stores the EXACT `updated_at` the
+-- original accepted write produced (copied from user_planner's own
+-- RETURNING clause at insert time), NOT a re-read of user_planner's
+-- CURRENT value. This is what lets a duplicate delivery of the same
+-- client_op_id (handleWrite in route.ts, checked under the SAME
+-- per-(user,profile) advisory lock as the write itself, BEFORE any merge/
+-- upsert runs) return the ORIGINAL accepted {updatedAt, revision} result
+-- without touching user_planner again — by the time a duplicate arrives,
+-- user_planner may already reflect a newer write, so re-reading it would
+-- return the WRONG (newer, unrelated) result for what is supposed to be a
+-- pure idempotent replay of THIS specific operation.
+CREATE TABLE IF NOT EXISTS user_planner_writes (
+  user_id       TEXT        NOT NULL,
+  profile_id    TEXT        NOT NULL,
+  client_op_id  TEXT        NOT NULL,
+  revision      BIGINT      NOT NULL,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, profile_id, client_op_id)
+);
+
+-- Idempotent self-heal — same rationale as user_planner's own `revision`
+-- backfill above: picks up `updated_at` on a table created by round 7,
+-- before this column existed, on an already-deployed database.
+ALTER TABLE user_planner_writes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();

@@ -142,6 +142,663 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
   };
 }
 
+// ===== PER-DOMAIN CONFIRMED STATE (SH.2, Codex P1 11th round) =====
+
+/**
+ * SH.2 architecture (Codex P1, 11th round) — REPLACES the single mixed-
+ * domain `ConfirmedPlannerSnapshot { revision; snapshot }` (one global
+ * revision covering plans+lightning+days together). Codex found this
+ * unsound: disjoint pulls/pushes can confirm DIFFERENT domains at
+ * DIFFERENT server revisions (e.g. a Days-only cloud win at revision 7,
+ * while Plans is still only confirmed as of revision 5 from an earlier,
+ * separate commit) — assigning the WHOLE mixed snapshot a single "newest"
+ * revision makes the OLDER domain look newer than it genuinely is,
+ * silently blocking a later, perfectly legitimate update to that domain
+ * (its real revision is lower than the mixed snapshot's borrowed one, so a
+ * correct future commit at, say, revision 6 for Plans would be wrongly
+ * rejected as "stale" against the borrowed revision 7).
+ *
+ * The fix: confirmed state is tracked PER DOMAIN. Each of plans/lightning/
+ * days independently carries its OWN `{ revision, value }` fact — see
+ * `ConfirmedPlannerState` below. A confirmation at revision R may advance
+ * ONLY the domain(s) actually accepted at R; every other domain retains
+ * its own prior revision/value completely untouched. A later response
+ * with a LOWER revision than some OTHER domain's confirmed revision may
+ * still legitimately advance a domain whose OWN confirmed revision is
+ * lower — there is no "reject the whole mixed commit" step anymore,
+ * because there is no whole mixed commit to reject: each domain's fate is
+ * decided independently, using ONLY that domain's own revision history.
+ */
+export interface ConfirmedDomainFact<T> {
+  revision: number;
+  value: T;
+}
+
+/**
+ * Codex P1 fix (16th round) — every field is now a REQUIRED
+ * ConfirmedDomainResult (see its own doc below), never merely an optional
+ * fact. The old `plans?: ConfirmedDomainFact<...>` shape could only ever
+ * say "here's the fact" or "absent" — it had no way to represent "the
+ * newest revision exists but is CONFLICTED", so getConfirmedState()
+ * (syncHelper.ts) silently collapsed that case into either the fact from
+ * an older, stale revision or nothing at all, discarding the one signal
+ * a caller most needed. Every consumer (captureConfirmedSnapshotForPull in
+ * plans/page.tsx and lightning/page.tsx) now must handle all three
+ * statuses explicitly.
+ */
+export interface ConfirmedPlannerState {
+  plans: ConfirmedDomainResult<{ version: number; items: unknown[] }>;
+  lightning: ConfirmedDomainResult<{ version: number; items: unknown[] }>;
+  days: ConfirmedDomainResult<string[]>;
+}
+
+function isPlannerDomainValue(v: unknown): v is { version: number; items: unknown[] } {
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    typeof (v as Record<string, unknown>).version === "number" &&
+    Array.isArray((v as Record<string, unknown>).items)
+  );
+}
+
+function isDaysValue(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((id) => typeof id === "string");
+}
+
+/**
+ * Parse and validate a raw unknown value as a plans/lightning
+ * ConfirmedDomainFact (both domains share the identical
+ * `{ version, items[] }` value shape). Returns null if the shape is
+ * missing or invalid — callers (syncHelper.ts's getConfirmedState) treat
+ * null as "no confirmed fact here", never as an error. A non-finite/non-
+ * numeric `revision` is rejected outright (never coerced to 0) since
+ * resolveConfirmedDomainState()'s whole revision comparison depends on
+ * genuine server-issued revisions — treating a corrupted fact as revision
+ * 0 would make it look OLDER than everything, silently discarding it
+ * instead of just refusing to trust it (it is simply excluded from the
+ * candidate set resolveConfirmedDomainState() reduces over).
+ */
+export function parseConfirmedPlannerDomainFact(
+  raw: unknown
+): ConfirmedDomainFact<{ version: number; items: unknown[] }> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  if (!isPlannerDomainValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
+}
+
+/**
+ * Parse and validate a raw unknown value as a `days` ConfirmedDomainFact —
+ * same contract as parseConfirmedPlannerDomainFact(), just for the `days`
+ * domain's own value shape (a plain string array).
+ */
+export function parseConfirmedDaysFact(raw: unknown): ConfirmedDomainFact<string[]> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  if (!isDaysValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
+}
+
+/**
+ * Reference cases for parseConfirmedPlannerDomainFact()/parseConfirmedDaysFact().
+ * Run from Node:
+ *   import { DEV_PARSE_CONFIRMED_FACT_CASES, parseConfirmedPlannerDomainFact, parseConfirmedDaysFact } from "@/lib/syncPayload";
+ *   DEV_PARSE_CONFIRMED_FACT_CASES.forEach(c => {
+ *     const parse = c.domain === "days" ? parseConfirmedDaysFact : parseConfirmedPlannerDomainFact;
+ *     const got = parse(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
+  name: string;
+  domain: "plannerDomain" | "days";
+  raw: unknown;
+  expected: ConfirmedDomainFact<unknown> | null;
+}> = [
+  {
+    name: "valid plans/lightning fact — parses as-is",
+    domain: "plannerDomain",
+    raw: { revision: 12, value: { version: 1, items: ["p"] } },
+    expected: { revision: 12, value: { version: 1, items: ["p"] } },
+  },
+  {
+    name: "revision 0 is a legitimate value, not treated as missing",
+    domain: "plannerDomain",
+    raw: { revision: 0, value: { version: 1, items: [] } },
+    expected: { revision: 0, value: { version: 1, items: [] } },
+  },
+  {
+    name: "missing revision — rejected, never coerced to 0",
+    domain: "plannerDomain",
+    raw: { value: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "non-numeric revision — rejected",
+    domain: "plannerDomain",
+    raw: { revision: "6", value: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "non-finite revision (NaN) — rejected",
+    domain: "plannerDomain",
+    raw: { revision: NaN, value: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "revision valid but value shape invalid — whole fact rejected",
+    domain: "plannerDomain",
+    raw: { revision: 3, value: { items: "not-an-array" } },
+    expected: null,
+  },
+  {
+    name: "non-object raw — rejected",
+    domain: "plannerDomain",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected",
+    domain: "plannerDomain",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+  {
+    name: "valid days fact — parses as-is",
+    domain: "days",
+    raw: { revision: 7, value: ["day-1", "day-2"] },
+    expected: { revision: 7, value: ["day-1", "day-2"] },
+  },
+  {
+    name: "days value not a string array — rejected",
+    domain: "days",
+    raw: { revision: 7, value: [1, 2, 3] },
+    expected: null,
+  },
+];
+
+/**
+ * SH.2 architecture (Codex P1, 15th round; STATUS MODEL REPLACED 16th
+ * round) — the 15th round's reduceConfirmedFactRecords() (removed) walked
+ * revisions highest-first and, on finding a CONFLICTED one, silently fell
+ * back to the next-lower UNAMBIGUOUS revision as "confirmed". Codex's
+ * 16th-round finding: that fallback is wrong. A conflict at the NEWEST
+ * revision means the domain's true current state is UNKNOWN — falling back
+ * to an older revision presents a STALE value as if it were a trustworthy
+ * current baseline, which a pull's winner-selection logic (captureConfirmed-
+ * SnapshotForPull, plans/lightning page.tsx) would then treat as genuine
+ * confirmed truth, potentially misclassifying newer local/cloud state as an
+ * unsynced edit and overwriting it. "A conflict at the newest confirmed
+ * revision is NOT equivalent to using the next older revision."
+ *
+ * resolveConfirmedDomainState() is the replacement: it looks ONLY at the
+ * HIGHEST revision recorded for a domain (never falling back), and returns
+ * one of exactly three statuses — the CONFIRMED-STATE CONTRACT's own
+ * required distinction:
+ *   • "none"      — no facts recorded for this domain at all.
+ *   • "confirmed" — the highest revision's recorded fact(s) all canonically
+ *     agree (canonicalizeJSON() above) — this domain has a valid,
+ *     trustworthy confirmed value.
+ *   • "conflict"  — the highest revision's recorded facts DISAGREE. The
+ *     domain's confirmed state is presently UNKNOWABLE — callers must fail
+ *     closed for this domain (no winner selection, no push, sync gated)
+ *     rather than substitute ANY older revision, however unambiguous that
+ *     older one might individually be.
+ * A conflict is always temporary: the moment a NEWER, unambiguous revision
+ * is recorded (e.g. a later successful push or pull resolves the
+ * inconsistency going forward), it becomes the new highest revision and
+ * resolveConfirmedDomainState() reports "confirmed" again — the stale
+ * conflicted revision is simply no longer the one being looked at. See
+ * confirmedFactKey's own doc in syncHelper.ts for why facts are physically
+ * append-only (so this function never needs to worry about a fact changing
+ * out from under it mid-computation), and this round's own report for how
+ * the "conflict" status propagates through the actual pull/baseline
+ * consumers instead of being silently dropped.
+ */
+export type ConfirmedDomainResult<T> =
+  | { status: "confirmed"; fact: ConfirmedDomainFact<T> }
+  | { status: "none" }
+  | { status: "conflict"; revision: number };
+
+export function resolveConfirmedDomainState<T>(
+  facts: Array<ConfirmedDomainFact<T>>
+): ConfirmedDomainResult<T> {
+  if (facts.length === 0) return { status: "none" };
+  let topRevision = facts[0].revision;
+  for (const fact of facts) {
+    if (fact.revision > topRevision) topRevision = fact.revision;
+  }
+  const topGroup = facts.filter((fact) => fact.revision === topRevision);
+  const canonicalValues = new Set(topGroup.map((fact) => canonicalizeJSON(fact.value)));
+  if (canonicalValues.size > 1) {
+    return { status: "conflict", revision: topRevision };
+  }
+  return { status: "confirmed", fact: topGroup[0] };
+}
+
+/**
+ * True if every fact recorded for `revision` within `facts` shares the SAME
+ * canonical value (including the trivial case of exactly one fact, or none
+ * — absence is never itself a conflict). Used by recordConfirmedFact()
+ * (syncHelper.ts) to decide, immediately after writing its own new fact,
+ * whether THIS SPECIFIC revision is durably confirmed as unambiguous — the
+ * per-call success signal reconcilePendingOperations() depends on to decide
+ * whether it is safe to retire a pending op's evidence. Deliberately
+ * independent of reduceConfirmedFactRecords()'s "stop at the first
+ * unambiguous revision" search: a revision below the domain's current
+ * overall max can still be perfectly unambiguous on its own terms (e.g. a
+ * legitimately delayed lower-revision response — see this round's own
+ * report), and this function must say so correctly regardless of what a
+ * HIGHER revision's group looks like.
+ */
+export function confirmedFactRevisionIsUnambiguous<T>(
+  facts: Array<ConfirmedDomainFact<T>>,
+  revision: number
+): boolean {
+  const group = facts.filter((f) => f.revision === revision);
+  if (group.length === 0) return false;
+  const canonicalValues = new Set(group.map((f) => canonicalizeJSON(f.value)));
+  return canonicalValues.size === 1;
+}
+
+/**
+ * Reference cases for resolveConfirmedDomainState() — the REQUIRED cases
+ * from the 16th round's architectural contract. Run from Node:
+ *   import { DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES, resolveConfirmedDomainState } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES.forEach(c => {
+ *     const got = resolveConfirmedDomainState(c.facts);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES: Array<{
+  name: string;
+  facts: Array<ConfirmedDomainFact<unknown>>;
+  expected: ConfirmedDomainResult<unknown>;
+}> = [
+  {
+    name: "empty set — no confirmed state for this domain yet",
+    facts: [],
+    expected: { status: "none" },
+  },
+  {
+    name: "single fact — confirmed trivially",
+    facts: [{ revision: 5, value: "A" }],
+    expected: { status: "confirmed", fact: { revision: 5, value: "A" } },
+  },
+  {
+    name: "two tabs record IDENTICAL rev5 value (as separate physical facts) — one equivalent confirmed result",
+    facts: [
+      { revision: 5, value: { version: 1, items: ["a"] } },
+      { revision: 5, value: { version: 1, items: ["a"] } },
+    ],
+    expected: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: ["a"] } } },
+  },
+  {
+    name: "two tabs record DIFFERENT rev5 values — conflict, neither wins",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+    ],
+    expected: { status: "conflict", revision: 5 },
+  },
+  {
+    name: "required — rev5=A confirmed, rev6 has conflicting facts: reports conflict at rev6, NEVER falls back to rev5 as a usable baseline",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 6, value: "B" },
+      { revision: 6, value: "C" },
+    ],
+    expected: { status: "conflict", revision: 6 },
+  },
+  {
+    name: "required — later unambiguous rev7 arrives after rev6's conflict: rev6's conflict is superseded, normal confirmed state resumes from rev7",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 6, value: "B" },
+      { revision: 6, value: "C" },
+      { revision: 7, value: "D" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 7, value: "D" } },
+  },
+  {
+    name: "different revisions recorded concurrently — highest revision's own status determines the result",
+    facts: [
+      { revision: 6, value: "B" },
+      { revision: 9, value: "D" },
+      { revision: 3, value: "A" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 9, value: "D" } },
+  },
+  {
+    name: "delayed lower revision arriving after a higher unambiguous one remains harmless — still resolves to the higher revision",
+    facts: [
+      { revision: 7, value: "C" },
+      { revision: 6, value: "B-delayed" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 7, value: "C" } },
+  },
+  {
+    name: "only the newest revision is conflicted, with no older revision at all — still 'conflict', never fabricates a fallback",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+    ],
+    expected: { status: "conflict", revision: 5 },
+  },
+];
+
+/**
+ * Reference cases for confirmedFactRevisionIsUnambiguous(). Run from Node:
+ *   import { DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES, confirmedFactRevisionIsUnambiguous } from "@/lib/syncPayload";
+ *   DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES.forEach(c => {
+ *     const got = confirmedFactRevisionIsUnambiguous(c.facts, c.revision);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES: Array<{
+  name: string;
+  facts: Array<ConfirmedDomainFact<unknown>>;
+  revision: number;
+  expected: boolean;
+}> = [
+  {
+    name: "no facts at all for this revision — not unambiguous (nothing to confirm)",
+    facts: [{ revision: 9, value: "X" }],
+    revision: 5,
+    expected: false,
+  },
+  {
+    name: "exactly one fact for this revision — unambiguous",
+    facts: [{ revision: 5, value: "A" }],
+    revision: 5,
+    expected: true,
+  },
+  {
+    name: "multiple facts, same canonical value — unambiguous",
+    facts: [
+      { revision: 5, value: { b: 2, a: 1 } },
+      { revision: 5, value: { a: 1, b: 2 } },
+    ],
+    revision: 5,
+    expected: true,
+  },
+  {
+    name: "multiple facts, different values — NOT unambiguous, regardless of a higher revision existing elsewhere",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+      { revision: 9, value: "Z" },
+    ],
+    revision: 5,
+    expected: false,
+  },
+  {
+    name: "a lower revision is unambiguous on its own terms even though a HIGHER revision is the domain's overall confirmed max",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 9, value: "Z" },
+    ],
+    revision: 5,
+    expected: true,
+  },
+];
+
+// ===== CONFIRMED-CONFLICT RECOVERY (SH.2, Codex P1, 17th round) =====
+
+/**
+ * CONFIRMED-CONFLICT RECOVERY CONTRACT — a conflicted newest-confirmed
+ * revision (resolveConfirmedDomainState() above returning "conflict") must
+ * fail closed, but must not permanently deadlock. Codex P1, 17th round:
+ * the 16th round's own fix made this deadlock structurally guaranteed —
+ * the pull unconditionally bails out the instant ANY domain is conflicted,
+ * but the ONLY way a conflict is ever superseded is a NEW, higher-revision
+ * fact getting recorded, which only happens via the winner-selection/commit
+ * code path the bail-out itself prevents from ever running. A conflict
+ * could never resolve.
+ *
+ * The fix: a conflict at `conflictRevision` is REPAIRABLE by a given pull
+ * if and only if that pull's own authoritative server response carries a
+ * STRICTLY NEWER revision than the conflict itself — never an equal or
+ * older one ("Do not recover from an equal/older response"; "Do not
+ * silently fall back to an older confirmed revision" — both from the 17th
+ * round's own directive). `candidateRevision` is `null` for a response with
+ * no usable revision at all (a 204, or an unparseable GET) — never
+ * repairable, since there is no authoritative newer fact to repair with.
+ *
+ * This is a PURE, per-domain decision only — see each page's
+ * captureConfirmedSnapshotForPull() for how a "repairable" domain is then
+ * treated exactly like "none" (falls through to the ordinary baseline-ref/
+ * ownership-mismatch path), letting the EXISTING winner-selection/
+ * reconciliation/commit machinery record a new fact at the (higher)
+ * candidate revision with zero special-casing — that new fact is what
+ * actually supersedes the conflict, via resolveConfirmedDomainState()'s own
+ * existing "only the highest revision matters" rule, not any special
+ * recovery code path here. A domain that is NOT repairable by this pull's
+ * response still fails closed exactly as the 16th round already ensured.
+ */
+export function isConflictRepairableByRevision(
+  conflictRevision: number,
+  candidateRevision: number | null
+): boolean {
+  return candidateRevision !== null && candidateRevision > conflictRevision;
+}
+
+/**
+ * Reference cases for isConflictRepairableByRevision() — the REQUIRED
+ * cases 3 and 4 from the 17th round's architectural contract (conflicted
+ * rev6 + authoritative rev7 repairs; conflicted rev6 + rev6/rev5 stays
+ * fail-closed), plus the surrounding edge cases. Run from Node:
+ *   import { DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES, isConflictRepairableByRevision } from "@/lib/syncPayload";
+ *   DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES.forEach(c => {
+ *     const got = isConflictRepairableByRevision(c.conflictRevision, c.candidateRevision);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES: Array<{
+  name: string;
+  conflictRevision: number;
+  candidateRevision: number | null;
+  expected: boolean;
+}> = [
+  {
+    name: "required — conflicted rev6 + authoritative GET rev7 — strictly newer, repairs the conflict",
+    conflictRevision: 6,
+    candidateRevision: 7,
+    expected: true,
+  },
+  {
+    name: "required — conflicted rev6 + GET rev6 (equal) — never recovers from an equal response",
+    conflictRevision: 6,
+    candidateRevision: 6,
+    expected: false,
+  },
+  {
+    name: "required — conflicted rev6 + GET rev5 (older) — never falls back to an older confirmed revision",
+    conflictRevision: 6,
+    candidateRevision: 5,
+    expected: false,
+  },
+  {
+    name: "no usable candidate revision at all (204 / unparseable GET) — never repairable",
+    conflictRevision: 6,
+    candidateRevision: null,
+    expected: false,
+  },
+  {
+    name: "candidate far newer — still repairs (any strictly-newer revision suffices)",
+    conflictRevision: 3,
+    candidateRevision: 100,
+    expected: true,
+  },
+];
+
+/**
+ * SH.2 architecture (Codex P1, 11th round) — the per-domain accepted-facts
+ * a caller should record, given a set of domain values all confirmed
+ * together at ONE server revision (a single push's response, or a single
+ * pull's GET response). This replaces the old `nextConfirmedBaseline()`
+ * merge function: there is no "current state" input anymore, and no
+ * accept/reject decision to make here at all — recording an immutable fact
+ * is ALWAYS valid (it is simply a true historical record of what revision
+ * R produced), and whether it ends up being the domain's CURRENT confirmed
+ * value is entirely up to resolveConfirmedDomainState() at READ time. This
+ * function exists only to describe, per domain, WHAT to record — never
+ * whether it's "allowed".
+ */
+export interface AcceptedPlannerDomains {
+  plans?: { version: number; items: unknown[] };
+  lightning?: { version: number; items: unknown[] };
+  days?: string[];
+}
+
+/**
+ * SH.2 architecture (Codex P1, 7th round; generalized 11th) — REPLACES the
+ * 6th round's content-comparison beacon resolution (formerly
+ * SyncIdentityState / resolveSyncIdentityStateAfterPull, both removed).
+ * That approach compared a pendingBeacon's PAYLOAD against a subsequent
+ * GET's current snapshot and treated a mismatch as "the beacon failed".
+ * This is unsound: `user_planner` (see db-schema.sql) stores only the
+ * LATEST state per (user, profile) — no history — so "beacon B failed" and
+ * "beacon B succeeded, then a newer write C superseded it" are
+ * OBSERVATIONALLY IDENTICAL from a single GET's content alone. Both cases
+ * show up as "current cloud content differs from what B sent". No amount
+ * of client-side heuristics (timing, retry counts, event ordering) can
+ * distinguish them, because the information needed — "was B specifically
+ * ever accepted" — simply does not exist in a content-only GET response.
+ * Closing this required a SERVER-VERIFIABLE write-acknowledgment: see
+ * user_planner_writes (db-schema.sql) and lastOpId/clientOpId
+ * (api/sync/planner/route.ts) for the minimal additive mechanism — an
+ * append-only table recording, per client-generated opaque opId, whether
+ * that specific write was ever accepted, independent of whatever the row
+ * looks like now.
+ *
+ * This function is the pure decision core for that resolved contract,
+ * given the GET response's own `opStatus.found` (a direct, deterministic
+ * server fact — never inferred from timing or content comparison):
+ *   • `beaconAccepted` true (server confirms opId was recorded): the
+ *     beacon's contribution is, by definition, already reflected in
+ *     whatever `cloudSnapshot`/`cloudRevision` this SAME GET response
+ *     returned (accepted-then-possibly-superseded is still "this pull's
+ *     cloud state already accounts for it") — returns the per-domain facts
+ *     to record at `cloudRevision`, bundled with that revision. This
+ *     correctly resolves BOTH "accepted, not yet superseded" and
+ *     "accepted, then superseded by C" identically and correctly: either
+ *     way, `cloudSnapshot` IS the accurate current truth to record.
+ *   • `beaconAccepted` false (server confirms opId was never recorded, or
+ *     no opId was pending at all), or `cloudRevision`/`cloudSnapshot` null
+ *     (a 204): returns `null` — nothing to record. The caller's ORDINARY
+ *     pickWinningItems/pickWinningDays comparison decides the rest, exactly
+ *     as it would for any other unresolved local edit.
+ * Never fabricates a revision (always uses this GET's own live
+ * `cloudRevision`) and never consults arrival order or timing.
+ *
+ * Codex P1 fix (11th round) — no longer routes through a "current state"
+ * merge/rejection step (the old nextConfirmedBaseline()): recording a fact
+ * is always valid regardless of what's currently confirmed for any domain,
+ * per-domain OR mixed together — see resolveConfirmedDomainState()'s own doc
+ * for why this is what removes the Web-Locks dependency for confirmed state.
+ */
+export function acceptedDomainFactsFromBeacon(
+  beaconAccepted: boolean,
+  cloudRevision: number | null,
+  cloudSnapshot: SyncedPlannerPayload | null
+): { revision: number; accepted: AcceptedPlannerDomains } | null {
+  if (!beaconAccepted || cloudRevision === null || cloudSnapshot === null) {
+    return null;
+  }
+  return {
+    revision: cloudRevision,
+    accepted: {
+      plans: cloudSnapshot.plans,
+      lightning: cloudSnapshot.lightning,
+      days: cloudSnapshot.days,
+    },
+  };
+}
+
+/**
+ * Reference cases for acceptedDomainFactsFromBeacon() — the two REQUIRED
+ * beacon-resolution cases per the round-7 directive (accepted, accepted-
+ * then-superseded, failed, failed-while-newer-C-exists), plus the
+ * surrounding edge cases, re-pinned against the round-11 per-domain
+ * contract (no more "current confirmed" input/rejection — see the
+ * function's own doc for why). Run from Node:
+ *   import { DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES, acceptedDomainFactsFromBeacon } from "@/lib/syncPayload";
+ *   DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES.forEach(c => {
+ *     const got = acceptedDomainFactsFromBeacon(c.beaconAccepted, c.cloudRevision, c.cloudSnapshot);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
+  name: string;
+  beaconAccepted: boolean;
+  cloudRevision: number | null;
+  cloudSnapshot: SyncedPlannerPayload | null;
+  expected: { revision: number; accepted: AcceptedPlannerDomains } | null;
+}> = [
+  {
+    name: "required — beacon accepted, not yet superseded: records the GET's own snapshot/revision",
+    beaconAccepted: true,
+    cloudRevision: 5,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      revision: 5,
+      accepted: { plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] }, days: undefined },
+    },
+  },
+  {
+    name: "required — beacon accepted, then SUPERSEDED by a newer cloud write C: still records CURRENT cloud (C), the accurate accounting of the beacon's contribution",
+    beaconAccepted: true,
+    cloudRevision: 7,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      revision: 7,
+      accepted: { plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] }, days: undefined },
+    },
+  },
+  {
+    name: "required — beacon failed (opId never recorded): nothing to record",
+    beaconAccepted: false,
+    cloudRevision: 4,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "required — beacon failed WHILE a newer cloud write C exists (from another device): still nothing to record HERE — ordinary pull logic (commitConfirmedBaseline) handles C separately",
+    beaconAccepted: false,
+    cloudRevision: 9,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["C-unrelated"] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "no beacon was pending at all (beaconAccepted false) — nothing to record",
+    beaconAccepted: false,
+    cloudRevision: 3,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "definitive 204 (cloudRevision/cloudSnapshot both null) even though beaconAccepted somehow true (defensive) — nothing to record",
+    beaconAccepted: true,
+    cloudRevision: null,
+    cloudSnapshot: null,
+    expected: null,
+  },
+  {
+    name: "accepted, with a days[] present — days included in the recorded facts",
+    beaconAccepted: true,
+    cloudRevision: 1,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    expected: {
+      revision: 1,
+      accepted: { plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    },
+  },
+];
+
 // ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
 
 /**
@@ -406,3 +1063,330 @@ export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
     expectedUnknown: ["dayParks", "dayAutoFallbacks"],
   },
 ];
+
+/**
+ * Reference cases for parseSyncedPlannerPayload() — SH.2's cloud-confirmed
+ * snapshot contract (see syncHelper.ts's getConfirmedSnapshot) now depends
+ * on this function to validate the stored confirmedSnapshot value before
+ * any page trusts it as a baseline, so its accept/reject/sanitize behavior
+ * is pinned here explicitly. Run from Node:
+ *   import { DEV_PARSE_SYNCED_PAYLOAD_CASES, parseSyncedPlannerPayload } from "@/lib/syncPayload";
+ *   DEV_PARSE_SYNCED_PAYLOAD_CASES.forEach(c => {
+ *     const got = parseSyncedPlannerPayload(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
+  name: string;
+  raw: unknown;
+  expected: SyncedPlannerPayload | null;
+}> = [
+  {
+    name: "valid full payload with days — parses as-is",
+    raw: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: ["l"] }, days: ["day-1", "day-2"] },
+    expected: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: ["l"] }, days: ["day-1", "day-2"] },
+  },
+  {
+    name: "valid payload without days — days omitted from result",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "wrong version — rejected",
+    raw: { version: 2, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "missing plans — rejected",
+    raw: { version: 1, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "lightning.items not an array — rejected",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: "nope" } },
+    expected: null,
+  },
+  {
+    name: "non-object raw — rejected",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+  {
+    name: "malformed days entries — sanitized, not rejected (plans/lightning still valid)",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["not-a-day", "day-2"] },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1", "day-2"] },
+  },
+];
+
+// ===== LOCAL-DOMAIN COMMIT DECISION (SH.2, 12th round) =====
+//
+// Codex found two P1s in local persistence after pull reconciliation: (1)
+// hydration's read-current → choose-winner → later setItem() sequence left
+// a window in which another tab's newer same-domain write could land in
+// between and get silently clobbered by the pull's now-stale winner; (2)
+// some persistence-retry checks compared the winning value against REACT
+// STATE (e.g. itemsRef.current) instead of the actual durable localStorage
+// value — if a prior direct write AND its persistence effect had both
+// failed, React state could already equal the winner while disk stayed
+// stale, so the check wrongly concluded "already persisted" and skipped
+// the write, letting sync/ownership gates reopen over unpersisted data.
+//
+// This function is the PURE decision core both bugs are fixed through: it
+// takes the durable value actually on disk right now (`currentRaw`), the
+// durable value that was on disk when the winner was decided
+// (`expectedPreviousRaw`), and the value a caller wants to commit
+// (`nextRaw`) — never React state, never a timestamp, never arrival order —
+// and returns which of three things must happen:
+//   "noop"       — `currentRaw` already equals `nextRaw`; nothing to write,
+//                  and this is a SUCCESS (the durable value already is the
+//                  winner, however it got there).
+//   "superseded" — `currentRaw` no longer equals `expectedPreviousRaw`: a
+//                  write this caller didn't know about landed since the
+//                  decision was made. That write is NEWER by construction
+//                  (it happened after the observation the caller's own
+//                  decision was based on) and must never be overwritten —
+//                  the caller MUST NOT write `nextRaw` in this case.
+//   "write"      — `currentRaw` still matches the caller's own baseline;
+//                  safe to persist `nextRaw`.
+// See commitLocalDomainRaw()/commitLocalDomainRawSync() in syncHelper.ts
+// for the actual localStorage I/O built on this decision — commitLocalDomainRaw()
+// (pull hydration's CAS policy) uses per-key Web Locks serialization when
+// available and fails closed otherwise; commitLocalDomainRawSync() (ordinary
+// user edits, 16th round) is a synchronous, lock-free `write`-or-`noop`
+// application of this SAME decision (its own baseline is always the current
+// value itself, so it can never observe "superseded").
+export type LocalDomainCommitDecision = "write" | "noop" | "superseded";
+
+export function decideLocalDomainCommit(
+  currentRaw: string | null,
+  expectedPreviousRaw: string | null,
+  nextRaw: string
+): LocalDomainCommitDecision {
+  if (currentRaw === nextRaw) return "noop";
+  if (currentRaw !== expectedPreviousRaw) return "superseded";
+  return "write";
+}
+
+/**
+ * Reference cases for decideLocalDomainCommit() — the REQUIRED cases from
+ * the 12th round's architectural contract, reduced to this function's pure
+ * inputs/outputs. Run from Node:
+ *   import { DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES.forEach(c => {
+ *     const got = decideLocalDomainCommit(c.currentRaw, c.expectedPreviousRaw, c.nextRaw);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES: Array<{
+  name: string;
+  currentRaw: string | null;
+  expectedPreviousRaw: string | null;
+  nextRaw: string;
+  expected: LocalDomainCommitDecision;
+}> = [
+  {
+    name: "required — durable value unchanged since decision: safe to write",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "required — a newer write already landed (current diverged from the decision baseline): superseded, must not overwrite",
+    currentRaw: "C",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "superseded",
+  },
+  {
+    name: "required — durable value already equals the winner: successful no-op, regardless of what the stale baseline was",
+    currentRaw: "B",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "noop",
+  },
+  {
+    name: "force-commit policy (expectedPrevious == currentRaw always): never superseded, writes whenever different",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "A",
+    expected: "noop",
+  },
+  {
+    name: "key never previously existed (null baseline) and still doesn't: safe to write",
+    currentRaw: null,
+    expectedPreviousRaw: null,
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "key never previously existed per the decision baseline, but now does (a concurrent first-write raced in): superseded",
+    currentRaw: "C",
+    expectedPreviousRaw: null,
+    nextRaw: "B",
+    expected: "superseded",
+  },
+];
+
+// ===== PULL EXECUTION CONTEXT (SH.2, 13th round) =====
+//
+// Codex found two P1s that are both instances of one failure class: a
+// durable write or gate transition executing under an execution context
+// that is no longer the one the operation started under — (1) an
+// authenticated identity switch (A -> B) that NextAuth can report without
+// `sessionStatus` ever leaving "authenticated", so nothing told the page's
+// effect to re-run and retarget; (2) an awaited local-domain commit that
+// resumes after cancellation/identity change and keeps performing further
+// writes/ownership transfer/confirmation/syncReady updates regardless.
+//
+// The fix is one immutable per-pull context — { epoch, userId, profileId }
+// (see PullContext/beginPullContext()/isPullContextCurrent() in
+// syncHelper.ts) — captured exactly once at pull start and re-validated
+// after every awaited boundary before any further durable step. This
+// function is the PURE comparison both the outer per-await check and the
+// commit primitive's own last-instant-before-write check reduce to: is the
+// epoch a pull captured still the current one?
+export function isPullEpochCurrent(capturedEpoch: number, currentEpoch: number): boolean {
+  return capturedEpoch === currentEpoch;
+}
+
+/**
+ * Reference cases for isPullEpochCurrent() — the REQUIRED cases from the
+ * 13th round's architectural contract, reduced to this function's pure
+ * inputs/outputs (a real identity/profile switch is exactly "the epoch
+ * counter has advanced since this pull captured it"). Run from Node:
+ *   import { DEV_IS_PULL_EPOCH_CURRENT_CASES, isPullEpochCurrent } from "@/lib/syncPayload";
+ *   DEV_IS_PULL_EPOCH_CURRENT_CASES.forEach(c => {
+ *     const got = isPullEpochCurrent(c.capturedEpoch, c.currentEpoch);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
+  name: string;
+  capturedEpoch: number;
+  currentEpoch: number;
+  expected: boolean;
+}> = [
+  {
+    name: "required — no transition happened since capture: still current",
+    capturedEpoch: 3,
+    currentEpoch: 3,
+    expected: true,
+  },
+  {
+    name: "required — one identity switch (A -> B) happened since capture: stale",
+    capturedEpoch: 3,
+    currentEpoch: 4,
+    expected: false,
+  },
+  {
+    name: "required — a profile switch AND an identity switch both happened since capture: stale",
+    capturedEpoch: 3,
+    currentEpoch: 5,
+    expected: false,
+  },
+  {
+    name: "the very first pull of a session: epoch 0 captured, nothing has changed",
+    capturedEpoch: 0,
+    currentEpoch: 0,
+    expected: true,
+  },
+];
+
+// ===== CONFIRMED-FACT CANONICALIZATION (SH.2, 14th round; storage model
+// replaced 15th round; status model replaced 16th round) =====
+//
+// The 14th round gave every fact's value ONE deterministic canonical
+// serialization (canonicalizeJSON() below) so two code paths constructing
+// logically-identical content never manufacture a false conflict merely
+// from incidental object-key-order differences — that part still holds and
+// is unchanged. What the 14th round got WRONG was HOW it used
+// canonicalization: recordConfirmedFact() read whatever existed at the
+// (user, profile, domain, revision) key, canonically compared it against
+// the new value, and only THEN decided whether to write
+// (decideConfirmedFactWrite() — REMOVED this round). That read-then-decide-
+// then-write sequence is exactly the un-atomic check-then-act pattern round
+// 13 already established localStorage cannot safely provide without a
+// lock: two tabs can both read the key as absent, both independently decide
+// "write", and the later setItem() silently replaces the earlier fact —
+// Codex's 15th-round finding. See resolveConfirmedDomainState() (16th round;
+// the 15th round's own reduceConfirmedFactRecords() has since been replaced —
+// see that function's own doc) and confirmedFactRevisionIsUnambiguous()
+// below, and confirmedFactKey()'s own
+// doc in syncHelper.ts, for the replacement: every recorded fact now gets
+// its own permanently-unique physical key (an append-only representation),
+// so the write side is a single unconditional setItem with no read-before-
+// write at all — genuinely un-raceable — and canonical-value reconciliation
+// happens entirely at READ time instead, over however many facts a
+// revision ends up with.
+
+/**
+ * Deterministic, canonical JSON serialization: object keys are recursively
+ * sorted so any two JS values with the same LOGICAL content — regardless of
+ * which code path constructed them, or in what order their keys happened to
+ * be assigned — always serialize identically. Array element ORDER is
+ * preserved exactly: order is semantically significant for every value this
+ * module canonicalizes (a days[] sequence, an items[] display order), so it
+ * is never reordered, only recursed into.
+ */
+export function canonicalizeJSON(value: unknown): string {
+  return JSON.stringify(canonicalizeValue(value));
+}
+
+function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeValue);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalizeValue((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Reference cases for canonicalizeJSON(). Run from Node:
+ *   import { DEV_CANONICALIZE_JSON_CASES, canonicalizeJSON } from "@/lib/syncPayload";
+ *   DEV_CANONICALIZE_JSON_CASES.forEach(c => {
+ *     const got = canonicalizeJSON(c.value);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CANONICALIZE_JSON_CASES: Array<{
+  name: string;
+  value: unknown;
+  expected: string;
+}> = [
+  {
+    name: "flat object — keys sorted regardless of construction order",
+    value: { b: 2, a: 1 },
+    expected: '{"a":1,"b":2}',
+  },
+  {
+    name: "two objects with same content, different key order, canonicalize identically",
+    value: { version: 1, items: [] },
+    expected: '{"items":[],"version":1}',
+  },
+  {
+    name: "nested objects inside an array — array order preserved, each element's keys sorted",
+    value: { version: 1, items: [{ name: "b", id: "1" }, { id: "2", name: "a" }] },
+    expected: '{"items":[{"id":"1","name":"b"},{"id":"2","name":"a"}],"version":1}',
+  },
+  {
+    name: "days[] array order is NEVER reordered — it is semantically the display sequence",
+    value: ["day-2", "day-1", "day-3"],
+    expected: '["day-2","day-1","day-3"]',
+  },
+  {
+    name: "primitives pass through unchanged",
+    value: null,
+    expected: "null",
+  },
+];
+
