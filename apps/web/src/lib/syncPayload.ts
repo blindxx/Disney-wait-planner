@@ -405,6 +405,133 @@ export function confirmedFactRevisionIsUnambiguous<T>(
 }
 
 /**
+ * IDENTITY comparison over TWO ConfirmedDomainResult<T> snapshots — SH.2.2
+ * (Codex P1 third follow-up round). "A hydration winner is valid only while
+ * the confirmed authority used to select it remains unchanged" (this
+ * round's required invariant): `a` and `b` are equal only when they
+ * represent the EXACT SAME authoritative fact — same status, and for
+ * "confirmed" the same revision AND canonically-equal value, and for
+ * "conflict" the same revision. Two "none" results are always equal (both
+ * mean "nothing confirmed yet"). Any difference in status, revision, or
+ * value — in either direction, newer OR older, ambiguous OR not — is NOT
+ * equal.
+ *
+ * Root cause this closes: the FIRST SH.2.2 follow-up round's commit-time
+ * `isAuthorityStillValid` check re-derived resolvePostFetchDomainBaseline()
+ * fresh and asked only "is the CURRENT confirmed state still USABLE
+ * relative to this pull's own cloudRevision" (i.e. not "gated"/
+ * "stale-response"/"unusable-response"). That question has a real gap: if
+ * confirmed authority advances from revision 5 to revision 6 WHILE this
+ * pull's cloudRevision is 7, resolvePostFetchDomainBaseline() reports the
+ * NEW revision-6 fact as perfectly "confirmed" (6 <= 7) — not unusable at
+ * all — so the OLD check reported "still valid" even though the winner
+ * this pull already selected was chosen against revision 5's value, never
+ * recomputed against revision 6's. Asking "is CURRENT state usable" is the
+ * wrong question at commit time; the right one is "is CURRENT state
+ * IDENTICAL to what winner selection actually used" — this function
+ * answers exactly that, generically, over the SAME ConfirmedDomainResult<T>
+ * type every other confirmed-authority decision in this codebase already
+ * uses (no parallel authority model introduced).
+ *
+ * Note this is a STRICT superset of the old usability check, not a
+ * replacement decision competing with it: a domain whose confirmed
+ * authority is UNCHANGED from what winner selection used is, by
+ * construction, exactly as usable as it was proven to be at the ORIGINAL
+ * baseline check (that pull's own cloudRevision never changes mid-pull) —
+ * so callers no longer need resolvePostFetchDomainBaseline() at all for
+ * this SPECIFIC "did anything move" question; see each page's
+ * revalidateAuthorityBeforeCommit() for the call site.
+ */
+export function confirmedDomainResultsEqual<T>(
+  a: ConfirmedDomainResult<T>,
+  b: ConfirmedDomainResult<T>
+): boolean {
+  if (a.status === "none") return b.status === "none";
+  if (a.status === "conflict") {
+    return b.status === "conflict" && a.revision === b.revision;
+  }
+  return b.status === "confirmed" && a.fact.revision === b.fact.revision && canonicalizeJSON(a.fact.value) === canonicalizeJSON(b.fact.value);
+}
+
+/**
+ * Reference cases for confirmedDomainResultsEqual() — the REQUIRED cases
+ * from the SH.2.2 (Codex P1 third follow-up round) architectural contract.
+ * Run from Node:
+ *   import { DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES, confirmedDomainResultsEqual } from "@/lib/syncPayload";
+ *   DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES.forEach(c => {
+ *     const got = confirmedDomainResultsEqual(c.a, c.b);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES: Array<{
+  name: string;
+  a: ConfirmedDomainResult<unknown>;
+  b: ConfirmedDomainResult<unknown>;
+  expected: boolean;
+}> = [
+  {
+    name: "both 'none' — nothing confirmed yet either time — equal",
+    a: { status: "none" },
+    b: { status: "none" },
+    expected: true,
+  },
+  {
+    name: "required case 3 — identical confirmed revision AND value — unchanged, equal",
+    a: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    b: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    expected: true,
+  },
+  {
+    name: "required case 1 — winner selected at rev5, confirmed authority advances to rev6 while waiting: NOT equal, even though rev6 could itself be perfectly usable against a later cloudRevision",
+    a: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    b: { status: "confirmed", fact: { revision: 6, value: "V6" } },
+    expected: false,
+  },
+  {
+    name: "required case 2 — SAME revision but the relevant confirmed value changed (e.g. resolved differently by a concurrent conflict repair): NOT equal",
+    a: { status: "confirmed", fact: { revision: 5, value: "V5-ORIGINAL" } },
+    b: { status: "confirmed", fact: { revision: 5, value: "V5-DIFFERENT" } },
+    expected: false,
+  },
+  {
+    name: "confirmed revision goes BACKWARD (should not happen in practice, but the comparison is symmetric about direction) — still NOT equal",
+    a: { status: "confirmed", fact: { revision: 6, value: "V6" } },
+    b: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    expected: false,
+  },
+  {
+    name: "'none' at selection time, a confirmed fact now exists (e.g. a reconciled pending op or concurrent push just recorded one): NOT equal — a fallback-ref-based winner must not be trusted once real confirmed authority appears",
+    a: { status: "none" },
+    b: { status: "confirmed", fact: { revision: 1, value: "V1" } },
+    expected: false,
+  },
+  {
+    name: "a genuine conflict at the SAME revision the original 'recovered' plan was based on, still unresolved: equal — the existing conflict-recovery plan (preFetch.diskValue) remains valid",
+    a: { status: "conflict", revision: 6 },
+    b: { status: "conflict", revision: 6 },
+    expected: true,
+  },
+  {
+    name: "a conflict resolves (unambiguously) to a confirmed fact while waiting: NOT equal — the 'recovered' plan was based on an assumption that no longer holds",
+    a: { status: "conflict", revision: 6 },
+    b: { status: "confirmed", fact: { revision: 7, value: "V7" } },
+    expected: false,
+  },
+  {
+    name: "a conflict's OWN top revision advances (a newer, still-ambiguous revision) while waiting: NOT equal",
+    a: { status: "conflict", revision: 6 },
+    b: { status: "conflict", revision: 7 },
+    expected: false,
+  },
+  {
+    name: "value equality is CANONICAL, not literal reference/shape identity — the SAME object with differently-ordered keys at the same revision still compares equal (reuses the SAME canonicalizeJSON() every other confirmed-fact comparison in this module already uses)",
+    a: { status: "confirmed", fact: { revision: 5, value: { items: [1, 2], version: 1 } } },
+    b: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [1, 2] } } },
+    expected: true,
+  },
+];
+
+/**
  * Reference cases for resolveConfirmedDomainState() — the REQUIRED cases
  * from the 16th round's architectural contract. Run from Node:
  *   import { DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES, resolveConfirmedDomainState } from "@/lib/syncPayload";
@@ -2292,27 +2419,70 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
 // established — to every domain's commitLocalDomainRaw() call, and maps an
 // "authority-superseded" result back through the SAME `handlePullDeferral()`
 // recovery path used everywhere else, using the FRESH unusable-domain list
-// that closure itself just captured (already carrying the correct
-// "stale-response"/"conflict"/"unusable-response" reason — no NEW
-// UnusableDomainReason was needed for this case).
+// that closure itself just captured.
+//
+// CODEX P1 THIRD FOLLOW-UP ROUND — "Reject any changed confirmed baseline
+// before commit." The check above (and the first follow-up round's
+// `revalidateAuthorityBeforeCommit()`) asked "is the CURRENT confirmed
+// state still USABLE relative to this pull's own cloudRevision" — reusing
+// resolvePostFetchDomainBaseline()/collectUnusableDomains(), and therefore
+// the "stale-response"/"conflict"/"unusable-response" reasons. That
+// question has a real gap: winner selection was made against a SPECIFIC
+// confirmed authority X (captured once, right when the pull's baseline was
+// first computed). If confirmed authority changes to Y WHILE hydration
+// waits for the lock, and Y is NEWER but still perfectly usable relative
+// to this pull's own cloudRevision (e.g. X=revision 5, Y=revision 6,
+// cloudRevision=7 — 6 <= 7 is a completely normal "confirmed" outcome),
+// the old check reported "still valid" — even though the winner already
+// selected was never recomputed against Y at all. "Usable" and "unchanged
+// from what was actually used" are different questions; only the second
+// one is safe to gate a commit on.
+//
+// `revalidateAuthorityBeforeCommit()` (each page) is now built on
+// confirmedDomainResultsEqual() (above) instead: it compares a FRESH
+// getConfirmedState() read against `winnerSelectionAuthority` — the EXACT
+// ConfirmedPlannerState this pull's baseline check captured (via
+// buildPostFetchPullBaseline()'s own `confirmed` return field) the ONE
+// time winner selection actually ran. ANY difference — revision advanced
+// OR regressed, the value at an unchanged revision differs, "none"
+// becoming "confirmed", a "conflict" resolving or advancing — produces a
+// NEW reason, `"authority-changed"`, for that domain. This SUBSUMES the
+// old usability question rather than running alongside it: a domain whose
+// confirmed authority is IDENTICAL to what winner selection used is, by
+// construction, exactly as usable as it was already proven to be at the
+// original baseline check (cloudRevision is fixed for the whole pull), so
+// no separate usability re-derivation is needed at commit time anymore —
+// see confirmedDomainResultsEqual()'s own doc above for the full
+// rationale. The OLD "stale-response"/"conflict"/"unusable-response"
+// reasons remain exactly as they were for the INITIAL, once-per-pull
+// baseline-stage check (collectUnusableDomains(baselineOutcomes), BEFORE
+// winner selection even runs) — untouched by this round; only the LATER,
+// commit-time re-checks now produce "authority-changed" instead of
+// reusing them.
 export type UnusableDomainReason =
   | "conflict"
   | "stale-response"
   | "unusable-response"
-  | "local-edit-superseded";
+  | "local-edit-superseded"
+  | "authority-changed";
 
 export function decideStaleResponseRecovery(
   unusableDomains: Array<{ reason: UnusableDomainReason }>
 ): "retry" | "no-retry" {
   if (unusableDomains.length === 0) return "no-retry";
   // SH.2.2 — "local-edit-superseded" (a commit-time CAS supersession by a
-  // genuine local edit) is, like "stale-response", always safe to retry on
-  // its own: the true current state is already durably known to this
-  // device. Mixed with either alone, or with each other, the whole set
-  // stays retry-eligible; mixed with a "conflict" or "unusable-response"
-  // anywhere in the set, it stays fail-closed — unchanged from SH.2.1's own
-  // rule, just widened to recognize the new always-safe reason too.
-  return unusableDomains.every((d) => d.reason === "stale-response" || d.reason === "local-edit-superseded")
+  // genuine local edit) and "authority-changed" (a commit-time confirmed-
+  // authority identity mismatch — see this section's own "CODEX P1 THIRD
+  // FOLLOW-UP ROUND" doc above) are, like "stale-response", always safe to
+  // retry on their own: the true current state is already durably known to
+  // this device. Mixed with any of these three alone, or with each other,
+  // the whole set stays retry-eligible; mixed with a "conflict" or
+  // "unusable-response" anywhere in the set, it stays fail-closed —
+  // unchanged from SH.2.1's own rule, just widened to recognize each new
+  // always-safe reason as it was added.
+  return unusableDomains.every(
+    (d) => d.reason === "stale-response" || d.reason === "local-edit-superseded" || d.reason === "authority-changed"
+  )
     ? "retry"
     : "no-retry";
 }
@@ -2394,6 +2564,31 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
   {
     name: "SH.2.2 — a local-edit-superseded domain must NEVER make an unrelated unusable-response retry-eligible",
     unusableDomains: [{ reason: "local-edit-superseded" }, { reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 third follow-up required case — a single authority-changed domain (winner selected against rev5, confirmed authority moved to rev6 during the lock wait): retry",
+    unusableDomains: [{ reason: "authority-changed" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — multiple domains all authority-changed in one pull: retry",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "authority-changed" }, { reason: "authority-changed" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — mixed authority-changed + local-edit-superseded + stale-response in the SAME pull: still retry, all three reasons are independently always-safe",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "local-edit-superseded" }, { reason: "stale-response" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — an authority-changed domain must NEVER make an unrelated conflict retry-eligible",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — an authority-changed domain must NEVER make an unrelated unusable-response retry-eligible",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "unusable-response" }],
     expected: "no-retry",
   },
 ];

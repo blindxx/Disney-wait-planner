@@ -100,8 +100,11 @@ import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
   decideStaleResponseRecovery,
+  confirmedDomainResultsEqual,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
+  type ConfirmedPlannerState,
+  type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
 
 // Phase 9.0 — content type foundation
@@ -1161,6 +1164,17 @@ export default function PlansPage() {
     items: DomainBaselineOutcome<PlanItem[]>;
     days: DomainBaselineOutcome<string[]>;
     lightningRaw: DomainBaselineOutcome<string | null>;
+    // SH.2.2 (Codex P1 third follow-up round) — the RAW per-domain
+    // confirmed-state read this call itself made, returned alongside the
+    // derived outcomes so the caller can freeze it as
+    // `winnerSelectionAuthority` — the EXACT authority identity winner
+    // selection used — for a LATER, commit-time equality comparison (see
+    // revalidateAuthorityBeforeCommit() below and confirmedDomainResultsEqual()'s
+    // own doc in syncPayload.ts). Never re-derived from the outcomes
+    // themselves (a DomainBaselineOutcome's "confirmed"/"recovered"/
+    // "fallback" kind alone cannot reconstruct the original ConfirmedDomainResult
+    // it came from — e.g. "fallback" carries no revision/value at all).
+    confirmed: ConfirmedPlannerState;
   } {
     const confirmed = identity.userId
       ? getConfirmedState(identity.userId, identity.profileId)
@@ -1193,7 +1207,7 @@ export default function PlansPage() {
     );
     clearRefOnFallbackMismatch(lightningRawBaselineRef, lightningRaw, null, contentOwnershipMismatch);
 
-    return { items, days, lightningRaw };
+    return { items, days, lightningRaw, confirmed };
   }
 
   /**
@@ -1230,6 +1244,22 @@ export default function PlansPage() {
         // "conflict"/"unusable-response".
         domain: "plans" | "lightning" | "days";
         reason: "local-edit-superseded";
+      }
+    | {
+        // SH.2.2 (Codex P1 third follow-up round) — confirmed authority for
+        // this domain no longer IDENTICALLY matches `winnerSelectionAuthority`
+        // (the exact ConfirmedDomainResult winner selection was computed
+        // against) — see confirmedDomainResultsEqual()'s own doc in
+        // syncPayload.ts for the full rationale this closes: "usable
+        // relative to cloudRevision" and "unchanged from what was actually
+        // used" are different questions, and only the second is safe to
+        // commit against. `previousRevision`/`currentRevision` are `null`
+        // for a "none" or "conflict" (unrevisioned-in-this-context) side of
+        // the comparison — purely diagnostic, carries no decision weight.
+        domain: "plans" | "lightning" | "days";
+        reason: "authority-changed";
+        previousRevision: number | null;
+        currentRevision: number | null;
       };
 
   /**
@@ -2197,6 +2227,14 @@ export default function PlansPage() {
           planner?.revision ?? null,
           preFetchBaseline
         );
+        // SH.2.2 (Codex P1 third follow-up round) — freeze the EXACT
+        // confirmed-authority identity winner selection is about to use,
+        // the ONE time this pull's baseline is actually computed — see
+        // revalidateAuthorityBeforeCommit() below and
+        // confirmedDomainResultsEqual()'s own doc in syncPayload.ts for how
+        // this is later compared, unchanged, against a fresh read
+        // immediately before each hydration commit.
+        const winnerSelectionAuthority = baselineOutcomes.confirmed;
 
         // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
         // added 17th; SH.2.1 P1 enforced by DomainBaselineOutcome's own
@@ -2265,6 +2303,10 @@ export default function PlansPage() {
                 console.error(
                   `SH.2.1: pull deferred — ${u.domain}'s confirmed state is at revision ${u.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
                 );
+              } else if (u.reason === "authority-changed") {
+                console.error(
+                  `SH.2.2: pull deferred — ${u.domain}'s confirmed authority changed from revision ${u.previousRevision ?? "none"} to ${u.currentRevision ?? "none"} since this pull selected its winner; refusing to commit a winner that was never recomputed against the new authority. Scheduling a replacement pull.`
+                );
               } else {
                 console.error(
                   `SH.2.2: pull deferred — ${u.domain}'s local hydration commit was superseded by a newer local edit; the edit survives untouched. Scheduling a replacement pull.`
@@ -2272,9 +2314,10 @@ export default function PlansPage() {
               }
             } catch {}
           }
-          // SH.2.1 (stale-response)/SH.2.2 (local-edit-superseded) — see
-          // decideStaleResponseRecovery()'s own doc in syncPayload.ts for
-          // the full, shared retry-eligibility rule. `isPullCurrent()` and
+          // SH.2.1 (stale-response)/SH.2.2 (local-edit-superseded,
+          // authority-changed) — see decideStaleResponseRecovery()'s own
+          // doc in syncPayload.ts for the full, shared retry-eligibility
+          // rule. `isPullCurrent()` and
           // `!staleRetryPendingRef.current` together are what keep this to
           // exactly ONE scheduled replacement, no matter how many times or
           // from how many call sites this function is invoked for the SAME
@@ -2289,22 +2332,54 @@ export default function PlansPage() {
             setStaleRetryTick((t) => t + 1);
           }
         }
-        // Re-runs the SAME stage-2 baseline check (resolvePostFetchDomainBaseline
-        // via buildPostFetchPullBaseline/collectUnusableDomains — no new
-        // decision logic, purely a fresh re-read of getConfirmedState())
-        // immediately before a hydration commit, so a confirmed-authority
-        // advance landing in the awaited gap since the LAST check is never
-        // missed. Cheap: a synchronous localStorage scan, never a fetch —
-        // never polling.
+        // SH.2.2 (Codex P1 third follow-up round) — "Reject any changed
+        // confirmed baseline before commit." Compares a FRESH
+        // getConfirmedState() read against `winnerSelectionAuthority` — the
+        // EXACT ConfirmedDomainResult winner selection actually used for
+        // each domain, frozen once above — via confirmedDomainResultsEqual()
+        // (syncPayload.ts). This is a STRICTER, DIFFERENT question than the
+        // original "is the current state still usable relative to this
+        // pull's own cloudRevision" (that question could pass even when
+        // authority had genuinely moved to a newer-but-still-usable value
+        // the winner was never recomputed against — see this function's own
+        // history and confirmedDomainResultsEqual()'s doc in syncPayload.ts
+        // for the full root-cause). No longer calls
+        // buildPostFetchPullBaseline()/collectUnusableDomains() at all: a
+        // domain whose confirmed authority is IDENTICAL to what winner
+        // selection used is, by construction, exactly as usable as it was
+        // already proven to be at the original baseline check (this pull's
+        // own cloudRevision never changes), so no separate usability
+        // re-derivation — and no repeated clearRefOnFallbackMismatch() side
+        // effect — is needed here anymore. Cheap: a synchronous localStorage
+        // scan, never a fetch — never polling.
+        function authorityRevisionOf<T>(result: ConfirmedDomainResult<T>): number | null {
+          if (result.status === "confirmed") return result.fact.revision;
+          if (result.status === "conflict") return result.revision;
+          return null;
+        }
+        function checkAuthorityChanged<T>(
+          unusable: UnusableDomain[],
+          domain: "plans" | "lightning" | "days",
+          freshResult: ConfirmedDomainResult<T>,
+          original: ConfirmedDomainResult<T>
+        ): void {
+          if (confirmedDomainResultsEqual(freshResult, original)) return;
+          unusable.push({
+            domain,
+            reason: "authority-changed",
+            previousRevision: authorityRevisionOf(original),
+            currentRevision: authorityRevisionOf(freshResult),
+          });
+        }
         function revalidateAuthorityBeforeCommit(): UnusableDomain[] {
-          return collectUnusableDomains(
-            buildPostFetchPullBaseline(
-              contentOwnershipMismatch,
-              { userId: pullCtx.userId, profileId: pullCtx.profileId },
-              planner?.revision ?? null,
-              preFetchBaseline
-            )
-          );
+          const fresh: ConfirmedPlannerState = pullCtx.userId
+            ? getConfirmedState(pullCtx.userId, pullCtx.profileId)
+            : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+          const unusable: UnusableDomain[] = [];
+          checkAuthorityChanged(unusable, "plans", fresh.plans, winnerSelectionAuthority.plans);
+          checkAuthorityChanged(unusable, "lightning", fresh.lightning, winnerSelectionAuthority.lightning);
+          checkAuthorityChanged(unusable, "days", fresh.days, winnerSelectionAuthority.days);
+          return unusable;
         }
         // SH.2.2 (Codex P1 follow-up round) — INSIDE-THE-LOCK commit-time
         // authority check, passed as commitLocalDomainRaw()'s new

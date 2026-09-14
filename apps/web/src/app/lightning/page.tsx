@@ -45,8 +45,11 @@ import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
   decideStaleResponseRecovery,
+  confirmedDomainResultsEqual,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
+  type ConfirmedPlannerState,
+  type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
 import {
   normalizeKey,
@@ -785,6 +788,12 @@ export default function LightningPage() {
     items: DomainBaselineOutcome<LightningItem[]>;
     days: DomainBaselineOutcome<string[]>;
     plansRaw: DomainBaselineOutcome<string | null>;
+    // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx
+    // exactly, see its own detailed doc: the RAW per-domain confirmed-state
+    // read this call itself made, so the caller can freeze it as
+    // `winnerSelectionAuthority` for a later, commit-time equality
+    // comparison.
+    confirmed: ConfirmedPlannerState;
   } {
     const confirmed = identity.userId
       ? getConfirmedState(identity.userId, identity.profileId)
@@ -817,7 +826,7 @@ export default function LightningPage() {
     );
     clearRefOnFallbackMismatch(plansRawBaselineRef, plansRaw, null, contentOwnershipMismatch);
 
-    return { items, days, plansRaw };
+    return { items, days, plansRaw, confirmed };
   }
 
   /**
@@ -844,6 +853,16 @@ export default function LightningPage() {
         // when mixed with a genuine "conflict"/"unusable-response".
         domain: "plans" | "lightning" | "days";
         reason: "local-edit-superseded";
+      }
+    | {
+        // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx's
+        // own UnusableDomain arm exactly, see its own detailed doc:
+        // confirmed authority for this domain no longer IDENTICALLY matches
+        // `winnerSelectionAuthority`.
+        domain: "plans" | "lightning" | "days";
+        reason: "authority-changed";
+        previousRevision: number | null;
+        currentRevision: number | null;
       };
 
   /**
@@ -1148,6 +1167,10 @@ export default function LightningPage() {
           planner?.revision ?? null,
           preFetchBaseline
         );
+        // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx
+        // exactly, see its own detailed doc: freeze the EXACT
+        // confirmed-authority identity winner selection is about to use.
+        const winnerSelectionAuthority = baselineOutcomes.confirmed;
 
         // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
         // added 17th; SH.2.1 P1 enforced by DomainBaselineOutcome's own
@@ -1191,6 +1214,10 @@ export default function LightningPage() {
                 console.error(
                   `SH.2.1: pull deferred — ${u.domain}'s confirmed state is at revision ${u.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
                 );
+              } else if (u.reason === "authority-changed") {
+                console.error(
+                  `SH.2.2: pull deferred — ${u.domain}'s confirmed authority changed from revision ${u.previousRevision ?? "none"} to ${u.currentRevision ?? "none"} since this pull selected its winner; refusing to commit a winner that was never recomputed against the new authority. Scheduling a replacement pull.`
+                );
               } else {
                 console.error(
                   `SH.2.2: pull deferred — ${u.domain}'s local hydration commit was superseded by a newer local edit; the edit survives untouched. Scheduling a replacement pull.`
@@ -1210,18 +1237,42 @@ export default function LightningPage() {
             setStaleRetryTick((t) => t + 1);
           }
         }
-        // Mirrors plans/page.tsx's own revalidateAuthorityBeforeCommit()
-        // exactly — a fresh re-read of getConfirmedState() via the SAME
-        // stage-2 baseline primitives, never a new decision.
+        // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx's
+        // own authorityRevisionOf()/checkAuthorityChanged()/
+        // revalidateAuthorityBeforeCommit() exactly, see their own detailed
+        // docs: compares a FRESH getConfirmedState() read against
+        // `winnerSelectionAuthority` via confirmedDomainResultsEqual()
+        // (syncPayload.ts) — a STRICTER, DIFFERENT question than "is the
+        // current state still usable relative to cloudRevision". No longer
+        // calls buildPostFetchPullBaseline()/collectUnusableDomains() at all.
+        function authorityRevisionOf<T>(result: ConfirmedDomainResult<T>): number | null {
+          if (result.status === "confirmed") return result.fact.revision;
+          if (result.status === "conflict") return result.revision;
+          return null;
+        }
+        function checkAuthorityChanged<T>(
+          unusable: UnusableDomain[],
+          domain: "plans" | "lightning" | "days",
+          freshResult: ConfirmedDomainResult<T>,
+          original: ConfirmedDomainResult<T>
+        ): void {
+          if (confirmedDomainResultsEqual(freshResult, original)) return;
+          unusable.push({
+            domain,
+            reason: "authority-changed",
+            previousRevision: authorityRevisionOf(original),
+            currentRevision: authorityRevisionOf(freshResult),
+          });
+        }
         function revalidateAuthorityBeforeCommit(): UnusableDomain[] {
-          return collectUnusableDomains(
-            buildPostFetchPullBaseline(
-              contentOwnershipMismatch,
-              { userId: pullCtx.userId, profileId: pullCtx.profileId },
-              planner?.revision ?? null,
-              preFetchBaseline
-            )
-          );
+          const fresh: ConfirmedPlannerState = pullCtx.userId
+            ? getConfirmedState(pullCtx.userId, pullCtx.profileId)
+            : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+          const unusable: UnusableDomain[] = [];
+          checkAuthorityChanged(unusable, "lightning", fresh.lightning, winnerSelectionAuthority.lightning);
+          checkAuthorityChanged(unusable, "plans", fresh.plans, winnerSelectionAuthority.plans);
+          checkAuthorityChanged(unusable, "days", fresh.days, winnerSelectionAuthority.days);
+          return unusable;
         }
         // SH.2.2 (Codex P1 follow-up round) — INSIDE-THE-LOCK commit-time
         // authority check. Mirrors plans/page.tsx's own
