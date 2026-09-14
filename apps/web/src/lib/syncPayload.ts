@@ -2348,16 +2348,32 @@ export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
 // every shape syncHelper.ts's own key-builders produce for a profile:
 //   - local-edit facts:    dwp:localEditFact:dwp:{profileId}:{baseKey}:{editId}
 //   - local content owner: dwp:sync:{profileId}:localContentOwner
+//   - sync status:         dwp:sync:{profileId}:status
+//   - last-synced time:    dwp:sync:{profileId}:lastSyncedAt
+//   - last sync error:     dwp:sync:{profileId}:lastError
 //   - confirmed facts:     dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision}:{instanceId}
+//   - hydration provenance: dwp:sync:{userId}:{profileId}:hydrationFact:{domain}:{revision}:{instanceId}
 //   - pending ops:         dwp:sync:{userId}:{profileId}:pendingOp:{opId}
 //   - pending op cursor:   dwp:sync:{userId}:{profileId}:pendingOpCursor
 // `userId` is unknown to a profile-deletion caller (profileStorage.ts has
 // no auth context, by design — profiles are device-local), so the
-// confirmedFact/pendingOp/pendingOpCursor family — all namespaced
-// `dwp:sync:{userId}:{profileId}:...` — is matched STRUCTURALLY: profileId
-// must appear as the exact 4th colon-delimited segment (0-indexed 3),
-// wherever `userId` actually is, rather than requiring the caller to
-// enumerate every identity that may ever have synced this profile.
+// confirmedFact/hydrationFact/pendingOp/pendingOpCursor family — all
+// namespaced `dwp:sync:{userId}:{profileId}:...` — is matched
+// STRUCTURALLY: profileId must appear as the exact 4th colon-delimited
+// segment (0-indexed 3), wherever `userId` actually is, rather than
+// requiring the caller to enumerate every identity that may ever have
+// synced this profile.
+//
+// Codex P2 (SH.2.2 cleanup round) — the profile-level status/lastSyncedAt/
+// lastError keys are NOT userId-scoped (`dwp:sync:{profileId}:status`, a
+// 4-segment key — the structural `parts.length >= 5` branch above never
+// matches them, exactly like localContentOwner needed its own explicit
+// check) and were missing from this predicate entirely: deleting a profile
+// left them behind, so recreating the same normalized profile ID inherited
+// a stale sync status ("error"/"syncing"), a stale lastSyncedAt timestamp,
+// and a stale lastError message from the profile that used to occupy that
+// ID — never reflecting the fact that this is now a brand-new profile that
+// has never synced.
 //
 // This is a PURE string predicate deliberately kept in this module (not
 // syncHelper.ts) so it carries real DEV_* coverage the same way every
@@ -2368,6 +2384,9 @@ export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
 export function isProfileOwnedSyncKey(key: string, profileId: string): boolean {
   if (key.startsWith(`dwp:localEditFact:dwp:${profileId}:`)) return true;
   if (key === `dwp:sync:${profileId}:localContentOwner`) return true;
+  if (key === `dwp:sync:${profileId}:status`) return true;
+  if (key === `dwp:sync:${profileId}:lastSyncedAt`) return true;
+  if (key === `dwp:sync:${profileId}:lastError`) return true;
   if (key.startsWith("dwp:sync:")) {
     const parts = key.split(":");
     // ["dwp", "sync", userId, profileId, domainKind, ...] — profileId is
@@ -2417,6 +2436,24 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
     expected: true,
   },
   {
+    name: "Codex P2 (SH.2.2 cleanup round) — the profile-level sync status key is matched",
+    key: "dwp:sync:my-family:status",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — the profile-level lastSyncedAt key is matched",
+    key: "dwp:sync:my-family:lastSyncedAt",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — the profile-level lastError key is matched",
+    key: "dwp:sync:my-family:lastError",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
     name: "required case 1 — a confirmed fact for this profile, under some userId, is matched without knowing the userId in advance",
     key: "dwp:sync:user-abc123:my-family:confirmedFact:plans:7:op-999",
     profileId: "my-family",
@@ -2449,6 +2486,12 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
   {
     name: "required case 2 — a different profile's confirmed fact, even under the SAME userId, must never be matched",
     key: "dwp:sync:user-abc123:other-profile:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — a different profile's sync status key must never be matched",
+    key: "dwp:sync:other-profile:status",
     profileId: "my-family",
     expected: false,
   },

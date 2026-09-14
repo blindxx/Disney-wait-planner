@@ -1760,6 +1760,19 @@ export default function LightningPage() {
         if (daysCommitStatus === "superseded") {
           supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });
         }
+        // Codex P2 (SH.2.2 cleanup round) — `effectiveActiveDayId` tracks
+        // the day THIS PULL itself just decided is active, independent of
+        // React renders: `safeActiveDayIdRef.current` (used further below)
+        // is a `useMemo` mirrored into a ref by a plain per-render
+        // assignment — it only reflects a NEW active day once the
+        // `setActiveDayId` call below has actually triggered a re-render,
+        // which cannot have happened yet inside this SAME async callback.
+        // Defaults to `activeDayIdRef.current` (also render-derived, but
+        // correct whenever the day did NOT change this pull); overridden
+        // to the freshly-chosen day the INSTANT this pull decides to
+        // switch, so the unconditional planDayItems refresh further below
+        // sees the true post-pull day rather than a stale pre-pull one.
+        let effectiveActiveDayId = activeDayIdRef.current;
         if (!daysWriteFailed && winningDays.join(",") !== knownDaysRef.current.join(",")) {
           setKnownDays(winningDays);
           // Revalidate activeDayId against the newly winning order: another
@@ -1775,11 +1788,7 @@ export default function LightningPage() {
             try {
               localStorage.setItem(activeDayKeyRef.current, nextActiveDayId);
             } catch {}
-            // Refresh day-scoped Lightning state that depends on the active
-            // day — would otherwise stay stale, showing plan items for the
-            // now-invalid removed day, until some unrelated trigger (e.g.
-            // the user manually picking a day) happened to refresh it.
-            setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, nextActiveDayId));
+            effectiveActiveDayId = nextActiveDayId;
           }
         }
         // Days FALLBACK baseline updates only when NEITHER domain had a
@@ -1825,8 +1834,20 @@ export default function LightningPage() {
         // `planner?.plans` now — gating this UI refresh on cloud's presence
         // let it keep showing a previous identity's stale cross-referenced
         // plan items even after the underlying storage was correctly
-        // overwritten.
-        setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, safeActiveDayIdRef.current));
+        // overwritten. Codex P2 (SH.2.2 cleanup round) — uses
+        // `effectiveActiveDayId` (this pull's OWN post-revalidation day),
+        // never `safeActiveDayIdRef.current`: that ref only updates on the
+        // NEXT render, so — when this SAME pull just removed the
+        // previously-active day above — it was still pointing at the OLD,
+        // now-invalid day at this exact point in the callback, and this
+        // unconditional refresh would silently re-clobber the correct
+        // items the revalidation step just computed with stale ones for a
+        // day that no longer exists. `safeActiveDayId`/crossDayChecks/
+        // dayParks inference (render-time useMemo) pick up the corrected
+        // `planDayItems`/`activeDayId`/`knownDays` automatically on the
+        // re-render `setActiveDayId`/`setKnownDays`/`setPlanDayItems`
+        // above schedule — no further explicit refresh needed here.
+        setPlanDayItems(loadPlanItemsForDay(profileKeysForPull.plans, effectiveActiveDayId));
         setAllPlanItems(loadAllPlanItems(profileKeysForPull.plans));
         // Codex fix — a failed authoritative days[] write (daysWriteFailed)
         // keeps the gate closed exactly like a failed plans-hydration write
