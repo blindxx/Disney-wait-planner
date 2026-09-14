@@ -2169,6 +2169,19 @@ export default function PlansPage() {
         if (!isPullCurrent()) return;
         // Extract the plans portion from the combined planner payload.
         const cloud = planner?.plans ?? null;
+        // SH.2.2 (Codex P1 "keep raw cloud values for provenance checks"
+        // round) — `cloudItemsRawForProvenance` is the LITERAL fetched
+        // server value for this domain, untouched by normalizePlanItem()/
+        // migrateDayIds() below. Those two transforms can reshape or infer
+        // fields (a legacy `type` inferred from `name`, a legacy dayId
+        // rewritten) — if the winning candidate and the value isExactCloudValue()
+        // compares it against BOTH went through the same transform, a
+        // candidate that only equals the TRANSFORMED cloud value (not the
+        // server's own literal bytes) could be misrecorded as confirmed
+        // server authority for this revision. `cloudItems` (below) remains
+        // the normalized value used for winner selection/reconciliation/UI
+        // state — only the provenance-check call site uses the raw one.
+        const cloudItemsRawForProvenance: unknown[] | null = cloud ? (cloud.items as unknown[]) : null;
         let cloudItems: PlanItem[] | null = null;
         if (cloud) {
           // Phase 8.0.1 — normalize dayIds from cloud before applying to state.
@@ -2776,7 +2789,11 @@ export default function PlansPage() {
           itemsCloudWon
             ? {
                 candidateValue: winningPlanItems,
-                cloudValue: cloudItems,
+                // SH.2.2 "keep raw cloud values for provenance checks"
+                // round — the LITERAL fetched server value, not the
+                // normalized `cloudItems` winner-selection uses. See
+                // `cloudItemsRawForProvenance`'s own doc above.
+                cloudValue: cloudItemsRawForProvenance,
                 confirmedValue: { version: SCHEMA_VERSION, items: winningPlanItems },
                 hydrationValue: { version: SCHEMA_VERSION, items: winningPlanItems },
               }

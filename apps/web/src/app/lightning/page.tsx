@@ -1132,6 +1132,15 @@ export default function LightningPage() {
       .then(async (planner) => {
         if (!isPullCurrent()) return;
         const cloud = planner?.lightning ?? null;
+        // SH.2.2 (Codex P1 "keep raw cloud values for provenance checks"
+        // round) — `cloudItemsRawForProvenance` is the LITERAL fetched
+        // server value for this domain, untouched by migrateLightningDayIds()
+        // below (which can rewrite a legacy/missing dayId). Mirrors
+        // plans/page.tsx's own `cloudItemsRawForProvenance` exactly — see
+        // its own detailed doc. `cloudLightningItems` (below) remains the
+        // normalized value used for winner selection/reconciliation/UI
+        // state — only the provenance-check call site uses the raw one.
+        const cloudItemsRawForProvenance: unknown[] | null = cloud ? (cloud.items as unknown[]) : null;
         let cloudLightningItems: LightningItem[] | null = null;
         if (cloud) {
           // Phase 8.3 — normalize dayIds from cloud items so legacy items
@@ -1533,7 +1542,11 @@ export default function LightningPage() {
           itemsCloudWon
             ? {
                 candidateValue: winningLightningItems,
-                cloudValue: cloudLightningItems,
+                // SH.2.2 "keep raw cloud values for provenance checks"
+                // round — the LITERAL fetched server value, not the
+                // normalized `cloudLightningItems` winner-selection uses.
+                // See `cloudItemsRawForProvenance`'s own doc above.
+                cloudValue: cloudItemsRawForProvenance,
                 confirmedValue: { version: 1, items: winningLightningItems },
                 hydrationValue: { version: 1, items: winningLightningItems },
               }
