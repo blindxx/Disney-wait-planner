@@ -41,6 +41,33 @@ Reviewers should check any changes affecting:
  *                                                       old single-mixed-
  *                                                       snapshot
  *                                                       getConfirmedSnapshot)
+ *   await getConfirmedStateAtomic(userId, profileId)  — the SAME per-domain
+ *                                                       confirmed state as
+ *                                                       getConfirmedState(),
+ *                                                       but serialized
+ *                                                       against every
+ *                                                       recordConfirmedFact()
+ *                                                       write for this
+ *                                                       identity via a
+ *                                                       dedicated Web Lock —
+ *                                                       returns `null`
+ *                                                       (FAIL CLOSED) if Web
+ *                                                       Locks are
+ *                                                       unavailable, rather
+ *                                                       than an un-atomic
+ *                                                       scan (SH.2.2, "make
+ *                                                       confirmed-authority
+ *                                                       scans atomic"
+ *                                                       round; see its own
+ *                                                       doc). Use ONLY at a
+ *                                                       commit boundary that
+ *                                                       needs this stronger
+ *                                                       guarantee — every
+ *                                                       ORDINARY read stays
+ *                                                       on the plain,
+ *                                                       synchronous
+ *                                                       getConfirmedState()
+ *                                                       above.
  *   await commitConfirmedBaseline(userId, profileId, — record specific
  *     revision, accepted)                              domain(s) as
  *                                                       CONFIRMED at that
@@ -126,7 +153,19 @@ Reviewers should check any changes affecting:
  *                                                        `isAuthorityStillValid`
  *                                                        added SH.2.2's
  *                                                        Codex P1 follow-up
- *                                                        round; see its own
+ *                                                        round, now
+ *                                                        `() => Promise<boolean>`
+ *                                                        and `await`ed
+ *                                                        (SH.2.2 "make
+ *                                                        confirmed-authority
+ *                                                        scans atomic"
+ *                                                        round — backed by
+ *                                                        getConfirmedStateAtomic(),
+ *                                                        never the plain
+ *                                                        getConfirmedState()
+ *                                                        scan, at this
+ *                                                        commit boundary);
+ *                                                        see its own
  *                                                        doc) — writes
  *                                                        `nextRaw` to a
  *                                                        synced domain's
@@ -998,11 +1037,95 @@ function hasLocalDomainSerialization(): boolean {
  * edits no longer participate in this lock at all (16th round; see this
  * section's own doc above).
  */
-function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
+function withLocalDomainCommitLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   if (hasLocalDomainSerialization()) {
-    return navigator.locks.request(localDomainCommitLockName(key), () => fn());
+    // lib.dom.d.ts's LockGrantedCallback<T> types the callback as returning
+    // `T` verbatim, not `T | PromiseLike<T>` — it does not model the Locks
+    // API's own runtime behavior of awaiting a returned promise before
+    // releasing the lock. Passing our `Promise<T>`-returning callback
+    // therefore infers the lock request's own generic as `Promise<T>`
+    // itself, yielding `Promise<Promise<T>>` — `.then((v) => v)` performs
+    // the SAME flattening every Promise constructor already does for a
+    // thenable returned from a handler, unwrapping the type correctly to
+    // match what actually happens at runtime.
+    return navigator.locks.request(localDomainCommitLockName(key), () => fn()).then((v) => v);
   }
-  return Promise.resolve(fn());
+  return fn();
+}
+
+// ── Confirmed-authority atomic observability (SH.2.2, Codex P1 "make
+// confirmed-authority scans atomic" round) ─────────────────────────────────
+// Root cause: getConfirmedState() (below) reads every confirmed-fact key via
+// snapshotKeysWithPrefix() — capture `localStorage.length`, then enumerate
+// indices `length-1` down to `0`. That produces a STABLE snapshot against
+// same-tab removal (see snapshotKeysWithPrefix's own doc), but it is NOT an
+// atomic snapshot against a DIFFERENT tab's concurrent WRITE: `.length` and
+// each `.key(i)` are separate synchronous calls to the shared, cross-process
+// localStorage backend, and nothing fences them together as one atomic
+// operation. A write from another tab that lands in the real-world gap
+// between this tab's `.length` read and its enumeration finishing can settle
+// at a storage position this scan's already-captured `length` bound never
+// visits — a genuine torn read, invisible to this tab's own single-threaded,
+// non-yielding JS execution (which cannot itself be interrupted mid-scan),
+// because the interleaving happens in the shared storage backend, not in
+// this tab's own event loop. recordConfirmedFact()'s write is itself always
+// safe in isolation (a plain `setItem` to a permanently-unique key — see the
+// "Per-domain confirmed state" section above), but a REVALIDATION scan that
+// races a write in this window can observe old authority as still current —
+// exactly the gap SH.2.2's commit-time authority check depends on being
+// closed at the hydration commit boundary.
+//
+// Fix: a dedicated per-(userId, profileId) Web Lock — confirmedAuthorityLockName()
+// below — serializes every confirmed-fact WRITE (recordConfirmedFact, all
+// three domains share it) against every ATOMIC confirmed-state READ
+// (getConfirmedStateAtomic() below) for that same identity. Total ordering
+// under a shared lock name means a scan run inside it can never observe a
+// PARTIAL write: either it runs entirely before a not-yet-acquired writer
+// (legitimately "happens-before" it — that writer simply waits its turn, and
+// its fact becomes visible to the NEXT scan) or entirely after a writer that
+// already released the lock (its fact is now fully, durably visible). No
+// third possibility exists, unlike the plain `.length`-bounded scan above.
+// One lock per (userId, profileId) — not per domain — is deliberately
+// coarser than the canonical-domain-key lock's granularity: confirmed-fact
+// writes and atomic reads are both rare, short, purely-synchronous critical
+// sections (no I/O beyond localStorage itself), so the small cross-domain
+// contention cost is worth keeping this to ONE lock resource rather than
+// three, while EACH domain's own facts/revisions remain completely
+// independent DATA (this lock only ever gates observability, never merges or
+// blocks one domain's revision against another's — see the "Per-domain
+// confirmed state" section above, unchanged).
+//
+// getConfirmedState() itself (the plain, synchronous, non-atomic scan) is
+// UNCHANGED and still the right tool for every ORDINARY read (the once-per-
+// pull baseline check before winner selection, and any other caller that
+// does not sit at a commit boundary) — those are already revalidated later
+// by the atomic check if they turn out to matter, so paying the (tiny but
+// nonzero) lock-acquisition cost on every such read would be unjustified.
+// getConfirmedStateAtomic() below is a NEW, ADDITIONAL primitive used ONLY
+// where SH.2.2 already established a commit-time gate needs to exist — it
+// does not replace or duplicate getConfirmedState()'s own scan logic; it
+// simply runs that SAME function's body inside the serializing lock.
+//
+// FAIL CLOSED (this round's explicit requirement) — getConfirmedStateAtomic()
+// returns `null` when Web Locks are unavailable, rather than silently
+// falling back to the non-atomic scan (which would just reintroduce the
+// exact race this fix closes) or fabricating an optimistic answer. Every
+// caller of this function is a commit-time gate that already knows how to
+// treat "authority could not be safely established" as equivalent to "do
+// not accept this winner" — see each page's own `checkAuthorityStillValid`/
+// `revalidateAuthorityBeforeCommit` doc for how a `null` result is folded
+// into the SAME whole-pull deferral path as a genuine authority change,
+// mirroring commitLocalDomainRaw()'s own "unavailable" fail-closed status
+// for the identical class of environment limitation. recordConfirmedFact()'s
+// WRITE side, by contrast, does NOT need to fail closed when Web Locks are
+// unavailable — writing to a permanently-unique key is unconditionally safe
+// on its own terms (per the 15th round's own invariant, unchanged); it
+// simply runs its existing body directly, without the lock, exactly as
+// before this round, so ordinary confirmed-fact recording (including every
+// push's own confirmation) keeps working in a browser lacking Web Locks —
+// only the STRONGER atomic-observability guarantee is unavailable there.
+function confirmedAuthorityLockName(userId: string, profileId: string): string {
+  return `dwp:confirmedAuthority:${userId}:${profileId}`;
 }
 
 /**
@@ -1165,11 +1288,11 @@ export function commitLocalDomainRaw(
   expectedPreviousRaw: string | null,
   nextRaw: string,
   isStillValid: () => boolean = () => true,
-  isAuthorityStillValid: () => boolean = () => true
+  isAuthorityStillValid: () => Promise<boolean> = () => Promise.resolve(true)
 ): Promise<LocalDomainCommitStatus> {
   if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
   const baselineEditFactIds = new Set(snapshotKeysWithPrefix(localEditFactPrefix(key)));
-  return withLocalDomainCommitLock(key, (): LocalDomainCommitStatus => {
+  return withLocalDomainCommitLock(key, async (): Promise<LocalDomainCommitStatus> => {
     let currentRaw: string | null;
     try {
       currentRaw = localStorage.getItem(key);
@@ -1260,7 +1383,32 @@ export function commitLocalDomainRaw(
     // never be treated as successful, reopen syncReady, or let a page's
     // pull effect continue from an obsolete server revision merely because
     // the bytes it wanted to write already happened to be on disk.
-    if (!isAuthorityStillValid()) return "authority-superseded";
+    if (!(await isAuthorityStillValid())) return "authority-superseded";
+    // SH.2.2 (Codex P1 "make confirmed-authority scans atomic" round) — a
+    // SECOND edit-fact re-scan, immediately after the authority check above.
+    // Making `isAuthorityStillValid` genuinely atomic (see
+    // confirmedAuthorityLockName's own doc above) requires it to `await` a
+    // separate Web Lock — a real yield point this function did not have
+    // before. Without this second scan, a genuinely concurrent OTHER tab's
+    // ordinary edit (commitLocalDomainRawSync, which never participates in
+    // any lock) could land in exactly that new await window, after the
+    // first edit-fact re-scan already passed, and this commit would still
+    // overwrite it — reopening the precise race the 17th round's rescan was
+    // built to close. Re-running the SAME check, with the SAME
+    // `baselineEditFactIds` frontier, immediately after the only await left
+    // between here and the write, closes it again: an edit that landed
+    // before the FIRST rescan is still caught there (cheaply, before ever
+    // acquiring the confirmed-authority lock — required case: local edit
+    // still wins over a commit-time authority regression, unchanged); an
+    // edit that landed only during the authority check's own await is
+    // caught HERE instead, still reported as "superseded" (never
+    // "authority-superseded") — the local edit still wins as the reported
+    // reason either way, exactly preserving the existing precedence. Only
+    // one real yield point remains between this statement and the write —
+    // eliminated, not just narrowed.
+    for (const factKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
+      if (!baselineEditFactIds.has(factKey)) return "superseded";
+    }
     // A genuine safe noop has now passed every gate a real write would
     // have: pull/auth/profile context is still current, no concurrent edit
     // fact landed during the lock wait, and confirmed authority is still
@@ -1841,49 +1989,92 @@ function selectConfirmedFactPruneKeys(
  * Opportunistically PRUNES this domain's redundant/superseded facts after
  * every call — see selectConfirmedFactPruneKeys()'s own doc. Pure
  * optimization; never a correctness dependency.
+ *
+ * SH.2.2 (Codex P1 "make confirmed-authority scans atomic" round) — the
+ * write itself remains unconditionally safe without a lock (a permanently-
+ * unique key can never race), but this call's own INTERNAL unambiguity
+ * scan (scanConfirmedFactEntries, right below) is exactly the same kind of
+ * `.length`-bounded enumeration getConfirmedStateAtomic() exists to
+ * protect — so its body now runs inside confirmedAuthorityLockName()'s lock
+ * (when available), serializing it against every OTHER concurrent
+ * recordConfirmedFact() call AND every getConfirmedStateAtomic() read for
+ * the SAME identity. Never fails closed when Web Locks are unavailable —
+ * see that lock helper's own doc above for why the write side doesn't need
+ * to (a permanently-unique-key write needs no serialization to be safe on
+ * its own terms; only the STRONGER cross-call atomic-observability
+ * guarantee requires one).
  */
-function recordConfirmedFact(
+async function recordConfirmedFact(
   userId: string,
   profileId: string,
   domain: ConfirmedDomainName,
   revision: number,
   value: unknown
-): boolean {
+): Promise<boolean> {
   const key = confirmedFactKey(userId, profileId, domain, revision, generateOpId());
-  try {
-    localStorage.setItem(key, JSON.stringify({ revision, value }));
-  } catch {
-    return false;
-  }
-  let success = true;
-  try {
-    const entries = scanConfirmedFactEntries(userId, profileId, domain);
-    const parsed = entries
-      .map((e) => ({ key: e.key, fact: parseConfirmedFactForDomain(domain, e.raw) }))
-      .filter((e): e is { key: string; fact: ConfirmedDomainFact<unknown> } => e.fact !== null);
-    const facts = parsed.map((p) => p.fact);
-    if (!confirmedFactRevisionIsUnambiguous(facts, revision)) {
-      success = false;
-      try {
-        console.error(
-          `SH.2: confirmed-fact conflict for ${domain} at revision ${revision} — deferring confirmation until resolved.`
-        );
-      } catch {}
+  const body = (): boolean => {
+    try {
+      localStorage.setItem(key, JSON.stringify({ revision, value }));
+    } catch {
+      return false;
     }
-    const domainResult = resolveConfirmedDomainState(facts);
-    const confirmedRevision = domainResult.status === "confirmed" ? domainResult.fact.revision : null;
-    const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmedRevision);
-    for (const pruneKey of pruneKeys) {
-      try {
-        localStorage.removeItem(pruneKey);
-      } catch {}
+    let success = true;
+    try {
+      const entries = scanConfirmedFactEntries(userId, profileId, domain);
+      const parsed = entries
+        .map((e) => ({ key: e.key, fact: parseConfirmedFactForDomain(domain, e.raw) }))
+        .filter((e): e is { key: string; fact: ConfirmedDomainFact<unknown> } => e.fact !== null);
+      const facts = parsed.map((p) => p.fact);
+      if (!confirmedFactRevisionIsUnambiguous(facts, revision)) {
+        success = false;
+        try {
+          console.error(
+            `SH.2: confirmed-fact conflict for ${domain} at revision ${revision} — deferring confirmation until resolved.`
+          );
+        } catch {}
+      }
+      const domainResult = resolveConfirmedDomainState(facts);
+      const confirmedRevision = domainResult.status === "confirmed" ? domainResult.fact.revision : null;
+      const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmedRevision);
+      for (const pruneKey of pruneKeys) {
+        try {
+          localStorage.removeItem(pruneKey);
+        } catch {}
+      }
+    } catch {
+      // Best-effort scan/prune failure never flips an already-durable write
+      // to a failure, and never blocks pruning from being retried on a
+      // later call.
     }
-  } catch {
-    // Best-effort scan/prune failure never flips an already-durable write
-    // to a failure, and never blocks pruning from being retried on a later
-    // call.
+    return success;
+  };
+  if (hasLocalDomainSerialization()) {
+    return navigator.locks.request(confirmedAuthorityLockName(userId, profileId), () => body());
   }
-  return success;
+  return body();
+}
+
+/**
+ * ATOMIC commit-time confirmed-state read — see confirmedAuthorityLockName's
+ * own doc above for the full root-cause and mechanism. Runs
+ * getConfirmedState()'s existing, UNCHANGED scan logic inside the SAME lock
+ * recordConfirmedFact() writes hold, so the returned state can never be a
+ * torn read against a concurrently-publishing fact for this (userId,
+ * profileId). Returns `null` — FAIL CLOSED — when Web Locks are
+ * unavailable, rather than silently falling back to the non-atomic scan;
+ * every caller is a commit-time gate (see each page's `checkAuthorityStillValid`/
+ * `revalidateAuthorityBeforeCommit`) that already treats a `null` result as
+ * "authority could not be safely established" and defers the whole pull,
+ * exactly like a genuine authority change. Use getConfirmedState() directly
+ * (unchanged) for any ORDINARY, non-commit-time read — this function exists
+ * ONLY for the stronger guarantee a commit boundary needs.
+ */
+export function getConfirmedStateAtomic(userId: string, profileId: string): Promise<ConfirmedPlannerState | null> {
+  if (typeof window === "undefined") return Promise.resolve(null);
+  if (!hasLocalDomainSerialization()) return Promise.resolve(null);
+  return navigator.locks.request(confirmedAuthorityLockName(userId, profileId), () =>
+    getConfirmedState(userId, profileId)
+  );
 }
 
 /**
@@ -1926,13 +2117,13 @@ export async function commitConfirmedBaseline(
   }
   let allOk = true;
   if (accepted.plans !== undefined) {
-    allOk = recordConfirmedFact(userId, profileId, "plans", revision, accepted.plans) && allOk;
+    allOk = (await recordConfirmedFact(userId, profileId, "plans", revision, accepted.plans)) && allOk;
   }
   if (accepted.lightning !== undefined) {
-    allOk = recordConfirmedFact(userId, profileId, "lightning", revision, accepted.lightning) && allOk;
+    allOk = (await recordConfirmedFact(userId, profileId, "lightning", revision, accepted.lightning)) && allOk;
   }
   if (accepted.days !== undefined) {
-    allOk = recordConfirmedFact(userId, profileId, "days", revision, accepted.days) && allOk;
+    allOk = (await recordConfirmedFact(userId, profileId, "days", revision, accepted.days)) && allOk;
   }
   return allOk;
 }

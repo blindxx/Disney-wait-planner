@@ -29,6 +29,7 @@ import {
   registerUnloadSync,
   cancelScheduledSync,
   getConfirmedState,
+  getConfirmedStateAtomic,
   commitConfirmedBaseline,
   getLocalContentOwner,
   setLocalContentOwner,
@@ -863,6 +864,15 @@ export default function LightningPage() {
         reason: "authority-changed";
         previousRevision: number | null;
         currentRevision: number | null;
+      }
+    | {
+        // SH.2.2 (Codex P1 "make confirmed-authority scans atomic" round) —
+        // mirrors plans/page.tsx's own UnusableDomain arm exactly, see its
+        // own detailed doc: getConfirmedStateAtomic() could not be
+        // performed (Web Locks unavailable) — FAIL CLOSED, never
+        // auto-retried.
+        domain: "plans" | "lightning" | "days";
+        reason: "authority-unavailable";
       };
 
   /**
@@ -1170,7 +1180,14 @@ export default function LightningPage() {
         // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx
         // exactly, see its own detailed doc: freeze the EXACT
         // confirmed-authority identity winner selection is about to use.
-        const winnerSelectionAuthority = baselineOutcomes.confirmed;
+        // SH.2.2 ("make confirmed-authority scans atomic" round) — `let`,
+        // not `const`, mirroring plans/page.tsx exactly — see its own
+        // detailed doc near this SAME declaration for why: PARTIAL-APPLY
+        // PROVENANCE advances a domain's confirmed authority the instant
+        // this pull commits it, so this variable must ratchet forward
+        // (ratchetWinnerSelectionAuthority() below) to avoid mistaking this
+        // pull's OWN advance for an external authority change.
+        let winnerSelectionAuthority: ConfirmedPlannerState = baselineOutcomes.confirmed;
 
         // CONFIRMED-STATE CONTRACT (Codex P1, 16th round; conflict recovery
         // added 17th; SH.2.1 P1 enforced by DomainBaselineOutcome's own
@@ -1227,6 +1244,10 @@ export default function LightningPage() {
                 console.error(
                   `SH.2.2: pull deferred — ${u.domain}'s confirmed authority changed from revision ${u.previousRevision ?? "none"} to ${u.currentRevision ?? "none"} since this pull selected its winner; refusing to commit a winner that was never recomputed against the new authority. Scheduling a replacement pull.`
                 );
+              } else if (u.reason === "authority-unavailable") {
+                console.error(
+                  `SH.2.2: pull deferred — ${u.domain}'s confirmed authority could not be established atomically (Web Locks unavailable); refusing to commit a winner whose authority cannot be safely verified. Not retrying automatically — this is a permanent environment limitation.`
+                );
               } else {
                 console.error(
                   `SH.2.2: pull deferred — ${u.domain}'s local hydration commit was superseded by a newer local edit; the edit survives untouched. Scheduling a replacement pull.`
@@ -1273,10 +1294,29 @@ export default function LightningPage() {
             currentRevision: authorityRevisionOf(freshResult),
           });
         }
-        function revalidateAuthorityBeforeCommit(): UnusableDomain[] {
-          const fresh: ConfirmedPlannerState = pullCtx.userId
-            ? getConfirmedState(pullCtx.userId, pullCtx.profileId)
-            : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+        // SH.2.2 ("make confirmed-authority scans atomic" round) — mirrors
+        // plans/page.tsx exactly, see its own detailed doc:
+        // getConfirmedStateAtomic() (syncHelper.ts), never the plain
+        // getConfirmedState(), at this commit boundary — that scan captures
+        // `localStorage.length` then enumerates by index, NOT an atomic
+        // snapshot against a DIFFERENT tab's concurrent confirmed-fact
+        // publish. FAIL CLOSED (`fresh === null`) reports EVERY domain as
+        // "authority-unavailable" rather than silently falling back to the
+        // non-atomic scan.
+        async function revalidateAuthorityBeforeCommit(): Promise<UnusableDomain[]> {
+          if (!pullCtx.userId) return []; // no identity to look up — nothing published, nothing to ratchet against
+          const fresh = await getConfirmedStateAtomic(pullCtx.userId, pullCtx.profileId);
+          if (fresh === null) {
+            try {
+              console.error(
+                "SH.2.2: pull deferred — confirmed authority could not be established atomically (Web Locks unavailable); refusing to commit a winner whose authority cannot be safely verified."
+              );
+            } catch {}
+            return (["plans", "lightning", "days"] as const).map((domain) => ({
+              domain,
+              reason: "authority-unavailable" as const,
+            }));
+          }
           const unusable: UnusableDomain[] = [];
           checkAuthorityChanged(unusable, "lightning", fresh.lightning, winnerSelectionAuthority.lightning);
           checkAuthorityChanged(unusable, "plans", fresh.plans, winnerSelectionAuthority.plans);
@@ -1293,13 +1333,31 @@ export default function LightningPage() {
         // write — closing the gap where authority advances WHILE a commit
         // waits for a lock another writer currently holds (invisible to
         // both the canonical CAS and to isPullCurrent()'s pull-epoch check).
+        // Now `await`s `revalidateAuthorityBeforeCommit()` (SH.2.2 "make
+        // confirmed-authority scans atomic" round — see
+        // commitLocalDomainRaw()'s own doc in syncHelper.ts for the SECOND
+        // edit-fact re-scan this required to keep local edits winning over
+        // authority even across this new await).
         let lastAuthorityRevalidation: UnusableDomain[] = [];
-        function checkAuthorityStillValid(): boolean {
-          const unusable = revalidateAuthorityBeforeCommit();
+        async function checkAuthorityStillValid(): Promise<boolean> {
+          const unusable = await revalidateAuthorityBeforeCommit();
           if (unusable.length > 0) {
             lastAuthorityRevalidation = unusable;
             return false;
           }
+          return true;
+        }
+        // SH.2.2 ("make confirmed-authority scans atomic" round) — mirrors
+        // plans/page.tsx's own ratchetWinnerSelectionAuthority() exactly,
+        // see its own detailed doc: advances `winnerSelectionAuthority[domain]`
+        // to the EXACT fact this pull itself just durably recorded, read
+        // back via the SAME atomic primitive, so this pull's own advance is
+        // never misread as an external authority change on the next check.
+        async function ratchetWinnerSelectionAuthority(domain: "plans" | "lightning" | "days"): Promise<boolean> {
+          if (!pullCtx.userId) return true; // nothing was recorded, nothing to ratchet
+          const fresh = await getConfirmedStateAtomic(pullCtx.userId, pullCtx.profileId);
+          if (fresh === null) return false;
+          winnerSelectionAuthority = { ...winnerSelectionAuthority, [domain]: fresh[domain] };
           return true;
         }
 
@@ -1467,9 +1525,14 @@ export default function LightningPage() {
             // confirmed-baseline fact right now — see this pull's own doc
             // above (near `supersededDomains`).
             if (pullCtx.userId && planner?.revision != null) {
-              void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+              await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
                 lightning: { version: 1, items: winningLightningItems },
               });
+              if (!isPullCurrent()) return;
+              if (!(await ratchetWinnerSelectionAuthority("lightning"))) {
+                handlePullDeferral([...supersededDomains, { domain: "lightning", reason: "authority-unavailable" }]);
+                return;
+              }
             }
           }
         }
@@ -1505,7 +1568,8 @@ export default function LightningPage() {
         // (possibly lock-queued) write, during which confirmed authority
         // for ANY domain can have advanced.
         if (!isPullCurrent()) return;
-        const prePlansAuthorityCheck = revalidateAuthorityBeforeCommit();
+        const prePlansAuthorityCheck = await revalidateAuthorityBeforeCommit();
+        if (!isPullCurrent()) return;
         if (prePlansAuthorityCheck.length > 0) {
           handlePullDeferral([...supersededDomains, ...prePlansAuthorityCheck]);
           return;
@@ -1543,16 +1607,22 @@ export default function LightningPage() {
         // eligibility condition exactly — see this pull's own doc above
         // (near `supersededDomains`).
         if (plansHydrationWritten && planner?.plans && pullCtx.userId && planner?.revision != null) {
-          void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+          await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
             plans: { version: planner.plans.version, items: winningPlansItems },
           });
+          if (!isPullCurrent()) return;
+          if (!(await ratchetWinnerSelectionAuthority("plans"))) {
+            handlePullDeferral([...supersededDomains, { domain: "plans", reason: "authority-unavailable" }]);
+            return;
+          }
         }
 
         // SH.2.2 — COMMIT-TIME AUTHORITY REVALIDATION, immediately before
         // this pull's LAST hydration commit — mirrors plans/page.tsx
         // exactly, see its own detailed doc.
         if (!isPullCurrent()) return;
-        const preDaysAuthorityCheck = revalidateAuthorityBeforeCommit();
+        const preDaysAuthorityCheck = await revalidateAuthorityBeforeCommit();
+        if (!isPullCurrent()) return;
         if (preDaysAuthorityCheck.length > 0) {
           handlePullDeferral([...supersededDomains, ...preDaysAuthorityCheck]);
           return;
@@ -1628,9 +1698,14 @@ export default function LightningPage() {
           pullCtx.userId &&
           planner?.revision != null
         ) {
-          void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+          await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
             days: winningDays,
           });
+          if (!isPullCurrent()) return;
+          if (!(await ratchetWinnerSelectionAuthority("days"))) {
+            handlePullDeferral([...supersededDomains, { domain: "days", reason: "authority-unavailable" }]);
+            return;
+          }
         }
 
         // Same-tab writes do not fire a storage event, so refresh

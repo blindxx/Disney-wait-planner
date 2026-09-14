@@ -2537,12 +2537,32 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
 // winner selection even runs) — untouched by this round; only the LATER,
 // commit-time re-checks now produce "authority-changed" instead of
 // reusing them.
+//
+// CODEX P1 "MAKE CONFIRMED-AUTHORITY SCANS ATOMIC" ROUND — the commit-time
+// re-check above (`revalidateAuthorityBeforeCommit()`/`checkAuthorityStillValid()`)
+// used getConfirmedState()'s plain scan, which captures `localStorage.length`
+// then enumerates by index — NOT an atomic snapshot against a DIFFERENT
+// tab's concurrent confirmed-fact write (see confirmedAuthorityLockName's
+// own doc in syncHelper.ts for the full root-cause). Both pages' commit-time
+// checks now call the NEW getConfirmedStateAtomic() (syncHelper.ts) instead
+// — the SAME scan, serialized via a dedicated Web Lock against every
+// recordConfirmedFact() write for this identity, so a torn read is
+// impossible. `"authority-unavailable"` is the new reason for when that
+// atomic read itself cannot be performed (Web Locks unavailable) — FAIL
+// CLOSED, per this round's explicit requirement, rather than silently
+// falling back to the non-atomic scan. Unlike "authority-changed"/
+// "local-edit-superseded", this is NEVER auto-retried below: it reflects a
+// permanent environment limitation (this browser lacks Web Locks), not a
+// transient race a fresh pull could resolve — mirrors
+// commitLocalDomainRaw()'s own "unavailable" status, which
+// isLocalDomainCommitSuccess() also never treats as retryable.
 export type UnusableDomainReason =
   | "conflict"
   | "stale-response"
   | "unusable-response"
   | "local-edit-superseded"
-  | "authority-changed";
+  | "authority-changed"
+  | "authority-unavailable";
 
 export function decideStaleResponseRecovery(
   unusableDomains: Array<{ reason: UnusableDomainReason }>
@@ -2557,7 +2577,11 @@ export function decideStaleResponseRecovery(
   // the whole set stays retry-eligible; mixed with a "conflict" or
   // "unusable-response" anywhere in the set, it stays fail-closed —
   // unchanged from SH.2.1's own rule, just widened to recognize each new
-  // always-safe reason as it was added.
+  // always-safe reason as it was added. "authority-unavailable" (this
+  // round's "make confirmed-authority scans atomic" fix) is deliberately
+  // EXCLUDED from the always-safe set above — falls through to the default
+  // "no-retry" below — since it reflects a permanent environment limitation
+  // (no Web Locks), which a fresh pull cannot fix.
   return unusableDomains.every(
     (d) => d.reason === "stale-response" || d.reason === "local-edit-superseded" || d.reason === "authority-changed"
   )
@@ -2667,6 +2691,21 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
   {
     name: "SH.2.2 third follow-up — an authority-changed domain must NEVER make an unrelated unusable-response retry-eligible",
     unusableDomains: [{ reason: "authority-changed" }, { reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 'make confirmed-authority scans atomic' round — a single authority-unavailable domain (Web Locks absent, atomic read could not be performed) must NEVER auto-retry, even alone: this is a permanent environment limitation, not a transient race",
+    unusableDomains: [{ reason: "authority-unavailable" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 atomic-scans round — an authority-unavailable domain blocks retry even when every other domain is merely authority-changed/stale-response/local-edit-superseded (all otherwise-safe reasons)",
+    unusableDomains: [
+      { reason: "authority-unavailable" },
+      { reason: "authority-changed" },
+      { reason: "stale-response" },
+      { reason: "local-edit-superseded" },
+    ],
     expected: "no-retry",
   },
 ];
