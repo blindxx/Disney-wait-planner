@@ -1179,11 +1179,12 @@ export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
 // reverting the change B represents.
 //
 // isPendingOpDomainEvidenceCurrent() is the pure decision this closes: an
-// operation's own per-domain evidence, captured at send time (its own
-// value, plus the SNAPSHOT of local-edit-fact keys that existed for that
-// domain's canonical key at that moment — its "edit-fact frontier"), is
-// still the CURRENT explanation for a domain's local content only when
-// BOTH:
+// operation's own per-domain evidence, captured at send time (a COMPACT
+// FINGERPRINT of its own value — see canonicalDigest() below, Codex P1
+// "bound unresolved-operation storage" round — plus the SNAPSHOT of
+// local-edit-fact keys that existed for that domain's canonical key at that
+// moment, its "edit-fact frontier"), is still the CURRENT explanation for a
+// domain's local content only when BOTH:
 //   • no edit-fact key exists right now that wasn't already in that
 //     frontier (mirrors commitLocalDomainRaw's own baselineEditFactIds
 //     re-validation) — a NEWER key means a genuine local edit happened
@@ -1192,25 +1193,70 @@ export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
 //     the exact same content is still a genuine, newer edit — see
 //     hasSurvivingEditFact's own doc in syncHelper.ts for why value-only
 //     matching can never stand in for this causal check); AND
-//   • the domain's current value still canonically equals the operation's
-//     own recorded value — belt-and-suspenders: closes the case where some
+//   • the domain's current value's own digest still equals the operation's
+//     own recorded digest — belt-and-suspenders: closes the case where some
 //     OTHER writer (a hydration commit) already retired the frontier AND
 //     moved the canonical key on to a third value, which would otherwise
 //     look "frontier-intact" (nothing newer landed FROM AN EDIT) but is not
 //     this operation's content anymore.
 // When both hold, the caller (reconcilePendingOperations()) may safely
 // retire that domain's edit-fact(s) — the same LOCAL-EDIT FACT LIFECYCLE
-// retirement a hydration commit performs — and record the operation's own
-// value as hydration-provenance-equivalent evidence (recordHydrationProvenance()
-// in syncHelper.ts — the SAME non-authoritative provenance store SH.2.2
-// built for reconciled-but-not-pure-cloud hydration winners; reused here
-// rather than inventing a parallel one, per this phase's "one
-// operation-lifecycle model" requirement), so a subsequent pull's
-// hydration-provenance check recognizes A as explained and lets whatever
-// the CURRENT confirmed baseline is (B, if cloud has advanced) win
-// normally, instead of misreading stale-but-accepted A as fresh intent.
+// retirement a hydration commit performs — and record the domain's CURRENT
+// value (already in hand, freshly read to compute the digest above — never
+// re-derived from the compact evidence, which no longer carries the full
+// value at all) as hydration-provenance-equivalent evidence
+// (recordHydrationProvenance() in syncHelper.ts — the SAME non-authoritative
+// provenance store SH.2.2 built for reconciled-but-not-pure-cloud hydration
+// winners; reused here rather than inventing a parallel one, per this
+// phase's "one operation-lifecycle model" requirement), so a subsequent
+// pull's hydration-provenance check recognizes A as explained and lets
+// whatever the CURRENT confirmed baseline is (B, if cloud has advanced) win
+// normally, instead of misreading stale-but-accepted A as fresh intent. See
+// reconcilePendingOperations()'s own doc in syncHelper.ts for the ORDERING
+// this enables — provenance recorded durably BEFORE either the edit-fact or
+// the pending-op itself is retired (Codex P1 "provenance before retirement"
+// round).
+//
+// Codex P1 fix ("bound unresolved-operation storage" round) — the ORIGINAL
+// SH.2.3 design stored each pending operation's own FULL per-domain value
+// (the entire Plans/Lightning/Days dataset) inside the pending-op record,
+// once per unresolved operation. A device that accumulates several
+// unresolved operations (e.g. a flaky connection producing repeated lost
+// responses — precisely the scenario this phase exists to make recoverable)
+// would then durably duplicate the ENTIRE planner dataset once per
+// unresolved op, working directly against the LOCAL-FIRST DURABILITY
+// CONTRACT this codebase treats as a hard invariant (unbounded local
+// storage growth can itself cause localStorage writes — ordinary edits
+// included — to start failing on quota). A bare retention cap (e.g. "keep
+// only the N most recent pending ops") was rejected: an operation dropped
+// under such a cap is UNRESOLVED CORRECTNESS EVIDENCE, not disposable
+// cache — discarding it reopens exactly the "server accepted it, this
+// device can no longer prove what it resolved into" gap this phase closes.
+//
+// canonicalDigest() is the fix: pending-op evidence now stores a small,
+// FIXED-SIZE fingerprint of each domain's value (16 hex characters,
+// regardless of how large the underlying Plans/Lightning/Days dataset is)
+// instead of the value itself. This is sufficient for
+// isPendingOpDomainEvidenceCurrent()'s only actual need — "does the domain's
+// CURRENT value still canonically equal what this operation sent" — a
+// boolean equality check that a digest answers exactly as well as the full
+// value would, at O(1) storage instead of O(dataset size) PER PENDING
+// OPERATION. The full value is never needed again once digested: at
+// reconciliation time, the domain's CURRENT durable value is read fresh
+// anyway (to compute its own digest for comparison) — that SAME freshly-read
+// value is what gets passed to recordHydrationProvenance() on a match, so no
+// caller ever needs the operation's own original value bytes back out of
+// this store. A 16-hex-character fingerprint is not collision-proof in the
+// cryptographic sense, but this is a LOCAL, single-device reconciliation
+// heuristic, not a security boundary — see canonicalDigest()'s own doc for
+// why an accidental collision here is not a realistic concern, and note
+// that even a hypothetical collision could only ever cause a MISSED
+// retire+provenance opportunity or a spurious one on byte-identical
+// content, never data loss (the edit-fact frontier check above is the
+// structural protection against a genuine edit being mistaken for resolved
+// operation content — digest equality alone was never that protection).
 export interface PendingOpDomainEvidence {
-  value: unknown;
+  digest: string;
   editFactKeys: string[];
 }
 
@@ -1219,23 +1265,98 @@ export interface PendingOpRecord {
   domains: Partial<Record<"plans" | "lightning" | "days", PendingOpDomainEvidence>>;
 }
 
+/**
+ * A compact, fixed-size (16 hex chars = 64 bits), deterministic fingerprint
+ * of an arbitrary JSON-serializable value, computed over its CANONICAL form
+ * (canonicalizeJSON() above) so key order never affects the result — two
+ * differently-ordered-but-equal objects always digest identically, matching
+ * every OTHER equality check in this codebase (isExactCloudValue,
+ * confirmedDomainResultsEqual, etc.), all of which already compare via
+ * canonicalizeJSON() rather than raw JSON.stringify().
+ *
+ * Two independent 32-bit rolling hashes (different seeds/mixing, FNV-1a and
+ * a DJB2 variant) run over the same canonical string and are concatenated —
+ * cheap enough to compute synchronously on every write, including from a
+ * beforeunload handler (registerUnloadSync()'s beacon path), which cannot
+ * reliably await an async Web Crypto digest. A 64-bit keyspace makes an
+ * accidental collision between two genuinely different planner payloads not
+ * a realistic concern for this use: a LOCAL, single-device reconciliation
+ * heuristic, never a security or integrity boundary (see this section's own
+ * module doc above for what a hypothetical collision could and could not
+ * cause).
+ */
+export function canonicalDigest(value: unknown): string {
+  const canonical = canonicalizeJSON(value);
+  let h1 = 0x811c9dc5;
+  let h2 = 5381;
+  for (let i = 0; i < canonical.length; i++) {
+    const c = canonical.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 = Math.imul(h2, 33) ^ c;
+  }
+  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Reference cases for canonicalDigest(). Run from Node:
+ *   import { DEV_CANONICAL_DIGEST_CASES, canonicalDigest } from "@/lib/syncPayload";
+ *   DEV_CANONICAL_DIGEST_CASES.forEach(c => {
+ *     const got = canonicalDigest(c.value);
+ *     const ok = c.equalTo !== undefined ? got === canonicalDigest(c.equalTo) : got !== canonicalDigest(c.differentFrom);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CANONICAL_DIGEST_CASES: Array<{
+  name: string;
+  value: unknown;
+  equalTo?: unknown;
+  differentFrom?: unknown;
+}> = [
+  {
+    name: "required — deterministic: the same value digests identically across calls",
+    value: { version: 1, items: ["A", "B"] },
+    equalTo: { version: 1, items: ["A", "B"] },
+  },
+  {
+    name: "required — canonical: differently-ordered keys digest identically",
+    value: { items: ["A", "B"], version: 1 },
+    equalTo: { version: 1, items: ["A", "B"] },
+  },
+  {
+    name: "required — a genuinely different value digests differently",
+    value: { version: 1, items: ["A"] },
+    differentFrom: { version: 1, items: ["A", "B"] },
+  },
+  {
+    name: "different value shape (array vs object) digests differently",
+    value: ["day-1", "day-2"],
+    differentFrom: { version: 1, items: [] },
+  },
+  {
+    name: "empty vs non-empty digests differently",
+    value: { version: 1, items: [] },
+    differentFrom: { version: 1, items: ["A"] },
+  },
+];
+
 export function isPendingOpDomainEvidenceCurrent(
   currentEditFactKeys: string[],
   frontierEditFactKeys: string[],
-  currentValue: unknown,
-  operationValue: unknown
+  currentDigest: string,
+  operationDigest: string
 ): boolean {
   const frontier = new Set(frontierEditFactKeys);
   const frontierIntact = currentEditFactKeys.every((key) => frontier.has(key));
   if (!frontierIntact) return false;
-  return canonicalizeJSON(currentValue) === canonicalizeJSON(operationValue);
+  return currentDigest === operationDigest;
 }
 
 /**
  * Reference cases for isPendingOpDomainEvidenceCurrent(). Run from Node:
- *   import { DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES, isPendingOpDomainEvidenceCurrent } from "@/lib/syncPayload";
+ *   import { DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES, isPendingOpDomainEvidenceCurrent, canonicalDigest } from "@/lib/syncPayload";
  *   DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES.forEach(c => {
- *     const got = isPendingOpDomainEvidenceCurrent(c.currentEditFactKeys, c.frontierEditFactKeys, c.currentValue, c.operationValue);
+ *     const got = isPendingOpDomainEvidenceCurrent(c.currentEditFactKeys, c.frontierEditFactKeys, canonicalDigest(c.currentValue), canonicalDigest(c.operationValue));
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
  */

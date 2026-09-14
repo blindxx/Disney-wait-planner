@@ -789,6 +789,7 @@ import {
   confirmedDomainResultsEqual,
   resolveHydrationApplyIntentDisposition,
   isPendingOpDomainEvidenceCurrent,
+  canonicalDigest,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -2844,30 +2845,34 @@ function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): str
 /**
  * SH.2.3 — captures a pending operation's own per-domain evidence AT SEND
  * TIME, right before it is persisted (addPendingOp) and the request is
- * actually sent: each domain's own value from the payload just built, plus
- * the SNAPSHOT of local-edit-fact keys currently present for that domain's
- * canonical key (this operation's own "edit-fact frontier" — the SAME kind
- * of snapshot commitLocalDomainRaw's own `baselineEditFactIds` takes, just
- * from the SEND side rather than the WRITE side). See
- * isPendingOpDomainEvidenceCurrent()'s own doc in syncPayload.ts for why
- * this frontier is what lets reconcilePendingOperations() later tell "this
- * operation's own now-resolved content" apart from "a genuine local edit
- * made after it" — never from content alone.
+ * actually sent: a COMPACT FINGERPRINT (canonicalDigest(), syncPayload.ts —
+ * Codex P1 "bound unresolved-operation storage" round) of each domain's own
+ * value from the payload just built — never the full value itself, which
+ * would durably duplicate an entire Plans/Lightning/Days dataset per
+ * unresolved operation — plus the SNAPSHOT of local-edit-fact keys currently
+ * present for that domain's canonical key (this operation's own "edit-fact
+ * frontier" — the SAME kind of snapshot commitLocalDomainRaw's own
+ * `baselineEditFactIds` takes, just from the SEND side rather than the WRITE
+ * side). See isPendingOpDomainEvidenceCurrent()'s and canonicalDigest()'s
+ * own docs in syncPayload.ts for why this bounded pair is sufficient to let
+ * reconcilePendingOperations() later tell "this operation's own now-resolved
+ * content" apart from "a genuine local edit made after it" — never from the
+ * full content itself.
  */
 function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload): PendingOpRecord["domains"] {
   const domains: PendingOpRecord["domains"] = {
     plans: {
-      value: payload.plans,
+      digest: canonicalDigest(payload.plans),
       editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "plans"))),
     },
     lightning: {
-      value: payload.lightning,
+      digest: canonicalDigest(payload.lightning),
       editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "lightning"))),
     },
   };
   if (payload.days !== undefined) {
     domains.days = {
-      value: payload.days,
+      digest: canonicalDigest(payload.days),
       editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "days"))),
     };
   }
@@ -2883,19 +2888,30 @@ function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload)
  * builds one via buildPendingOpDomains() — but the parameter stays
  * optional so a record without evidence still round-trips through
  * getPendingOpRecord() exactly like a pre-SH.2.3 legacy entry would).
- * Still a single unconditional setItem — see pendingOpKeyForIdentity's own
- * doc above for why this can never race a DIFFERENT op's key.
+ *
+ * Codex P1 fix ("pending evidence persistence" round) — returns whether the
+ * write durably succeeded. This is no longer a fire-and-forget best-effort
+ * write: both callers (doPush(), registerUnloadSync()) now REQUIRE a `true`
+ * return before sending the network request at all — "no durable pending
+ * evidence → do not send" (this round's own invariant). A localStorage
+ * failure here (quota, private-mode, security error) must never be silently
+ * swallowed into "the write proceeded with no recovery evidence", which is
+ * exactly the uncertain-outcome-with-no-recovery-path gap this whole phase
+ * exists to close.
  */
 function addPendingOp(
   userId: string,
   profileId: string,
   opId: string,
   domains: PendingOpRecord["domains"] | null = null
-): void {
+): boolean {
   try {
     const record: PendingOpRecord = { opId, domains: domains ?? {} };
     localStorage.setItem(pendingOpKeyForIdentity(userId, profileId, opId), JSON.stringify(record));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -3139,12 +3155,29 @@ export async function reconcilePendingOperations(
     // would remain an absolute veto against recognizing A as resolved, and
     // winner selection would push stale A right back over newer B.
     //
-    // Best-effort: a failure here never blocks retiring the pending-op key
-    // itself below — the op's core "was it accepted" fact is already
-    // durably promoted via commitConfirmedBaseline() above regardless, and
-    // the worst case of skipping this step is a redundant local-first
-    // re-push of still-unexplained content next cycle, never a destructive
-    // one (see this function's own PULL OUTCOME CONTRACT doc above).
+    // Codex P1 fix ("provenance before retirement" round) — ORDERING AND
+    // FAIL-CLOSED: replacement provenance (recordHydrationProvenance) is
+    // now durably recorded BEFORE either this domain's edit-fact(s) or
+    // (once every domain is handled) the pending-op key itself is retired —
+    // never after. The previous version retired the edit-fact FIRST, then
+    // attempted the provenance write, then removed the pending-op key
+    // UNCONDITIONALLY regardless of whether that write actually succeeded:
+    // a provenance failure (recordHydrationProvenance returns `false` on a
+    // genuine write exception — quota, private-mode, security error — it
+    // does not throw) left this domain with NEITHER a surviving edit-fact
+    // NOR a durable provenance record NOR a pending op to retry from —
+    // exactly the "no durable evidence for an uncertain outcome" gap this
+    // whole phase exists to close, just relocated to the retirement side
+    // instead of the send side. Now: a provenance failure for ANY domain
+    // this op was eligible to explain marks the whole op `domainFailed`,
+    // which suppresses removePendingOp() for it below — the pending-op
+    // record (and every domain's still-intact edit-fact/evidence) is left
+    // exactly as durable as it already was, for the NEXT pull to retry the
+    // SAME idempotent check (a domain already successfully retired this
+    // round is simply a no-op next time — its edit-fact is already gone and
+    // isPendingOpDomainEvidenceCurrent() sees an empty current set, still
+    // "frontier intact").
+    let domainFailed = false;
     try {
       const record = getPendingOpRecord(userId, profileId, opId);
       for (const domain of CONFIRMED_DOMAIN_NAMES) {
@@ -3153,11 +3186,15 @@ export async function reconcilePendingOperations(
         const key = domainCanonicalKey(profileId, domain);
         const currentEditFactKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
         // Read via the SAME normalization buildPayloadFromStorage() used to
-        // produce `evidence.value` in the first place (parseLocalDatasetEntry
+        // produce `evidence.digest` in the first place (parseLocalDatasetEntry
         // for plans/lightning, a plain array for days) — comparing raw JSON
         // directly would spuriously disagree with a legacy array-only shape
         // still on disk for plans/lightning even when it represents the
-        // identical dataset this operation sent.
+        // identical dataset this operation sent. This SAME freshly-read
+        // value (never the compact evidence, which no longer carries the
+        // full value at all — see canonicalDigest's own "bound unresolved-
+        // operation storage" doc in syncPayload.ts) is what gets recorded as
+        // provenance below on a match.
         let currentValue: unknown = null;
         try {
           const currentRaw = readLatestDurableValue(key);
@@ -3173,29 +3210,55 @@ export async function reconcilePendingOperations(
         const isCurrent = isPendingOpDomainEvidenceCurrent(
           currentEditFactKeys,
           evidence.editFactKeys,
-          currentValue,
-          evidence.value
+          canonicalDigest(currentValue),
+          evidence.digest
         );
         if (!isCurrent) continue;
-        // No genuine local edit has landed since this operation was sent —
-        // its own edit-fact(s) are resolved: retire them (the SAME
-        // LOCAL-EDIT FACT LIFECYCLE retirement a hydration commit performs
-        // — see commitLocalDomainRaw's own doc above) and record the
-        // operation's own value as hydration-provenance-equivalent
-        // evidence, so a subsequent pull's winner selection recognizes this
-        // domain's still-on-disk bytes as explained rather than a fresh
-        // edit, and defers to whatever the CURRENT confirmed baseline is.
+        // Record the operation's now-current value as hydration-provenance-
+        // equivalent evidence FIRST — only once THIS write is durably
+        // proven (a genuine `true` return, not merely "did not throw") does
+        // retiring the edit-fact(s) below become safe: retiring first and
+        // recording second is exactly the ordering Codex flagged, since a
+        // provenance write can fail without throwing.
+        let provenanceOk = false;
+        try {
+          provenanceOk = await recordHydrationProvenance(userId, profileId, domain, resolved.revision, currentValue);
+        } catch {
+          provenanceOk = false;
+        }
+        if (!provenanceOk) {
+          // Fail closed for this op: leave this domain's edit-fact(s) and
+          // the pending-op record itself fully intact — see this loop's own
+          // doc above for why a later pull safely retries the identical
+          // check rather than losing evidence.
+          domainFailed = true;
+          continue;
+        }
+        // Durable replacement evidence now exists — the SAME LOCAL-EDIT
+        // FACT LIFECYCLE retirement a hydration commit performs (see
+        // commitLocalDomainRaw's own doc above) is safe to perform now, so
+        // a subsequent pull's winner selection recognizes this domain's
+        // still-on-disk bytes as explained rather than a fresh edit, and
+        // defers to whatever the CURRENT confirmed baseline is.
         for (const factKey of currentEditFactKeys) {
           try {
             localStorage.removeItem(factKey);
           } catch {}
         }
-        try {
-          await recordHydrationProvenance(userId, profileId, domain, resolved.revision, evidence.value);
-        } catch {}
       }
-    } catch {}
-    removePendingOp(userId, profileId, opId);
+    } catch {
+      domainFailed = true;
+    }
+    // The op's core "was it accepted" fact is already durably promoted via
+    // commitConfirmedBaseline() above regardless of `domainFailed` — only
+    // the SUPPLEMENTARY provenance/edit-fact explanation above is at risk,
+    // so a provenance failure here never re-opens this function's own PULL
+    // OUTCOME CONTRACT (it does not return `false`); it only keeps this ONE
+    // op's pending-evidence key alive for a later retry instead of retiring
+    // it on unproven replacement evidence.
+    if (!domainFailed) {
+      removePendingOp(userId, profileId, opId);
+    }
   }
   return true;
 }
@@ -3571,8 +3634,19 @@ export function registerUnloadSync(): () => void {
     // boundary — registering first, then undoing the registration if the
     // browser never actually queued it (below), closes that ordering gap
     // the same way doPush() now does for ordinary PUTs.
+    //
+    // Codex P1 fix ("pending evidence persistence" round) — "no durable
+    // pending evidence → do not send": if addPendingOp() itself could not
+    // durably persist this evidence (a localStorage write failure), the
+    // beacon is never sent at all. There is no later retry this handler can
+    // schedule (the page is unloading right now) — but the content is
+    // already safely durable in local canonical storage and its own
+    // local-edit fact, exactly as it was before this handler ran, for a
+    // LATER session's ordinary doPush()/beacon to pick up and push
+    // (correctly evidenced) once storage pressure clears.
     if (userId) {
-      addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+      if (!registered) return;
     }
     const queued = navigator.sendBeacon(
       `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}`,
@@ -3755,8 +3829,31 @@ async function doPush(): Promise<void> {
   // successful pull's reconcilePendingOperations() resolve it conclusively
   // against the server's own state.
   const opId = generateOpId();
+  // Codex P1 fix ("pending evidence persistence" round) — "no durable
+  // pending evidence → do not send": if addPendingOp() could not durably
+  // persist this operation's recovery evidence (a localStorage write
+  // failure — quota, private-mode, security error), the PUT is never sent
+  // at all. Surfacing this as the SAME "error" status/event the network-
+  // failure catch block below already uses keeps the UI from reporting a
+  // false idle/synced state; the content itself stays exactly as durable
+  // locally as it already was (this function never touched canonical
+  // storage), and the NEXT scheduleSync() debounce (triggered by any
+  // further edit, or by this same profile's next mount/pull cycle) simply
+  // retries once storage pressure clears — no new retry machinery needed.
   if (userId) {
-    addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+    if (!registered) {
+      try {
+        localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
+      } catch {}
+      try {
+        localStorage.setItem(syncErrorKeyForProfile(profileId), "Local evidence write failed");
+      } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
+      return;
+    }
   }
 
   inFlight = true;
