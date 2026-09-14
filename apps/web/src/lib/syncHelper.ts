@@ -792,6 +792,8 @@ import {
   canonicalDigest,
   planHydrationProvenanceDedup,
   isHydrationProvenanceFactObsoleteAfterConfirm,
+  planOrdinaryEditFactCommit,
+  type LocalEditFactRecord,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -995,19 +997,22 @@ export type LocalDomainCommitStatus =
 // specifically so a transient canonical-key clobber can never cause a lost
 // push, regardless of this residual window.
 //
-// DEFERRED — SH.2.3 "Concurrent Local Edit Fact Safety" (recorded, not
-// fixed, during SH.2.2's Codex P1 follow-up rounds): this residual window
-// is the SAME concurrent-edit-fact deletion race Codex separately flagged
-// while reviewing SH.2.2's commit-time authority work — retirement
-// (commitLocalDomainRaw()'s removeItem loop over `baselineEditFactIds`)
-// and a genuinely concurrent OTHER tab's own fact write/removal are not
-// mutually exclusive with each other the way canonical-key writes are made
-// to be. Explicitly out of SH.2.2's scope (commit-time CONFIRMED AUTHORITY
-// validity, not local edit-fact CONCURRENCY) — a future SH.2.3 phase
-// should address local-edit-fact safety under genuine cross-tab
-// concurrency specifically. The previously planned schema-migration phase
-// is renumbered SH.2.4 ("Sync Schema Migration & Deployment Safety") to
-// make room for it.
+// RESOLVED — SH.2.4 "Concurrent Local Edit Fact Safety" (recorded, not yet
+// fixed, during SH.2.2's Codex P1 follow-up rounds; fixed this round): the
+// PRACTICALLY significant instance of this concurrent-edit-fact deletion
+// race was commitLocalDomainRawSync()'s own retirement — see its own doc
+// below and planOrdinaryEditFactCommit() in syncPayload.ts for the full
+// root-cause writeup and fix. In short: that function used to re-scan the
+// edit-fact keyspace AFTER its own writes and delete every key that was not
+// its own, with no way to tell "a fact I already knew about" from "a fact a
+// concurrent OTHER tab just published" — two racing ordinary edits could
+// each delete the other's still-unresolved fact, exactly the failure this
+// phase closes. The fix retires ONLY a snapshot taken BEFORE that call's
+// own writes (never a key outside it, structurally), mirroring
+// commitLocalDomainRaw()'s own `baselineEditFactIds` discipline immediately
+// below — which was, and remains, correct on its own terms: its retirement
+// loop only ever removes keys it itself proved (via its own re-validation
+// gates) were part of its own observed, unchanged baseline.
 function localEditFactPrefix(key: string): string {
   return `dwp:localEditFact:${key}:`;
 }
@@ -1556,18 +1561,52 @@ export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
  * my decision was made" even in the narrow window its raw-value CAS alone
  * could miss, and what lets readLatestDurableValue() (below) always recover
  * this edit's true content even if a concurrent hydration race transiently
- * clobbers the canonical key afterward. Opportunistically prunes this
- * key's OTHER edit-fact entries down to just the one just written — pure
- * storage-growth bookkeeping, never a correctness dependency (the log is
- * read only by "how many entries exist right now", never by which specific
- * one is oldest/newest beyond that count).
+ * clobbers the canonical key afterward.
+ *
+ * SH.2.4 fix (Concurrent Local Edit Fact Safety) — retirement of this key's
+ * OTHER edit-fact entries used to be a re-scan taken AFTER this call's own
+ * writes, deleting every key that was not the one just published. Because
+ * ordinary edits are deliberately unlocked and synchronous (16th round,
+ * above), a genuinely concurrent OTHER tab's own commitLocalDomainRawSync()
+ * call can publish ITS fact at any point relative to this call's own
+ * statements — including strictly between this call's fact/canonical writes
+ * and that post-write re-scan. Such a re-scan cannot distinguish "a fact I
+ * already knew about and am superseding" from "a fact a different writer
+ * just published a moment ago" — it deleted both identically, so two tabs
+ * racing this function could each delete the OTHER's still-unresolved fact.
+ * See planOrdinaryEditFactCommit()'s own module doc in syncPayload.ts for
+ * the full root-cause writeup and the fix: `baselineFacts` is this key's
+ * local-edit-fact keyspace captured BEFORE any of this call's own writes —
+ * this writer's own observed frontier — and retirement is computed as a
+ * pure function of ONLY that snapshot, so a fact that did not exist yet
+ * when this call started is structurally unreachable by the plan, never a
+ * candidate for deletion no matter how this call's own writes and a
+ * concurrent tab's interleave. Same-value dedup (an existing baseline fact
+ * already carrying `nextRaw`'s exact bytes is reused instead of duplicated)
+ * is also handled by that same pure decision — see its own doc.
  */
 export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
   if (typeof window === "undefined") return "failed";
+  let canonicalRaw: string | null;
   try {
-    localStorage.getItem(key);
+    canonicalRaw = localStorage.getItem(key);
   } catch {
     return "failed";
+  }
+  // SH.2.4 — this key's local-edit-fact keyspace, snapshotted (keys AND
+  // their raw content) BEFORE any of this call's own writes. This is both
+  // the noop check's own input (via resolveEffectiveDurableRaw(), unchanged
+  // from before this round) and the frontier planOrdinaryEditFactCommit()
+  // below is allowed to retire from — see this function's own doc above.
+  const baselineFacts: LocalEditFactRecord[] = [];
+  for (const factKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
+    let raw: string | null;
+    try {
+      raw = localStorage.getItem(factKey);
+    } catch {
+      continue;
+    }
+    if (raw !== null) baselineFacts.push({ key: factKey, raw });
   }
   // SH.2.1 P1 fix (Codex finding #2, this round) — the noop check below
   // compares against the EFFECTIVE DURABLE value (canonical + any still-
@@ -1577,30 +1616,30 @@ export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDom
   // "expected previous" baseline — so decideLocalDomainCommit() can still
   // only return "write" or "noop", never "superseded": an ordinary edit is
   // always the user's freshest intent and is never rejected.
-  const durableRaw = readLatestDurableValue(key);
+  const durableRaw = resolveEffectiveDurableRaw(
+    canonicalRaw,
+    baselineFacts.map((fact) => fact.raw)
+  );
   const decision = decideLocalDomainCommit(durableRaw, durableRaw, nextRaw);
   if (decision === "noop") return "noop";
-  const editId = generateOpId();
-  const editFactKey = localEditFactKey(key, editId);
-  try {
-    localStorage.setItem(editFactKey, nextRaw);
-  } catch {
-    return "failed";
+  const plan = planOrdinaryEditFactCommit(baselineFacts, nextRaw, localEditFactKey(key, generateOpId()));
+  if (plan.writeNew) {
+    try {
+      localStorage.setItem(plan.ownFactKey, nextRaw);
+    } catch {
+      return "failed";
+    }
   }
   try {
     localStorage.setItem(key, nextRaw);
   } catch {
     return "failed";
   }
-  try {
-    for (const oldKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
-      if (oldKey !== editFactKey) {
-        try {
-          localStorage.removeItem(oldKey);
-        } catch {}
-      }
-    }
-  } catch {}
+  for (const staleKey of plan.keysToRetire) {
+    try {
+      localStorage.removeItem(staleKey);
+    } catch {}
+  }
   return "committed";
 }
 

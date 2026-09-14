@@ -3042,6 +3042,161 @@ export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
   },
 ];
 
+// ===== ORDINARY-EDIT FACT RETIREMENT (SH.2.4 — Concurrent Local Edit Fact
+// Safety) =====================================================================
+//
+// ROOT CAUSE: commitLocalDomainRawSync() (syncHelper.ts) published its own
+// edit fact, then "pruned" the key's local-edit-fact keyspace by RE-SCANNING
+// it AFTER that write and deleting every key that was not its own —
+// `for (const oldKey of snapshotKeysWithPrefix(...)) if (oldKey !== editFactKey)
+// removeItem(oldKey)`. Ordinary edits are deliberately unlocked and
+// synchronous (16th round, above) so a genuinely concurrent OTHER tab's own
+// commitLocalDomainRawSync() call can publish ITS fact at any point relative
+// to this one's own statements — including strictly BETWEEN this call's own
+// fact/canonical writes and this exact prune loop. That re-scan-after-write
+// re-scan has no way to distinguish "a fact I already knew about and am
+// superseding" from "a fact a different writer just published a moment ago,
+// completely unrelated to my own decision" — it deletes both identically.
+// Two tabs each publishing a fact and then pruning "everything but mine" can
+// therefore each delete the OTHER's still-unresolved fact, leaving
+// readLatestDurableValue() with no surviving evidence for either edit — the
+// exact failure this phase exists to close (see the 17th round's own
+// "DEFERRED — SH.2.3/SH.2.4" note above).
+//
+// THE FIX: never re-derive "what to delete" from a POST-write re-scan. Take
+// the local-edit-fact keyspace SNAPSHOT BEFORE this call's own writes (this
+// writer's OWN observed baseline — the exact same "frontier, captured once,
+// consumed once" discipline commitLocalDomainRaw() already applies for
+// hydration's `baselineEditFactIds` above) and retire ONLY keys that were
+// members of THAT snapshot. A fact that is not in the baseline — because it
+// did not exist yet when this call captured it — is structurally
+// unreachable by this decision: `planOrdinaryEditFactCommit()` below only
+// ever receives the baseline array as its universe of retirement candidates,
+// so it cannot name a key outside it no matter how it reasons. This is what
+// makes "never delete another writer's unresolved fact" hold BY
+// CONSTRUCTION, not by a runtime check that could itself race: retiring the
+// baseline is safe for the SAME reason hydration's retirement of
+// `baselineEditFactIds` is safe (see commitLocalDomainRaw's own "LOCAL-EDIT
+// FACT LIFECYCLE" doc) — every fact in it was already OBSERVED by this
+// decision (folded into the effective-durable-value read that `nextRaw` is
+// this writer's fresh response to), so this writer's own newer publish
+// genuinely supersedes it; a fact NOT in it was never observed, so this
+// writer has no basis — and, with this fix, no ABILITY — to declare it
+// obsolete.
+//
+// SAME-VALUE DEDUP (avoids unnecessary growth without any additional
+// deletion risk): if some baseline fact's raw content already equals
+// `nextRaw` byte-for-byte, that fact already durably records this exact
+// intent — publishing a second, physically-unique duplicate key would only
+// grow storage for zero informational gain (mirrors
+// planHydrationProvenanceDedup()'s own "already present, no new write
+// needed" rule above, applied here to the ordinary-edit fact log instead of
+// the hydration-provenance log). The matching fact is reused as `ownFactKey`
+// (kept, never retired) precisely because it is not obsolete: it already
+// carries the value this decision needed published, whether that fact
+// happens to be this writer's own earlier publish or a genuinely different
+// concurrent writer's. Every OTHER baseline fact (necessarily a different,
+// now-superseded value) is still retired exactly as the no-match case
+// retires the whole baseline.
+export interface LocalEditFactRecord {
+  key: string;
+  raw: string;
+}
+
+export interface OrdinaryEditFactCommitPlan {
+  /** Whether a NEW fact key needs to be written at `ownFactKey`. False when
+   * an existing baseline fact already carries `nextRaw`'s exact bytes. */
+  writeNew: boolean;
+  /** The fact key that durably represents `nextRaw` after this commit —
+   * either the freshly-generated `candidateFactKey`, or a reused baseline
+   * fact whose content already matched. Never retired by this same plan. */
+  ownFactKey: string;
+  /** Baseline fact keys to remove — always a SUBSET of `baselineFacts`,
+   * never a key outside it (see this section's own module doc for why that
+   * containment is the entire safety property this function exists to
+   * provide). */
+  keysToRetire: string[];
+}
+
+export function planOrdinaryEditFactCommit(
+  baselineFacts: LocalEditFactRecord[],
+  nextRaw: string,
+  candidateFactKey: string
+): OrdinaryEditFactCommitPlan {
+  const matching = baselineFacts.find((fact) => fact.raw === nextRaw);
+  const ownFactKey = matching ? matching.key : candidateFactKey;
+  const keysToRetire = baselineFacts.filter((fact) => fact.key !== ownFactKey).map((fact) => fact.key);
+  return { writeNew: !matching, ownFactKey, keysToRetire };
+}
+
+/**
+ * Reference cases for planOrdinaryEditFactCommit() — the REQUIRED cases from
+ * the SH.2.4 architectural contract. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_FACT_COMMIT_CASES, planOrdinaryEditFactCommit } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_FACT_COMMIT_CASES.forEach(c => {
+ *     const got = planOrdinaryEditFactCommit(c.baselineFacts, c.nextRaw, c.candidateFactKey);
+ *     const ok = got.writeNew === c.expected.writeNew && got.ownFactKey === c.expected.ownFactKey &&
+ *       JSON.stringify([...got.keysToRetire].sort()) === JSON.stringify([...c.expected.keysToRetire].sort());
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_FACT_COMMIT_CASES: Array<{
+  name: string;
+  baselineFacts: LocalEditFactRecord[];
+  nextRaw: string;
+  candidateFactKey: string;
+  expected: OrdinaryEditFactCommitPlan;
+}> = [
+  {
+    name: "required — first-ever edit for this key: no baseline, writes a new fact, retires nothing",
+    baselineFacts: [],
+    nextRaw: "A",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: [] },
+  },
+  {
+    name: "required — ordinary sequential edit: this writer's own prior fact is in its baseline and is genuinely superseded",
+    baselineFacts: [{ key: "F1", raw: "OLD" }],
+    nextRaw: "NEW",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: ["F1"] },
+  },
+  {
+    name: "required — SH.2.4 root cause: two concurrent writers' facts, BOTH observed in this decision's own baseline, are legitimately superseded together by a genuinely newer third value",
+    baselineFacts: [
+      { key: "F1", raw: "TAB-A" },
+      { key: "F2", raw: "TAB-B" },
+    ],
+    nextRaw: "TAB-C",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: ["F1", "F2"] },
+  },
+  {
+    name: "required — a fact NOT in the baseline can never appear in keysToRetire: an empty baseline retires nothing no matter what nextRaw is, even though a concurrent OTHER tab may have just published a fact this call never observed",
+    baselineFacts: [],
+    nextRaw: "WHATEVER",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: [] },
+  },
+  {
+    name: "required — same-value concurrent edit: an already-surviving baseline fact exactly matches nextRaw, so it is reused (not retired) and no duplicate fact is written",
+    baselineFacts: [{ key: "F1", raw: "SAME" }],
+    nextRaw: "SAME",
+    candidateFactKey: "candidate",
+    expected: { writeNew: false, ownFactKey: "F1", keysToRetire: [] },
+  },
+  {
+    name: "same-value dedup among an ambiguous multi-fact baseline: the matching sibling is kept, the genuinely different one is still retired as obsolete",
+    baselineFacts: [
+      { key: "F1", raw: "MATCH" },
+      { key: "F2", raw: "OTHER" },
+    ],
+    nextRaw: "MATCH",
+    candidateFactKey: "candidate",
+    expected: { writeNew: false, ownFactKey: "F1", keysToRetire: ["F2"] },
+  },
+];
+
 // ===== PROFILE-OWNED SYNC STATE (SH.2.1 P1, this round) =====
 //
 // Codex found a second architectural gap: deleteProfile() (profileStorage.ts)
