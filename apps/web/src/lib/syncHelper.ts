@@ -2128,6 +2128,175 @@ export async function commitConfirmedBaseline(
   return allOk;
 }
 
+// ── Hydration provenance (SH.2.2, Codex P1 "authority vs. hydration-
+// provenance" round) — a SECOND, DELIBERATELY NON-AUTHORITATIVE fact store,
+// separate from confirmed facts above ────────────────────────────────────
+//
+// Root cause — see isExactCloudValue()'s own doc in syncPayload.ts for the
+// full example: a domain being "cloud-won" at the DOMAIN level says nothing
+// about whether the WINNING VALUE a pull actually persists is byte-for-byte
+// the server's own value for that domain. Cross-domain reconciliation
+// (reconcilePlannerSnapshot in crossDayChecks.ts) can filter or extend a
+// cloud-won domain's winning value based on THIS DEVICE'S OWN local state in
+// ANOTHER domain (Days removing a day locally filters a sibling's items
+// referencing it; a newly cloud-won item can extend days[] with a day cloud
+// itself never listed). Recording that ALTERED value as a "confirmed fact"
+// under the server's own revision would assert something the server never
+// said — and, critically, is not even well-defined ACROSS TABS: two tabs
+// with DIFFERENT local state in the OTHER domain, reconciling the SAME GET
+// response, legitimately derive DIFFERENT winning values for THIS domain —
+// recording either as "the" confirmed value for that domain+revision would
+// manufacture a conflict the server itself has no ambiguity about at all.
+//
+// Confirmed facts (above) therefore now record ONLY a PURE cloud winner — a
+// winning value that canonically equals the literal cloud value this pull
+// fetched (see isExactCloudValue(), syncPayload.ts) — never a reconciliation
+// that altered it. But SH.2.2's original partial-apply-provenance guarantee
+// ("an already-applied domain from an aborted pull must remain identifiable
+// as hydration, not become pushable local intent") still has to hold for
+// the ALTERED case too — a reconciled-but-not-pure-cloud winner is JUST AS
+// much a hydration result as a pure one, and a REPLACEMENT pull must still
+// be able to recognize it as such rather than misreading disk content that
+// diverges from an (unratcheted) confirmed baseline as a genuine user edit.
+//
+// Hydration-provenance facts close that gap WITHOUT polluting confirmed
+// server authority: stored under their OWN prefix
+// (`dwp:sync:{userId}:{profileId}:hydrationFact:{domain}:{revision}:{instanceId}`
+// — deliberately the SAME physical shape as a confirmed fact, `{revision,
+// value}`, reusing the SAME parseConfirmedFactForDomain() parser — but under
+// a domain-parallel keyspace resolveConfirmedDomainState()/getConfirmedState()
+// NEVER scan, so they can never feed cross-tab "confirmed authority"
+// comparisons, never trigger "authority-changed"/conflict detection, and —
+// unlike confirmed facts — MULTIPLE hydration-provenance facts recorded for
+// the exact same domain+revision, even with DIFFERING values, are NOT an
+// error: each is independently a legitimate hydration result some tab
+// derived from its OWN local state at that moment; there is no single
+// "true" value to reconcile them down to, so no ambiguity/conflict
+// resolution logic exists for this store at all (a deliberate, structural
+// difference from confirmedFact's own read-time reduction) — hasHydrationProvenanceMatch()
+// below only ever asks "does ANY recorded fact for this domain match this
+// SPECIFIC candidate value", never "what is THE value for this revision".
+//
+// Consumed by each page's pull effect at the SAME point the existing
+// `contentOwnershipMismatch` substitution already runs (see
+// buildPreFetchPullBaseline's/buildPostFetchPullBaseline's own callers):
+// before computing `changedLocally` for a domain, if the fresh disk read
+// differs from this pull's own baseline, but a hydration-provenance fact at
+// a revision no newer than this pull's own cloudRevision records the EXACT
+// same value, the disk content is recognized as an earlier pull's own
+// hydration output rather than an unsynced edit — the SAME substitution
+// mechanism `contentOwnershipMismatch` already uses (never a NEW page-level
+// boolean/ref: one shared, testable predicate, symmetric across both
+// pages). A genuine local edit is unaffected: commitLocalDomainRawSync()
+// always publishes a local-edit fact, and loadEffectiveDurable*()/
+// readLatestDurableValue() already prefer a surviving edit fact over the
+// canonical key BEFORE this substitution is even consulted — hydration
+// provenance is only ever checked against the CANONICAL-key-derived
+// "current" value, so it can never override a genuine, still-unresolved
+// edit.
+//
+// No Web Lock is used for either the write or the read here (unlike
+// confirmed facts' getConfirmedStateAtomic()/recordConfirmedFact() pairing
+// — see confirmedAuthorityLockName's own doc above): there is no
+// authoritative "current true value" this store must ever agree on
+// atomically across tabs — each fact is independently valid on its own
+// terms, and a torn read here can, AT WORST, miss a legitimate match this
+// one time (the SAME cheap, permanently-unique-key write recordConfirmedFact()
+// itself used before the atomicity round — correct, just not linearizable),
+// falling through to the SAME existing local-edit/CAS protections that
+// already make an unnecessary "changedLocally" classification merely
+// wasteful (a fresh reconciliation redoes the exact same work), never
+// unsafe.
+function hydrationProvenancePrefix(userId: string, profileId: string, domain: ConfirmedDomainName): string {
+  return `dwp:sync:${userId}:${profileId}:hydrationFact:${domain}:`;
+}
+
+function hydrationProvenanceKey(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  revision: number,
+  instanceId: string
+): string {
+  return `${hydrationProvenancePrefix(userId, profileId, domain)}${revision}:${instanceId}`;
+}
+
+/**
+ * Durably records that a LOCALLY-RECONCILED hydration result (one this
+ * pull's own reconciliation produced, which is NOT byte-for-byte the
+ * server's own cloud value — see this section's own doc above) was written
+ * to `domain`'s local storage, tagged with the server revision it was
+ * reconciled against. A plain, unconditional `setItem` to a permanently-
+ * unique key — like recordConfirmedFact() before the atomicity round, this
+ * can never race with anything, from any tab, since no two calls ever
+ * target the same key. Returns `false` only on a genuine write exception
+ * (storage quota, disabled storage) — callers must treat that exactly like
+ * any other "required provenance could not be durably recorded" failure:
+ * fail the whole pull closed (new `"provenance-write-failed"` reason,
+ * syncPayload.ts) BEFORE any authority ratchet, ownership transfer,
+ * syncReady, or push — per this round's explicit requirement.
+ */
+export async function recordHydrationProvenance(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  revision: number,
+  value: unknown
+): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  const key = hydrationProvenanceKey(userId, profileId, domain, revision, generateOpId());
+  try {
+    localStorage.setItem(key, JSON.stringify({ revision, value }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Does ANY recorded hydration-provenance fact for (userId, profileId,
+ * domain), at a revision no newer than `maxRevision`, canonically equal
+ * `value`? See this section's own doc above for why this is an EXISTENCE
+ * check over independently-valid facts, never a single-value reduction like
+ * resolveConfirmedDomainState(). `maxRevision` bounds the search to facts
+ * this pull's OWN view of cloud could plausibly have produced or seen
+ * produced (never a revision NEWER than this pull's own cloudRevision,
+ * which this pull has no basis to trust yet) — pass `Number.POSITIVE_INFINITY`
+ * when this pull's own cloudRevision is unknown (a 204/unparseable
+ * response establishes no bound to check against either way, mirroring
+ * resolvePostFetchDomainBaseline's own null-cloudRevision handling).
+ */
+export function hasHydrationProvenanceMatch(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  maxRevision: number,
+  value: unknown
+): boolean {
+  if (typeof window === "undefined") return false;
+  const targetCanonical = canonicalizeJSON(value);
+  for (const key of snapshotKeysWithPrefix(hydrationProvenancePrefix(userId, profileId, domain))) {
+    let raw: string | null;
+    try {
+      raw = localStorage.getItem(key);
+    } catch {
+      continue;
+    }
+    if (raw === null) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const fact = parseConfirmedFactForDomain(domain, parsed);
+    if (fact === null) continue;
+    if (fact.revision > maxRevision) continue;
+    if (canonicalizeJSON(fact.value) === targetCanonical) return true;
+  }
+  return false;
+}
+
 // ── Pending operations (one UNLOCKED key PER opId — see module doc, 9th round) ──
 
 /**

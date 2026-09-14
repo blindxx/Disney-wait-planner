@@ -31,6 +31,8 @@ import {
   getConfirmedState,
   getConfirmedStateAtomic,
   commitConfirmedBaseline,
+  recordHydrationProvenance,
+  hasHydrationProvenanceMatch,
   getLocalContentOwner,
   setLocalContentOwner,
   selectPendingOpBatch,
@@ -47,10 +49,12 @@ import {
   resolvePostFetchDomainBaseline,
   decideStaleResponseRecovery,
   confirmedDomainResultsEqual,
+  isExactCloudValue,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
   type ConfirmedPlannerState,
   type ConfirmedDomainResult,
+  type AcceptedPlannerDomains,
 } from "@/lib/syncPayload";
 import {
   normalizeKey,
@@ -873,6 +877,15 @@ export default function LightningPage() {
         // auto-retried.
         domain: "plans" | "lightning" | "days";
         reason: "authority-unavailable";
+      }
+    | {
+        // SH.2.2 (Codex P1 "authority vs. hydration-provenance" round) —
+        // mirrors plans/page.tsx's own UnusableDomain arm exactly, see its
+        // own detailed doc: recordDomainProvenance() could not durably
+        // record EITHER confirmed server authority OR hydration
+        // provenance for this domain — FAIL CLOSED, never auto-retried.
+        domain: "plans" | "lightning" | "days";
+        reason: "provenance-write-failed";
       };
 
   /**
@@ -1248,6 +1261,10 @@ export default function LightningPage() {
                 console.error(
                   `SH.2.2: pull deferred — ${u.domain}'s confirmed authority could not be established atomically (Web Locks unavailable); refusing to commit a winner whose authority cannot be safely verified. Not retrying automatically — this is a permanent environment limitation.`
                 );
+              } else if (u.reason === "provenance-write-failed") {
+                console.error(
+                  `SH.2.2: pull deferred — ${u.domain}'s confirmed-authority or hydration-provenance fact could not be durably recorded (write failure or cross-tab conflict); refusing to advance ownership/syncReady past an unrecorded winner. Not retrying automatically.`
+                );
               } else {
                 console.error(
                   `SH.2.2: pull deferred — ${u.domain}'s local hydration commit was superseded by a newer local edit; the edit survives untouched. Scheduling a replacement pull.`
@@ -1360,6 +1377,40 @@ export default function LightningPage() {
           winnerSelectionAuthority = { ...winnerSelectionAuthority, [domain]: fresh[domain] };
           return true;
         }
+        // SH.2.2 (Codex P1 "authority vs. hydration-provenance" round) —
+        // mirrors plans/page.tsx's own recordDomainProvenance() exactly,
+        // see its own detailed doc: records EITHER confirmed server
+        // authority (a PURE cloud winner) OR hydration provenance (a
+        // locally-reconciled winner), whichever applies, for ONE domain.
+        // Caller MUST `return` immediately on `false`.
+        async function recordDomainProvenance(
+          domain: "plans" | "lightning" | "days",
+          candidateValue: unknown,
+          cloudValue: unknown,
+          confirmedAccepted: AcceptedPlannerDomains,
+          hydrationValue: unknown
+        ): Promise<boolean> {
+          if (!pullCtx.userId || planner?.revision == null) return true; // nothing safe to record against
+          if (isExactCloudValue(candidateValue, cloudValue)) {
+            const ok = await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, confirmedAccepted);
+            if (!ok) {
+              handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
+              return false;
+            }
+            if (!isPullCurrent()) return false;
+            if (!(await ratchetWinnerSelectionAuthority(domain))) {
+              handlePullDeferral([...supersededDomains, { domain, reason: "authority-unavailable" }]);
+              return false;
+            }
+            return true;
+          }
+          const ok = await recordHydrationProvenance(pullCtx.userId, pullCtx.profileId, domain, planner.revision, hydrationValue);
+          if (!ok) {
+            handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
+            return false;
+          }
+          return true;
+        }
 
         const unusableDomains = collectUnusableDomains(baselineOutcomes);
         if (unusableDomains.length > 0) {
@@ -1408,9 +1459,48 @@ export default function LightningPage() {
         // identity, every "current" fed into a conflict decision below is
         // forced to equal this pull's own effective baseline instead of a
         // real (possibly foreign-owned) read.
-        const itemsForComparison = contentOwnershipMismatch ? effectiveBaseline.items : currentItems;
-        const daysForComparison = contentOwnershipMismatch ? effectiveBaseline.days : currentDays;
-        const plansRawForComparison = contentOwnershipMismatch ? effectiveBaseline.plansRaw : currentPlansRawDurable;
+        // SH.2.2 (Codex P1 "authority vs. hydration-provenance" round) —
+        // HYDRATION-PROVENANCE SUBSTITUTION. Mirrors plans/page.tsx
+        // exactly, see its own detailed doc: the SAME mechanism the
+        // ownership-mismatch substitution immediately below already uses,
+        // consulted for a different reason — disk content that diverges
+        // from this pull's own baseline but matches an EARLIER pull's own
+        // recorded hydration-provenance fact (at a revision no newer than
+        // this pull's own cloudRevision) is recognized as that earlier
+        // pull's own hydration output, not an unsynced user edit.
+        const itemsHydrationExplained =
+          !!pullCtx.userId &&
+          hasHydrationProvenanceMatch(
+            pullCtx.userId,
+            pullCtx.profileId,
+            "lightning",
+            planner?.revision ?? Number.POSITIVE_INFINITY,
+            { version: 1, items: currentItems }
+          );
+        const daysHydrationExplained =
+          !!pullCtx.userId &&
+          hasHydrationProvenanceMatch(
+            pullCtx.userId,
+            pullCtx.profileId,
+            "days",
+            planner?.revision ?? Number.POSITIVE_INFINITY,
+            currentDays
+          );
+        const plansHydrationExplained =
+          !!pullCtx.userId &&
+          hasHydrationProvenanceMatch(
+            pullCtx.userId,
+            pullCtx.profileId,
+            "plans",
+            planner?.revision ?? Number.POSITIVE_INFINITY,
+            { version: 1, items: parsePlansRawItems(currentPlansRawDurable) }
+          );
+        const itemsForComparison =
+          contentOwnershipMismatch || itemsHydrationExplained ? effectiveBaseline.items : currentItems;
+        const daysForComparison =
+          contentOwnershipMismatch || daysHydrationExplained ? effectiveBaseline.days : currentDays;
+        const plansRawForComparison =
+          contentOwnershipMismatch || plansHydrationExplained ? effectiveBaseline.plansRaw : currentPlansRawDurable;
 
         // SH.2 architecture (Codex P1, 2nd round) — resolve the SIBLING
         // (Plans) dataset's own local-vs-cloud CANDIDATE (winning items,
@@ -1521,18 +1611,17 @@ export default function LightningPage() {
           // noop). Mirrors plans/page.tsx.
           if (primaryPersistSucceeded) {
             itemsBaselineRef.current = winningLightningItems;
-            // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Lightning's own
-            // confirmed-baseline fact right now — see this pull's own doc
-            // above (near `supersededDomains`).
-            if (pullCtx.userId && planner?.revision != null) {
-              await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
-                lightning: { version: 1, items: winningLightningItems },
-              });
-              if (!isPullCurrent()) return;
-              if (!(await ratchetWinnerSelectionAuthority("lightning"))) {
-                handlePullDeferral([...supersededDomains, { domain: "lightning", reason: "authority-unavailable" }]);
-                return;
-              }
+            // SH.2.2 — PARTIAL-APPLY PROVENANCE, refined by the "authority
+            // vs. hydration-provenance" round — mirrors plans/page.tsx
+            // exactly, see its own detailed doc.
+            if (!(await recordDomainProvenance(
+              "lightning",
+              winningLightningItems,
+              cloudLightningItems,
+              { lightning: { version: 1, items: winningLightningItems } },
+              { version: 1, items: winningLightningItems }
+            ))) {
+              return;
             }
           }
         }
@@ -1606,13 +1695,17 @@ export default function LightningPage() {
         // baseline fact right now, mirroring the ORIGINAL end-of-pull
         // eligibility condition exactly — see this pull's own doc above
         // (near `supersededDomains`).
-        if (plansHydrationWritten && planner?.plans && pullCtx.userId && planner?.revision != null) {
-          await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
-            plans: { version: planner.plans.version, items: winningPlansItems },
-          });
-          if (!isPullCurrent()) return;
-          if (!(await ratchetWinnerSelectionAuthority("plans"))) {
-            handlePullDeferral([...supersededDomains, { domain: "plans", reason: "authority-unavailable" }]);
+        if (plansHydrationWritten && planner?.plans) {
+          // SH.2.2 "authority vs. hydration-provenance" round — purity is
+          // checked against `planner.plans.items` alone — mirrors
+          // plans/page.tsx's own Lightning-sibling treatment exactly.
+          if (!(await recordDomainProvenance(
+            "plans",
+            winningPlansItems,
+            planner.plans.items,
+            { plans: { version: planner.plans.version, items: winningPlansItems } },
+            { version: 1, items: winningPlansItems }
+          ))) {
             return;
           }
         }
@@ -1694,16 +1787,11 @@ export default function LightningPage() {
           primaryPersistSucceeded &&
           !plansChangedLocally &&
           !daysChangedLocally &&
-          !daysWriteFailed &&
-          pullCtx.userId &&
-          planner?.revision != null
+          !daysWriteFailed
         ) {
-          await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
-            days: winningDays,
-          });
-          if (!isPullCurrent()) return;
-          if (!(await ratchetWinnerSelectionAuthority("days"))) {
-            handlePullDeferral([...supersededDomains, { domain: "days", reason: "authority-unavailable" }]);
+          // SH.2.2 "authority vs. hydration-provenance" round — mirrors
+          // plans/page.tsx exactly, see its own detailed doc.
+          if (!(await recordDomainProvenance("days", winningDays, cloudDaysOrder ?? null, { days: winningDays }, winningDays))) {
             return;
           }
         }

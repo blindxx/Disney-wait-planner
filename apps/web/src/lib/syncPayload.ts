@@ -532,6 +532,99 @@ export const DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES: Array<{
 ];
 
 /**
+ * SH.2.2 (Codex P1 "authority vs. hydration-provenance" round) — root cause:
+ * a domain being "cloud-won" at the DOMAIN level (`!itemsChangedLocally &&
+ * cloudItems !== null`) says nothing about whether the WINNING VALUE this
+ * pull actually persists is byte-for-byte the server's own value. Cross-
+ * domain reconciliation (reconcilePlannerSnapshot in crossDayChecks.ts) can
+ * ALTER a cloud-won domain's winning value — filtering a sibling's items
+ * that reference a day the winning days[] removed, or extending days[]
+ * itself with a day a cloud-won item newly references — so "cloud won this
+ * domain" and "this domain's winning value literally equals what the server
+ * returned for it" are DIFFERENT questions. Recording the ALTERED value as
+ * a confirmed fact under the server's own revision asserts something false:
+ * "the server's canonical value for this domain at this revision was X",
+ * when the server actually held Y. A concrete instance (this round's own
+ * task): GET rev7 returns Plans={A,B}; this device's local Days already
+ * lacks the day B belongs to; reconciliation locally, correctly, filters B
+ * out of winningPlanItems — but the server's OWN Plans@rev7 is still
+ * {A,B}, not {A}. Two tabs (or devices) with DIFFERENT local Days state
+ * reconciling the SAME GET response would derive DIFFERENT "winning" Plans
+ * values and, under the old (pre-this-round) code, both record THEIR OWN
+ * value as if it were "the" confirmed Plans@rev7 — a spurious, entirely
+ * artificial conflict for a domain the server itself has no ambiguity
+ * about at all.
+ *
+ * isExactCloudValue() is the gate: a candidate winning value is eligible to
+ * be recorded as CONFIRMED SERVER AUTHORITY (commitConfirmedBaseline, see
+ * syncHelper.ts) only when it canonically equals the literal cloud value
+ * this pull actually fetched for that domain — never merely "cloud won the
+ * domain-level decision". `cloudValue` of `null`/`undefined` (no cloud
+ * payload for this domain at all) can never make a candidate "the exact
+ * cloud value" — there is nothing to be exactly equal to — so it always
+ * returns false in that case, correctly routing such a domain to hydration
+ * provenance instead (see recordHydrationProvenance()'s own doc in
+ * syncHelper.ts for that separate, non-authoritative channel).
+ */
+export function isExactCloudValue(candidateValue: unknown, cloudValue: unknown): boolean {
+  if (cloudValue === null || cloudValue === undefined) return false;
+  return canonicalizeJSON(candidateValue) === canonicalizeJSON(cloudValue);
+}
+
+/**
+ * Reference cases for isExactCloudValue() — the REQUIRED cases from the
+ * SH.2.2 "authority vs. hydration-provenance" round. Run from Node:
+ *   import { DEV_IS_EXACT_CLOUD_VALUE_CASES, isExactCloudValue } from "@/lib/syncPayload";
+ *   DEV_IS_EXACT_CLOUD_VALUE_CASES.forEach(c => {
+ *     const got = isExactCloudValue(c.candidateValue, c.cloudValue);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_EXACT_CLOUD_VALUE_CASES: Array<{
+  name: string;
+  candidateValue: unknown;
+  cloudValue: unknown;
+  expected: boolean;
+}> = [
+  {
+    name: "pure cloud winner — candidate IS the literal cloud value — eligible for confirmed authority",
+    candidateValue: { version: 1, items: ["A", "B"] },
+    cloudValue: { version: 1, items: ["A", "B"] },
+    expected: true,
+  },
+  {
+    name: "canonical equality — differently-ordered keys still count as the exact cloud value",
+    candidateValue: { items: ["A", "B"], version: 1 },
+    cloudValue: { version: 1, items: ["A", "B"] },
+    expected: true,
+  },
+  {
+    name: "root example — reconciliation filtered B out locally (Days removed B's day): candidate {A} != cloud {A,B} — NOT the exact cloud value, must not become a confirmed fact",
+    candidateValue: { version: 1, items: ["A"] },
+    cloudValue: { version: 1, items: ["A", "B"] },
+    expected: false,
+  },
+  {
+    name: "reconciliation EXTENDED a domain beyond cloud's own value (e.g. days[] gained a day from a newly cloud-won item) — still NOT the exact cloud value",
+    candidateValue: ["day1", "day2", "day3"],
+    cloudValue: ["day1", "day2"],
+    expected: false,
+  },
+  {
+    name: "no cloud payload for this domain at all (null) — never eligible, regardless of what the candidate is",
+    candidateValue: { version: 1, items: [] },
+    cloudValue: null,
+    expected: false,
+  },
+  {
+    name: "no cloud payload for this domain at all (undefined) — never eligible",
+    candidateValue: [],
+    cloudValue: undefined,
+    expected: false,
+  },
+];
+
+/**
  * Reference cases for resolveConfirmedDomainState() — the REQUIRED cases
  * from the 16th round's architectural contract. Run from Node:
  *   import { DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES, resolveConfirmedDomainState } from "@/lib/syncPayload";
@@ -2330,6 +2423,12 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
     expected: true,
   },
   {
+    name: "SH.2.2 authority-vs-provenance round — a hydration-provenance fact for this profile, under some userId, is matched without knowing the userId in advance (SAME structural shape as a confirmed fact, so deletion coverage is automatic)",
+    key: "dwp:sync:user-abc123:my-family:hydrationFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
     name: "required case 1 — a pending op for this profile, under some userId, is matched",
     key: "dwp:sync:user-abc123:my-family:pendingOp:op-321",
     profileId: "my-family",
@@ -2350,6 +2449,12 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
   {
     name: "required case 2 — a different profile's confirmed fact, even under the SAME userId, must never be matched",
     key: "dwp:sync:user-abc123:other-profile:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a different profile's hydration-provenance fact must never be matched",
+    key: "dwp:sync:user-abc123:other-profile:hydrationFact:plans:7:op-999",
     profileId: "my-family",
     expected: false,
   },
@@ -2556,13 +2661,32 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
 // transient race a fresh pull could resolve — mirrors
 // commitLocalDomainRaw()'s own "unavailable" status, which
 // isLocalDomainCommitSuccess() also never treats as retryable.
+//
+// CODEX P1 "AUTHORITY VS. HYDRATION-PROVENANCE" ROUND — two DISTINCT durable
+// records can now be written after a domain's own hydration commit succeeds
+// (see isExactCloudValue()'s own doc above and recordHydrationProvenance()'s
+// in syncHelper.ts): commitConfirmedBaseline() for a PURE cloud winner, or
+// recordHydrationProvenance() for a locally-reconciled one. EITHER write can
+// fail (a real I/O exception, or — for the confirmed-fact path only — a
+// genuine cross-tab ambiguity at that exact domain/revision). Required this
+// round: "on persistence failure/conflict, fail closed before authority
+// ratchet, ownership transfer, syncReady, or push." `"provenance-write-failed"`
+// is the ONE new reason covering BOTH writers — the caller (each page)
+// checks the SAME boolean return either write already produced and, on
+// `false`, defers the whole pull via this reason before EVER reaching the
+// ratchet/ownership/syncReady/push steps that follow it in the same
+// sequence, exactly as this round requires. Never auto-retried below —
+// same treatment as "authority-unavailable": a fresh pull cannot itself
+// resolve a write-time conflict or a genuine storage failure, so retrying
+// blindly would just repeat it.
 export type UnusableDomainReason =
   | "conflict"
   | "stale-response"
   | "unusable-response"
   | "local-edit-superseded"
   | "authority-changed"
-  | "authority-unavailable";
+  | "authority-unavailable"
+  | "provenance-write-failed";
 
 export function decideStaleResponseRecovery(
   unusableDomains: Array<{ reason: UnusableDomainReason }>
@@ -2581,7 +2705,10 @@ export function decideStaleResponseRecovery(
   // round's "make confirmed-authority scans atomic" fix) is deliberately
   // EXCLUDED from the always-safe set above — falls through to the default
   // "no-retry" below — since it reflects a permanent environment limitation
-  // (no Web Locks), which a fresh pull cannot fix.
+  // (no Web Locks), which a fresh pull cannot fix. "provenance-write-failed"
+  // (the "authority vs. hydration-provenance" round) is EXCLUDED for the
+  // same reason: a real I/O exception or a genuine cross-tab confirmed-fact
+  // conflict is not something blindly retrying this same pull can resolve.
   return unusableDomains.every(
     (d) => d.reason === "stale-response" || d.reason === "local-edit-superseded" || d.reason === "authority-changed"
   )
@@ -2702,6 +2829,21 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
     name: "SH.2.2 atomic-scans round — an authority-unavailable domain blocks retry even when every other domain is merely authority-changed/stale-response/local-edit-superseded (all otherwise-safe reasons)",
     unusableDomains: [
       { reason: "authority-unavailable" },
+      { reason: "authority-changed" },
+      { reason: "stale-response" },
+      { reason: "local-edit-superseded" },
+    ],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a single provenance-write-failed domain (confirmed-fact or hydration-provenance write did not durably succeed) must NEVER auto-retry, even alone",
+    unusableDomains: [{ reason: "provenance-write-failed" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a provenance-write-failed domain blocks retry even when every other domain is merely authority-changed/stale-response/local-edit-superseded",
+    unusableDomains: [
+      { reason: "provenance-write-failed" },
       { reason: "authority-changed" },
       { reason: "stale-response" },
       { reason: "local-edit-superseded" },
