@@ -33,6 +33,7 @@ import {
   commitConfirmedBaseline,
   recordHydrationProvenance,
   hasHydrationProvenanceMatch,
+  hasSurvivingEditFact,
   getLocalContentOwner,
   setLocalContentOwner,
   selectPendingOpBatch,
@@ -1393,18 +1394,25 @@ export default function LightningPage() {
           if (!pullCtx.userId || planner?.revision == null) return true; // nothing safe to record against
           if (isExactCloudValue(candidateValue, cloudValue)) {
             const ok = await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, confirmedAccepted);
+            // SH.2.2 (Codex P1 "recheck pull context after the authority
+            // ratchet" round) — mirrors plans/page.tsx exactly, see its
+            // own detailed doc: recheck IMMEDIATELY after every awaited
+            // step, BEFORE reacting to its own result.
+            if (!isPullCurrent()) return false;
             if (!ok) {
               handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
               return false;
             }
+            const ratchetOk = await ratchetWinnerSelectionAuthority(domain);
             if (!isPullCurrent()) return false;
-            if (!(await ratchetWinnerSelectionAuthority(domain))) {
+            if (!ratchetOk) {
               handlePullDeferral([...supersededDomains, { domain, reason: "authority-unavailable" }]);
               return false;
             }
             return true;
           }
           const ok = await recordHydrationProvenance(pullCtx.userId, pullCtx.profileId, domain, planner.revision, hydrationValue);
+          if (!isPullCurrent()) return false;
           if (!ok) {
             handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
             return false;
@@ -1468,8 +1476,16 @@ export default function LightningPage() {
         // recorded hydration-provenance fact (at a revision no newer than
         // this pull's own cloudRevision) is recognized as that earlier
         // pull's own hydration output, not an unsynced user edit.
+        // SH.2.2 (Codex P1 "hydration-provenance causality" round) —
+        // mirrors plans/page.tsx exactly, see its own detailed doc:
+        // hasSurvivingEditFact(key) is an ABSOLUTE VETO, checked FIRST — a
+        // genuine, newer local edit whose bytes coincidentally match some
+        // earlier hydration output must never be masked by that historical
+        // match. Hydration provenance is consulted ONLY when no local-edit
+        // fact currently survives for this domain's canonical key.
         const itemsHydrationExplained =
           !!pullCtx.userId &&
+          !hasSurvivingEditFact(lightningKeyRef.current) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,
@@ -1479,6 +1495,7 @@ export default function LightningPage() {
           );
         const daysHydrationExplained =
           !!pullCtx.userId &&
+          !hasSurvivingEditFact(daysKeyRef.current) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,
@@ -1488,6 +1505,7 @@ export default function LightningPage() {
           );
         const plansHydrationExplained =
           !!pullCtx.userId &&
+          !hasSurvivingEditFact(profileKeysForPull.plans) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,

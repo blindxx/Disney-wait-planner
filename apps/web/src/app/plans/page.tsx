@@ -88,6 +88,7 @@ import {
   commitConfirmedBaseline,
   recordHydrationProvenance,
   hasHydrationProvenanceMatch,
+  hasSurvivingEditFact,
   getLocalContentOwner,
   setLocalContentOwner,
   selectPendingOpBatch,
@@ -2587,18 +2588,34 @@ export default function PlansPage() {
           if (!pullCtx.userId || planner?.revision == null) return true; // nothing safe to record against
           if (isExactCloudValue(candidateValue, cloudValue)) {
             const ok = await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, confirmedAccepted);
+            // SH.2.2 (Codex P1 "recheck pull context after the authority
+            // ratchet" round) — recheck IMMEDIATELY after every awaited
+            // step in this function, BEFORE reacting to its own result: an
+            // auth/profile transition during ANY of these awaits must
+            // never let this stale continuation mutate authority,
+            // ownership, syncReady, or even schedule a deferral/retry on
+            // behalf of an identity this pull no longer represents. A
+            // stale continuation returns `false` SILENTLY here (no
+            // handlePullDeferral call — mirrors this file's established
+            // `if (!isPullCurrent()) return;` convention everywhere else;
+            // handlePullDeferral's own retry-scheduling already no-ops for
+            // a stale pull, but calling it at all is unnecessary noise for
+            // an identity this continuation no longer speaks for).
+            if (!isPullCurrent()) return false;
             if (!ok) {
               handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
               return false;
             }
+            const ratchetOk = await ratchetWinnerSelectionAuthority(domain);
             if (!isPullCurrent()) return false;
-            if (!(await ratchetWinnerSelectionAuthority(domain))) {
+            if (!ratchetOk) {
               handlePullDeferral([...supersededDomains, { domain, reason: "authority-unavailable" }]);
               return false;
             }
             return true;
           }
           const ok = await recordHydrationProvenance(pullCtx.userId, pullCtx.profileId, domain, planner.revision, hydrationValue);
+          if (!isPullCurrent()) return false;
           if (!ok) {
             handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
             return false;
@@ -2702,15 +2719,32 @@ export default function PlansPage() {
         // reconciliation below is free to redo the same work cleanly,
         // rather than treating stale hydration bytes as protected local
         // intent eligible to be pushed. A genuine, still-unresolved local
-        // edit is unaffected: `current*` above already prefers a
-        // surviving edit fact over canonical bytes BEFORE this check ever
-        // runs, so a real edit would have to coincidentally byte-match
-        // some prior reconciliation's output to be wrongly explained away
-        // here — not a realistic collision for planner content. Uses the
-        // SAME wrapped shape recordDomainProvenance() below writes, so
-        // write and match sides always compare apples to apples.
+        // edit is unaffected — but NOT merely because its bytes are
+        // unlikely to coincidentally match a prior reconciliation: SH.2.2
+        // (Codex P1 "hydration-provenance causality" round) makes this a
+        // STRUCTURAL guarantee, not a probabilistic one. An edit that
+        // reverts to content byte-identical to some earlier hydration
+        // output — undo, or simply editing back to the same state — is
+        // still a genuine, newer edit, and value-only matching alone
+        // cannot tell the difference from stale hydration bytes. The fix:
+        // hasSurvivingEditFact(key) is checked FIRST and is an ABSOLUTE
+        // VETO — hydration provenance is consulted ONLY when NO local-edit
+        // fact currently survives for this domain's canonical key at all.
+        // LOCAL-EDIT FACT LIFECYCLE (commitLocalDomainRaw's own doc)
+        // guarantees any successful hydration commit already retired every
+        // edit fact it captured, so a fact surviving here can only be
+        // NEWER than the last hydration commit — never a leftover from
+        // one — meaning "no surviving edit fact" is exactly the causal
+        // signal "the most recent durable-authority-changing event for
+        // this key WAS a hydration commit, not a user edit" this round
+        // requires. This makes hydration provenance mean "still causally
+        // attributable to hydration", not merely "byte-matches something
+        // hydration once produced". Uses the SAME wrapped shape
+        // recordDomainProvenance() below writes, so write and match sides
+        // always compare apples to apples.
         const itemsHydrationExplained =
           !!pullCtx.userId &&
+          !hasSurvivingEditFact(planKeyRef.current) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,
@@ -2720,6 +2754,7 @@ export default function PlansPage() {
           );
         const daysHydrationExplained =
           !!pullCtx.userId &&
+          !hasSurvivingEditFact(daysKeyRef.current) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,
@@ -2729,6 +2764,7 @@ export default function PlansPage() {
           );
         const lightningHydrationExplained =
           !!pullCtx.userId &&
+          !hasSurvivingEditFact(profileKeysForPull.lightning) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,

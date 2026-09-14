@@ -1020,6 +1020,32 @@ export function readLatestDurableValue(key: string): string | null {
   return resolveEffectiveDurableRaw(canonicalRaw, factRawValues);
 }
 
+/**
+ * SH.2.2 (Codex P1 "hydration-provenance causality" round) — does a
+ * currently-surviving local-edit fact exist for `key` at all, right now?
+ * See hasHydrationProvenanceMatch's own doc above for WHY this matters:
+ * hydration provenance must mean "these bytes are still causally
+ * attributable to hydration", never merely "these bytes happen to match
+ * something a past hydration produced". A local-edit fact currently
+ * existing for this key means the MOST RECENT durable-authority-changing
+ * event for it was a genuine user edit — LOCAL-EDIT FACT LIFECYCLE (see
+ * commitLocalDomainRaw's own doc) guarantees that ANY successful hydration
+ * commit already retired every edit fact it captured as its own
+ * `baselineEditFactIds` frontier, so a fact surviving THIS check can only
+ * be newer than the LAST hydration commit for this key — never a stale
+ * leftover from one. Callers (each page's hydration-provenance
+ * consultation) must treat a `true` result as an absolute veto: skip the
+ * hydration-provenance lookup entirely, regardless of whether the edit's
+ * OWN bytes happen to coincide with some historical hydration-provenance
+ * record's value — an edit that reverts to old content is still a genuine,
+ * newer edit, and a value-only match (ignoring this causal signal) would
+ * silently let cloud/reconciliation win over it, exactly the "old
+ * hydration facts mask new local edits" failure class this round closes.
+ */
+export function hasSurvivingEditFact(key: string): boolean {
+  return snapshotKeysWithPrefix(localEditFactPrefix(key)).length > 0;
+}
+
 function localDomainCommitLockName(key: string): string {
   return `dwp:localDomainCommit:${key}`;
 }
@@ -2046,6 +2072,26 @@ async function recordConfirmedFact(
       // to a failure, and never blocks pruning from being retried on a
       // later call.
     }
+    // SH.2.2 (Codex P1 "prune superseded hydration provenance" round) —
+    // CROSS-STORE prune: genuine CONFIRMED authority now exists for this
+    // domain AT this revision (this call's own CAS-protected commit
+    // already proved the canonical key holds exactly what this write
+    // recorded), so any hydration-provenance record AT OR BELOW this
+    // revision — from any writer, this tab or another — can never again
+    // explain current disk content. `<=`, not `<`: unlike hydration
+    // provenance's OWN self-pruning (which preserves same-revision
+    // siblings from a genuinely concurrent writer, since neither can prove
+    // the other is stale), confirmed authority is a strictly stronger,
+    // single-truth signal that supersedes even same-revision hydration
+    // records — see pruneHydrationProvenanceFacts's own doc below. Runs
+    // regardless of this call's own `success` flag: a confirmed-fact
+    // AMBIGUITY (two different values at the same revision) is a separate
+    // question from whether disk has moved past older hydration bytes,
+    // which this write's own successful CAS-protected commit already
+    // settled independently.
+    try {
+      pruneHydrationProvenanceFacts(userId, profileId, domain, (r) => r <= revision);
+    } catch {}
     return success;
   };
   if (hasLocalDomainSerialization()) {
@@ -2236,6 +2282,63 @@ function hydrationProvenanceKey(
  * syncPayload.ts) BEFORE any authority ratchet, ownership transfer,
  * syncReady, or push — per this round's explicit requirement.
  */
+/**
+ * SH.2.2 (Codex P1 "prune superseded hydration provenance" round) — deletes
+ * every hydration-provenance fact for (userId, profileId, domain) that
+ * `isPrunable(factRevision)` accepts. Shared by recordHydrationProvenance()
+ * (below — self-prunes STRICTLY OLDER records on every new write: `r <
+ * revision`, preserving same-revision siblings a genuinely concurrent OTHER
+ * writer may have recorded for the identical GET response) and
+ * recordConfirmedFact() (above — cross-store-prunes records `r <= revision`
+ * once genuine CONFIRMED authority is established AT OR BELOW that
+ * revision, a strictly stronger signal that supersedes any hydration
+ * record at or below it, from any writer).
+ *
+ * Why pruning strictly-older records is safe at all: a hydration-provenance
+ * record can only ever "explain" CURRENT disk content — see
+ * hasHydrationProvenanceMatch's own doc. commitLocalDomainRaw()'s CAS
+ * guarantees at most one writer's value can ever land on a given canonical
+ * key at a time; the moment ANY later write (hydration OR confirmed, this
+ * tab or another) succeeds for that key, it PROVES the canonical key has
+ * moved on — every OLDER record, from any writer, can never again match
+ * current disk, so deleting it loses nothing a live pull could still need.
+ * This is the exact mechanism that keeps this store BOUNDED (never
+ * accumulating full historical planner snapshots): the keyspace for one
+ * domain only ever holds however many DISTINCT values genuinely concurrent
+ * writers produced at the CURRENT frontier revision — typically zero or
+ * one, occasionally a few during a real race, never growing across
+ * repeated ordinary reconciliations.
+ */
+function pruneHydrationProvenanceFacts(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  isPrunable: (factRevision: number) => boolean
+): void {
+  for (const key of snapshotKeysWithPrefix(hydrationProvenancePrefix(userId, profileId, domain))) {
+    let raw: string | null;
+    try {
+      raw = localStorage.getItem(key);
+    } catch {
+      continue;
+    }
+    if (raw === null) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const fact = parseConfirmedFactForDomain(domain, parsed);
+    if (fact === null) continue;
+    if (isPrunable(fact.revision)) {
+      try {
+        localStorage.removeItem(key);
+      } catch {}
+    }
+  }
+}
+
 export async function recordHydrationProvenance(
   userId: string,
   profileId: string,
@@ -2247,10 +2350,16 @@ export async function recordHydrationProvenance(
   const key = hydrationProvenanceKey(userId, profileId, domain, revision, generateOpId());
   try {
     localStorage.setItem(key, JSON.stringify({ revision, value }));
-    return true;
   } catch {
     return false;
   }
+  try {
+    pruneHydrationProvenanceFacts(userId, profileId, domain, (r) => r < revision);
+  } catch {
+    // Best-effort pruning failure never flips an already-durable write to a
+    // failure — mirrors recordConfirmedFact's own established convention.
+  }
+  return true;
 }
 
 /**
