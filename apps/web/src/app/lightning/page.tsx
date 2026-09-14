@@ -29,33 +29,28 @@ import {
   registerUnloadSync,
   cancelScheduledSync,
   getConfirmedState,
-  getConfirmedStateAtomic,
-  commitConfirmedBaseline,
-  recordHydrationProvenance,
   hasHydrationProvenanceMatch,
   hasSurvivingEditFact,
   getLocalContentOwner,
   setLocalContentOwner,
   selectPendingOpBatch,
   reconcilePendingOperations,
-  commitLocalDomainRaw,
   commitLocalDomainRawSync,
-  isLocalDomainCommitSuccess,
+  commitDomainHydration,
   beginPullContext,
   isPullContextCurrent,
   readLatestDurableValue,
+  type DomainHydrationCommitResult,
 } from "@/lib/syncHelper";
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
   decideStaleResponseRecovery,
-  confirmedDomainResultsEqual,
   isExactCloudValue,
   type DomainPreFetchSnapshot,
   type DomainBaselineOutcome,
   type ConfirmedPlannerState,
   type ConfirmedDomainResult,
-  type AcceptedPlannerDomains,
 } from "@/lib/syncPayload";
 import {
   normalizeKey,
@@ -1293,131 +1288,71 @@ export default function LightningPage() {
         // (syncPayload.ts) — a STRICTER, DIFFERENT question than "is the
         // current state still usable relative to cloudRevision". No longer
         // calls buildPostFetchPullBaseline()/collectUnusableDomains() at all.
-        function authorityRevisionOf<T>(result: ConfirmedDomainResult<T>): number | null {
+        function authorityRevisionOf(result: ConfirmedDomainResult<unknown>): number | null {
           if (result.status === "confirmed") return result.fact.revision;
           if (result.status === "conflict") return result.revision;
           return null;
         }
-        function checkAuthorityChanged<T>(
-          unusable: UnusableDomain[],
+        // SH.2.2 ("stop adding isolated authority checks — consolidate
+        // hydration commit semantics" round) — mirrors plans/page.tsx's own
+        // commitDomain() exactly, see its own detailed doc: REPLACES the
+        // previous three-separate-lock-cycle pattern with ONE call into
+        // commitDomainHydration() (syncHelper.ts), which holds
+        // confirmedAuthorityLockName()'s lock for the whole critical
+        // section (authority validation, the canonical CAS write, and, when
+        // eligible, the provenance/confirmed-fact write) and returns the
+        // EXACT authority state this call itself established.
+        async function commitDomain(
           domain: "plans" | "lightning" | "days",
-          freshResult: ConfirmedDomainResult<T>,
-          original: ConfirmedDomainResult<T>
-        ): void {
-          if (confirmedDomainResultsEqual(freshResult, original)) return;
-          unusable.push({
+          key: string,
+          expectedPreviousRaw: string | null,
+          nextRaw: string,
+          provenance:
+            | null
+            | {
+                candidateValue: unknown;
+                cloudValue: unknown;
+                confirmedValue: unknown;
+                hydrationValue: unknown;
+              }
+        ): Promise<{ result: DomainHydrationCommitResult; deferralReasons: UnusableDomain[] }> {
+          const expectedAuthority = winnerSelectionAuthority[domain];
+          const result = await commitDomainHydration({
+            userId: pullCtx.userId,
+            profileId: pullCtx.profileId,
             domain,
-            reason: "authority-changed",
-            previousRevision: authorityRevisionOf(original),
-            currentRevision: authorityRevisionOf(freshResult),
+            key,
+            expectedPreviousRaw,
+            nextRaw,
+            isStillValid: isPullCurrent,
+            expectedAuthority,
+            provenance:
+              provenance && planner?.revision != null
+                ? {
+                    revision: planner.revision,
+                    isPureCloudValue: isExactCloudValue(provenance.candidateValue, provenance.cloudValue),
+                    confirmedValue: provenance.confirmedValue,
+                    hydrationValue: provenance.hydrationValue,
+                  }
+                : null,
           });
-        }
-        // SH.2.2 ("make confirmed-authority scans atomic" round) — mirrors
-        // plans/page.tsx exactly, see its own detailed doc:
-        // getConfirmedStateAtomic() (syncHelper.ts), never the plain
-        // getConfirmedState(), at this commit boundary — that scan captures
-        // `localStorage.length` then enumerates by index, NOT an atomic
-        // snapshot against a DIFFERENT tab's concurrent confirmed-fact
-        // publish. FAIL CLOSED (`fresh === null`) reports EVERY domain as
-        // "authority-unavailable" rather than silently falling back to the
-        // non-atomic scan.
-        async function revalidateAuthorityBeforeCommit(): Promise<UnusableDomain[]> {
-          if (!pullCtx.userId) return []; // no identity to look up — nothing published, nothing to ratchet against
-          const fresh = await getConfirmedStateAtomic(pullCtx.userId, pullCtx.profileId);
-          if (fresh === null) {
-            try {
-              console.error(
-                "SH.2.2: pull deferred — confirmed authority could not be established atomically (Web Locks unavailable); refusing to commit a winner whose authority cannot be safely verified."
-              );
-            } catch {}
-            return (["plans", "lightning", "days"] as const).map((domain) => ({
-              domain,
-              reason: "authority-unavailable" as const,
-            }));
+          if (result.authority) {
+            winnerSelectionAuthority = { ...winnerSelectionAuthority, [domain]: result.authority[domain] };
           }
-          const unusable: UnusableDomain[] = [];
-          checkAuthorityChanged(unusable, "lightning", fresh.lightning, winnerSelectionAuthority.lightning);
-          checkAuthorityChanged(unusable, "plans", fresh.plans, winnerSelectionAuthority.plans);
-          checkAuthorityChanged(unusable, "days", fresh.days, winnerSelectionAuthority.days);
-          return unusable;
-        }
-        // SH.2.2 (Codex P1 follow-up round) — INSIDE-THE-LOCK commit-time
-        // authority check. Mirrors plans/page.tsx's own
-        // checkAuthorityStillValid()/lastAuthorityRevalidation exactly, see
-        // its own detailed doc: passed as commitLocalDomainRaw()'s new
-        // `isAuthorityStillValid` argument for EVERY domain's commit below
-        // (items/plans/days) so confirmed authority is re-checked as the
-        // LAST gate, still inside the Web Lock, immediately before the
-        // write — closing the gap where authority advances WHILE a commit
-        // waits for a lock another writer currently holds (invisible to
-        // both the canonical CAS and to isPullCurrent()'s pull-epoch check).
-        // Now `await`s `revalidateAuthorityBeforeCommit()` (SH.2.2 "make
-        // confirmed-authority scans atomic" round — see
-        // commitLocalDomainRaw()'s own doc in syncHelper.ts for the SECOND
-        // edit-fact re-scan this required to keep local edits winning over
-        // authority even across this new await).
-        let lastAuthorityRevalidation: UnusableDomain[] = [];
-        async function checkAuthorityStillValid(): Promise<boolean> {
-          const unusable = await revalidateAuthorityBeforeCommit();
-          if (unusable.length > 0) {
-            lastAuthorityRevalidation = unusable;
-            return false;
-          }
-          return true;
-        }
-        // SH.2.2 ("make confirmed-authority scans atomic" round) — mirrors
-        // plans/page.tsx's own ratchetWinnerSelectionAuthority() exactly,
-        // see its own detailed doc: advances `winnerSelectionAuthority[domain]`
-        // to the EXACT fact this pull itself just durably recorded, read
-        // back via the SAME atomic primitive, so this pull's own advance is
-        // never misread as an external authority change on the next check.
-        async function ratchetWinnerSelectionAuthority(domain: "plans" | "lightning" | "days"): Promise<boolean> {
-          if (!pullCtx.userId) return true; // nothing was recorded, nothing to ratchet
-          const fresh = await getConfirmedStateAtomic(pullCtx.userId, pullCtx.profileId);
-          if (fresh === null) return false;
-          winnerSelectionAuthority = { ...winnerSelectionAuthority, [domain]: fresh[domain] };
-          return true;
-        }
-        // SH.2.2 (Codex P1 "authority vs. hydration-provenance" round) —
-        // mirrors plans/page.tsx's own recordDomainProvenance() exactly,
-        // see its own detailed doc: records EITHER confirmed server
-        // authority (a PURE cloud winner) OR hydration provenance (a
-        // locally-reconciled winner), whichever applies, for ONE domain.
-        // Caller MUST `return` immediately on `false`.
-        async function recordDomainProvenance(
-          domain: "plans" | "lightning" | "days",
-          candidateValue: unknown,
-          cloudValue: unknown,
-          confirmedAccepted: AcceptedPlannerDomains,
-          hydrationValue: unknown
-        ): Promise<boolean> {
-          if (!pullCtx.userId || planner?.revision == null) return true; // nothing safe to record against
-          if (isExactCloudValue(candidateValue, cloudValue)) {
-            const ok = await commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, confirmedAccepted);
-            // SH.2.2 (Codex P1 "recheck pull context after the authority
-            // ratchet" round) — mirrors plans/page.tsx exactly, see its
-            // own detailed doc: recheck IMMEDIATELY after every awaited
-            // step, BEFORE reacting to its own result.
-            if (!isPullCurrent()) return false;
-            if (!ok) {
-              handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
-              return false;
-            }
-            const ratchetOk = await ratchetWinnerSelectionAuthority(domain);
-            if (!isPullCurrent()) return false;
-            if (!ratchetOk) {
-              handlePullDeferral([...supersededDomains, { domain, reason: "authority-unavailable" }]);
-              return false;
-            }
-            return true;
-          }
-          const ok = await recordHydrationProvenance(pullCtx.userId, pullCtx.profileId, domain, planner.revision, hydrationValue);
-          if (!isPullCurrent()) return false;
-          if (!ok) {
-            handlePullDeferral([...supersededDomains, { domain, reason: "provenance-write-failed" }]);
-            return false;
-          }
-          return true;
+          const deferralReasons: UnusableDomain[] =
+            result.status === "authority-changed"
+              ? [
+                  {
+                    domain,
+                    reason: "authority-changed",
+                    previousRevision: authorityRevisionOf(expectedAuthority),
+                    currentRevision: result.authority ? authorityRevisionOf(result.authority[domain]) : null,
+                  },
+                ]
+              : result.status === "provenance-write-failed"
+              ? [{ domain, reason: "provenance-write-failed" }]
+              : [];
+          return { result, deferralReasons };
         }
 
         const unusableDomains = collectUnusableDomains(baselineOutcomes);
@@ -1585,24 +1520,36 @@ export default function LightningPage() {
         // same-tab or cross-tab write that lands after `currentItemsRaw` was
         // captured above — Codex finding #1).
         const nextItemsRaw = JSON.stringify({ version: 1, items: winningLightningItems });
-        const itemsCommitStatus = await commitLocalDomainRaw(
+        // Cloud "won" the items domain when local hadn't changed and a
+        // valid cloud payload existed — computed BEFORE the commit itself
+        // so it can double as commitDomain()'s own provenance-eligibility
+        // gate. Mirrors plans/page.tsx exactly.
+        const itemsCloudWon = !itemsChangedLocally && cloudLightningItems !== null;
+        const { result: itemsCommit, deferralReasons: itemsDeferralReasons } = await commitDomain(
+          "lightning",
           lightningKeyRef.current,
           currentItemsRaw,
           nextItemsRaw,
-          isPullCurrent,
-          checkAuthorityStillValid
+          itemsCloudWon
+            ? {
+                candidateValue: winningLightningItems,
+                cloudValue: cloudLightningItems,
+                confirmedValue: { version: 1, items: winningLightningItems },
+                hydrationValue: { version: 1, items: winningLightningItems },
+              }
+            : null
         );
         // Codex P1 fix (13th round) — re-check after EVERY awaited
         // local-domain commit, before using its result for anything.
         // Mirrors plans/page.tsx exactly — see its own detailed doc.
         if (!isPullCurrent()) return;
-        // SH.2.2 (Codex P1 follow-up round) — mirrors plans/page.tsx
-        // exactly, see its own detailed doc.
-        if (itemsCommitStatus === "authority-superseded") {
-          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+        // SH.2.2 — mirrors plans/page.tsx exactly, see its own detailed doc.
+        if (itemsCommit.status === "authority-changed") {
+          handlePullDeferral([...supersededDomains, ...itemsDeferralReasons]);
           return;
         }
-        const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
+        const itemsCommitStatus = itemsCommit.status;
+        const primaryPersistSucceeded = itemsCommitStatus === "committed" || itemsCommitStatus === "noop";
         // SH.2.2 — mirrors plans/page.tsx exactly: accumulate a genuine
         // local-edit CAS supersession (never "failed"/"aborted"/
         // "unavailable") so the end-of-pull recovery check schedules
@@ -1616,12 +1563,6 @@ export default function LightningPage() {
         if (primaryPersistSucceeded && JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
           setItems(winningLightningItems);
         }
-        // Cloud "won" the items domain when local hadn't changed and a
-        // valid cloud payload existed — safe to trust immediately as this
-        // page's new baseline (see itemsBaselineRef's own doc: updating
-        // here does not risk discarding an unpushed edit, since none
-        // exists in this branch).
-        const itemsCloudWon = !itemsChangedLocally && cloudLightningItems !== null;
         if (itemsCloudWon) {
           // Codex P1 fix (7th round; commit outcome generalized 12th) —
           // only trust winningLightningItems as the new fallback baseline
@@ -1629,16 +1570,11 @@ export default function LightningPage() {
           // noop). Mirrors plans/page.tsx.
           if (primaryPersistSucceeded) {
             itemsBaselineRef.current = winningLightningItems;
-            // SH.2.2 — PARTIAL-APPLY PROVENANCE, refined by the "authority
-            // vs. hydration-provenance" round — mirrors plans/page.tsx
-            // exactly, see its own detailed doc.
-            if (!(await recordDomainProvenance(
-              "lightning",
-              winningLightningItems,
-              cloudLightningItems,
-              { lightning: { version: 1, items: winningLightningItems } },
-              { version: 1, items: winningLightningItems }
-            ))) {
+            // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above
+            // already attempted to record this domain's provenance —
+            // mirrors plans/page.tsx exactly, see its own detailed doc.
+            if (itemsCommit.status === "provenance-write-failed") {
+              handlePullDeferral([...supersededDomains, ...itemsDeferralReasons]);
               return;
             }
           }
@@ -1669,94 +1605,79 @@ export default function LightningPage() {
         // actually differs from the reconciled winningPlansItems. Mirrors
         // plans/page.tsx's own Lightning-sibling fix exactly.
         const winningPlansRawToWrite = JSON.stringify({ version: 1, items: winningPlansItems });
-        // SH.2.2 — COMMIT-TIME AUTHORITY REVALIDATION, immediately before
-        // this domain's hydration commit — mirrors plans/page.tsx exactly,
-        // see its own detailed doc: the items commit above just awaited a
-        // (possibly lock-queued) write, during which confirmed authority
-        // for ANY domain can have advanced.
-        if (!isPullCurrent()) return;
-        const prePlansAuthorityCheck = await revalidateAuthorityBeforeCommit();
-        if (!isPullCurrent()) return;
-        if (prePlansAuthorityCheck.length > 0) {
-          handlePullDeferral([...supersededDomains, ...prePlansAuthorityCheck]);
-          return;
-        }
-        const plansCommitStatus = await commitLocalDomainRaw(
+        // Codex P1 fix (1st round; commit outcome generalized 12th) —
+        // tracks specifically whether THIS pull's final durable Plans value
+        // would be CLOUD-SOURCED (distinct from hydration success, which is
+        // also true on a "noop" outcome where disk already held that exact
+        // value) — computed BEFORE the commit so it can double as
+        // commitDomain()'s own provenance-eligibility gate.
+        const plansCloudSourced = !plansChangedLocally && !!planner?.plans;
+        const { result: plansCommit, deferralReasons: plansDeferralReasons } = await commitDomain(
+          "plans",
           profileKeysForPull.plans,
           currentPlansRaw,
           winningPlansRawToWrite,
-          isPullCurrent,
-          checkAuthorityStillValid
+          plansCloudSourced && planner?.plans
+            ? {
+                // SH.2.2 "authority vs. hydration-provenance" round —
+                // purity is checked against `planner.plans.items` alone.
+                candidateValue: winningPlansItems,
+                cloudValue: planner.plans.items,
+                confirmedValue: { version: planner.plans.version, items: winningPlansItems },
+                hydrationValue: { version: 1, items: winningPlansItems },
+              }
+            : null
         );
         if (!isPullCurrent()) return;
-        // SH.2.2 (Codex P1 follow-up round) — mirrors plans/page.tsx
-        // exactly, see its own detailed doc.
-        if (plansCommitStatus === "authority-superseded") {
-          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+        // SH.2.2 — mirrors plans/page.tsx exactly, see its own detailed doc.
+        if (plansCommit.status === "authority-changed") {
+          handlePullDeferral([...supersededDomains, ...plansDeferralReasons]);
           return;
         }
-        const hydrationSucceeded = isLocalDomainCommitSuccess(plansCommitStatus);
+        const plansCommitStatus = plansCommit.status;
+        const hydrationSucceeded = plansCommitStatus === "committed" || plansCommitStatus === "noop";
         if (plansCommitStatus === "superseded") {
           supersededDomains.push({ domain: "plans", reason: "local-edit-superseded" });
         }
-        // Codex P1 fix (1st round; commit outcome generalized 12th) —
-        // tracks specifically whether THIS pull's final durable Plans value
-        // is CLOUD-SOURCED (distinct from hydrationSucceeded, which is also
-        // true on a "noop" outcome where disk already held that exact
-        // value) — only a durably-confirmed, cloud-derived value is
-        // eligible to advance Plans' confirmed baseline below.
-        const plansHydrationWritten = hydrationSucceeded && !plansChangedLocally && !!planner?.plans;
+        const plansHydrationWritten = hydrationSucceeded && plansCloudSourced;
         if (hydrationSucceeded) {
           plansRawBaselineRef.current = winningPlansRawToWrite;
         }
-        // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Plans' own confirmed-
-        // baseline fact right now, mirroring the ORIGINAL end-of-pull
-        // eligibility condition exactly — see this pull's own doc above
-        // (near `supersededDomains`).
-        if (plansHydrationWritten && planner?.plans) {
-          // SH.2.2 "authority vs. hydration-provenance" round — purity is
-          // checked against `planner.plans.items` alone — mirrors
-          // plans/page.tsx's own Lightning-sibling treatment exactly.
-          if (!(await recordDomainProvenance(
-            "plans",
-            winningPlansItems,
-            planner.plans.items,
-            { plans: { version: planner.plans.version, items: winningPlansItems } },
-            { version: 1, items: winningPlansItems }
-          ))) {
-            return;
-          }
-        }
-
-        // SH.2.2 — COMMIT-TIME AUTHORITY REVALIDATION, immediately before
-        // this pull's LAST hydration commit — mirrors plans/page.tsx
-        // exactly, see its own detailed doc.
-        if (!isPullCurrent()) return;
-        const preDaysAuthorityCheck = await revalidateAuthorityBeforeCommit();
-        if (!isPullCurrent()) return;
-        if (preDaysAuthorityCheck.length > 0) {
-          handlePullDeferral([...supersededDomains, ...preDaysAuthorityCheck]);
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
+        // attempted to record Plans' own confirmed-baseline fact or
+        // hydration provenance, whichever applies.
+        if (plansHydrationWritten && plansCommit.status === "provenance-write-failed") {
+          handlePullDeferral([...supersededDomains, ...plansDeferralReasons]);
           return;
         }
 
         // Days domain — same shared commit primitive as Lightning's own
         // items.
         const nextDaysRaw = JSON.stringify(winningDays);
-        const daysCommitStatus = await commitLocalDomainRaw(
+        const daysProvenanceEligible =
+          itemsCloudWon && primaryPersistSucceeded && !plansChangedLocally && !daysChangedLocally;
+        const { result: daysCommit, deferralReasons: daysDeferralReasons } = await commitDomain(
+          "days",
           daysKeyRef.current,
           currentDaysRaw,
           nextDaysRaw,
-          isPullCurrent,
-          checkAuthorityStillValid
+          daysProvenanceEligible
+            ? {
+                candidateValue: winningDays,
+                cloudValue: cloudDaysOrder ?? null,
+                confirmedValue: winningDays,
+                hydrationValue: winningDays,
+              }
+            : null
         );
         if (!isPullCurrent()) return;
-        // SH.2.2 (Codex P1 follow-up round) — mirrors plans/page.tsx
-        // exactly, see its own detailed doc.
-        if (daysCommitStatus === "authority-superseded") {
-          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+        // SH.2.2 — mirrors plans/page.tsx exactly, see its own detailed doc.
+        if (daysCommit.status === "authority-changed") {
+          handlePullDeferral([...supersededDomains, ...daysDeferralReasons]);
           return;
         }
-        const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
+        const daysCommitStatus = daysCommit.status;
+        const daysWriteFailed = !(daysCommitStatus === "committed" || daysCommitStatus === "noop");
         if (daysCommitStatus === "superseded") {
           supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });
         }
@@ -1803,24 +1724,15 @@ export default function LightningPage() {
         if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
           daysBaselineRef.current = winningDays;
         }
-        // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Days' own confirmed-
-        // baseline fact right now, mirroring the ORIGINAL end-of-pull
-        // eligibility condition exactly (itemsCloudWon,
-        // primaryPersistSucceeded, !plansChangedLocally,
-        // !daysChangedLocally, !daysWriteFailed) — see this pull's own doc
-        // above (near `supersededDomains`).
-        if (
-          itemsCloudWon &&
-          primaryPersistSucceeded &&
-          !plansChangedLocally &&
-          !daysChangedLocally &&
-          !daysWriteFailed
-        ) {
-          // SH.2.2 "authority vs. hydration-provenance" round — mirrors
-          // plans/page.tsx exactly, see its own detailed doc.
-          if (!(await recordDomainProvenance("days", winningDays, cloudDaysOrder ?? null, { days: winningDays }, winningDays))) {
-            return;
-          }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
+        // attempted to record Days' own confirmed-baseline fact or
+        // hydration provenance, whichever applies, gated by
+        // `daysProvenanceEligible` (computed before the commit). A
+        // "provenance-write-failed" outcome must still fail this pull
+        // closed here.
+        if (daysCommit.status === "provenance-write-failed") {
+          handlePullDeferral([...supersededDomains, ...daysDeferralReasons]);
+          return;
         }
 
         // Same-tab writes do not fire a storage event, so refresh

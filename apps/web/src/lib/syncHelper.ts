@@ -754,10 +754,14 @@ import {
   canonicalizeJSON,
   resolveEffectiveDurableRaw,
   isProfileOwnedSyncKey,
+  confirmedDomainResultsEqual,
+  resolveHydrationApplyIntentDisposition,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
+  type ConfirmedDomainResult,
   type AcceptedPlannerDomains,
+  type HydrationApplyIntent,
 } from "./syncPayload";
 
 /**
@@ -2030,6 +2034,83 @@ function selectConfirmedFactPruneKeys(
  * its own terms; only the STRONGER cross-call atomic-observability
  * guarantee requires one).
  */
+/**
+ * The lock-free CORE of recordConfirmedFact() — a single unconditional
+ * `setItem` to a permanently-unique key, plus the unambiguity scan/prune and
+ * cross-store hydration-provenance prune. Extracted (SH.2.2 "consolidated
+ * hydration commit boundary" round) so commitDomainHydration() below can
+ * invoke it directly while ALREADY holding confirmedAuthorityLockName()'s
+ * lock for the surrounding commit — calling recordConfirmedFact() itself
+ * there would re-request the SAME lock name from inside its own held
+ * callback, which the Locks API does not grant reentrantly (a genuine
+ * deadlock, not merely a wasted wait). recordConfirmedFact() (below) is the
+ * ONLY other caller and remains the right entry point for any caller NOT
+ * already inside that lock.
+ */
+function recordConfirmedFactBody(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  revision: number,
+  value: unknown
+): boolean {
+  const key = confirmedFactKey(userId, profileId, domain, revision, generateOpId());
+  try {
+    localStorage.setItem(key, JSON.stringify({ revision, value }));
+  } catch {
+    return false;
+  }
+  let success = true;
+  try {
+    const entries = scanConfirmedFactEntries(userId, profileId, domain);
+    const parsed = entries
+      .map((e) => ({ key: e.key, fact: parseConfirmedFactForDomain(domain, e.raw) }))
+      .filter((e): e is { key: string; fact: ConfirmedDomainFact<unknown> } => e.fact !== null);
+    const facts = parsed.map((p) => p.fact);
+    if (!confirmedFactRevisionIsUnambiguous(facts, revision)) {
+      success = false;
+      try {
+        console.error(
+          `SH.2: confirmed-fact conflict for ${domain} at revision ${revision} — deferring confirmation until resolved.`
+        );
+      } catch {}
+    }
+    const domainResult = resolveConfirmedDomainState(facts);
+    const confirmedRevision = domainResult.status === "confirmed" ? domainResult.fact.revision : null;
+    const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmedRevision);
+    for (const pruneKey of pruneKeys) {
+      try {
+        localStorage.removeItem(pruneKey);
+      } catch {}
+    }
+  } catch {
+    // Best-effort scan/prune failure never flips an already-durable write
+    // to a failure, and never blocks pruning from being retried on a
+    // later call.
+  }
+  // SH.2.2 (Codex P1 "prune superseded hydration provenance" round) —
+  // CROSS-STORE prune: genuine CONFIRMED authority now exists for this
+  // domain AT this revision (this call's own CAS-protected commit
+  // already proved the canonical key holds exactly what this write
+  // recorded), so any hydration-provenance record AT OR BELOW this
+  // revision — from any writer, this tab or another — can never again
+  // explain current disk content. `<=`, not `<`: unlike hydration
+  // provenance's OWN self-pruning (which preserves same-revision
+  // siblings from a genuinely concurrent writer, since neither can prove
+  // the other is stale), confirmed authority is a strictly stronger,
+  // single-truth signal that supersedes even same-revision hydration
+  // records — see pruneHydrationProvenanceFacts's own doc below. Runs
+  // regardless of this call's own `success` flag: a confirmed-fact
+  // AMBIGUITY (two different values at the same revision) is a separate
+  // question from whether disk has moved past older hydration bytes,
+  // which this write's own successful CAS-protected commit already
+  // settled independently.
+  try {
+    pruneHydrationProvenanceFacts(userId, profileId, domain, (r) => r <= revision);
+  } catch {}
+  return success;
+}
+
 async function recordConfirmedFact(
   userId: string,
   profileId: string,
@@ -2037,67 +2118,12 @@ async function recordConfirmedFact(
   revision: number,
   value: unknown
 ): Promise<boolean> {
-  const key = confirmedFactKey(userId, profileId, domain, revision, generateOpId());
-  const body = (): boolean => {
-    try {
-      localStorage.setItem(key, JSON.stringify({ revision, value }));
-    } catch {
-      return false;
-    }
-    let success = true;
-    try {
-      const entries = scanConfirmedFactEntries(userId, profileId, domain);
-      const parsed = entries
-        .map((e) => ({ key: e.key, fact: parseConfirmedFactForDomain(domain, e.raw) }))
-        .filter((e): e is { key: string; fact: ConfirmedDomainFact<unknown> } => e.fact !== null);
-      const facts = parsed.map((p) => p.fact);
-      if (!confirmedFactRevisionIsUnambiguous(facts, revision)) {
-        success = false;
-        try {
-          console.error(
-            `SH.2: confirmed-fact conflict for ${domain} at revision ${revision} — deferring confirmation until resolved.`
-          );
-        } catch {}
-      }
-      const domainResult = resolveConfirmedDomainState(facts);
-      const confirmedRevision = domainResult.status === "confirmed" ? domainResult.fact.revision : null;
-      const pruneKeys = selectConfirmedFactPruneKeys(parsed, confirmedRevision);
-      for (const pruneKey of pruneKeys) {
-        try {
-          localStorage.removeItem(pruneKey);
-        } catch {}
-      }
-    } catch {
-      // Best-effort scan/prune failure never flips an already-durable write
-      // to a failure, and never blocks pruning from being retried on a
-      // later call.
-    }
-    // SH.2.2 (Codex P1 "prune superseded hydration provenance" round) —
-    // CROSS-STORE prune: genuine CONFIRMED authority now exists for this
-    // domain AT this revision (this call's own CAS-protected commit
-    // already proved the canonical key holds exactly what this write
-    // recorded), so any hydration-provenance record AT OR BELOW this
-    // revision — from any writer, this tab or another — can never again
-    // explain current disk content. `<=`, not `<`: unlike hydration
-    // provenance's OWN self-pruning (which preserves same-revision
-    // siblings from a genuinely concurrent writer, since neither can prove
-    // the other is stale), confirmed authority is a strictly stronger,
-    // single-truth signal that supersedes even same-revision hydration
-    // records — see pruneHydrationProvenanceFacts's own doc below. Runs
-    // regardless of this call's own `success` flag: a confirmed-fact
-    // AMBIGUITY (two different values at the same revision) is a separate
-    // question from whether disk has moved past older hydration bytes,
-    // which this write's own successful CAS-protected commit already
-    // settled independently.
-    try {
-      pruneHydrationProvenanceFacts(userId, profileId, domain, (r) => r <= revision);
-    } catch {}
-    return success;
-  };
   if (hasLocalDomainSerialization()) {
-    return navigator.locks.request(confirmedAuthorityLockName(userId, profileId), () => body());
+    return navigator.locks.request(confirmedAuthorityLockName(userId, profileId), () =>
+      recordConfirmedFactBody(userId, profileId, domain, revision, value)
+    );
   }
-  return body();
+  return recordConfirmedFactBody(userId, profileId, domain, revision, value);
 }
 
 /**
@@ -2406,6 +2432,269 @@ export function hasHydrationProvenanceMatch(
   return false;
 }
 
+// ── Consolidated hydration commit boundary (SH.2.2, "stop adding isolated
+// authority checks" round) ──────────────────────────────────────────────
+//
+// ROOT ISSUE this closes: the pull effects (plans/page.tsx,
+// lightning/page.tsx) used to serialize ONE logical per-domain commit
+// across independently-acquired-and-released stages — a pre-commit
+// atomic authority read (its own lock cycle), commitLocalDomainRaw()'s
+// in-lock re-check via an `isAuthorityStillValid` callback (a SECOND,
+// separate lock cycle, nested inside the per-key lock), and, after the
+// per-key lock had already been released, a provenance/confirmed-fact
+// write followed by a reread-and-ratchet of "whatever confirmed authority
+// is current now" (a THIRD, independently-timed lock cycle). Between any
+// two of those cycles, another writer for the SAME identity could publish
+// a confirmed fact, and the final ratchet had no way to tell its OWN
+// self-caused advancement apart from a genuinely external one — ratcheting
+// to "whatever is current" either way.
+//
+// commitDomainHydration() replaces all three with ONE
+// confirmedAuthorityLockName() acquisition, held for the entire critical
+// section: fresh authority validation, the nested per-key CAS commit, and
+// (when eligible) the provenance/confirmed-fact write — returning the
+// EXACT authority state this call itself established, read back while
+// STILL holding the same lock, never a later independently-timed reread.
+// No other writer for this (userId, profileId) can ever run concurrently
+// with any part of it, since every writer for this identity — this
+// function, recordConfirmedFact(), getConfirmedStateAtomic() — contends
+// for the identical lock name (see confirmedAuthorityLockName's own doc
+// above). A change to confirmed authority detected at the START of this
+// call (before the per-key lock is even requested) is reported as
+// "authority-changed" and nothing is written; commitLocalDomainRaw()'s own
+// `isAuthorityStillValid` re-check is therefore passed as its default
+// (always-valid) — the race that parameter existed to catch cannot occur
+// while this lock is held, not merely re-checked-and-still-possible.
+//
+// `provenance`, when non-null, is recorded ONLY once the CAS commit itself
+// reports "committed" or "noop" (isLocalDomainCommitSuccess's own
+// equivalence, preserved) — never speculatively ahead of durable proof,
+// exactly like the previous separate recordDomainProvenance() step. Pass
+// `null` when the caller's own domain-specific eligibility gate (e.g.
+// "did local win this domain locally" — a decision made from information
+// already known BEFORE this call, never from this call's own not-yet-known
+// outcome) says this attempt should not be recorded either way.
+//
+// See resolveHydrationApplyIntentDisposition()'s own doc (syncPayload.ts)
+// for the CRASH/RELOAD SAFETY half of this: a durable intent marker is
+// written immediately before the CAS commit is attempted and cleared once
+// the provenance write (or the decision not to attempt one) is known,
+// still inside this SAME held lock — narrowing the crash window down to
+// two back-to-back synchronous statements with no further `await` between
+// them, and giving a future reload durable evidence to reconcile even a
+// genuine interruption in that narrow window.
+export type DomainHydrationCommitStatus =
+  | "committed"
+  | "noop"
+  | "superseded"
+  | "aborted"
+  | "authority-changed"
+  | "provenance-write-failed"
+  | "unavailable"
+  | "failed";
+
+export interface DomainHydrationCommitResult {
+  status: DomainHydrationCommitStatus;
+  /**
+   * The confirmed-authority state as of the moment this call returned —
+   * `null` only when no authenticated identity was available to look one
+   * up. For "committed"/"noop", this is the EXACT state this call itself
+   * established (or confirmed unchanged); for "authority-changed", the
+   * fresh state that was found to differ from the caller's expectation.
+   * Callers ratchet their own frozen `winnerSelectionAuthority[domain]` to
+   * this value directly — there is no separate reread/ratchet step left to
+   * perform.
+   */
+  authority: ConfirmedPlannerState | null;
+}
+
+export interface DomainHydrationProvenanceInput {
+  /** The server revision this pull's response carried. */
+  revision: number;
+  /**
+   * True when the winning value being committed is byte-for-byte the
+   * literal cloud value this pull fetched (see isExactCloudValue()'s own
+   * doc in syncPayload.ts) — decides confirmed-authority vs
+   * hydration-provenance recording, exactly like recordDomainProvenance()
+   * (removed) used to.
+   */
+  isPureCloudValue: boolean;
+  /** The value commitConfirmedBaseline() should record when `isPureCloudValue`. */
+  confirmedValue: unknown;
+  /** The value recordHydrationProvenance() should record otherwise. */
+  hydrationValue: unknown;
+}
+
+function hydrationApplyIntentKey(userId: string, profileId: string, domain: ConfirmedDomainName): string {
+  return `dwp:sync:${userId}:${profileId}:hydrationApplyIntent:${domain}`;
+}
+
+function readHydrationApplyIntent(
+  userId: string,
+  profileId: string,
+  domain: ConfirmedDomainName
+): HydrationApplyIntent | null {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(hydrationApplyIntentKey(userId, profileId, domain));
+  } catch {
+    return null;
+  }
+  if (raw === null) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<HydrationApplyIntent>;
+    if (
+      typeof parsed.key === "string" &&
+      typeof parsed.revision === "number" &&
+      Number.isFinite(parsed.revision) &&
+      typeof parsed.nextRaw === "string"
+    ) {
+      return { key: parsed.key, revision: parsed.revision, nextRaw: parsed.nextRaw };
+    }
+  } catch {}
+  return null;
+}
+
+export async function commitDomainHydration(input: {
+  userId: string | null;
+  profileId: string;
+  domain: ConfirmedDomainName;
+  key: string;
+  expectedPreviousRaw: string | null;
+  nextRaw: string;
+  isStillValid: () => boolean;
+  expectedAuthority: ConfirmedDomainResult<unknown>;
+  provenance: DomainHydrationProvenanceInput | null;
+}): Promise<DomainHydrationCommitResult> {
+  const { userId, profileId, domain, key, expectedPreviousRaw, nextRaw, isStillValid, expectedAuthority, provenance } =
+    input;
+  if (!hasLocalDomainSerialization()) return { status: "unavailable", authority: null };
+  if (!userId) {
+    // No authenticated identity — no confirmed-authority concept applies
+    // (unauthenticated local-only usage); behaves exactly like a plain
+    // local commit always has, with no provenance recorded.
+    const commitStatus = await commitLocalDomainRaw(key, expectedPreviousRaw, nextRaw, isStillValid);
+    const status: DomainHydrationCommitStatus =
+      commitStatus === "authority-superseded" ? "authority-changed" : commitStatus;
+    return { status, authority: null };
+  }
+  return navigator.locks.request(
+    confirmedAuthorityLockName(userId, profileId),
+    async (): Promise<DomainHydrationCommitResult> => {
+      const freshAuthority = getConfirmedState(userId, profileId);
+      if (!confirmedDomainResultsEqual(freshAuthority[domain], expectedAuthority)) {
+        return { status: "authority-changed", authority: freshAuthority };
+      }
+      const intentKey = hydrationApplyIntentKey(userId, profileId, domain);
+      if (provenance) {
+        try {
+          const intent: HydrationApplyIntent = { key, revision: provenance.revision, nextRaw };
+          localStorage.setItem(intentKey, JSON.stringify(intent));
+        } catch {}
+      }
+      // commitLocalDomainRaw()'s own `isAuthorityStillValid` parameter is
+      // left at its default (always-valid) — see this section's own doc
+      // above for why the race it exists to catch cannot occur while this
+      // call holds confirmedAuthorityLockName() for the whole operation.
+      const commitStatus = await commitLocalDomainRaw(key, expectedPreviousRaw, nextRaw, isStillValid);
+      if (
+        commitStatus === "unavailable" ||
+        commitStatus === "failed" ||
+        commitStatus === "superseded" ||
+        commitStatus === "aborted"
+      ) {
+        if (provenance) {
+          try {
+            localStorage.removeItem(intentKey);
+          } catch {}
+        }
+        return { status: commitStatus, authority: freshAuthority };
+      }
+      // commitStatus is "noop" or "committed" here at runtime
+      // ("authority-superseded" cannot occur — see above); narrow the type
+      // explicitly since TypeScript cannot infer that from the default
+      // isAuthorityStillValid argument alone.
+      if (commitStatus === "authority-superseded") {
+        return { status: "authority-changed", authority: freshAuthority };
+      }
+      if (!provenance) {
+        return { status: commitStatus, authority: freshAuthority };
+      }
+      let updatedAuthority = freshAuthority;
+      if (provenance.isPureCloudValue) {
+        const ok = recordConfirmedFactBody(userId, profileId, domain, provenance.revision, provenance.confirmedValue);
+        if (!ok) return { status: "provenance-write-failed", authority: freshAuthority };
+        // Re-read, STILL inside this SAME held lock — reflects exactly the
+        // fact this call itself just wrote; no external writer for this
+        // identity could have run anything while this lock was held, so
+        // this can never absorb an externally-caused advancement. This IS
+        // the ratchet — there is no further reread step.
+        updatedAuthority = getConfirmedState(userId, profileId);
+      } else {
+        const ok = await recordHydrationProvenance(userId, profileId, domain, provenance.revision, provenance.hydrationValue);
+        if (!ok) return { status: "provenance-write-failed", authority: freshAuthority };
+      }
+      try {
+        localStorage.removeItem(intentKey);
+      } catch {}
+      return { status: commitStatus, authority: updatedAuthority };
+    }
+  );
+}
+
+/**
+ * True when ANY domain of (userId, profileId) has a leftover
+ * hydration-apply-intent marker whose disposition is "incomplete" — see
+ * resolveHydrationApplyIntentDisposition()'s own doc in syncPayload.ts.
+ * Consulted by buildPayloadFromStorage() below so neither doPush() nor
+ * registerUnloadSync()'s beacon can turn an unresolved, possibly-partial
+ * hydration write into a pushed "local edit" — the CRASH/RELOAD SAFETY
+ * half of this round's requirement, independent of in-memory syncReady
+ * (this reads only durable evidence). Opportunistically clears every
+ * marker this scan finds "resolved" or "stale", so a healthy profile pays
+ * this scan's cost only once per leftover marker, not on every push.
+ */
+function hasIncompleteHydrationApplyIntent(userId: string, profileId: string): boolean {
+  let incomplete = false;
+  for (const domain of CONFIRMED_DOMAIN_NAMES) {
+    const intent = readHydrationApplyIntent(userId, profileId, domain);
+    if (intent === null) continue;
+    let canonicalRaw: string | null;
+    try {
+      canonicalRaw = localStorage.getItem(intent.key);
+    } catch {
+      canonicalRaw = null;
+    }
+    let hasMatchingDurableFact = false;
+    if (canonicalRaw === intent.nextRaw) {
+      try {
+        const value = JSON.parse(intent.nextRaw) as unknown;
+        const confirmedResult = getConfirmedState(userId, profileId)[domain];
+        hasMatchingDurableFact =
+          (confirmedResult.status === "confirmed" &&
+            canonicalizeJSON(confirmedResult.fact.value) === canonicalizeJSON(value)) ||
+          hasHydrationProvenanceMatch(userId, profileId, domain, Number.POSITIVE_INFINITY, value);
+      } catch {
+        hasMatchingDurableFact = false;
+      }
+    }
+    const disposition = resolveHydrationApplyIntentDisposition(
+      intent,
+      canonicalRaw,
+      hasSurvivingEditFact(intent.key),
+      hasMatchingDurableFact
+    );
+    if (disposition === "incomplete") {
+      incomplete = true;
+      continue;
+    }
+    try {
+      localStorage.removeItem(hydrationApplyIntentKey(userId, profileId, domain));
+    } catch {}
+  }
+  return incomplete;
+}
+
 // ── Pending operations (one UNLOCKED key PER opId — see module doc, 9th round) ──
 
 /**
@@ -2685,8 +2974,17 @@ export async function reconcilePendingOperations(
  */
 export const SYNC_STATE_CHANGED_EVENT = "dwp:syncStateChanged";
 
+/**
+ * SH.2.2 ("fail closed when push confirmation is not durable" round) —
+ * "unresolved" is a DISTINCT status from "idle": the most recent push
+ * completed over HTTP (server accepted it — never a transport/auth error,
+ * unlike "error") but could not yet be durably confirmed locally (a
+ * malformed/missing response revision, or a genuine recordConfirmedFact
+ * conflict). See doPush()'s own doc for the full contract and how it
+ * self-resolves via the pending-op mechanism on the next successful pull.
+ */
 export interface SyncState {
-  status: "idle" | "syncing" | "error";
+  status: "idle" | "syncing" | "error" | "unresolved";
   lastSyncedAt: string | null;
   lastError: string | null;
 }
@@ -2702,7 +3000,7 @@ export function getSyncStateForProfile(profileId: string): SyncState {
   try {
     const rawStatus = localStorage.getItem(syncStatusKeyForProfile(profileId));
     const status: SyncState["status"] =
-      rawStatus === "syncing" || rawStatus === "error" ? rawStatus : "idle";
+      rawStatus === "syncing" || rawStatus === "error" || rawStatus === "unresolved" ? rawStatus : "idle";
     const lastSyncedAt = localStorage.getItem(lastSyncedKeyForProfile(profileId));
     const lastError = localStorage.getItem(syncErrorKeyForProfile(profileId));
     return { status, lastSyncedAt, lastError };
@@ -3026,7 +3324,7 @@ export function registerUnloadSync(): () => void {
     }
     const profileId = currentSyncProfileId;
     const userId = currentSyncUserId;
-    const payload = buildPayloadFromStorage(profileId);
+    const payload = buildPayloadFromStorage(profileId, userId);
     if (!payload) return;
     const body = JSON.stringify(payload);
     if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
@@ -3118,9 +3416,20 @@ function readLocalDaysOrder(profileId: string): unknown[] | undefined {
  * Missing localStorage keys for plans/lightning are treated as empty
  * datasets (safe). Legacy array-only shapes are normalised automatically.
  * A missing/malformed local `days[]` is not fatal — see readLocalDaysOrder.
+ *
+ * SH.2.2 ("consolidated hydration commit boundary" round) — CRASH/RELOAD
+ * SAFETY: also returns null when `userId` is known and
+ * hasIncompleteHydrationApplyIntent() reports a leftover, unresolved
+ * hydration-apply intent for this profile — see that function's own doc
+ * above. Shared by doPush() and registerUnloadSync()'s beacon (both route
+ * through this same function), so neither path can turn a possibly-partial
+ * hydration write into a pushed "local edit" while it remains unresolved;
+ * the next successful pull's own commitDomainHydration() call resolves it
+ * normally.
  */
-function buildPayloadFromStorage(profileId: string): SyncedPlannerPayload | null {
+function buildPayloadFromStorage(profileId: string, userId: string | null): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
+  if (userId && hasIncompleteHydrationApplyIntent(userId, profileId)) return null;
   try {
     // Codex P1 fix (17th round) — LOCAL-FIRST + CROSS-TAB SERIALIZATION:
     // "unload serializes the newest durable edit state, not merely the
@@ -3163,11 +3472,26 @@ async function doPush(): Promise<void> {
   const profileId = currentSyncProfileId;
   const userId = currentSyncUserId;
 
-  const payload = buildPayloadFromStorage(profileId);
+  const payload = buildPayloadFromStorage(profileId, userId);
   if (!payload) return;
 
   const body = JSON.stringify(payload);
   if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
+
+  // SH.2.2 ("fail closed when push confirmation is not durable" round) —
+  // every push is now tagged with its own clientOpId, exactly like
+  // registerUnloadSync()'s beacon already is: if the response below turns
+  // out NOT to be durably confirmable locally (a malformed/missing
+  // `revision`, or commitConfirmedBaseline() itself reporting a conflict),
+  // this SAME opId is registered as a pending operation (addPendingOp) so
+  // the next successful pull's reconcilePendingOperations() resolves it
+  // conclusively against the server's own state — the identical, already-
+  // durable mechanism the beacon path has always relied on for exactly
+  // this "server accepted it, this device doesn't yet know for certain"
+  // gap. An ordinary push that DOES confirm synchronously below never
+  // touches the pending-op store at all — this tag costs nothing beyond a
+  // harmless extra ledger row on the server.
+  const opId = generateOpId();
 
   inFlight = true;
   // Mark syncing for the originating profile. This write is intentionally
@@ -3181,7 +3505,7 @@ async function doPush(): Promise<void> {
   } catch {}
   try {
     const res = await fetch(
-      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}`,
+      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -3194,7 +3518,9 @@ async function doPush(): Promise<void> {
       // storage is per-profile so this is always safe regardless of whether
       // the user has switched to a different profile mid-flight.
       // lastSyncedAt is also written unconditionally: the originating profile
-      // completed a real successful sync and should always record its own timestamp.
+      // completed a real successful HTTP round-trip and should always record
+      // its own timestamp — a push "happened" regardless of whether local
+      // confirmation below turns out to be durable this attempt.
       // Timestamp write is best-effort — quota or private-mode errors must not
       // prevent the status transition and event dispatch below.
       try {
@@ -3210,6 +3536,20 @@ async function doPush(): Promise<void> {
       // no safe identity to commit under, so the confirmed-baseline step
       // is skipped entirely — lastSyncedAt/status above still record the
       // push's success for UI purposes regardless.
+      //
+      // SH.2.2 ("fail closed when push confirmation is not durable" round)
+      // — HTTP 2xx alone is NOT a fully reconciled local success:
+      // `confirmedDurably` tracks whether a confirmed-baseline fact was
+      // actually, durably recorded for this exact push. When it wasn't —
+      // an unreadable/malformed body, a non-numeric revision, or
+      // commitConfirmedBaseline() itself returning false (a genuine
+      // recordConfirmedFact conflict) — this push's own opId is registered
+      // as pending (see this function's own doc above) and status is set
+      // to "unresolved", never "idle": the server DID accept the write,
+      // but this device cannot yet prove what it resolved into, so it must
+      // not report a fully-synced state until the next pull's
+      // reconcilePendingOperations() durably closes that gap.
+      let confirmedDurably = false;
       if (userId) {
         try {
           const responseData = (await res.json()) as { revision?: unknown };
@@ -3218,7 +3558,7 @@ async function doPush(): Promise<void> {
               ? responseData.revision
               : null;
           if (revision !== null) {
-            await commitConfirmedBaseline(userId, profileId, revision, {
+            confirmedDurably = await commitConfirmedBaseline(userId, profileId, revision, {
               plans: payload.plans,
               lightning: payload.lightning,
               days: payload.days,
@@ -3226,14 +3566,17 @@ async function doPush(): Promise<void> {
           }
         } catch {
           // Response body unreadable/malformed — cannot safely commit a
-          // confirmed baseline without a known revision; the push itself
-          // still succeeded (res.ok), only the local confirmation record
-          // is skipped this time.
+          // confirmed baseline without a known revision; confirmedDurably
+          // stays false, handled identically to any other non-durable
+          // outcome below.
+        }
+        if (!confirmedDurably) {
+          addPendingOp(userId, profileId, opId);
         }
       }
       // Status writes are best-effort; event dispatch MUST always execute.
       try {
-        localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
+        localStorage.setItem(syncStatusKeyForProfile(profileId), userId && !confirmedDurably ? "unresolved" : "idle");
       } catch {}
       try {
         localStorage.removeItem(syncErrorKeyForProfile(profileId));

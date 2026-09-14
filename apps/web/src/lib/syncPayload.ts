@@ -625,6 +625,133 @@ export const DEV_IS_EXACT_CLOUD_VALUE_CASES: Array<{
 ];
 
 /**
+ * SH.2.2 (Codex P1 "consolidated hydration commit boundary" round) —
+ * CRASH/RELOAD SAFETY for the gap between a domain's canonical-key mutation
+ * and its confirmed-authority/hydration-provenance fact write. Even inside
+ * commitDomainHydration()'s single held Web Lock (syncHelper.ts), those are
+ * still two separate `localStorage.setItem` calls — ordinary localStorage
+ * writes are not transactional, so a genuine process-level interruption
+ * (crash, kill, power loss) landing between them is possible in principle,
+ * however small the window. Before that write pair begins,
+ * commitDomainHydration() durably records a `HydrationApplyIntent` — the
+ * canonical key, the revision, and the exact bytes about to be written —
+ * under a per-(userId, profileId, domain) key, and clears it once the fact
+ * write (or the decision not to attempt one) has been recorded. A reload
+ * that finds a LEFTOVER intent means this device cannot prove which side of
+ * that gap the interruption landed on.
+ *
+ * resolveHydrationApplyIntentDisposition() is the pure decision a caller
+ * (e.g. the pull effect, before ever trusting canonical bytes as pushable
+ * local intent) makes from that leftover evidence:
+ *   • `intent === null` — nothing was ever left mid-flight — "resolved".
+ *   • `canonicalRaw !== intent.nextRaw` — something newer already
+ *     superseded whatever this intent described (the write never landed at
+ *     all, or a later genuine edit/commit has since moved past it) — the
+ *     intent is simply moot — "stale".
+ *   • `canonicalRaw === intent.nextRaw` (the write DID land) and a
+ *     surviving local-edit fact exists for this key — a genuine, newer user
+ *     edit happens to byte-for-byte coincide with the hydration write; the
+ *     local-edit-fact priority rule (see hasSurvivingEditFact's own doc in
+ *     syncHelper.ts) already makes this content trustworthy on its own
+ *     terms, regardless of hydration provenance — "resolved".
+ *   • `canonicalRaw === intent.nextRaw` and a confirmed-authority or
+ *     hydration-provenance fact already exists at `intent.revision` — the
+ *     fact write DID complete (or a later pull already re-established
+ *     equivalent provenance); only the intent marker's own clear step was
+ *     lost — harmless — "resolved".
+ *   • Otherwise — canonical bytes match exactly what this device was in the
+ *     middle of hydrating, with NEITHER a local edit NOR a fact to explain
+ *     them — the fact write genuinely never landed — "incomplete": the
+ *     caller must not treat this content as safe, pushable local intent
+ *     until a fresh pull re-establishes real provenance for it.
+ */
+export interface HydrationApplyIntent {
+  key: string;
+  revision: number;
+  nextRaw: string;
+}
+
+export type HydrationApplyIntentDisposition = "resolved" | "incomplete" | "stale";
+
+export function resolveHydrationApplyIntentDisposition(
+  intent: HydrationApplyIntent | null,
+  canonicalRaw: string | null,
+  hasSurvivingEditFact: boolean,
+  hasMatchingDurableFact: boolean
+): HydrationApplyIntentDisposition {
+  if (intent === null) return "resolved";
+  if (canonicalRaw !== intent.nextRaw) return "stale";
+  if (hasSurvivingEditFact || hasMatchingDurableFact) return "resolved";
+  return "incomplete";
+}
+
+/**
+ * Reference cases for resolveHydrationApplyIntentDisposition(). Run from Node:
+ *   import { DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES, resolveHydrationApplyIntentDisposition } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES.forEach(c => {
+ *     const got = resolveHydrationApplyIntentDisposition(c.intent, c.canonicalRaw, c.hasSurvivingEditFact, c.hasMatchingDurableFact);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES: Array<{
+  name: string;
+  intent: HydrationApplyIntent | null;
+  canonicalRaw: string | null;
+  hasSurvivingEditFact: boolean;
+  hasMatchingDurableFact: boolean;
+  expected: HydrationApplyIntentDisposition;
+}> = [
+  {
+    name: "no leftover intent — nothing to reconcile",
+    intent: null,
+    canonicalRaw: '{"version":1,"items":[]}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "resolved",
+  },
+  {
+    name: "canonical bytes no longer match the intent — superseded by something newer, moot",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":2}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "stale",
+  },
+  {
+    name: "write landed, no fact recorded yet, no local edit either — the genuine gap this exists to catch",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":1}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "incomplete",
+  },
+  {
+    name: "write landed, but a surviving local-edit fact explains it — a genuine newer edit, trust it on its own terms",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":1}',
+    hasSurvivingEditFact: true,
+    hasMatchingDurableFact: false,
+    expected: "resolved",
+  },
+  {
+    name: "write landed, a durable confirmed/hydration fact already exists for it — only the marker's own clear was lost, harmless",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":1}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: true,
+    expected: "resolved",
+  },
+  {
+    name: "canonical key missing entirely (null) while intent expected real bytes — never confused with a match",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: null,
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "stale",
+  },
+];
+
+/**
  * Reference cases for resolveConfirmedDomainState() — the REQUIRED cases
  * from the 16th round's architectural contract. Run from Node:
  *   import { DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES, resolveConfirmedDomainState } from "@/lib/syncPayload";
