@@ -1927,6 +1927,84 @@ export const DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE: {
   fallbackValue: "FALLBACK-REF",
 };
 
+/**
+ * SH.2.2 — PARTIAL-APPLY PROVENANCE (Codex P1 follow-up round). Root cause:
+ * a multi-domain pull used to batch its commitConfirmedBaseline() call until
+ * every domain had attempted its own commit. If domain A's hydration commit
+ * succeeded but a LATER domain's authority check then aborted the rest of
+ * that pull, A's already-durable write never got a matching confirmed fact.
+ * On the REPLACEMENT pull, resolvePostFetchDomainBaseline() (above) then
+ * resolves A's baseline from whatever OLDER confirmed fact already existed
+ * (if any) — NOT from A's own just-applied hydration — because a genuine
+ * "confirmed" status always takes precedence over the caller's in-memory
+ * fallback ref (see this function's own doc: fallback is used ONLY when
+ * `confirmed.status === "none"`). That older baseline value can diverge
+ * from what's genuinely on disk (A's abandoned-pull hydration bytes),
+ * misreading durably-applied cloud content as an unsynced local edit —
+ * eligible to be pushed back over cloud state newer than A itself ever saw.
+ *
+ * The fix (plans/page.tsx, lightning/page.tsx) calls commitConfirmedBaseline()
+ * PER DOMAIN, immediately once that domain's own eligibility is known,
+ * instead of batching until the whole pull finishes — see each page's own
+ * "PARTIAL-APPLY PROVENANCE" doc near its `supersededDomains` declaration.
+ * These cases prove the effect on resolvePostFetchDomainBaseline() itself —
+ * the REAL production primitive every replacement pull's baseline goes
+ * through — using the SAME `abandonedPullDiskValue` disk read both "before"
+ * and "after" cases compare against: without the fix, the resolved baseline
+ * diverges from disk (the bug); with the fix (the confirmed fact now
+ * recorded at the abandoned pull's own revision/value), it matches (the
+ * pull is symmetric across Plans/Lightning/Days — this primitive is
+ * domain-agnostic, so one generic case proves all three). Run from Node:
+ *   import { DEV_PARTIAL_PULL_PROVENANCE_CASES, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   DEV_PARTIAL_PULL_PROVENANCE_CASES.forEach(c => {
+ *     const got = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, (raw) => raw, c.preFetch, c.fallbackValue);
+ *     const matchesDisk = got.kind === "confirmed" && got.value === c.abandonedPullDiskValue;
+ *     const ok = JSON.stringify(got) === JSON.stringify(c.expected) && matchesDisk === c.expectMatchesDisk;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARTIAL_PULL_PROVENANCE_CASES: Array<{
+  name: string;
+  abandonedPullDiskValue: string;
+  confirmed: ConfirmedDomainResult<string>;
+  cloudRevision: number;
+  preFetch: DomainPreFetchSnapshot<string>;
+  fallbackValue: string;
+  expected: DomainBaselineOutcome<string>;
+  expectMatchesDisk: boolean;
+}> = [
+  {
+    name: "WITHOUT the fix (bug) — batched commit never ran for the aborted domain, so confirmed authority is still the OLDER pre-pull fact (rev5); the replacement pull's own baseline (rev5's value) diverges from what the abandoned pull already durably wrote to disk (rev7's value) — exactly the misclassification the fix closes",
+    abandonedPullDiskValue: "CLOUD-V7",
+    confirmed: { status: "confirmed", fact: { revision: 5, value: "CLOUD-V5" } },
+    cloudRevision: 9,
+    preFetch: { diskValue: "PRE-FETCH-UNUSED" },
+    fallbackValue: "FALLBACK-REF-UNUSED",
+    expected: { kind: "confirmed", value: "CLOUD-V5" },
+    expectMatchesDisk: false,
+  },
+  {
+    name: "WITH the fix — commitConfirmedBaseline() ran immediately after the abandoned pull's own domain commit, recording confirmed authority at rev7 (exactly the value it wrote); the replacement pull's own baseline now matches disk, so no misclassification",
+    abandonedPullDiskValue: "CLOUD-V7",
+    confirmed: { status: "confirmed", fact: { revision: 7, value: "CLOUD-V7" } },
+    cloudRevision: 9,
+    preFetch: { diskValue: "PRE-FETCH-UNUSED" },
+    fallbackValue: "FALLBACK-REF-UNUSED",
+    expected: { kind: "confirmed", value: "CLOUD-V7" },
+    expectMatchesDisk: true,
+  },
+  {
+    name: "required case 5 — authority unchanged (no OTHER pull ever advanced it) is the SAME shape as the fixed case: this pull's own recorded fact IS the current confirmed authority, so the very next pull (or this same one, re-entered) resolves it normally",
+    abandonedPullDiskValue: "CLOUD-V3",
+    confirmed: { status: "confirmed", fact: { revision: 3, value: "CLOUD-V3" } },
+    cloudRevision: 3,
+    preFetch: { diskValue: "PRE-FETCH-UNUSED" },
+    fallbackValue: "FALLBACK-REF-UNUSED",
+    expected: { kind: "confirmed", value: "CLOUD-V3" },
+    expectMatchesDisk: true,
+  },
+];
+
 // ===== DURABLE LOCAL AUTHORITY (SH.2.1 P3) =====
 
 /**

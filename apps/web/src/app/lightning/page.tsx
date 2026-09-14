@@ -1198,6 +1198,15 @@ export default function LightningPage() {
         // recovery decision — deduplicated by the pre-existing
         // staleRetryPendingRef guard — covers all of them.
         const supersededDomains: UnusableDomain[] = [];
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE (Codex P1 follow-up round).
+        // Mirrors plans/page.tsx exactly — see its own detailed doc near
+        // its `supersededDomains` declaration for the full root-cause and
+        // fix rationale: each domain's commitConfirmedBaseline() call is
+        // fired PER DOMAIN, immediately once that domain's own eligibility
+        // is known, never batched until this whole pull finishes — so an
+        // earlier domain's already-durable hydration write always gets
+        // matching confirmed-baseline provenance even if a LATER domain's
+        // authority check then aborts the rest of this pull.
         function handlePullDeferral(unusable: UnusableDomain[]): void {
           if (unusable.length === 0) return;
           for (const u of unusable) {
@@ -1454,6 +1463,14 @@ export default function LightningPage() {
           // noop). Mirrors plans/page.tsx.
           if (primaryPersistSucceeded) {
             itemsBaselineRef.current = winningLightningItems;
+            // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Lightning's own
+            // confirmed-baseline fact right now — see this pull's own doc
+            // above (near `supersededDomains`).
+            if (pullCtx.userId && planner?.revision != null) {
+              void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+                lightning: { version: 1, items: winningLightningItems },
+              });
+            }
           }
         }
 
@@ -1521,6 +1538,15 @@ export default function LightningPage() {
         if (hydrationSucceeded) {
           plansRawBaselineRef.current = winningPlansRawToWrite;
         }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Plans' own confirmed-
+        // baseline fact right now, mirroring the ORIGINAL end-of-pull
+        // eligibility condition exactly — see this pull's own doc above
+        // (near `supersededDomains`).
+        if (plansHydrationWritten && planner?.plans && pullCtx.userId && planner?.revision != null) {
+          void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+            plans: { version: planner.plans.version, items: winningPlansItems },
+          });
+        }
 
         // SH.2.2 — COMMIT-TIME AUTHORITY REVALIDATION, immediately before
         // this pull's LAST hydration commit — mirrors plans/page.tsx
@@ -1587,6 +1613,25 @@ export default function LightningPage() {
         if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
           daysBaselineRef.current = winningDays;
         }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Days' own confirmed-
+        // baseline fact right now, mirroring the ORIGINAL end-of-pull
+        // eligibility condition exactly (itemsCloudWon,
+        // primaryPersistSucceeded, !plansChangedLocally,
+        // !daysChangedLocally, !daysWriteFailed) — see this pull's own doc
+        // above (near `supersededDomains`).
+        if (
+          itemsCloudWon &&
+          primaryPersistSucceeded &&
+          !plansChangedLocally &&
+          !daysChangedLocally &&
+          !daysWriteFailed &&
+          pullCtx.userId &&
+          planner?.revision != null
+        ) {
+          void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+            days: winningDays,
+          });
+        }
 
         // Same-tab writes do not fire a storage event, so refresh
         // planDayItems/allPlanItems explicitly after every pull. Reads
@@ -1622,64 +1667,11 @@ export default function LightningPage() {
         // MOVED to the top of this `.then()`, before winner selection.
         // Mirrors plans/page.tsx exactly — see its own detailed doc.
 
-        // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
-        // DURABLE confirmed baseline for whichever domain(s) this pull
-        // determined were cloud-won AND successfully persisted. This is
-        // what makes a pull-hydrated domain just as "confirmed" as a
-        // pushed one, so a LATER pull's buildPostFetchPullBaseline()
-        // never misclassifies it as an unsynced local edit — see
-        // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
-        // domains are simply omitted: their prior confirmation status is
-        // left untouched, exactly matching this pull's own conflict
-        // decision (never "retroactively" changed by a later event).
-        // 3rd round: the commit is now identity-scoped (activeUserIdRef)
-        // and revision-gated — it's skipped entirely when we don't know
-        // which account this is for, or when the GET response carried no
-        // server revision, since an un-ordered commit could otherwise
-        // regress a newer confirmed snapshot written by a concurrent push.
-        const acceptedForBaseline: {
-          plans?: { version: number; items: unknown[] };
-          lightning?: { version: number; items: unknown[] };
-          days?: string[];
-        } = {};
-        // Codex P1 fix (7th round) — also requires `primaryPersistSucceeded`:
-        // metadata must never advance ahead of the durable state it
-        // describes. Mirrors plans/page.tsx.
-        if (itemsCloudWon && primaryPersistSucceeded) {
-          acceptedForBaseline.lightning = { version: 1, items: winningLightningItems };
-        }
-        if (plansHydrationWritten && planner?.plans) {
-          // Codex P1 fix (4th round) — commit the SAME sanitized content
-          // that was actually persisted to Plans' storage above, not the
-          // raw planner.plans payload; committing the unsanitized version
-          // would re-introduce the orphaned item into the durable
-          // confirmed record even though it was correctly stripped from
-          // local storage.
-          acceptedForBaseline.plans = { version: planner.plans.version, items: winningPlansItems };
-        }
-        // Days is committed only when winningDays is ENTIRELY cloud-derived
-        // — own items cloud-won, Plans didn't win locally either (so no
-        // locally-sourced day could have been folded into the
-        // reconciliation step above), days itself didn't win locally, and
-        // the write actually succeeded. Mirrors the daysBaselineRef
-        // fallback-tier condition just above, now also accounting for the
-        // sibling dataset.
-        if (itemsCloudWon && primaryPersistSucceeded && !plansChangedLocally && !daysChangedLocally && !daysWriteFailed) {
-          acceptedForBaseline.days = winningDays;
-        }
-        if (pullCtx.userId && planner?.revision != null) {
-          // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
-          // the 11th — see commitConfirmedBaseline's own doc); fired
-          // without awaiting since nothing later in this callback depends
-          // on the commit having landed. Scoped to pullCtx.userId/
-          // pullCtx.profileId (13th round), not the live refs.
-          void commitConfirmedBaseline(
-            pullCtx.userId,
-            pullCtx.profileId,
-            planner.revision,
-            acceptedForBaseline
-          );
-        }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE (Codex P1 follow-up round):
+        // each domain's confirmed-baseline fact was already recorded, per
+        // domain, immediately after ITS OWN commit resolved above — see
+        // this pull's own doc near `supersededDomains`. No batched
+        // end-of-pull commit remains here. Mirrors plans/page.tsx exactly.
 
         // SH.2.2 — mirrors plans/page.tsx exactly, see its own detailed
         // doc: schedules the ONE replacement pull needed when this pull

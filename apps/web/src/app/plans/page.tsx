@@ -2287,6 +2287,40 @@ export default function PlansPage() {
         // staleRetryPendingRef guard — covers every domain that superseded
         // this pull, however many, however they did.
         const supersededDomains: UnusableDomain[] = [];
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE (Codex P1 follow-up round).
+        // Root cause: a MULTI-DOMAIN pull's confirmed-baseline commit used
+        // to be a single call, batched until every domain (items, days,
+        // lightning) had attempted its own commit. If domain A committed
+        // successfully but a LATER domain's authority check then aborted
+        // the rest of this pull (return before reaching that batched
+        // call), A's already-durable hydration write got NO matching
+        // confirmed-baseline fact. A's disk bytes were real and correct —
+        // but the NEXT pull's resolvePostFetchDomainBaseline() (see its
+        // own doc in syncPayload.ts) trusts a domain's EXISTING older
+        // confirmed fact (if one exists) over any in-memory ref fallback;
+        // with no new fact recorded, that older, now-stale value becomes
+        // the replacement pull's baseline, diverges from A's already-
+        // applied disk content, and gets misread as an unsynced LOCAL
+        // EDIT — eligible to be pushed back over cloud state newer than
+        // what A itself ever saw.
+        //
+        // Fix: commitConfirmedBaseline() is now called PER DOMAIN,
+        // immediately once that domain's OWN eligibility is fully known —
+        // never batched until the whole pull finishes. Each domain's
+        // eligibility (itemsCloudWon/primaryPersistSucceeded for items;
+        // the days-specific conditions; lightningHydrationWritten) only
+        // ever depends on THIS OR AN EARLIER domain's own outcome, never a
+        // LATER one — so recording immediately changes nothing about
+        // which facts get recorded, only WHEN, closing the gap without
+        // weakening any existing eligibility rule. commitConfirmedBaseline
+        // itself has no internal `await` (see its own doc in
+        // syncHelper.ts), so firing it with `void` here still lands the
+        // localStorage write synchronously, before this function's next
+        // statement runs — no race with a later domain's own authority
+        // check or with handlePullDeferral()'s retry scheduling. A domain
+        // that never reached this point (the pull aborted before its own
+        // commit ran) correctly gets no fact — there is nothing durable to
+        // describe yet.
         function handlePullDeferral(unusable: UnusableDomain[]): void {
           if (unusable.length === 0) return;
           for (const u of unusable) {
@@ -2643,6 +2677,14 @@ export default function PlansPage() {
           // on-disk value for the rest of this mount.
           if (primaryPersistSucceeded) {
             itemsBaselineRef.current = winningPlanItems;
+            // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Plans' own
+            // confirmed-baseline fact right now — see this pull's own doc
+            // above (near `supersededDomains`) for the full rationale.
+            if (pullCtx.userId && planner?.revision != null) {
+              void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+                plans: { version: SCHEMA_VERSION, items: winningPlanItems },
+              });
+            }
           }
           // Phase 7.3.6: if no explicit session context exists, allow the
           // items-watcher to re-run inference once on the authoritative
@@ -2721,6 +2763,27 @@ export default function PlansPage() {
         if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
           daysBaselineRef.current = winningDays;
         }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Days' own confirmed-
+        // baseline fact right now, mirroring the ORIGINAL end-of-pull
+        // eligibility condition exactly (itemsCloudWon,
+        // primaryPersistSucceeded, !lightningChangedLocally,
+        // !daysChangedLocally, !daysWriteFailed) — see this pull's own
+        // "PARTIAL-APPLY PROVENANCE" doc above (near `supersededDomains`)
+        // for why this can no longer wait for Lightning's own commit to
+        // also resolve.
+        if (
+          itemsCloudWon &&
+          primaryPersistSucceeded &&
+          !lightningChangedLocally &&
+          !daysChangedLocally &&
+          !daysWriteFailed &&
+          pullCtx.userId &&
+          planner?.revision != null
+        ) {
+          void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+            days: winningDays,
+          });
+        }
 
         // Phase 7.6.3 — Sync Hydration Safety: hydrate lightning into localStorage
         // so sync pushes always include a complete dataset regardless of which page loads first.
@@ -2794,6 +2857,15 @@ export default function PlansPage() {
             setLightningVersion((v) => v + 1);
           }
         }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE: record Lightning's own
+        // confirmed-baseline fact right now, mirroring the ORIGINAL
+        // end-of-pull eligibility condition exactly — see this pull's own
+        // doc above (near `supersededDomains`).
+        if (lightningHydrationWritten && planner?.lightning && pullCtx.userId && planner?.revision != null) {
+          void commitConfirmedBaseline(pullCtx.userId, pullCtx.profileId, planner.revision, {
+            lightning: { version: planner.lightning.version, items: winningLightningItems },
+          });
+        }
         // Codex fix — a failed authoritative days[] write (daysWriteFailed)
         // keeps the gate closed exactly like a failed lightning-hydration
         // write already does, so a stale locally-persisted order can never
@@ -2825,66 +2897,13 @@ export default function PlansPage() {
         // that block's own doc for why. Nothing beacon-related happens here
         // anymore.
 
-        // SH.2 architecture (Codex P1, 1st + 3rd rounds) — commit the
-        // DURABLE confirmed baseline for whichever domain(s) this pull
-        // determined were cloud-won AND successfully persisted, gated by
-        // THIS pull's own GET response revision. This is what makes a
-        // pull-hydrated domain just as "confirmed" as a pushed one, so a
-        // LATER pull's buildPostFetchPullBaseline() never
-        // misclassifies it as an unsynced local edit — see
-        // commitConfirmedBaseline's own doc in syncHelper.ts. Local-won
-        // domains are simply omitted: their prior confirmation status is
-        // left untouched, exactly matching this pull's own conflict
-        // decision (never "retroactively" changed by a later event).
-        // Requires both a known revision (planner?.revision — null only if
-        // the server response unexpectedly omitted it) and a known
-        // identity (pullCtx.userId); either missing means there is nothing
-        // safe to commit against, so the step is skipped entirely rather
-        // than guessing.
-        const acceptedForBaseline: {
-          plans?: { version: number; items: unknown[] };
-          lightning?: { version: number; items: unknown[] };
-          days?: string[];
-        } = {};
-        // Codex P1 fix (7th round) — also requires `primaryPersistSucceeded`:
-        // a cloud-won Plans domain whose durable write above failed must
-        // never be committed as confirmed — metadata must never advance
-        // ahead of the durable state it describes.
-        if (itemsCloudWon && primaryPersistSucceeded) {
-          acceptedForBaseline.plans = { version: SCHEMA_VERSION, items: winningPlanItems };
-        }
-        if (lightningHydrationWritten && planner?.lightning) {
-          // Codex P1 fix (4th round) — commit the SAME sanitized content
-          // that was actually persisted to Lightning's storage above, not
-          // the raw planner.lightning payload; committing the unsanitized
-          // version would re-introduce the orphaned item into the durable
-          // confirmed record even though it was correctly stripped from
-          // local storage.
-          acceptedForBaseline.lightning = { version: planner.lightning.version, items: winningLightningItems };
-        }
-        // Days is committed only when winningDays is ENTIRELY cloud-derived
-        // — own items cloud-won, Lightning didn't win locally either (so
-        // no locally-sourced day could have been folded into the
-        // reconciliation step above), days itself didn't win locally, and
-        // the write actually succeeded. Mirrors the daysBaselineRef
-        // fallback-tier condition just above, now also accounting for the
-        // sibling dataset.
-        if (itemsCloudWon && primaryPersistSucceeded && !lightningChangedLocally && !daysChangedLocally && !daysWriteFailed) {
-          acceptedForBaseline.days = winningDays;
-        }
-        if (pullCtx.userId && planner?.revision != null) {
-          // Async (Codex P1, 4th round; no longer Web-Locks-dependent as of
-          // the 11th — see commitConfirmedBaseline's own doc); fired
-          // without awaiting since nothing later in this callback depends
-          // on the commit having landed. Scoped to pullCtx.userId/
-          // pullCtx.profileId (13th round), not the live refs.
-          void commitConfirmedBaseline(
-            pullCtx.userId,
-            pullCtx.profileId,
-            planner.revision,
-            acceptedForBaseline
-          );
-        }
+        // SH.2.2 — PARTIAL-APPLY PROVENANCE (Codex P1 follow-up round):
+        // each domain's confirmed-baseline fact was already recorded, per
+        // domain, immediately after ITS OWN commit resolved above (see
+        // this pull's own doc near `supersededDomains`) — no batched
+        // end-of-pull commit remains here. A domain this pull never
+        // reached (an earlier authority-superseded bail-out returned
+        // before it) correctly has no fact recorded, exactly as before.
 
         // SH.2.2 — this pull reached the end of its commit sequence without
         // any confirmed-authority regression (every revalidateAuthorityBeforeCommit()
