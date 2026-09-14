@@ -242,11 +242,16 @@ Reviewers should check any changes affecting:
  *                                                        "noop" only when
  *                                                        the durable value
  *                                                        already equals it
- *   isLocalDomainCommitSuccess(status)               — true for "committed"
- *                                                        or "noop" (the
- *                                                        durable value is
- *                                                        confirmed to be, or
- *                                                        already was, the
+ *   isLocalDomainCommitSuccess(status)               — true for "committed",
+ *                                                        "committed-
+ *                                                        unprotected" (SH.2.4
+ *                                                        Codex P1 follow-up
+ *                                                        round — see
+ *                                                        commitLocalDomainRawSync's
+ *                                                        own doc), or "noop"
+ *                                                        (the durable value
+ *                                                        is confirmed to be,
+ *                                                        or already was, the
  *                                                        caller's intended
  *                                                        value); false for
  *                                                        "superseded",
@@ -793,6 +798,7 @@ import {
   planHydrationProvenanceDedup,
   isHydrationProvenanceFactObsoleteAfterConfirm,
   planOrdinaryEditFactCommit,
+  decideOrdinaryEditPersistOutcome,
   type LocalEditFactRecord,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
@@ -1519,8 +1525,15 @@ export function commitLocalDomainRaw(
  * subset of LocalDomainCommitStatus, since a synchronous, lock-free,
  * always-unconditional write can never be "superseded", "aborted", or
  * "unavailable" (there is no baseline to violate, no queued wait to go
- * stale during, and no serialization primitive it depends on). */
-export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
+ * stale during, and no serialization primitive it depends on).
+ * "committed-unprotected" (SH.2.4 Codex P1 follow-up round) — see
+ * decideOrdinaryEditPersistOutcome()'s own doc in syncPayload.ts — is
+ * added this round: the requested value is durably preserved (never lost
+ * to React state alone), but only ONE of {new edit fact, canonical
+ * overwrite} actually landed, so this write does not carry the FULL SH.2.4
+ * concurrent-fact protection a genuine fact+canonical pair provides.
+ * isLocalDomainCommitSuccess() still treats it as success. */
+export type LocalDomainSyncCommitStatus = "committed" | "committed-unprotected" | "noop" | "failed";
 
 /**
  * Unconditional, SYNCHRONOUS commit policy — used by ORDINARY user-edit
@@ -1584,6 +1597,23 @@ export type LocalDomainSyncCommitStatus = "committed" | "noop" | "failed";
  * concurrent tab's interleave. Same-value dedup (an existing baseline fact
  * already carrying `nextRaw`'s exact bytes is reused instead of duplicated)
  * is also handled by that same pure decision — see its own doc.
+ *
+ * SH.2.4 Codex P1 follow-up fix ("fact allocation near quota must not block
+ * a best-effort canonical write") — a NEW fact key (`plan.ownFactKey`, when
+ * `plan.writeNew`) is written BEFORE the canonical key, but allocating a
+ * brand-new key can fail on `QuotaExceededError` in a case where
+ * overwriting the EXISTING canonical key with the same/smaller value would
+ * still succeed (a new key needs genuinely additional storage; an overwrite
+ * usually does not). The previous implementation returned "failed" the
+ * instant that fact `setItem` threw, WITHOUT ever attempting the canonical
+ * write — a user's edit that could have been durably preserved was instead
+ * left only in React state, and lost on reload. The fix: attempt BOTH
+ * writes unconditionally (neither leg's failure skips the other), then
+ * classify the outcome via decideOrdinaryEditPersistOutcome() (syncPayload.ts
+ * — see its own doc for the full case analysis). Retirement of this
+ * decision's own observed baseline facts still runs whenever EITHER leg
+ * landed (never when both failed — fail safely, nothing durable changed, so
+ * nothing already on disk is disturbed).
  */
 export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
   if (typeof window === "undefined") return "failed";
@@ -1623,24 +1653,45 @@ export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDom
   const decision = decideLocalDomainCommit(durableRaw, durableRaw, nextRaw);
   if (decision === "noop") return "noop";
   const plan = planOrdinaryEditFactCommit(baselineFacts, nextRaw, localEditFactKey(key, generateOpId()));
+  // SH.2.4 Codex P1 follow-up — attempt BOTH the new fact and the canonical
+  // overwrite unconditionally; neither leg's failure is allowed to skip the
+  // other (see this function's own doc above for why a new-key allocation
+  // can fail near quota even when the canonical overwrite would still
+  // succeed). `factPublished` is already true when no new fact was even
+  // needed (a baseline fact already matched `nextRaw` — see
+  // planOrdinaryEditFactCommit's own dedup doc): that existing fact already
+  // durably represents this intent, nothing further to attempt for it.
+  let factPublished = !plan.writeNew;
   if (plan.writeNew) {
     try {
       localStorage.setItem(plan.ownFactKey, nextRaw);
-    } catch {
-      return "failed";
-    }
+      factPublished = true;
+    } catch {}
   }
+  let canonicalWritten = false;
   try {
     localStorage.setItem(key, nextRaw);
-  } catch {
+    canonicalWritten = true;
+  } catch {}
+  const outcome = decideOrdinaryEditPersistOutcome(factPublished, canonicalWritten);
+  if (outcome === "failed") {
+    // Fail safely: neither leg landed, so nothing durable changed — the
+    // baseline facts this decision observed are left completely untouched,
+    // exactly as they were before this call.
     return "failed";
   }
+  // At least one of {fact, canonical} now durably holds `nextRaw` — every
+  // baseline fact this decision observed is proven stale relative to it
+  // regardless of WHICH leg landed (see planOrdinaryEditFactCommit's own
+  // doc: `keysToRetire` never names a key outside this decision's own
+  // baseline, so retiring it here is exactly as safe as the fully-
+  // successful path already was).
   for (const staleKey of plan.keysToRetire) {
     try {
       localStorage.removeItem(staleKey);
     } catch {}
   }
-  return "committed";
+  return outcome;
 }
 
 /**
@@ -1655,12 +1706,29 @@ export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDom
  * safe serialization primitive exists in this environment), or "failed" (a
  * real localStorage exception) — all five mean the intended value is NOT
  * confirmed durable, so ownership/syncReady/confirmed-baseline advancement
- * must not proceed as if it were. Also accepts LocalDomainSyncCommitStatus
- * (a strict subset), so callers of either primitive can share this one
- * check.
+ * must not proceed as if it were. Also accepts LocalDomainSyncCommitStatus,
+ * so callers of either primitive can share this one check — explicitly
+ * unioned in the parameter type below rather than relying on one being a
+ * structural subset of the other, since LocalDomainSyncCommitStatus's
+ * "committed-unprotected" (see next paragraph) has no counterpart in
+ * LocalDomainCommitStatus: commitLocalDomainRaw() (the CAS/hydration path)
+ * never produces it — only commitLocalDomainRawSync() can — so it must not
+ * pollute LocalDomainCommitStatus itself (callers like
+ * DomainHydrationCommitStatus narrow from that exact type and must never
+ * have to account for an outcome commitLocalDomainRaw() cannot return).
+ *
+ * "committed-unprotected" (SH.2.4 Codex P1 follow-up round;
+ * decideOrdinaryEditPersistOutcome() in syncPayload.ts) is ALSO true here:
+ * the requested value is durably preserved on disk — via the surviving new
+ * fact, or via canonical directly — even though only one of the two legs
+ * commitLocalDomainRawSync() attempts actually landed. The overriding LOCAL-
+ * FIRST DURABILITY CONTRACT is "never lose the user's edit to React state
+ * alone", which this outcome satisfies exactly as fully as "committed"
+ * does; it is reported under a distinct name only so it is never confused
+ * with the fully fact-protected case, never so gates treat it as failure.
  */
-export function isLocalDomainCommitSuccess(status: LocalDomainCommitStatus): boolean {
-  return status === "committed" || status === "noop";
+export function isLocalDomainCommitSuccess(status: LocalDomainCommitStatus | LocalDomainSyncCommitStatus): boolean {
+  return status === "committed" || status === "committed-unprotected" || status === "noop";
 }
 
 /**

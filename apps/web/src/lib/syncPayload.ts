@@ -3197,6 +3197,107 @@ export const DEV_ORDINARY_EDIT_FACT_COMMIT_CASES: Array<{
   },
 ];
 
+// ===== ORDINARY-EDIT PERSIST OUTCOME (SH.2.4 Codex P1 follow-up round —
+// "fact allocation near quota must not block a best-effort canonical
+// write") ====================================================================
+//
+// ROOT CAUSE: commitLocalDomainRawSync() published the new local-edit-fact
+// key (`plan.ownFactKey`, when `plan.writeNew`) BEFORE writing the canonical
+// key. A brand-new key can fail near localStorage quota (`QuotaExceededError`)
+// in a case where overwriting the EXISTING canonical key with the same or
+// smaller value would still succeed — a new key needs genuinely additional
+// storage, while overwriting an existing one usually does not. The previous
+// code returned "failed" the instant the fact `setItem` threw, WITHOUT ever
+// attempting the canonical write — so a user's edit that could have been
+// preserved was instead left only in React state, and lost on reload.
+//
+// THE FIX: attempt BOTH writes unconditionally (never let one leg's failure
+// skip the other), then classify the outcome from what actually landed.
+// decideOrdinaryEditPersistOutcome() is the pure decision, given only
+// whether each leg durably succeeded:
+//   • neither leg landed — "failed". Fail safely: nothing changed on disk,
+//     so the baseline facts this decision observed are left completely
+//     untouched (the caller must not retire anything in this case — see
+//     commitLocalDomainRawSync's own doc for how this return value gates
+//     that).
+//   • BOTH legs landed — "committed", exactly the pre-existing full-success
+//     outcome. Every SH.2.4 concurrent-fact guarantee applies unchanged:
+//     the new fact durably backs this exact edit, so this case must never
+//     be weakened by this round.
+//   • exactly ONE leg landed — "committed-unprotected": the requested value
+//     IS durably recoverable (readLatestDurableValue() will still resolve
+//     to it — via the surviving fact, when only the fact leg landed and it
+//     is the sole surviving fact for this key; via canonical directly,
+//     when only the canonical leg landed), but this write no longer carries
+//     the FULL SH.2.4 protection a genuine fact+canonical pair provides —
+//     see isLocalDomainCommitSuccess()'s own doc for why this is still
+//     treated as a durable success for gating purposes (the overriding
+//     LOCAL-FIRST DURABILITY CONTRACT is "never lose the user's edit to
+//     React state alone", which this outcome satisfies) while remaining
+//     distinctly reported so it is never confused with the fully-protected
+//     case. This is the SAME class of already-accepted, narrower-window
+//     residual risk documented for the no-Web-Locks case generally — never
+//     a new correctness gap, only an honest name for an unavoidable
+//     degraded outcome.
+// Retirement of this decision's own observed baseline facts (`keysToRetire`
+// from planOrdinaryEditFactCommit() above) is safe whenever this function
+// does NOT return "failed" — i.e. whenever nextRaw is durably held by
+// EITHER leg — for the identical reason the fully-successful path was
+// already safe: those facts are proven-stale evidence the moment ANY
+// surviving representation (fact or canonical) of the newer value exists,
+// regardless of which leg happened to be the one that landed.
+export type OrdinaryEditPersistOutcome = "committed" | "committed-unprotected" | "failed";
+
+export function decideOrdinaryEditPersistOutcome(
+  factPublished: boolean,
+  canonicalWritten: boolean
+): OrdinaryEditPersistOutcome {
+  if (!factPublished && !canonicalWritten) return "failed";
+  if (factPublished && canonicalWritten) return "committed";
+  return "committed-unprotected";
+}
+
+/**
+ * Reference cases for decideOrdinaryEditPersistOutcome() — the REQUIRED
+ * cases from the SH.2.4 Codex P1 follow-up round. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES, decideOrdinaryEditPersistOutcome } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES.forEach(c => {
+ *     const got = decideOrdinaryEditPersistOutcome(c.factPublished, c.canonicalWritten);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES: Array<{
+  name: string;
+  factPublished: boolean;
+  canonicalWritten: boolean;
+  expected: OrdinaryEditPersistOutcome;
+}> = [
+  {
+    name: "required case 1 — fact allocation fails near quota, canonical overwrite still succeeds: durably preserved, but reported distinctly from a fully-protected commit",
+    factPublished: false,
+    canonicalWritten: true,
+    expected: "committed-unprotected",
+  },
+  {
+    name: "required case 2 — both fact allocation and the canonical write fail: fail safely, nothing durable changed",
+    factPublished: false,
+    canonicalWritten: false,
+    expected: "failed",
+  },
+  {
+    name: "required case 3 — normal successful fact publication: full SH.2.4 protection, unweakened",
+    factPublished: true,
+    canonicalWritten: true,
+    expected: "committed",
+  },
+  {
+    name: "symmetric case — canonical write fails but the new fact still lands: still durably recoverable via the surviving fact, reported as unprotected rather than a full commit",
+    factPublished: true,
+    canonicalWritten: false,
+    expected: "committed-unprotected",
+  },
+];
+
 // ===== PROFILE-OWNED SYNC STATE (SH.2.1 P1, this round) =====
 //
 // Codex found a second architectural gap: deleteProfile() (profileStorage.ts)
