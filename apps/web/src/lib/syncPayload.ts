@@ -1410,6 +1410,189 @@ export const DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES: Array<{
   },
 ];
 
+// ===== Hydration-provenance dedup/pruning (SH.2.3 — Codex P1 "deduplicate
+// same-revision hydration provenance facts" round) =========================
+//
+// ROOT ISSUE: recordHydrationProvenance() (syncHelper.ts) writes a new,
+// permanently-unique-keyed full-value record on EVERY call, and previously
+// self-pruned only STRICTLY OLDER revisions (`r < revision`) — deliberately,
+// so a genuinely concurrent OTHER tab's own same-revision-but-different
+// hydration result would never be discarded (see pruneHydrationProvenanceFacts's
+// own doc above for why `<` there and `<=` at recordConfirmedFact's cross-
+// store call site are DIFFERENT, both-correct semantics). But "preserve
+// same-revision siblings" was never meant to mean "preserve same-revision
+// DUPLICATES": repeated reconciliation at an UNCHANGED server revision —
+// ordinary, expected behavior, not an edge case (every reload's mount pull
+// while nothing has changed cloud-side, and SH.2.3's own accepted-operation
+// reconciliation loop, both call recordHydrationProvenance() again and again
+// at the SAME revision with the SAME value once nothing new has happened) —
+// had no mechanism to recognize "this exact value at this exact revision is
+// already durably recorded" and kept accumulating canonically-identical
+// full-value records indefinitely, working directly against the very
+// storage-boundedness canonicalDigest() (above) was built to establish for
+// pending-op evidence.
+//
+// planHydrationProvenanceDedup() is the pure decision this closes, factored
+// out from the actual localStorage scan (which stays in
+// recordHydrationProvenance(), syncHelper.ts — this function only reasons
+// over already-parsed `{key, revision, value}` records) so it can be
+// exercised directly via the DEV_* cases below, matching this codebase's
+// established "pure decision here, I/O wrapper in syncHelper.ts" pattern
+// (decideLocalDomainCommit, resolveConfirmedDomainState, etc.). Given the
+// full CURRENT set of recorded facts for one (userId, profileId, domain) and
+// the `{revision, value}` about to be recorded:
+//   • Any fact strictly OLDER than `revision` is marked for deletion —
+//     UNCHANGED from the previous self-pruning behavior; see
+//     pruneHydrationProvenanceFacts's own doc for why this is safe (a later
+//     write proves the canonical key has moved on, so no older record can
+//     ever again explain current disk content).
+//   • Among facts at EXACTLY `revision`, grouped by their OWN canonical
+//     value: the FIRST fact encountered per distinct canonical value is kept
+//     as that value's sole survivor; any FURTHER fact whose value canonically
+//     matches an already-kept survivor is ALSO marked for deletion — this is
+//     the actual dedup (collapses however many duplicate records have
+//     already accumulated for one distinct value down to one, self-healing
+//     even a keyspace that grew before this fix shipped). A fact at
+//     `revision` whose value canonically DIFFERS from every other same-
+//     revision fact seen so far is always kept as its own group's survivor —
+//     genuinely different same-revision siblings from a real concurrent
+//     writer race are never touched, exactly preserving the existing
+//     "same-revision siblings coexist" guarantee this round must not
+//     regress.
+//   • A fact at any revision STRICTLY NEWER than `revision` is never
+//     inspected or touched by this call at all — unchanged from before;
+//     each write only ever reasons about revisions up to its own.
+//   • `writeNew` is `false` exactly when an EXISTING fact at `revision`
+//     already canonically equals the value about to be recorded — the
+//     durable invariant ("this value at this revision is recorded") already
+//     holds, so writing yet another physically-unique duplicate key would
+//     only grow storage for zero informational gain. `true` otherwise: no
+//     existing same-revision fact matches (either none exist yet at this
+//     revision, or every one present is a genuinely different sibling), so a
+//     new key is needed to preserve that distinct value.
+export interface HydrationProvenanceFactRecord {
+  key: string;
+  revision: number;
+  value: unknown;
+}
+
+export interface HydrationProvenanceDedupPlan {
+  writeNew: boolean;
+  keysToDelete: string[];
+}
+
+export function planHydrationProvenanceDedup(
+  existing: HydrationProvenanceFactRecord[],
+  revision: number,
+  value: unknown
+): HydrationProvenanceDedupPlan {
+  const targetCanonical = canonicalizeJSON(value);
+  const keysToDelete: string[] = [];
+  let alreadyPresent = false;
+  const survivorForCanonical = new Map<string, string>();
+  for (const fact of existing) {
+    if (fact.revision < revision) {
+      keysToDelete.push(fact.key);
+      continue;
+    }
+    if (fact.revision !== revision) continue;
+    const factCanonical = canonicalizeJSON(fact.value);
+    if (factCanonical === targetCanonical) alreadyPresent = true;
+    const survivorKey = survivorForCanonical.get(factCanonical);
+    if (survivorKey === undefined) {
+      survivorForCanonical.set(factCanonical, fact.key);
+    } else {
+      keysToDelete.push(fact.key);
+    }
+  }
+  return { writeNew: !alreadyPresent, keysToDelete };
+}
+
+/**
+ * Reference cases for planHydrationProvenanceDedup(). Run from Node:
+ *   import { DEV_HYDRATION_PROVENANCE_DEDUP_CASES, planHydrationProvenanceDedup } from "@/lib/syncPayload";
+ *   DEV_HYDRATION_PROVENANCE_DEDUP_CASES.forEach(c => {
+ *     const got = planHydrationProvenanceDedup(c.existing, c.revision, c.value);
+ *     const ok = got.writeNew === c.expected.writeNew && JSON.stringify([...got.keysToDelete].sort()) === JSON.stringify([...c.expected.keysToDelete].sort());
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_HYDRATION_PROVENANCE_DEDUP_CASES: Array<{
+  name: string;
+  existing: HydrationProvenanceFactRecord[];
+  revision: number;
+  value: unknown;
+  expected: HydrationProvenanceDedupPlan;
+}> = [
+  {
+    name: "required — repeated identical value at the same revision: no new write, nothing to delete",
+    existing: [{ key: "k1", revision: 5, value: { version: 1, items: ["A"] } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: [] },
+  },
+  {
+    name: "required — no existing fact yet at this revision: write needed, nothing to delete",
+    existing: [],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: [] },
+  },
+  {
+    name: "required — a genuinely DIFFERENT value at the same revision (concurrent writer): both must coexist — write needed, the differing sibling is NOT deleted",
+    existing: [{ key: "k1", revision: 5, value: { version: 1, items: ["OTHER-TAB"] } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: [] },
+  },
+  {
+    name: "required — newer revision prunes obsolete strictly-older facts",
+    existing: [
+      { key: "old1", revision: 3, value: { version: 1, items: ["stale"] } },
+      { key: "old2", revision: 4, value: { version: 1, items: ["also-stale"] } },
+    ],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: ["old1", "old2"] },
+  },
+  {
+    name: "a revision STRICTLY NEWER than this write is never touched",
+    existing: [{ key: "future", revision: 9, value: { version: 1, items: ["from-the-future"] } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: [] },
+  },
+  {
+    name: "self-healing — collapses pre-existing same-revision duplicates of the SAME value down to one survivor, even though no new write is needed",
+    existing: [
+      { key: "dup1", revision: 5, value: { version: 1, items: ["A"] } },
+      { key: "dup2", revision: 5, value: { version: 1, items: ["A"] } },
+      { key: "dup3", revision: 5, value: { version: 1, items: ["A"] } },
+    ],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: ["dup2", "dup3"] },
+  },
+  {
+    name: "mixed — one duplicate of the target value collapsed, one genuinely different sibling preserved, one older revision pruned",
+    existing: [
+      { key: "dup", revision: 5, value: { version: 1, items: ["A"] } },
+      { key: "sibling", revision: 5, value: { version: 1, items: ["B-from-other-tab"] } },
+      { key: "old", revision: 2, value: { version: 1, items: ["ancient"] } },
+    ],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: ["old"] },
+  },
+  {
+    name: "canonical equality — differently-ordered keys count as the same value for dedup purposes too",
+    existing: [{ key: "k1", revision: 5, value: { items: ["A"], version: 1 } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: [] },
+  },
+];
+
 // ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
 
 /**

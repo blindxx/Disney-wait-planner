@@ -790,6 +790,7 @@ import {
   resolveHydrationApplyIntentDisposition,
   isPendingOpDomainEvidenceCurrent,
   canonicalDigest,
+  planHydrationProvenanceDedup,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -797,6 +798,7 @@ import {
   type AcceptedPlannerDomains,
   type HydrationApplyIntent,
   type PendingOpRecord,
+  type HydrationProvenanceFactRecord,
 } from "./syncPayload";
 
 /**
@@ -2346,14 +2348,27 @@ function hydrationProvenanceKey(
 /**
  * SH.2.2 (Codex P1 "prune superseded hydration provenance" round) — deletes
  * every hydration-provenance fact for (userId, profileId, domain) that
- * `isPrunable(factRevision)` accepts. Shared by recordHydrationProvenance()
- * (below — self-prunes STRICTLY OLDER records on every new write: `r <
- * revision`, preserving same-revision siblings a genuinely concurrent OTHER
- * writer may have recorded for the identical GET response) and
- * recordConfirmedFact() (above — cross-store-prunes records `r <= revision`
- * once genuine CONFIRMED authority is established AT OR BELOW that
- * revision, a strictly stronger signal that supersedes any hydration
- * record at or below it, from any writer).
+ * `isPrunable(factRevision)` accepts. Used by recordConfirmedFact() (above —
+ * cross-store-prunes records `r <= revision` once genuine CONFIRMED
+ * authority is established AT OR BELOW that revision, a strictly stronger
+ * signal that supersedes any hydration record at or below it, from any
+ * writer — `<=`, not `<`, since confirmed authority is a single-truth
+ * signal that even same-revision hydration siblings cannot survive).
+ *
+ * SH.2.3 (Codex P1 "deduplicate same-revision hydration provenance facts"
+ * round) — recordHydrationProvenance()'s OWN self-pruning below no longer
+ * goes through this generic `isPrunable` sweep: strictly-older pruning AND
+ * same-revision DEDUPLICATION (collapsing canonically-identical same-
+ * revision duplicates to one survivor, while still preserving genuinely
+ * different same-revision siblings — this function's simple boolean
+ * predicate has no way to express "delete all but one of a group of
+ * matching entries") are now decided together by planHydrationProvenanceDedup()
+ * (syncPayload.ts) against the full parsed fact set, and applied directly
+ * by recordHydrationProvenance() itself. This function is kept for the
+ * recordConfirmedFact() cross-store call site above, whose `<=` sweep never
+ * needed to distinguish same-revision siblings from duplicates in the first
+ * place (every fact at or below the confirmed revision is superseded
+ * regardless of its own value).
  *
  * Why pruning strictly-older records is safe at all: a hydration-provenance
  * record can only ever "explain" CURRENT disk content — see
@@ -2400,6 +2415,30 @@ function pruneHydrationProvenanceFacts(
   }
 }
 
+/**
+ * SH.2.3 (Codex P1 "deduplicate same-revision hydration provenance facts"
+ * round) — reads the full CURRENT set of recorded facts for this
+ * (userId, profileId, domain), hands it to the pure planHydrationProvenanceDedup()
+ * (syncPayload.ts) alongside the `{revision, value}` about to be recorded,
+ * and only writes a NEW physically-unique key when the plan says one is
+ * actually needed (`writeNew`) — never unconditionally, as the previous
+ * "always write, prune only strictly-older" version did. See that
+ * function's own doc for the full dedup/pruning rule this replaces. Both
+ * ordinary hydration commits (commitDomainHydration below) and SH.2.3's
+ * accepted-operation reconciliation (reconcilePendingOperations below) call
+ * THIS SAME function, so both get the bounded behavior automatically — no
+ * separate pruning path to keep in sync.
+ *
+ * Returns `false` only on a genuine write exception when a new key actually
+ * needed to be written (storage quota, disabled storage) — a call that
+ * determines no write is needed at all (`writeNew: false`) cannot fail this
+ * way, and still reports `true`: the durable invariant this function exists
+ * to establish ("this value at this revision is recorded") already held
+ * before this call, so there is nothing this call could fail to durably
+ * record. Pruning (`keysToDelete`) remains best-effort exactly as before —
+ * a pruning failure never flips an already-satisfied invariant to a
+ * failure.
+ */
 export async function recordHydrationProvenance(
   userId: string,
   profileId: string,
@@ -2408,14 +2447,38 @@ export async function recordHydrationProvenance(
   value: unknown
 ): Promise<boolean> {
   if (typeof window === "undefined") return false;
-  const key = hydrationProvenanceKey(userId, profileId, domain, revision, generateOpId());
-  try {
-    localStorage.setItem(key, JSON.stringify({ revision, value }));
-  } catch {
-    return false;
+  const existing: HydrationProvenanceFactRecord[] = [];
+  for (const factKey of snapshotKeysWithPrefix(hydrationProvenancePrefix(userId, profileId, domain))) {
+    let raw: string | null;
+    try {
+      raw = localStorage.getItem(factKey);
+    } catch {
+      continue;
+    }
+    if (raw === null) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    const fact = parseConfirmedFactForDomain(domain, parsed);
+    if (fact === null) continue;
+    existing.push({ key: factKey, revision: fact.revision, value: fact.value });
+  }
+  const plan = planHydrationProvenanceDedup(existing, revision, value);
+  if (plan.writeNew) {
+    const key = hydrationProvenanceKey(userId, profileId, domain, revision, generateOpId());
+    try {
+      localStorage.setItem(key, JSON.stringify({ revision, value }));
+    } catch {
+      return false;
+    }
   }
   try {
-    pruneHydrationProvenanceFacts(userId, profileId, domain, (r) => r < revision);
+    for (const staleKey of plan.keysToDelete) {
+      localStorage.removeItem(staleKey);
+    }
   } catch {
     // Best-effort pruning failure never flips an already-durable write to a
     // failure — mirrors recordConfirmedFact's own established convention.
