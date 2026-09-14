@@ -1217,6 +1217,19 @@ export default function PlansPage() {
         domain: "plans" | "lightning" | "days";
         reason: "unusable-response";
         confirmedRevision: number;
+      }
+    | {
+        // SH.2.2 — a commit-time CAS supersession (commitLocalDomainRaw()
+        // returned "superseded" for this domain, meaning a genuine local
+        // edit landed after winner selection but before this pull's own
+        // hydration write). No revision to carry — this is a local CAS
+        // decision, never a confirmed-fact comparison — but it feeds into
+        // the SAME decideStaleResponseRecovery() contract as "stale-response"
+        // (see that function's own SH.2.2 doc in syncPayload.ts): always
+        // safe to auto-retry on its own, never when mixed with a genuine
+        // "conflict"/"unusable-response".
+        domain: "plans" | "lightning" | "days";
+        reason: "local-edit-superseded";
       };
 
   /**
@@ -2212,57 +2225,91 @@ export default function PlansPage() {
         // domains' own confirmed facts (each domain's facts live under a
         // fully independent keyspace — see confirmedFactPrefix's own doc),
         // only defers what THIS pull does with them.
-        const unusableDomains = collectUnusableDomains(baselineOutcomes);
-        if (unusableDomains.length > 0) {
-          for (const unusable of unusableDomains) {
+        // SH.2.2 — COMMIT-TIME AUTHORITY & RECONCILIATION RECOVERY. This
+        // pull's baseline check above is only ONE point in time; the actual
+        // hydration writes below happen after further awaited boundaries
+        // (commitLocalDomainRaw per domain), during which confirmed
+        // authority can itself advance (e.g. an already-in-flight push —
+        // never aborted by cancelScheduledSync(), see its own doc in
+        // syncHelper.ts — resolves and confirms a newer revision) without
+        // ever touching the canonical storage key commitLocalDomainRaw's
+        // own CAS inspects. handlePullDeferral()/revalidateAuthorityBeforeCommit()
+        // below are the SHARED mechanism (used identically for the ORIGINAL
+        // baseline bail-out here AND for every later re-check immediately
+        // before a hydration commit) that keeps a winner PROVISIONAL until
+        // the instant it is actually committed — see
+        // decideStaleResponseRecovery()'s own SH.2.2 doc in syncPayload.ts
+        // for the full architecture this closes. `supersededDomains`
+        // accumulates every commit-time supersession this pull observes
+        // (confirmed-authority-advanced, reusing the existing
+        // "stale-response"/"conflict"/"unusable-response" reasons, AND
+        // local-edit CAS supersession, the new "local-edit-superseded"
+        // reason) so ONE recovery decision — and at most ONE scheduled
+        // replacement pull, deduplicated by the pre-existing
+        // staleRetryPendingRef guard — covers every domain that superseded
+        // this pull, however many, however they did.
+        const supersededDomains: UnusableDomain[] = [];
+        function handlePullDeferral(unusable: UnusableDomain[]): void {
+          if (unusable.length === 0) return;
+          for (const u of unusable) {
             try {
-              if (unusable.reason === "conflict") {
+              if (u.reason === "conflict") {
                 console.error(
-                  `SH.2: pull deferred — ${unusable.domain}'s confirmed state is conflicted at revision ${unusable.revision}.`
+                  `SH.2: pull deferred — ${u.domain}'s confirmed state is conflicted at revision ${u.revision}.`
                 );
-              } else if (unusable.reason === "stale-response") {
+              } else if (u.reason === "stale-response") {
                 console.error(
-                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is already at revision ${unusable.confirmedRevision}, newer than this pull's own response (revision ${unusable.cloudRevision}); refusing to hydrate an older response over it. Scheduling a replacement pull.`
+                  `SH.2.1: pull deferred — ${u.domain}'s confirmed state is already at revision ${u.confirmedRevision}, newer than this pull's own response (revision ${u.cloudRevision}); refusing to hydrate an older response over it. Scheduling a replacement pull.`
+                );
+              } else if (u.reason === "unusable-response") {
+                console.error(
+                  `SH.2.1: pull deferred — ${u.domain}'s confirmed state is at revision ${u.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
                 );
               } else {
                 console.error(
-                  `SH.2.1: pull deferred — ${unusable.domain}'s confirmed state is at revision ${unusable.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
+                  `SH.2.2: pull deferred — ${u.domain}'s local hydration commit was superseded by a newer local edit; the edit survives untouched. Scheduling a replacement pull.`
                 );
               }
             } catch {}
           }
-          // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Rejecting a
-          // stale response is correct, but leaving syncReady closed forever
-          // is not: decideStaleResponseRecovery() (syncPayload.ts) is the
-          // ONE shared, pure decision for whether THIS bail-out is safe to
-          // recover from automatically — "retry" only when EVERY unusable
-          // domain is "stale-response" (this pull's own response is a REAL,
-          // KNOWN, simply-older revision than already-confirmed durable
-          // authority), never when ANY domain is "conflict" (a real conflict
-          // has its own, separate recovery contract) or "unusable-response"
-          // (this pull's OWN response carried no usable revision at all —
-          // retrying cannot help and would repeat the same unusable GET
-          // indefinitely — see that function's own updated doc for the full
-          // rationale Codex's follow-up finding required). `isPullCurrent()`
-          // and `!staleRetryPendingRef.current` together are what keep this
-          // to exactly ONE scheduled
-          // replacement: isPullCurrent() catches a context change that
-          // already happened by this point in the SAME pull (nothing
-          // awaited since the last check above, but cheap and consistent
-          // with every other gate in this effect); the pending guard stops
-          // this exact pull instance from scheduling a second replacement
-          // even if this block were ever reached more than once. Bumping
-          // staleRetryTick is the ONLY action taken — no local write, no
-          // syncReady change, no hydration: this pull's own outcome is
-          // otherwise identical to before this round's fix.
+          // SH.2.1 (stale-response)/SH.2.2 (local-edit-superseded) — see
+          // decideStaleResponseRecovery()'s own doc in syncPayload.ts for
+          // the full, shared retry-eligibility rule. `isPullCurrent()` and
+          // `!staleRetryPendingRef.current` together are what keep this to
+          // exactly ONE scheduled replacement, no matter how many times or
+          // from how many call sites this function is invoked for the SAME
+          // pull. Bumping staleRetryTick is the ONLY action taken — no
+          // local write, no syncReady change, no hydration.
           if (
             isPullCurrent() &&
             !staleRetryPendingRef.current &&
-            decideStaleResponseRecovery(unusableDomains) === "retry"
+            decideStaleResponseRecovery(unusable) === "retry"
           ) {
             staleRetryPendingRef.current = true;
             setStaleRetryTick((t) => t + 1);
           }
+        }
+        // Re-runs the SAME stage-2 baseline check (resolvePostFetchDomainBaseline
+        // via buildPostFetchPullBaseline/collectUnusableDomains — no new
+        // decision logic, purely a fresh re-read of getConfirmedState())
+        // immediately before a hydration commit, so a confirmed-authority
+        // advance landing in the awaited gap since the LAST check is never
+        // missed. Cheap: a synchronous localStorage scan, never a fetch —
+        // never polling.
+        function revalidateAuthorityBeforeCommit(): UnusableDomain[] {
+          return collectUnusableDomains(
+            buildPostFetchPullBaseline(
+              contentOwnershipMismatch,
+              { userId: pullCtx.userId, profileId: pullCtx.profileId },
+              planner?.revision ?? null,
+              preFetchBaseline
+            )
+          );
+        }
+
+        const unusableDomains = collectUnusableDomains(baselineOutcomes);
+        if (unusableDomains.length > 0) {
+          handlePullDeferral(unusableDomains);
           return;
         }
         // Every outcome above is now proven usable — safe to read `.value`
@@ -2445,6 +2492,18 @@ export default function PlansPage() {
         // genuinely valid the moment it landed.
         if (!isPullCurrent()) return;
         const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
+        // SH.2.2 — a "superseded" outcome means a genuine local edit landed
+        // after winner selection but before this write; the edit itself is
+        // untouched (commitLocalDomainRaw() never wrote over it — CAS
+        // protection unchanged). What was previously MISSING is recorded
+        // here: this domain's supersession is accumulated so the recovery
+        // check at the end of this pull schedules exactly one replacement.
+        // Never recorded for "failed"/"aborted"/"unavailable" — a genuine
+        // persistence failure must stay fail-closed, never auto-retried as
+        // if it were a benign local-edit race.
+        if (itemsCommitStatus === "superseded") {
+          supersededDomains.push({ domain: "plans", reason: "local-edit-superseded" });
+        }
         // Only touch React state once the durable write is confirmed (or
         // confirmed unnecessary) AND the winning result actually differs
         // from what's already rendered — avoids an unnecessary re-render on
@@ -2485,6 +2544,20 @@ export default function PlansPage() {
           }
         }
 
+        // SH.2.2 — COMMIT-TIME AUTHORITY REVALIDATION. The items commit
+        // above just awaited a (possibly lock-queued) write; confirmed
+        // authority for ANY domain can have advanced during that wait — see
+        // this pull's own SH.2.2 doc above. Re-checking here, immediately
+        // before the Days hydration commit, is what actually closes that
+        // gap: never trust the ORIGINAL (now potentially stale) baseline
+        // check for a write this far removed from it in time.
+        if (!isPullCurrent()) return;
+        const preDaysAuthorityCheck = revalidateAuthorityBeforeCommit();
+        if (preDaysAuthorityCheck.length > 0) {
+          handlePullDeferral([...supersededDomains, ...preDaysAuthorityCheck]);
+          return;
+        }
+
         // Days domain — same shared commit primitive as Plans' own items.
         const nextDaysRaw = JSON.stringify(winningDays);
         const daysCommitStatus = await commitLocalDomainRaw(
@@ -2495,6 +2568,9 @@ export default function PlansPage() {
         );
         if (!isPullCurrent()) return;
         const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
+        if (daysCommitStatus === "superseded") {
+          supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });
+        }
         if (!daysWriteFailed && winningDays.join(",") !== daysRef.current.join(",")) {
           setDays(winningDays);
           // Revalidate activeDayId against the newly winning order: another
@@ -2552,6 +2628,17 @@ export default function PlansPage() {
           version: 1,
           items: winningLightningItems,
         });
+        // SH.2.2 — COMMIT-TIME AUTHORITY REVALIDATION, immediately before
+        // this pull's LAST hydration commit — see the identical checkpoint
+        // above the Days commit for the full rationale; the Days commit's
+        // own await is exactly as capable of letting confirmed authority
+        // advance in the meantime.
+        if (!isPullCurrent()) return;
+        const preLightningAuthorityCheck = revalidateAuthorityBeforeCommit();
+        if (preLightningAuthorityCheck.length > 0) {
+          handlePullDeferral([...supersededDomains, ...preLightningAuthorityCheck]);
+          return;
+        }
         const lightningCommitStatus = await commitLocalDomainRaw(
           profileKeysForPull.lightning,
           currentLightningRaw,
@@ -2560,6 +2647,9 @@ export default function PlansPage() {
         );
         if (!isPullCurrent()) return;
         const hydrationSucceeded = isLocalDomainCommitSuccess(lightningCommitStatus);
+        if (lightningCommitStatus === "superseded") {
+          supersededDomains.push({ domain: "lightning", reason: "local-edit-superseded" });
+        }
         // Codex P1 fix (1st round; commit outcome generalized 12th) —
         // tracks specifically whether THIS pull's final durable Lightning
         // value is CLOUD-SOURCED (distinct from hydrationSucceeded, which
@@ -2666,6 +2756,23 @@ export default function PlansPage() {
             acceptedForBaseline
           );
         }
+
+        // SH.2.2 — this pull reached the end of its commit sequence without
+        // any confirmed-authority regression (every revalidateAuthorityBeforeCommit()
+        // check above passed, or this pull never reached one that failed),
+        // but one or more domains may still have lost their own
+        // commitLocalDomainRaw() CAS to a genuine local edit along the way
+        // (accumulated in `supersededDomains` as each commit ran). Every
+        // entry reaching this point is "local-edit-superseded" by
+        // construction (a confirmed-authority regression already returned
+        // above via handlePullDeferral(), before ever reaching here) — the
+        // edit itself was never overwritten (CAS protection, unchanged),
+        // but syncReady stayed closed for the superseded domain(s), and
+        // nothing else would otherwise ever re-open it (the scheduleSync()
+        // effect is itself gated on syncReady). This is the ONE place that
+        // schedules the replacement pull for that case — a no-op when
+        // `supersededDomains` is empty (the ordinary, no-conflict pull).
+        handlePullDeferral(supersededDomains);
       })
       .catch(() => {
         if (!isPullCurrent()) return;

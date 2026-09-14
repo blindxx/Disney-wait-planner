@@ -2202,13 +2202,96 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
 // correct (there is nothing to recover from), though the pull effect only
 // ever calls this once it has already confirmed
 // `unusableDomains.length > 0`.
-export type UnusableDomainReason = "conflict" | "stale-response" | "unusable-response";
+//
+// ===== COMMIT-TIME AUTHORITY & RECONCILIATION RECOVERY (SH.2.2) =====
+//
+// SH.2.1 P2's revision bound (resolvePostFetchDomainBaseline, above) is only
+// checked ONCE per pull, at the moment this pull's GET response is known.
+// Codex found the architectural gap this left: winner selection and the
+// actual local write (commitLocalDomainRaw, syncHelper.ts) happen LATER,
+// separated from that one check — and from EACH OTHER — by real awaited
+// boundaries (reconcilePendingOperations, then one commitLocalDomainRaw
+// call per domain, sequentially). Two DIFFERENT kinds of authority can move
+// during those gaps, and neither was re-checked before the write that
+// finally lands on disk:
+//   (1) CONFIRMED AUTHORITY can advance — e.g. an already-in-flight push
+//       (started before this pull, never aborted by cancelScheduledSync()
+//       per its own contract — see syncHelper.ts's module doc — since that
+//       only clears a PENDING timer, never an in-flight fetch) resolves
+//       and calls commitConfirmedBaseline() for a NEWER revision, in the
+//       window between this pull's one-time baseline check and its own
+//       commitLocalDomainRaw() write. That push never touches the
+//       canonical plans/lightning/days storage key itself (it only reads
+//       and uploads it), so commitLocalDomainRaw()'s own CAS — which
+//       compares literal canonical bytes — cannot detect this: the bytes
+//       genuinely have not changed, yet the WINNER this pull already
+//       decided is now a strictly older, already-superseded value.
+//       Required case: GET rev7 resolves; before this pull's hydration
+//       commit runs, a concurrent push confirms rev8 for the same domain.
+//       This pull's rev7-based winner must never land — the domain must be
+//       treated exactly as "stale-response" would have been treated had
+//       this been visible at the ORIGINAL baseline check.
+//   (2) LOCAL AUTHORITY can advance — an ordinary user edit
+//       (commitLocalDomainRawSync) lands between winner selection's fresh
+//       "current" read and this pull's own commitLocalDomainRaw() write.
+//       commitLocalDomainRaw()'s CAS already detects this correctly and
+//       reports "superseded" (never overwriting the edit — this protection
+//       is untouched by SH.2.2), but nothing previously told the pull
+//       EFFECT to do anything about it: syncReady stayed false (correctly
+//       — this pull's own hydration did not durably land) but no
+//       replacement pull was ever scheduled, so the page could sit with
+//       cloud sync permanently disabled after a single benign local-edit
+//       race, since the scheduleSync()-triggering effect is itself gated
+//       on syncReady.
+//
+// Both are, architecturally, THE SAME problem: "a winner selected earlier
+// must remain provisional until the instant it is actually committed."
+// Both are RECOVERABLE the same way "stale-response" already is: the true
+// current state (confirmed authority for (1), the surviving local edit for
+// (2)) is already durably known to this device; there is no reason to wait
+// for an unrelated event before trying again. Neither is ever safe to
+// retry when mixed with a genuine "conflict" or "unusable-response" — see
+// decideStaleResponseRecovery()'s own established rule above, extended
+// (not replaced) below to also treat a local-edit CAS supersession as an
+// always-safe-to-retry reason, exactly like "stale-response".
+//
+// `"local-edit-superseded"` is used ONLY for case (2) above — a
+// commitLocalDomainRaw() "superseded" outcome — and carries no revision
+// (there is none to carry: this is a local CAS decision, not a confirmed
+// fact comparison). Case (1) reuses the EXISTING "stale-response"/
+// "conflict"/"unusable-response" reasons unchanged: a commit-time
+// revalidation is just resolvePostFetchDomainBaseline()/
+// collectUnusableDomains() called again, fresh, immediately before each
+// hydration commit — the SAME primitives the original once-per-pull check
+// already uses, not a duplicated decision. See each page's pull effect
+// (`revalidateAuthorityBeforeCommit()`/`handlePullDeferral()`) for the
+// wiring: never a new polling loop or arbitrary delay — a revalidation
+// check is one synchronous, already-in-memory read (getConfirmedState()),
+// not a fetch, and a scheduled retry is the SAME ordinary React
+// effect-dependency re-run (`staleRetryTick`) SH.2.1 already established,
+// deduplicated by the SAME `staleRetryPendingRef` guard so multiple
+// domains superseding within one pull (either kind, or a mix) still
+// schedule at most one replacement pull.
+export type UnusableDomainReason =
+  | "conflict"
+  | "stale-response"
+  | "unusable-response"
+  | "local-edit-superseded";
 
 export function decideStaleResponseRecovery(
   unusableDomains: Array<{ reason: UnusableDomainReason }>
 ): "retry" | "no-retry" {
   if (unusableDomains.length === 0) return "no-retry";
-  return unusableDomains.every((d) => d.reason === "stale-response") ? "retry" : "no-retry";
+  // SH.2.2 — "local-edit-superseded" (a commit-time CAS supersession by a
+  // genuine local edit) is, like "stale-response", always safe to retry on
+  // its own: the true current state is already durably known to this
+  // device. Mixed with either alone, or with each other, the whole set
+  // stays retry-eligible; mixed with a "conflict" or "unusable-response"
+  // anywhere in the set, it stays fail-closed — unchanged from SH.2.1's own
+  // rule, just widened to recognize the new always-safe reason too.
+  return unusableDomains.every((d) => d.reason === "stale-response" || d.reason === "local-edit-superseded")
+    ? "retry"
+    : "no-retry";
 }
 
 /**
@@ -2259,6 +2342,35 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
   {
     name: "no unusable domains — nothing to recover from",
     unusableDomains: [],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 required case — a single local-edit-superseded domain (commit-time CAS lost to a genuine local edit): retry",
+    unusableDomains: [{ reason: "local-edit-superseded" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 — multiple domains all local-edit-superseded (items+days+lightning all raced a local edit in one pull): retry",
+    unusableDomains: [
+      { reason: "local-edit-superseded" },
+      { reason: "local-edit-superseded" },
+      { reason: "local-edit-superseded" },
+    ],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 — mixed stale-response (confirmed authority advanced) + local-edit-superseded (a different domain raced a local edit) in the SAME pull: still retry, both reasons are independently always-safe",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "local-edit-superseded" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 — a local-edit-superseded domain must NEVER make an unrelated conflict retry-eligible: a real conflict elsewhere still blocks the whole pull",
+    unusableDomains: [{ reason: "local-edit-superseded" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 — a local-edit-superseded domain must NEVER make an unrelated unusable-response retry-eligible",
+    unusableDomains: [{ reason: "local-edit-superseded" }, { reason: "unusable-response" }],
     expected: "no-retry",
   },
 ];
