@@ -1223,6 +1223,25 @@ export default function LightningPage() {
             )
           );
         }
+        // SH.2.2 (Codex P1 follow-up round) — INSIDE-THE-LOCK commit-time
+        // authority check. Mirrors plans/page.tsx's own
+        // checkAuthorityStillValid()/lastAuthorityRevalidation exactly, see
+        // its own detailed doc: passed as commitLocalDomainRaw()'s new
+        // `isAuthorityStillValid` argument for EVERY domain's commit below
+        // (items/plans/days) so confirmed authority is re-checked as the
+        // LAST gate, still inside the Web Lock, immediately before the
+        // write — closing the gap where authority advances WHILE a commit
+        // waits for a lock another writer currently holds (invisible to
+        // both the canonical CAS and to isPullCurrent()'s pull-epoch check).
+        let lastAuthorityRevalidation: UnusableDomain[] = [];
+        function checkAuthorityStillValid(): boolean {
+          const unusable = revalidateAuthorityBeforeCommit();
+          if (unusable.length > 0) {
+            lastAuthorityRevalidation = unusable;
+            return false;
+          }
+          return true;
+        }
 
         const unusableDomains = collectUnusableDomains(baselineOutcomes);
         if (unusableDomains.length > 0) {
@@ -1344,12 +1363,19 @@ export default function LightningPage() {
           lightningKeyRef.current,
           currentItemsRaw,
           nextItemsRaw,
-          isPullCurrent
+          isPullCurrent,
+          checkAuthorityStillValid
         );
         // Codex P1 fix (13th round) — re-check after EVERY awaited
         // local-domain commit, before using its result for anything.
         // Mirrors plans/page.tsx exactly — see its own detailed doc.
         if (!isPullCurrent()) return;
+        // SH.2.2 (Codex P1 follow-up round) — mirrors plans/page.tsx
+        // exactly, see its own detailed doc.
+        if (itemsCommitStatus === "authority-superseded") {
+          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+          return;
+        }
         const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
         // SH.2.2 — mirrors plans/page.tsx exactly: accumulate a genuine
         // local-edit CAS supersession (never "failed"/"aborted"/
@@ -1420,9 +1446,16 @@ export default function LightningPage() {
           profileKeysForPull.plans,
           currentPlansRaw,
           winningPlansRawToWrite,
-          isPullCurrent
+          isPullCurrent,
+          checkAuthorityStillValid
         );
         if (!isPullCurrent()) return;
+        // SH.2.2 (Codex P1 follow-up round) — mirrors plans/page.tsx
+        // exactly, see its own detailed doc.
+        if (plansCommitStatus === "authority-superseded") {
+          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+          return;
+        }
         const hydrationSucceeded = isLocalDomainCommitSuccess(plansCommitStatus);
         if (plansCommitStatus === "superseded") {
           supersededDomains.push({ domain: "plans", reason: "local-edit-superseded" });
@@ -1455,9 +1488,16 @@ export default function LightningPage() {
           daysKeyRef.current,
           currentDaysRaw,
           nextDaysRaw,
-          isPullCurrent
+          isPullCurrent,
+          checkAuthorityStillValid
         );
         if (!isPullCurrent()) return;
+        // SH.2.2 (Codex P1 follow-up round) — mirrors plans/page.tsx
+        // exactly, see its own detailed doc.
+        if (daysCommitStatus === "authority-superseded") {
+          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+          return;
+        }
         const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
         if (daysCommitStatus === "superseded") {
           supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });

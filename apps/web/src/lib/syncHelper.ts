@@ -117,13 +117,17 @@ Reviewers should check any changes affecting:
  *                                                         winner selection)
  *   await commitLocalDomainRaw(key,                  — the shared LOCAL
  *     expectedPreviousRaw, nextRaw,                     persistence commit
- *     isStillValid?)                                    primitive (12th
- *                                                        round; FAIL-CLOSED
+ *     isStillValid?,                                    primitive (12th
+ *     isAuthorityStillValid?)                           round; FAIL-CLOSED
  *                                                        no-Web-Locks
  *                                                        behavior and
  *                                                        `isStillValid` added
- *                                                        13th round; see its
- *                                                        own doc) — writes
+ *                                                        13th round;
+ *                                                        `isAuthorityStillValid`
+ *                                                        added SH.2.2's
+ *                                                        Codex P1 follow-up
+ *                                                        round; see its own
+ *                                                        doc) — writes
  *                                                        `nextRaw` to a
  *                                                        synced domain's
  *                                                        localStorage `key`
@@ -137,7 +141,6 @@ Reviewers should check any changes affecting:
  *                                                        equals
  *                                                        `expectedPreviousRaw`
  *                                                        (else "superseded");
- *                                                        AND, checked LAST,
  *                                                        still inside the
  *                                                        lock, `isStillValid()`
  *                                                        (else "aborted") —
@@ -146,7 +149,29 @@ Reviewers should check any changes affecting:
  *                                                        here so a commit
  *                                                        that goes stale
  *                                                        while queued for the
- *                                                        lock never lands
+ *                                                        lock never lands;
+ *                                                        AND, checked LAST of
+ *                                                        all, still inside
+ *                                                        the lock,
+ *                                                        `isAuthorityStillValid()`
+ *                                                        (else the DISTINCT
+ *                                                        "authority-superseded"
+ *                                                        — never conflated
+ *                                                        with "superseded")
+ *                                                        — pass a closure
+ *                                                        that re-derives
+ *                                                        confirmed-authority
+ *                                                        validity fresh so a
+ *                                                        newer confirmed
+ *                                                        revision landing
+ *                                                        while THIS call was
+ *                                                        queued for the lock
+ *                                                        (invisible to both
+ *                                                        the canonical CAS
+ *                                                        and to
+ *                                                        `isStillValid`'s
+ *                                                        pull-epoch check)
+ *                                                        never lands either
  *   commitLocalDomainRawSync(key, nextRaw)            — the ordinary-edit
  *                                                        primitive (16th
  *                                                        round; see its own
@@ -829,7 +854,14 @@ function localContentOwnerKeyForProfile(profileId: string): string {
 // cross-tab mutual exclusion, only on being able to overwrite
 // unconditionally, which a plain setItem still does perfectly.
 
-export type LocalDomainCommitStatus = "committed" | "noop" | "superseded" | "failed" | "unavailable" | "aborted";
+export type LocalDomainCommitStatus =
+  | "committed"
+  | "noop"
+  | "superseded"
+  | "authority-superseded"
+  | "failed"
+  | "unavailable"
+  | "aborted";
 
 // ── Local edit facts (SH.2, Codex P1, 17th round) ───────────────────────────
 // LOCAL-FIRST + CROSS-TAB SERIALIZATION — durable, unconditional, lock-free
@@ -1013,6 +1045,47 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
  * single-threaded window between that loop and this retirement running (no
  * `await` between them), cannot exist at all.
  *
+ * COMMIT-TIME AUTHORITY REVALIDATION (SH.2.2, Codex P1 follow-up round) —
+ * `isAuthorityStillValid`, when provided, is a FOURTH gate, checked LAST of
+ * all — still inside the lock's critical section, immediately before the
+ * write and edit-fact retirement below, exactly where the edit-fact re-scan
+ * leaves off. Root cause this closes: SH.2.2's original fix re-validated
+ * confirmed authority (getConfirmedState() vs. this pull's own cloud
+ * revision) ONLY at the page level, BEFORE calling this function — but this
+ * function can then itself wait on `navigator.locks.request()` if another
+ * writer (this tab's own concurrent commit, or another tab's) currently
+ * holds this key's lock. Confirmed authority can advance DURING that wait
+ * (e.g. an already-in-flight push resolves and calls
+ * commitConfirmedBaseline() for a newer revision) without ever touching
+ * this key's canonical bytes — so the raw-value CAS above still passes —
+ * and without advancing the pull epoch — so a caller's own `isStillValid`
+ * (pull/auth/profile cancellation) still passes too. Neither existing gate
+ * can see this: the page-level pre-check is simply too early, from this
+ * function's point of view, relative to the lock wait it cannot itself see
+ * or control. Re-checking authority as the LAST statement before the
+ * mutation — after canonical CAS, after the noop-safety check, after
+ * `isStillValid`, after the edit-fact re-scan — is what actually closes the
+ * gap: nothing can happen between this check and the write, since there is
+ * no further `await` between them.
+ *
+ * Ordering (a genuine local edit or an aborted context must still win over
+ * a commit-time authority regression, never the reverse — required case 3):
+ * canonical CAS ("superseded") → noop-safety → `isStillValid` ("aborted")
+ * → edit-fact re-scan ("superseded") → `isAuthorityStillValid`
+ * ("authority-superseded") → write + retire ("committed"). Reports the
+ * DISTINCT status "authority-superseded" — never reused as the existing
+ * "superseded" (which means "a local edit intervened") — so callers can
+ * still tell the two apart when logging/reconciling, even though both feed
+ * the SAME SH.2.2 one-shot recovery decision
+ * (decideStaleResponseRecovery() in syncPayload.ts already treats
+ * "local-edit-superseded" as always-safe-to-retry; each page's pull effect
+ * maps "authority-superseded" the same way). Never writes, never retires
+ * any edit fact, on "authority-superseded" — identical non-mutation
+ * guarantee to every other non-"committed" outcome. Defaults to
+ * always-valid, so every EXISTING caller (and the no-Web-Locks
+ * "unavailable" fail-closed path, which never even reaches this check) is
+ * unaffected unless it opts in.
+ *
  * Retirement runs on "committed" — including a "noop"-shaped commit this
  * function upgrades to "committed" when canonical bytes already equalled
  * `nextRaw` but a surviving edit fact still disagreed (see the HYDRATION
@@ -1048,7 +1121,8 @@ export function commitLocalDomainRaw(
   key: string,
   expectedPreviousRaw: string | null,
   nextRaw: string,
-  isStillValid: () => boolean = () => true
+  isStillValid: () => boolean = () => true,
+  isAuthorityStillValid: () => boolean = () => true
 ): Promise<LocalDomainCommitStatus> {
   if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
   const baselineEditFactIds = new Set(snapshotKeysWithPrefix(localEditFactPrefix(key)));
@@ -1101,6 +1175,16 @@ export function commitLocalDomainRaw(
     for (const factKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
       if (!baselineEditFactIds.has(factKey)) return "superseded";
     }
+    // SH.2.2 (Codex P1 follow-up round) — COMMIT-TIME AUTHORITY
+    // REVALIDATION: the LAST gate of all, checked immediately before the
+    // mutation — see this function's own doc above for the full rationale
+    // (confirmed authority can advance during THIS call's own lock wait,
+    // which neither the canonical CAS above nor a caller's `isStillValid`
+    // can observe). A distinct, non-"superseded" status — "superseded"
+    // remains reserved for a genuine local-edit race (required case 3: a
+    // local edit occupies the priority slot immediately above this one and
+    // always wins first).
+    if (!isAuthorityStillValid()) return "authority-superseded";
     try {
       localStorage.setItem(key, nextRaw);
     } catch {
@@ -1221,13 +1305,16 @@ export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDom
  * commit: true for "committed" (a real write just landed) or "noop" (the
  * durable value already was the intended one) — both mean the intended
  * value is CONFIRMED durable right now. False for "superseded" (a newer
- * write won the race), "aborted" (the caller's own context went stale
- * before the write), "unavailable" (no safe serialization primitive exists
- * in this environment), or "failed" (a real localStorage exception) — all
- * four mean the intended value is NOT confirmed durable, so ownership/
- * syncReady/confirmed-baseline advancement must not proceed as if it were.
- * Also accepts LocalDomainSyncCommitStatus (a strict subset), so callers of
- * either primitive can share this one check.
+ * local write won the race), "authority-superseded" (SH.2.2's Codex P1
+ * follow-up round — confirmed authority advanced past this pull's own
+ * cloud revision while this commit waited for the lock), "aborted" (the
+ * caller's own context went stale before the write), "unavailable" (no
+ * safe serialization primitive exists in this environment), or "failed" (a
+ * real localStorage exception) — all five mean the intended value is NOT
+ * confirmed durable, so ownership/syncReady/confirmed-baseline advancement
+ * must not proceed as if it were. Also accepts LocalDomainSyncCommitStatus
+ * (a strict subset), so callers of either primitive can share this one
+ * check.
  */
 export function isLocalDomainCommitSuccess(status: LocalDomainCommitStatus): boolean {
   return status === "committed" || status === "noop";

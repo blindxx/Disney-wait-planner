@@ -2272,6 +2272,29 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
 // deduplicated by the SAME `staleRetryPendingRef` guard so multiple
 // domains superseding within one pull (either kind, or a mix) still
 // schedule at most one replacement pull.
+//
+// CODEX P1 FOLLOW-UP ROUND — case (1) above, as originally implemented,
+// only ran the page-level revalidateAuthorityBeforeCommit() re-check
+// BEFORE calling commitLocalDomainRaw() — but that function can then
+// itself wait on the Web Lock if another writer currently holds this key's
+// lock, and confirmed authority can advance DURING that wait without
+// tripping either the canonical CAS (never touches this key) or
+// `isStillValid` (confirmed-state changes never advance the pull epoch).
+// Fixed by moving the authoritative re-check INSIDE commitLocalDomainRaw()
+// itself, as a new `isAuthorityStillValid` parameter checked as the LAST
+// gate, still inside the lock, immediately before the write and edit-fact
+// retirement — see that function's own doc in syncHelper.ts and the
+// "COMMIT-TIME AUTHORITY GATE ORDER" DEV_* section below for the full
+// gate-ordering contract this establishes (a distinct "authority-superseded"
+// LocalDomainCommitStatus, never conflated with "superseded"). Each page's
+// pull effect now passes a `checkAuthorityStillValid` closure — built from
+// the SAME `revalidateAuthorityBeforeCommit()` this section already
+// established — to every domain's commitLocalDomainRaw() call, and maps an
+// "authority-superseded" result back through the SAME `handlePullDeferral()`
+// recovery path used everywhere else, using the FRESH unusable-domain list
+// that closure itself just captured (already carrying the correct
+// "stale-response"/"conflict"/"unusable-response" reason — no NEW
+// UnusableDomainReason was needed for this case).
 export type UnusableDomainReason =
   | "conflict"
   | "stale-response"
@@ -2480,6 +2503,158 @@ export const DEV_HYDRATION_NOOP_SAFETY_CASES: Array<{
     nextRaw: JSON.stringify(["day-1", "day-2"]),
     liveFactKeysGrew: false,
     expected: "committed",
+  },
+];
+
+// ===== COMMIT-TIME AUTHORITY GATE ORDER (SH.2.2, Codex P1 follow-up round) =====
+//
+// Codex found that SH.2.2's original commit-time revalidation ran ONLY at
+// the page level, BEFORE calling commitLocalDomainRaw() — but that
+// function can then itself wait on the Web Lock (navigator.locks.request())
+// if another writer (this tab's own concurrent commit, or another tab's)
+// currently holds this key's lock. Confirmed authority can advance DURING
+// that wait (an already-in-flight push resolves and confirms a newer
+// revision) without ever touching this key's canonical bytes — so the
+// raw-value CAS still passes — and without advancing the pull epoch — so a
+// caller's own `isStillValid` (isPullContextCurrent) still passes too.
+// Neither existing gate can observe a page-level-only pre-check's own blind
+// spot: the LOCK WAIT ITSELF, which only commitLocalDomainRaw() can see.
+//
+// The fix adds `isAuthorityStillValid` as a FIFTH commitLocalDomainRaw()
+// parameter, checked INSIDE the lock, as the LAST gate of all — immediately
+// before the write and edit-fact retirement, after everything else. Ordering
+// matters (required case 3: a genuine local edit must still win over a
+// commit-time authority regression, never the reverse) — canonical CAS
+// ("superseded") -> noop-safety -> `isStillValid` ("aborted") -> edit-fact
+// re-scan ("superseded") -> `isAuthorityStillValid` ("authority-superseded")
+// -> write + retire ("committed"). "authority-superseded" is a DISTINCT
+// status from "superseded" (see LocalDomainCommitStatus in syncHelper.ts) —
+// never conflated — so a caller can still log/report which kind of
+// commit-time race actually happened, even though both route through the
+// SAME SH.2.2 one-shot recovery decision once resolved back at the page
+// level (a fresh revalidateAuthorityBeforeCommit() re-scan for
+// "authority-superseded", reusing the already-established "stale-response"/
+// "conflict"/"unusable-response" reasons; decideStaleResponseRecovery()'s
+// "local-edit-superseded" reason above for a genuine CAS "superseded").
+//
+// The cases below model the EXACT gate sequence commitLocalDomainRaw()
+// evaluates — composing the SAME real decideLocalDomainCommit()/
+// resolveEffectiveDurableRaw() production primitives for the canonical-CAS
+// and noop-safety gates (unchanged, untouched by this round), plus the
+// THREE caller-supplied boolean predicates
+// (isStillValid/editFactGrew/isAuthorityStillValid) commitLocalDomainRaw()
+// itself receives as closures — reduced to the exact order that function
+// evaluates them in, never a reimplementation of the decision. Deliberately
+// NOT a new production function, matching the SAME "fix centrally in the
+// existing primitive" precedent the HYDRATION NOOP SAFETY cases above
+// already established.
+export type CommitTimeGateOutcome = "noop" | "committed" | "superseded" | "authority-superseded" | "aborted";
+
+/**
+ * Reference cases for commitLocalDomainRaw()'s full gate sequence,
+ * INCLUDING the SH.2.2 Codex P1 follow-up round's `isAuthorityStillValid`
+ * gate — the REQUIRED cases from that round's architectural contract. Run
+ * from Node:
+ *   import { DEV_COMMIT_TIME_AUTHORITY_GATE_CASES, decideLocalDomainCommit, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_COMMIT_TIME_AUTHORITY_GATE_CASES.forEach(c => {
+ *     let got;
+ *     const decision = decideLocalDomainCommit(c.currentRaw, c.expectedPreviousRaw, c.nextRaw);
+ *     if (decision === "superseded") got = "superseded";
+ *     else if (decision === "noop" && resolveEffectiveDurableRaw(c.currentRaw, c.baselineFactRawValues) === c.nextRaw) got = "noop";
+ *     else if (!c.isStillValid) got = "aborted";
+ *     else if (c.editFactGrew) got = "superseded";
+ *     else if (!c.isAuthorityStillValid) got = "authority-superseded";
+ *     else got = "committed";
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_COMMIT_TIME_AUTHORITY_GATE_CASES: Array<{
+  name: string;
+  currentRaw: string | null;
+  expectedPreviousRaw: string | null;
+  nextRaw: string;
+  baselineFactRawValues: string[];
+  isStillValid: boolean;
+  editFactGrew: boolean;
+  isAuthorityStillValid: boolean;
+  expected: CommitTimeGateOutcome;
+}> = [
+  {
+    name: "required case 1 — GET rev7, authority valid before the lock, but confirmed rev8 lands while this commit waits for the lock: rejected as authority-superseded, never committed (the caller's page-level pull effect schedules exactly one fresh replacement pull from this)",
+    currentRaw: "DISK-BYTES",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "authority-superseded",
+  },
+  {
+    name: "required case 2 — no authority change while waiting for the lock: normal commit succeeds",
+    currentRaw: "DISK-BYTES",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: true,
+    expected: "committed",
+  },
+  {
+    name: "required case 3 — a genuine local edit lands while waiting for the lock (edit-fact keyspace grew) AND authority also went stale in the SAME window: the existing local-edit supersession still wins — reported as 'superseded' (checked first), never 'authority-superseded'",
+    currentRaw: "DISK-BYTES",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: true,
+    isAuthorityStillValid: false,
+    expected: "superseded",
+  },
+  {
+    name: "required case 4 — auth/profile/pull context goes stale while waiting for the lock: aborted regardless of authority validity — isStillValid is checked BEFORE isAuthorityStillValid is ever consulted, so a stale context never even reaches the authority gate",
+    currentRaw: "DISK-BYTES",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: false,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "aborted",
+  },
+  {
+    name: "canonical CAS still takes absolute priority — a genuinely different canonical value already on disk reports 'superseded' before isStillValid/editFactGrew/isAuthorityStillValid are ever consulted, exactly as before this round",
+    currentRaw: "SOMEONE-ELSES-NEWER-VALUE",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "superseded",
+  },
+  {
+    name: "a genuine safe noop (durable authority already agrees with nextRaw) short-circuits before the authority gate is ever reached — a noop is not a mutation, so commit-time authority revalidation (scoped to 'immediately before writing/retiring edit facts') does not apply to it",
+    currentRaw: "REV7-WINNER",
+    expectedPreviousRaw: "REV7-WINNER",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "noop",
+  },
+  {
+    name: "required case 7 (Plans/Lightning/days symmetry) — a days[]-shaped payload goes through the identical gate sequence: authority regression at the last gate still reports authority-superseded",
+    currentRaw: JSON.stringify(["day-1", "day-2"]),
+    expectedPreviousRaw: JSON.stringify(["day-1", "day-2"]),
+    nextRaw: JSON.stringify(["day-1", "day-2", "day-3"]),
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "authority-superseded",
   },
 ];
 

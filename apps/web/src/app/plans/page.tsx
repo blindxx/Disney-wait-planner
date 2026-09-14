@@ -2306,6 +2306,33 @@ export default function PlansPage() {
             )
           );
         }
+        // SH.2.2 (Codex P1 follow-up round) — INSIDE-THE-LOCK commit-time
+        // authority check, passed as commitLocalDomainRaw()'s new
+        // `isAuthorityStillValid` argument for EVERY domain's commit below
+        // (items/days/lightning) — see that primitive's own doc in
+        // syncHelper.ts for the full architecture this closes. The
+        // page-level `revalidateAuthorityBeforeCommit()` checks around this
+        // pull's commits are too early relative to a commit's OWN Web Lock
+        // wait: another writer (this tab's own concurrent commit, or
+        // another tab's) can already hold this key's lock, and confirmed
+        // authority can advance WHILE this call waits for it — invisible to
+        // both the canonical CAS (never touches this key) and to
+        // `isPullCurrent()` (confirmed-state changes never advance the pull
+        // epoch). commitLocalDomainRaw() calls this SYNCHRONOUSLY, as the
+        // LAST gate, still inside the lock's critical section, immediately
+        // before the write. `lastAuthorityRevalidation` captures the fresh
+        // unusable-domain list at the moment this closure returns false, so
+        // the caller can report/recover using the SAME result this check
+        // itself computed — no second, separately-timed re-scan needed.
+        let lastAuthorityRevalidation: UnusableDomain[] = [];
+        function checkAuthorityStillValid(): boolean {
+          const unusable = revalidateAuthorityBeforeCommit();
+          if (unusable.length > 0) {
+            lastAuthorityRevalidation = unusable;
+            return false;
+          }
+          return true;
+        }
 
         const unusableDomains = collectUnusableDomains(baselineOutcomes);
         if (unusableDomains.length > 0) {
@@ -2480,7 +2507,8 @@ export default function PlansPage() {
           planKeyRef.current,
           currentItemsRaw,
           nextItemsRaw,
-          isPullCurrent
+          isPullCurrent,
+          checkAuthorityStillValid
         );
         // Codex P1 fix (13th round) — re-check after EVERY awaited local-
         // domain commit, before using its result for anything: a stale
@@ -2491,6 +2519,18 @@ export default function PlansPage() {
         // nothing already durably committed above is undone, since it was
         // genuinely valid the moment it landed.
         if (!isPullCurrent()) return;
+        // SH.2.2 (Codex P1 follow-up round) — confirmed authority regressed
+        // WHILE this commit was queued for the Web Lock (see
+        // checkAuthorityStillValid's own doc above): never write, never
+        // retire edit facts (commitLocalDomainRaw() already guaranteed
+        // this internally) — bail out the ENTIRE remaining pull, exactly
+        // like the pre-commit revalidation checkpoints below do, using the
+        // SAME fresh unusable-domain list checkAuthorityStillValid() itself
+        // just captured.
+        if (itemsCommitStatus === "authority-superseded") {
+          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+          return;
+        }
         const primaryPersistSucceeded = isLocalDomainCommitSuccess(itemsCommitStatus);
         // SH.2.2 — a "superseded" outcome means a genuine local edit landed
         // after winner selection but before this write; the edit itself is
@@ -2564,9 +2604,16 @@ export default function PlansPage() {
           daysKeyRef.current,
           currentDaysRaw,
           nextDaysRaw,
-          isPullCurrent
+          isPullCurrent,
+          checkAuthorityStillValid
         );
         if (!isPullCurrent()) return;
+        // SH.2.2 (Codex P1 follow-up round) — see the identical checkpoint
+        // above the items commit for the full rationale.
+        if (daysCommitStatus === "authority-superseded") {
+          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+          return;
+        }
         const daysWriteFailed = !isLocalDomainCommitSuccess(daysCommitStatus);
         if (daysCommitStatus === "superseded") {
           supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });
@@ -2643,9 +2690,16 @@ export default function PlansPage() {
           profileKeysForPull.lightning,
           currentLightningRaw,
           winningLightningRawToWrite,
-          isPullCurrent
+          isPullCurrent,
+          checkAuthorityStillValid
         );
         if (!isPullCurrent()) return;
+        // SH.2.2 (Codex P1 follow-up round) — see the identical checkpoint
+        // above the items commit for the full rationale.
+        if (lightningCommitStatus === "authority-superseded") {
+          handlePullDeferral([...supersededDomains, ...lastAuthorityRevalidation]);
+          return;
+        }
         const hydrationSucceeded = isLocalDomainCommitSuccess(lightningCommitStatus);
         if (lightningCommitStatus === "superseded") {
           supersededDomains.push({ domain: "lightning", reason: "local-edit-superseded" });
