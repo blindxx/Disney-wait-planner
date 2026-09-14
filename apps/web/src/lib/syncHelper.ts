@@ -913,6 +913,20 @@ export type LocalDomainCommitStatus =
 // below for how the unload/push path reads this log as authoritative
 // specifically so a transient canonical-key clobber can never cause a lost
 // push, regardless of this residual window.
+//
+// DEFERRED — SH.2.3 "Concurrent Local Edit Fact Safety" (recorded, not
+// fixed, during SH.2.2's Codex P1 follow-up rounds): this residual window
+// is the SAME concurrent-edit-fact deletion race Codex separately flagged
+// while reviewing SH.2.2's commit-time authority work — retirement
+// (commitLocalDomainRaw()'s removeItem loop over `baselineEditFactIds`)
+// and a genuinely concurrent OTHER tab's own fact write/removal are not
+// mutually exclusive with each other the way canonical-key writes are made
+// to be. Explicitly out of SH.2.2's scope (commit-time CONFIRMED AUTHORITY
+// validity, not local edit-fact CONCURRENCY) — a future SH.2.3 phase
+// should address local-edit-fact safety under genuine cross-tab
+// concurrency specifically. The previously planned schema-migration phase
+// is renumbered SH.2.4 ("Sync Schema Migration & Deployment Safety") to
+// make room for it.
 function localEditFactPrefix(key: string): string {
   return `dwp:localEditFact:${key}:`;
 }
@@ -1045,57 +1059,80 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
  * single-threaded window between that loop and this retirement running (no
  * `await` between them), cannot exist at all.
  *
- * COMMIT-TIME AUTHORITY REVALIDATION (SH.2.2, Codex P1 follow-up round) —
+ * COMMIT-TIME AUTHORITY REVALIDATION (SH.2.2, Codex P1 follow-up round;
+ * extended to gate "noop" too in the SH.2.2 second follow-up round below) —
  * `isAuthorityStillValid`, when provided, is a FOURTH gate, checked LAST of
- * all — still inside the lock's critical section, immediately before the
- * write and edit-fact retirement below, exactly where the edit-fact re-scan
- * leaves off. Root cause this closes: SH.2.2's original fix re-validated
- * confirmed authority (getConfirmedState() vs. this pull's own cloud
- * revision) ONLY at the page level, BEFORE calling this function — but this
- * function can then itself wait on `navigator.locks.request()` if another
- * writer (this tab's own concurrent commit, or another tab's) currently
- * holds this key's lock. Confirmed authority can advance DURING that wait
- * (e.g. an already-in-flight push resolves and calls
- * commitConfirmedBaseline() for a newer revision) without ever touching
- * this key's canonical bytes — so the raw-value CAS above still passes —
- * and without advancing the pull epoch — so a caller's own `isStillValid`
- * (pull/auth/profile cancellation) still passes too. Neither existing gate
- * can see this: the page-level pre-check is simply too early, from this
- * function's point of view, relative to the lock wait it cannot itself see
- * or control. Re-checking authority as the LAST statement before the
- * mutation — after canonical CAS, after the noop-safety check, after
- * `isStillValid`, after the edit-fact re-scan — is what actually closes the
- * gap: nothing can happen between this check and the write, since there is
- * no further `await` between them.
+ * all — still inside the lock's critical section, immediately before ANY
+ * success return (a real write, or a genuine noop — see below). Root cause
+ * this closes: SH.2.2's original fix re-validated confirmed authority
+ * (getConfirmedState() vs. this pull's own cloud revision) ONLY at the page
+ * level, BEFORE calling this function — but this function can then itself
+ * wait on `navigator.locks.request()` if another writer (this tab's own
+ * concurrent commit, or another tab's) currently holds this key's lock.
+ * Confirmed authority can advance DURING that wait (e.g. an already-in-
+ * flight push resolves and calls commitConfirmedBaseline() for a newer
+ * revision) without ever touching this key's canonical bytes — so the
+ * raw-value CAS above still passes — and without advancing the pull epoch —
+ * so a caller's own `isStillValid` (pull/auth/profile cancellation) still
+ * passes too. Neither existing gate can see this: the page-level pre-check
+ * is simply too early, from this function's point of view, relative to the
+ * lock wait it cannot itself see or control. Re-checking authority as the
+ * LAST statement before ANY success return — after canonical CAS, after the
+ * noop-safety check, after `isStillValid`, after the edit-fact re-scan — is
+ * what actually closes the gap: nothing can happen between this check and
+ * the return, since there is no further `await` between them.
+ *
+ * NOOP IS NOT AN EARLY EXIT (SH.2.2, Codex P1 SECOND follow-up round) — the
+ * first follow-up round above left one gap: the noop-safety check
+ * (immediately below) still RETURNED "noop" directly, bypassing
+ * `isStillValid`, the edit-fact re-scan, AND `isAuthorityStillValid`
+ * entirely. Since `isLocalDomainCommitSuccess()` treats "noop" and
+ * "committed" identically, this let a stale pull's commit be reported
+ * SUCCESSFUL — reopening syncReady and letting the page continue from an
+ * obsolete server revision — purely because the bytes it wanted to write
+ * already happened to already be on disk, with NONE of the validation a
+ * "committed" outcome is required to pass first. The fix: the noop-safety
+ * check now only sets a flag (`isSafeNoop`); the ACTUAL "noop" return
+ * happens AFTER `isStillValid`, the edit-fact re-scan, and
+ * `isAuthorityStillValid` all pass — the identical gate sequence a
+ * "committed" outcome passes through, with the write/retire step itself
+ * skipped (nothing changed on disk, so nothing needs writing; per the
+ * LOCAL-EDIT FACT LIFECYCLE rule below, nothing needs retiring either — see
+ * that rule's own doc for why a fact that already agreed with `nextRaw` was
+ * never "superseded" by anything this call did).
  *
  * Ordering (a genuine local edit or an aborted context must still win over
- * a commit-time authority regression, never the reverse — required case 3):
- * canonical CAS ("superseded") → noop-safety → `isStillValid` ("aborted")
- * → edit-fact re-scan ("superseded") → `isAuthorityStillValid`
- * ("authority-superseded") → write + retire ("committed"). Reports the
- * DISTINCT status "authority-superseded" — never reused as the existing
- * "superseded" (which means "a local edit intervened") — so callers can
- * still tell the two apart when logging/reconciling, even though both feed
- * the SAME SH.2.2 one-shot recovery decision
- * (decideStaleResponseRecovery() in syncPayload.ts already treats
- * "local-edit-superseded" as always-safe-to-retry; each page's pull effect
- * maps "authority-superseded" the same way). Never writes, never retires
- * any edit fact, on "authority-superseded" — identical non-mutation
- * guarantee to every other non-"committed" outcome. Defaults to
- * always-valid, so every EXISTING caller (and the no-Web-Locks
- * "unavailable" fail-closed path, which never even reaches this check) is
- * unaffected unless it opts in.
+ * a commit-time authority regression, and BOTH must still win over a
+ * would-be noop being reported as success — required cases 1 & 3):
+ * canonical CAS ("superseded") → noop-safety (sets `isSafeNoop`, does NOT
+ * return) → `isStillValid` ("aborted") → edit-fact re-scan ("superseded")
+ * → `isAuthorityStillValid` ("authority-superseded") → `isSafeNoop`?
+ * ("noop") → write + retire ("committed"). Reports the DISTINCT status
+ * "authority-superseded" — never reused as the existing "superseded"
+ * (which means "a local edit intervened") — so callers can still tell the
+ * two apart when logging/reconciling, even though both feed the SAME
+ * SH.2.2 one-shot recovery decision (decideStaleResponseRecovery() in
+ * syncPayload.ts already treats "local-edit-superseded" as
+ * always-safe-to-retry; each page's pull effect maps "authority-superseded"
+ * the same way). Never writes, never retires any edit fact, on
+ * "authority-superseded" — identical non-mutation guarantee to every other
+ * non-"committed" outcome, "noop" included. Defaults to always-valid, so
+ * every EXISTING caller (and the no-Web-Locks "unavailable" fail-closed
+ * path, which never even reaches this check) is unaffected unless it opts
+ * in.
  *
- * Retirement runs on "committed" — including a "noop"-shaped commit this
- * function upgrades to "committed" when canonical bytes already equalled
- * `nextRaw` but a surviving edit fact still disagreed (see the HYDRATION
- * NOOP MUST NOT OUTRANK A SURVIVING FACT doc below) — never on any outcome
- * where nothing was actually superseded (a GENUINE noop, or any other
- * non-write outcome — required case 3: a failed persistence must leave
- * edit facts and gates untouched).
+ * Retirement runs on "committed" ONLY — including a "noop"-shaped commit
+ * this function upgrades to "committed" when canonical bytes already
+ * equalled `nextRaw` but a surviving edit fact still disagreed (see the
+ * HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT doc below) — never on
+ * any outcome where nothing was actually superseded (a GENUINE noop, or
+ * any other non-write outcome — required case 3: a failed persistence must
+ * leave edit facts and gates untouched; a genuine noop must leave them
+ * untouched too, unchanged by this round).
  *
- * HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT (Codex, this round) — a
- * THIRD gate, checked only when the byte-level CAS above says "noop"
+ * HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT (Codex, earlier round;
+ * gate ordering corrected in the SH.2.2 second follow-up round above) — a
+ * THIRD gate, evaluated only when the byte-level CAS above says "noop"
  * (`currentRaw === nextRaw`): that comparison alone proves canonical bytes
  * already equal the winner, never that DURABLE AUTHORITY does. Canonical
  * can equal `nextRaw` purely because a prior pull left it at a stale
@@ -1107,15 +1144,21 @@ function withLocalDomainCommitLock<T>(key: string, fn: () => T): Promise<T> {
  * identically) while leaving the stale fact fully intact and unretired:
  * durably authoritative for every later readLatestDurableValue() read,
  * capable of resurfacing and even being pushed back over the cloud state
- * this pull just recorded as confirmed. A byte-level noop is trusted as-is
- * ONLY when resolveEffectiveDurableRaw(currentRaw, this decision's own
- * baselineEditFactIds frontier) already agrees with `nextRaw`; when it does
- * not, this falls through to the EXACT SAME write-and-retire path a
- * genuine "write" decision takes — canonical already holds `nextRaw`'s
- * bytes (the setItem below is a harmless idempotent rewrite), but the
- * conflicting fact frontier still needs the SAME validity/re-scan gates
- * (required case 6: a fact landing AFTER this snapshot still reports
- * "superseded", never silently retired) and the SAME retirement.
+ * this pull just recorded as confirmed. A byte-level noop is provisionally
+ * trusted (`isSafeNoop = true`) ONLY when
+ * resolveEffectiveDurableRaw(currentRaw, this decision's own
+ * baselineEditFactIds frontier) already agrees with `nextRaw` — but, as of
+ * the SH.2.2 second follow-up round, that verdict alone no longer returns
+ * "noop" immediately; it still has to survive `isStillValid`, the
+ * edit-fact re-scan, and `isAuthorityStillValid` below before this function
+ * actually reports success. When resolveEffectiveDurableRaw() disagrees
+ * with `nextRaw` (`isSafeNoop` stays false), this falls through to the
+ * EXACT SAME validation-then-write-and-retire path a genuine "write"
+ * decision takes — canonical already holds `nextRaw`'s bytes (the setItem
+ * below is a harmless idempotent rewrite), but the conflicting fact
+ * frontier still needs the SAME validity/re-scan gates (required case 6: a
+ * fact landing AFTER this snapshot still reports "superseded", never
+ * silently retired) and the SAME retirement.
  */
 export function commitLocalDomainRaw(
   key: string,
@@ -1135,13 +1178,27 @@ export function commitLocalDomainRaw(
     }
     const decision = decideLocalDomainCommit(currentRaw, expectedPreviousRaw, nextRaw);
     if (decision === "superseded") return "superseded";
+    // SH.2.2 (Codex P1 second follow-up round) — NOOP IS NOT AN EARLY EXIT.
+    // `isSafeNoop` records the HYDRATION NOOP SAFETY verdict (below) as a
+    // flag rather than returning immediately: a "noop" is a SUCCESS outcome
+    // exactly like "committed" (isLocalDomainCommitSuccess treats them
+    // identically), so it is subject to the EXACT SAME validation sequence
+    // every other successful return must pass — see this function's own
+    // doc above ("COMMIT-TIME AUTHORITY REVALIDATION") for why returning
+    // "noop" before that sequence ran was itself the bug this round closes:
+    // confirmed authority (or a concurrent local edit) can advance during
+    // THIS call's own lock wait exactly as easily whether the byte-level
+    // decision was "write" or "noop" — canonical bytes already matching
+    // `nextRaw` proves nothing about whether that match is still safe to
+    // report as success at the moment this function actually returns.
+    let isSafeNoop = false;
     if (decision === "noop") {
-      // HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT (Codex, this
+      // HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT (Codex, earlier
       // round) — see this function's own doc above for the full rationale.
       // `decision === "noop"` only proves canonical bytes already equal
       // `nextRaw`; it says nothing about a surviving edit fact that might
       // still disagree. Read baselineEditFactIds' own raw values (the SAME
-      // frontier the write path's re-scan below validates) and ask the ONE
+      // frontier the shared re-scan below validates) and ask the ONE
       // shared durable-authority resolver whether it agrees with nextRaw.
       const baselineFactRawValues: string[] = [];
       for (const factKey of baselineEditFactIds) {
@@ -1154,37 +1211,68 @@ export function commitLocalDomainRaw(
         if (factRaw !== null) baselineFactRawValues.push(factRaw);
       }
       const effectiveDurableRaw = resolveEffectiveDurableRaw(currentRaw, baselineFactRawValues);
-      if (effectiveDurableRaw === nextRaw) return "noop";
-      // Durable authority disagrees with nextRaw — NOT a safe noop. Fall
-      // through to the exact same write-and-retire path "write" takes
-      // below: canonical already holds nextRaw's bytes, so the setItem
-      // there is a harmless idempotent rewrite, but the conflicting fact
-      // frontier still needs validating and retiring.
+      if (effectiveDurableRaw === nextRaw) {
+        isSafeNoop = true;
+      }
+      // Durable authority disagrees with nextRaw — NOT a safe noop. Falls
+      // through to the exact same validation-then-write-and-retire path
+      // "write" takes below: canonical already holds nextRaw's bytes, so
+      // the setItem there is a harmless idempotent rewrite, but the
+      // conflicting fact frontier still needs validating and retiring.
     }
     // Codex P1 fix (13th round) — the LAST gate before mutation, evaluated
     // here rather than by the caller after this Promise resolves, so a
     // context that went stale while this commit sat queued for the lock is
-    // still caught before anything is written.
+    // still caught before anything is written. Codex P1 fix (SH.2.2 second
+    // follow-up round) — now evaluated UNCONDITIONALLY on the path to ANY
+    // success return, "noop" included: a stale pull/auth/profile context
+    // must abort a would-be noop exactly as it already aborted a would-be
+    // write, never let it slip through as a quiet success.
     if (!isStillValid()) return "aborted";
-    // Codex P1 fix (17th round) — the LAST gate of all, evaluated as the
-    // final statement before the write itself: any edit-fact key not in
-    // the baseline snapshot means a concurrent edit — from ANY tab, since
-    // ordinary edits never participate in this lock — is newer than this
-    // decision and must survive. See this section's own module doc above
-    // for the residual window this does and does not close.
+    // Codex P1 fix (17th round) — the LAST gate of all before this round,
+    // evaluated as the final statement before the write itself: any
+    // edit-fact key not in the baseline snapshot means a concurrent edit —
+    // from ANY tab, since ordinary edits never participate in this lock —
+    // is newer than this decision and must survive. See this section's own
+    // module doc above for the residual window this does and does not
+    // close. Codex P1 fix (SH.2.2 second follow-up round) — now evaluated
+    // UNCONDITIONALLY on the path to ANY success return, "noop" included:
+    // required case 3 — a local edit that appears while this call waits
+    // for the lock must still take precedence over a would-be noop exactly
+    // as it already did over a would-be write, and the edit itself must
+    // survive untouched (this loop only ever READS keys to compare against
+    // `baselineEditFactIds`; it never writes or retires anything — a noop
+    // that reaches this point still retires nothing below either way).
     for (const factKey of snapshotKeysWithPrefix(localEditFactPrefix(key))) {
       if (!baselineEditFactIds.has(factKey)) return "superseded";
     }
     // SH.2.2 (Codex P1 follow-up round) — COMMIT-TIME AUTHORITY
-    // REVALIDATION: the LAST gate of all, checked immediately before the
-    // mutation — see this function's own doc above for the full rationale
-    // (confirmed authority can advance during THIS call's own lock wait,
-    // which neither the canonical CAS above nor a caller's `isStillValid`
-    // can observe). A distinct, non-"superseded" status — "superseded"
-    // remains reserved for a genuine local-edit race (required case 3: a
-    // local edit occupies the priority slot immediately above this one and
-    // always wins first).
+    // REVALIDATION: the LAST gate of all, checked immediately before ANY
+    // success return — see this function's own doc above for the full
+    // rationale (confirmed authority can advance during THIS call's own
+    // lock wait, which neither the canonical CAS above nor a caller's
+    // `isStillValid` can observe). A distinct, non-"superseded" status —
+    // "superseded" remains reserved for a genuine local-edit race (required
+    // case 3: a local edit occupies the priority slot immediately above
+    // this one and always wins first). Codex P1 fix (SH.2.2 second
+    // follow-up round) — now evaluated UNCONDITIONALLY on the path to ANY
+    // success return, "noop" included (required case 1): a stale pull must
+    // never be treated as successful, reopen syncReady, or let a page's
+    // pull effect continue from an obsolete server revision merely because
+    // the bytes it wanted to write already happened to be on disk.
     if (!isAuthorityStillValid()) return "authority-superseded";
+    // A genuine safe noop has now passed every gate a real write would
+    // have: pull/auth/profile context is still current, no concurrent edit
+    // fact landed during the lock wait, and confirmed authority is still
+    // valid. Return here — BEFORE the write/retire below — so a noop never
+    // performs the write (nothing changed on disk; the setItem would be a
+    // no-op in practice, but is still skipped on principle) and, per the
+    // established LOCAL-EDIT FACT LIFECYCLE rule, never retires a fact
+    // either (retirement is reserved for a write that actually superseded
+    // something — see that rule's own doc below; a fact that already
+    // agreed with `nextRaw`, as this round's `isSafeNoop` verdict itself
+    // proves, was never "superseded" by anything this call did).
+    if (isSafeNoop) return "noop";
     try {
       localStorage.setItem(key, nextRaw);
     } catch {
