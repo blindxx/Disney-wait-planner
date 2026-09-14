@@ -142,6 +142,1601 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
   };
 }
 
+// ===== PER-DOMAIN CONFIRMED STATE (SH.2, Codex P1 11th round) =====
+
+/**
+ * SH.2 architecture (Codex P1, 11th round) — REPLACES the single mixed-
+ * domain `ConfirmedPlannerSnapshot { revision; snapshot }` (one global
+ * revision covering plans+lightning+days together). Codex found this
+ * unsound: disjoint pulls/pushes can confirm DIFFERENT domains at
+ * DIFFERENT server revisions (e.g. a Days-only cloud win at revision 7,
+ * while Plans is still only confirmed as of revision 5 from an earlier,
+ * separate commit) — assigning the WHOLE mixed snapshot a single "newest"
+ * revision makes the OLDER domain look newer than it genuinely is,
+ * silently blocking a later, perfectly legitimate update to that domain
+ * (its real revision is lower than the mixed snapshot's borrowed one, so a
+ * correct future commit at, say, revision 6 for Plans would be wrongly
+ * rejected as "stale" against the borrowed revision 7).
+ *
+ * The fix: confirmed state is tracked PER DOMAIN. Each of plans/lightning/
+ * days independently carries its OWN `{ revision, value }` fact — see
+ * `ConfirmedPlannerState` below. A confirmation at revision R may advance
+ * ONLY the domain(s) actually accepted at R; every other domain retains
+ * its own prior revision/value completely untouched. A later response
+ * with a LOWER revision than some OTHER domain's confirmed revision may
+ * still legitimately advance a domain whose OWN confirmed revision is
+ * lower — there is no "reject the whole mixed commit" step anymore,
+ * because there is no whole mixed commit to reject: each domain's fate is
+ * decided independently, using ONLY that domain's own revision history.
+ */
+export interface ConfirmedDomainFact<T> {
+  revision: number;
+  value: T;
+}
+
+/**
+ * Codex P1 fix (16th round) — every field is now a REQUIRED
+ * ConfirmedDomainResult (see its own doc below), never merely an optional
+ * fact. The old `plans?: ConfirmedDomainFact<...>` shape could only ever
+ * say "here's the fact" or "absent" — it had no way to represent "the
+ * newest revision exists but is CONFLICTED", so getConfirmedState()
+ * (syncHelper.ts) silently collapsed that case into either the fact from
+ * an older, stale revision or nothing at all, discarding the one signal
+ * a caller most needed. Every consumer (captureConfirmedSnapshotForPull in
+ * plans/page.tsx and lightning/page.tsx) now must handle all three
+ * statuses explicitly.
+ */
+export interface ConfirmedPlannerState {
+  plans: ConfirmedDomainResult<{ version: number; items: unknown[] }>;
+  lightning: ConfirmedDomainResult<{ version: number; items: unknown[] }>;
+  days: ConfirmedDomainResult<string[]>;
+}
+
+function isPlannerDomainValue(v: unknown): v is { version: number; items: unknown[] } {
+  return (
+    v !== null &&
+    typeof v === "object" &&
+    !Array.isArray(v) &&
+    typeof (v as Record<string, unknown>).version === "number" &&
+    Array.isArray((v as Record<string, unknown>).items)
+  );
+}
+
+function isDaysValue(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((id) => typeof id === "string");
+}
+
+/**
+ * Parse and validate a raw unknown value as a plans/lightning
+ * ConfirmedDomainFact (both domains share the identical
+ * `{ version, items[] }` value shape). Returns null if the shape is
+ * missing or invalid — callers (syncHelper.ts's getConfirmedState) treat
+ * null as "no confirmed fact here", never as an error. A non-finite/non-
+ * numeric `revision` is rejected outright (never coerced to 0) since
+ * resolveConfirmedDomainState()'s whole revision comparison depends on
+ * genuine server-issued revisions — treating a corrupted fact as revision
+ * 0 would make it look OLDER than everything, silently discarding it
+ * instead of just refusing to trust it (it is simply excluded from the
+ * candidate set resolveConfirmedDomainState() reduces over).
+ */
+export function parseConfirmedPlannerDomainFact(
+  raw: unknown
+): ConfirmedDomainFact<{ version: number; items: unknown[] }> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  if (!isPlannerDomainValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
+}
+
+/**
+ * Parse and validate a raw unknown value as a `days` ConfirmedDomainFact —
+ * same contract as parseConfirmedPlannerDomainFact(), just for the `days`
+ * domain's own value shape (a plain string array).
+ */
+export function parseConfirmedDaysFact(raw: unknown): ConfirmedDomainFact<string[]> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  if (!isDaysValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
+}
+
+/**
+ * Reference cases for parseConfirmedPlannerDomainFact()/parseConfirmedDaysFact().
+ * Run from Node:
+ *   import { DEV_PARSE_CONFIRMED_FACT_CASES, parseConfirmedPlannerDomainFact, parseConfirmedDaysFact } from "@/lib/syncPayload";
+ *   DEV_PARSE_CONFIRMED_FACT_CASES.forEach(c => {
+ *     const parse = c.domain === "days" ? parseConfirmedDaysFact : parseConfirmedPlannerDomainFact;
+ *     const got = parse(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
+  name: string;
+  domain: "plannerDomain" | "days";
+  raw: unknown;
+  expected: ConfirmedDomainFact<unknown> | null;
+}> = [
+  {
+    name: "valid plans/lightning fact — parses as-is",
+    domain: "plannerDomain",
+    raw: { revision: 12, value: { version: 1, items: ["p"] } },
+    expected: { revision: 12, value: { version: 1, items: ["p"] } },
+  },
+  {
+    name: "revision 0 is a legitimate value, not treated as missing",
+    domain: "plannerDomain",
+    raw: { revision: 0, value: { version: 1, items: [] } },
+    expected: { revision: 0, value: { version: 1, items: [] } },
+  },
+  {
+    name: "missing revision — rejected, never coerced to 0",
+    domain: "plannerDomain",
+    raw: { value: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "non-numeric revision — rejected",
+    domain: "plannerDomain",
+    raw: { revision: "6", value: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "non-finite revision (NaN) — rejected",
+    domain: "plannerDomain",
+    raw: { revision: NaN, value: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "revision valid but value shape invalid — whole fact rejected",
+    domain: "plannerDomain",
+    raw: { revision: 3, value: { items: "not-an-array" } },
+    expected: null,
+  },
+  {
+    name: "non-object raw — rejected",
+    domain: "plannerDomain",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected",
+    domain: "plannerDomain",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+  {
+    name: "valid days fact — parses as-is",
+    domain: "days",
+    raw: { revision: 7, value: ["day-1", "day-2"] },
+    expected: { revision: 7, value: ["day-1", "day-2"] },
+  },
+  {
+    name: "days value not a string array — rejected",
+    domain: "days",
+    raw: { revision: 7, value: [1, 2, 3] },
+    expected: null,
+  },
+];
+
+/**
+ * SH.2 architecture (Codex P1, 15th round; STATUS MODEL REPLACED 16th
+ * round) — the 15th round's reduceConfirmedFactRecords() (removed) walked
+ * revisions highest-first and, on finding a CONFLICTED one, silently fell
+ * back to the next-lower UNAMBIGUOUS revision as "confirmed". Codex's
+ * 16th-round finding: that fallback is wrong. A conflict at the NEWEST
+ * revision means the domain's true current state is UNKNOWN — falling back
+ * to an older revision presents a STALE value as if it were a trustworthy
+ * current baseline, which a pull's winner-selection logic (captureConfirmed-
+ * SnapshotForPull, plans/lightning page.tsx) would then treat as genuine
+ * confirmed truth, potentially misclassifying newer local/cloud state as an
+ * unsynced edit and overwriting it. "A conflict at the newest confirmed
+ * revision is NOT equivalent to using the next older revision."
+ *
+ * resolveConfirmedDomainState() is the replacement: it looks ONLY at the
+ * HIGHEST revision recorded for a domain (never falling back), and returns
+ * one of exactly three statuses — the CONFIRMED-STATE CONTRACT's own
+ * required distinction:
+ *   • "none"      — no facts recorded for this domain at all.
+ *   • "confirmed" — the highest revision's recorded fact(s) all canonically
+ *     agree (canonicalizeJSON() above) — this domain has a valid,
+ *     trustworthy confirmed value.
+ *   • "conflict"  — the highest revision's recorded facts DISAGREE. The
+ *     domain's confirmed state is presently UNKNOWABLE — callers must fail
+ *     closed for this domain (no winner selection, no push, sync gated)
+ *     rather than substitute ANY older revision, however unambiguous that
+ *     older one might individually be.
+ * A conflict is always temporary: the moment a NEWER, unambiguous revision
+ * is recorded (e.g. a later successful push or pull resolves the
+ * inconsistency going forward), it becomes the new highest revision and
+ * resolveConfirmedDomainState() reports "confirmed" again — the stale
+ * conflicted revision is simply no longer the one being looked at. See
+ * confirmedFactKey's own doc in syncHelper.ts for why facts are physically
+ * append-only (so this function never needs to worry about a fact changing
+ * out from under it mid-computation), and this round's own report for how
+ * the "conflict" status propagates through the actual pull/baseline
+ * consumers instead of being silently dropped.
+ */
+export type ConfirmedDomainResult<T> =
+  | { status: "confirmed"; fact: ConfirmedDomainFact<T> }
+  | { status: "none" }
+  | { status: "conflict"; revision: number };
+
+export function resolveConfirmedDomainState<T>(
+  facts: Array<ConfirmedDomainFact<T>>
+): ConfirmedDomainResult<T> {
+  if (facts.length === 0) return { status: "none" };
+  let topRevision = facts[0].revision;
+  for (const fact of facts) {
+    if (fact.revision > topRevision) topRevision = fact.revision;
+  }
+  const topGroup = facts.filter((fact) => fact.revision === topRevision);
+  const canonicalValues = new Set(topGroup.map((fact) => canonicalizeJSON(fact.value)));
+  if (canonicalValues.size > 1) {
+    return { status: "conflict", revision: topRevision };
+  }
+  return { status: "confirmed", fact: topGroup[0] };
+}
+
+/**
+ * True if every fact recorded for `revision` within `facts` shares the SAME
+ * canonical value (including the trivial case of exactly one fact, or none
+ * — absence is never itself a conflict). Used by recordConfirmedFact()
+ * (syncHelper.ts) to decide, immediately after writing its own new fact,
+ * whether THIS SPECIFIC revision is durably confirmed as unambiguous — the
+ * per-call success signal reconcilePendingOperations() depends on to decide
+ * whether it is safe to retire a pending op's evidence. Deliberately
+ * independent of reduceConfirmedFactRecords()'s "stop at the first
+ * unambiguous revision" search: a revision below the domain's current
+ * overall max can still be perfectly unambiguous on its own terms (e.g. a
+ * legitimately delayed lower-revision response — see this round's own
+ * report), and this function must say so correctly regardless of what a
+ * HIGHER revision's group looks like.
+ */
+export function confirmedFactRevisionIsUnambiguous<T>(
+  facts: Array<ConfirmedDomainFact<T>>,
+  revision: number
+): boolean {
+  const group = facts.filter((f) => f.revision === revision);
+  if (group.length === 0) return false;
+  const canonicalValues = new Set(group.map((f) => canonicalizeJSON(f.value)));
+  return canonicalValues.size === 1;
+}
+
+/**
+ * IDENTITY comparison over TWO ConfirmedDomainResult<T> snapshots — SH.2.2
+ * (Codex P1 third follow-up round). "A hydration winner is valid only while
+ * the confirmed authority used to select it remains unchanged" (this
+ * round's required invariant): `a` and `b` are equal only when they
+ * represent the EXACT SAME authoritative fact — same status, and for
+ * "confirmed" the same revision AND canonically-equal value, and for
+ * "conflict" the same revision. Two "none" results are always equal (both
+ * mean "nothing confirmed yet"). Any difference in status, revision, or
+ * value — in either direction, newer OR older, ambiguous OR not — is NOT
+ * equal.
+ *
+ * Root cause this closes: the FIRST SH.2.2 follow-up round's commit-time
+ * `isAuthorityStillValid` check re-derived resolvePostFetchDomainBaseline()
+ * fresh and asked only "is the CURRENT confirmed state still USABLE
+ * relative to this pull's own cloudRevision" (i.e. not "gated"/
+ * "stale-response"/"unusable-response"). That question has a real gap: if
+ * confirmed authority advances from revision 5 to revision 6 WHILE this
+ * pull's cloudRevision is 7, resolvePostFetchDomainBaseline() reports the
+ * NEW revision-6 fact as perfectly "confirmed" (6 <= 7) — not unusable at
+ * all — so the OLD check reported "still valid" even though the winner
+ * this pull already selected was chosen against revision 5's value, never
+ * recomputed against revision 6's. Asking "is CURRENT state usable" is the
+ * wrong question at commit time; the right one is "is CURRENT state
+ * IDENTICAL to what winner selection actually used" — this function
+ * answers exactly that, generically, over the SAME ConfirmedDomainResult<T>
+ * type every other confirmed-authority decision in this codebase already
+ * uses (no parallel authority model introduced).
+ *
+ * Note this is a STRICT superset of the old usability check, not a
+ * replacement decision competing with it: a domain whose confirmed
+ * authority is UNCHANGED from what winner selection used is, by
+ * construction, exactly as usable as it was proven to be at the ORIGINAL
+ * baseline check (that pull's own cloudRevision never changes mid-pull) —
+ * so callers no longer need resolvePostFetchDomainBaseline() at all for
+ * this SPECIFIC "did anything move" question; see each page's
+ * revalidateAuthorityBeforeCommit() for the call site.
+ */
+export function confirmedDomainResultsEqual<T>(
+  a: ConfirmedDomainResult<T>,
+  b: ConfirmedDomainResult<T>
+): boolean {
+  if (a.status === "none") return b.status === "none";
+  if (a.status === "conflict") {
+    return b.status === "conflict" && a.revision === b.revision;
+  }
+  return b.status === "confirmed" && a.fact.revision === b.fact.revision && canonicalizeJSON(a.fact.value) === canonicalizeJSON(b.fact.value);
+}
+
+/**
+ * Reference cases for confirmedDomainResultsEqual() — the REQUIRED cases
+ * from the SH.2.2 (Codex P1 third follow-up round) architectural contract.
+ * Run from Node:
+ *   import { DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES, confirmedDomainResultsEqual } from "@/lib/syncPayload";
+ *   DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES.forEach(c => {
+ *     const got = confirmedDomainResultsEqual(c.a, c.b);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONFIRMED_DOMAIN_RESULTS_EQUAL_CASES: Array<{
+  name: string;
+  a: ConfirmedDomainResult<unknown>;
+  b: ConfirmedDomainResult<unknown>;
+  expected: boolean;
+}> = [
+  {
+    name: "both 'none' — nothing confirmed yet either time — equal",
+    a: { status: "none" },
+    b: { status: "none" },
+    expected: true,
+  },
+  {
+    name: "required case 3 — identical confirmed revision AND value — unchanged, equal",
+    a: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    b: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    expected: true,
+  },
+  {
+    name: "required case 1 — winner selected at rev5, confirmed authority advances to rev6 while waiting: NOT equal, even though rev6 could itself be perfectly usable against a later cloudRevision",
+    a: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    b: { status: "confirmed", fact: { revision: 6, value: "V6" } },
+    expected: false,
+  },
+  {
+    name: "required case 2 — SAME revision but the relevant confirmed value changed (e.g. resolved differently by a concurrent conflict repair): NOT equal",
+    a: { status: "confirmed", fact: { revision: 5, value: "V5-ORIGINAL" } },
+    b: { status: "confirmed", fact: { revision: 5, value: "V5-DIFFERENT" } },
+    expected: false,
+  },
+  {
+    name: "confirmed revision goes BACKWARD (should not happen in practice, but the comparison is symmetric about direction) — still NOT equal",
+    a: { status: "confirmed", fact: { revision: 6, value: "V6" } },
+    b: { status: "confirmed", fact: { revision: 5, value: "V5" } },
+    expected: false,
+  },
+  {
+    name: "'none' at selection time, a confirmed fact now exists (e.g. a reconciled pending op or concurrent push just recorded one): NOT equal — a fallback-ref-based winner must not be trusted once real confirmed authority appears",
+    a: { status: "none" },
+    b: { status: "confirmed", fact: { revision: 1, value: "V1" } },
+    expected: false,
+  },
+  {
+    name: "a genuine conflict at the SAME revision the original 'recovered' plan was based on, still unresolved: equal — the existing conflict-recovery plan (preFetch.diskValue) remains valid",
+    a: { status: "conflict", revision: 6 },
+    b: { status: "conflict", revision: 6 },
+    expected: true,
+  },
+  {
+    name: "a conflict resolves (unambiguously) to a confirmed fact while waiting: NOT equal — the 'recovered' plan was based on an assumption that no longer holds",
+    a: { status: "conflict", revision: 6 },
+    b: { status: "confirmed", fact: { revision: 7, value: "V7" } },
+    expected: false,
+  },
+  {
+    name: "a conflict's OWN top revision advances (a newer, still-ambiguous revision) while waiting: NOT equal",
+    a: { status: "conflict", revision: 6 },
+    b: { status: "conflict", revision: 7 },
+    expected: false,
+  },
+  {
+    name: "value equality is CANONICAL, not literal reference/shape identity — the SAME object with differently-ordered keys at the same revision still compares equal (reuses the SAME canonicalizeJSON() every other confirmed-fact comparison in this module already uses)",
+    a: { status: "confirmed", fact: { revision: 5, value: { items: [1, 2], version: 1 } } },
+    b: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [1, 2] } } },
+    expected: true,
+  },
+];
+
+/**
+ * SH.2.2 (Codex P1 "authority vs. hydration-provenance" round) — root cause:
+ * a domain being "cloud-won" at the DOMAIN level (`!itemsChangedLocally &&
+ * cloudItems !== null`) says nothing about whether the WINNING VALUE this
+ * pull actually persists is byte-for-byte the server's own value. Cross-
+ * domain reconciliation (reconcilePlannerSnapshot in crossDayChecks.ts) can
+ * ALTER a cloud-won domain's winning value — filtering a sibling's items
+ * that reference a day the winning days[] removed, or extending days[]
+ * itself with a day a cloud-won item newly references — so "cloud won this
+ * domain" and "this domain's winning value literally equals what the server
+ * returned for it" are DIFFERENT questions. Recording the ALTERED value as
+ * a confirmed fact under the server's own revision asserts something false:
+ * "the server's canonical value for this domain at this revision was X",
+ * when the server actually held Y. A concrete instance (this round's own
+ * task): GET rev7 returns Plans={A,B}; this device's local Days already
+ * lacks the day B belongs to; reconciliation locally, correctly, filters B
+ * out of winningPlanItems — but the server's OWN Plans@rev7 is still
+ * {A,B}, not {A}. Two tabs (or devices) with DIFFERENT local Days state
+ * reconciling the SAME GET response would derive DIFFERENT "winning" Plans
+ * values and, under the old (pre-this-round) code, both record THEIR OWN
+ * value as if it were "the" confirmed Plans@rev7 — a spurious, entirely
+ * artificial conflict for a domain the server itself has no ambiguity
+ * about at all.
+ *
+ * isExactCloudValue() is the gate: a candidate winning value is eligible to
+ * be recorded as CONFIRMED SERVER AUTHORITY (commitConfirmedBaseline, see
+ * syncHelper.ts) only when it canonically equals the literal cloud value
+ * this pull actually fetched for that domain — never merely "cloud won the
+ * domain-level decision". `cloudValue` of `null`/`undefined` (no cloud
+ * payload for this domain at all) can never make a candidate "the exact
+ * cloud value" — there is nothing to be exactly equal to — so it always
+ * returns false in that case, correctly routing such a domain to hydration
+ * provenance instead (see recordHydrationProvenance()'s own doc in
+ * syncHelper.ts for that separate, non-authoritative channel).
+ */
+export function isExactCloudValue(candidateValue: unknown, cloudValue: unknown): boolean {
+  if (cloudValue === null || cloudValue === undefined) return false;
+  return canonicalizeJSON(candidateValue) === canonicalizeJSON(cloudValue);
+}
+
+/**
+ * Reference cases for isExactCloudValue() — the REQUIRED cases from the
+ * SH.2.2 "authority vs. hydration-provenance" round. Run from Node:
+ *   import { DEV_IS_EXACT_CLOUD_VALUE_CASES, isExactCloudValue } from "@/lib/syncPayload";
+ *   DEV_IS_EXACT_CLOUD_VALUE_CASES.forEach(c => {
+ *     const got = isExactCloudValue(c.candidateValue, c.cloudValue);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_EXACT_CLOUD_VALUE_CASES: Array<{
+  name: string;
+  candidateValue: unknown;
+  cloudValue: unknown;
+  expected: boolean;
+}> = [
+  {
+    name: "pure cloud winner — candidate IS the literal cloud value — eligible for confirmed authority",
+    candidateValue: { version: 1, items: ["A", "B"] },
+    cloudValue: { version: 1, items: ["A", "B"] },
+    expected: true,
+  },
+  {
+    name: "canonical equality — differently-ordered keys still count as the exact cloud value",
+    candidateValue: { items: ["A", "B"], version: 1 },
+    cloudValue: { version: 1, items: ["A", "B"] },
+    expected: true,
+  },
+  {
+    name: "root example — reconciliation filtered B out locally (Days removed B's day): candidate {A} != cloud {A,B} — NOT the exact cloud value, must not become a confirmed fact",
+    candidateValue: { version: 1, items: ["A"] },
+    cloudValue: { version: 1, items: ["A", "B"] },
+    expected: false,
+  },
+  {
+    name: "reconciliation EXTENDED a domain beyond cloud's own value (e.g. days[] gained a day from a newly cloud-won item) — still NOT the exact cloud value",
+    candidateValue: ["day1", "day2", "day3"],
+    cloudValue: ["day1", "day2"],
+    expected: false,
+  },
+  {
+    name: "no cloud payload for this domain at all (null) — never eligible, regardless of what the candidate is",
+    candidateValue: { version: 1, items: [] },
+    cloudValue: null,
+    expected: false,
+  },
+  {
+    name: "no cloud payload for this domain at all (undefined) — never eligible",
+    candidateValue: [],
+    cloudValue: undefined,
+    expected: false,
+  },
+];
+
+/**
+ * SH.2.2 (Codex P1 "consolidated hydration commit boundary" round) —
+ * CRASH/RELOAD SAFETY for the gap between a domain's canonical-key mutation
+ * and its confirmed-authority/hydration-provenance fact write. Even inside
+ * commitDomainHydration()'s single held Web Lock (syncHelper.ts), those are
+ * still two separate `localStorage.setItem` calls — ordinary localStorage
+ * writes are not transactional, so a genuine process-level interruption
+ * (crash, kill, power loss) landing between them is possible in principle,
+ * however small the window. Before that write pair begins,
+ * commitDomainHydration() durably records a `HydrationApplyIntent` — the
+ * canonical key, the revision, and the exact bytes about to be written —
+ * under a per-(userId, profileId, domain) key, and clears it once the fact
+ * write (or the decision not to attempt one) has been recorded. A reload
+ * that finds a LEFTOVER intent means this device cannot prove which side of
+ * that gap the interruption landed on.
+ *
+ * resolveHydrationApplyIntentDisposition() is the pure decision a caller
+ * (e.g. the pull effect, before ever trusting canonical bytes as pushable
+ * local intent) makes from that leftover evidence:
+ *   • `intent === null` — nothing was ever left mid-flight — "resolved".
+ *   • `canonicalRaw !== intent.nextRaw` — something newer already
+ *     superseded whatever this intent described (the write never landed at
+ *     all, or a later genuine edit/commit has since moved past it) — the
+ *     intent is simply moot — "stale".
+ *   • `canonicalRaw === intent.nextRaw` (the write DID land) and a
+ *     surviving local-edit fact exists for this key — a genuine, newer user
+ *     edit happens to byte-for-byte coincide with the hydration write; the
+ *     local-edit-fact priority rule (see hasSurvivingEditFact's own doc in
+ *     syncHelper.ts) already makes this content trustworthy on its own
+ *     terms, regardless of hydration provenance — "resolved".
+ *   • `canonicalRaw === intent.nextRaw` and a confirmed-authority or
+ *     hydration-provenance fact already exists at `intent.revision` — the
+ *     fact write DID complete (or a later pull already re-established
+ *     equivalent provenance); only the intent marker's own clear step was
+ *     lost — harmless — "resolved".
+ *   • Otherwise — canonical bytes match exactly what this device was in the
+ *     middle of hydrating, with NEITHER a local edit NOR a fact to explain
+ *     them — the fact write genuinely never landed — "incomplete": the
+ *     caller must not treat this content as safe, pushable local intent
+ *     until a fresh pull re-establishes real provenance for it.
+ */
+export interface HydrationApplyIntent {
+  key: string;
+  revision: number;
+  nextRaw: string;
+}
+
+export type HydrationApplyIntentDisposition = "resolved" | "incomplete" | "stale";
+
+export function resolveHydrationApplyIntentDisposition(
+  intent: HydrationApplyIntent | null,
+  canonicalRaw: string | null,
+  hasSurvivingEditFact: boolean,
+  hasMatchingDurableFact: boolean
+): HydrationApplyIntentDisposition {
+  if (intent === null) return "resolved";
+  if (canonicalRaw !== intent.nextRaw) return "stale";
+  if (hasSurvivingEditFact || hasMatchingDurableFact) return "resolved";
+  return "incomplete";
+}
+
+/**
+ * Reference cases for resolveHydrationApplyIntentDisposition(). Run from Node:
+ *   import { DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES, resolveHydrationApplyIntentDisposition } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES.forEach(c => {
+ *     const got = resolveHydrationApplyIntentDisposition(c.intent, c.canonicalRaw, c.hasSurvivingEditFact, c.hasMatchingDurableFact);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES: Array<{
+  name: string;
+  intent: HydrationApplyIntent | null;
+  canonicalRaw: string | null;
+  hasSurvivingEditFact: boolean;
+  hasMatchingDurableFact: boolean;
+  expected: HydrationApplyIntentDisposition;
+}> = [
+  {
+    name: "no leftover intent — nothing to reconcile",
+    intent: null,
+    canonicalRaw: '{"version":1,"items":[]}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "resolved",
+  },
+  {
+    name: "canonical bytes no longer match the intent — superseded by something newer, moot",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":2}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "stale",
+  },
+  {
+    name: "write landed, no fact recorded yet, no local edit either — the genuine gap this exists to catch",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":1}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "incomplete",
+  },
+  {
+    name: "write landed, but a surviving local-edit fact explains it — a genuine newer edit, trust it on its own terms",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":1}',
+    hasSurvivingEditFact: true,
+    hasMatchingDurableFact: false,
+    expected: "resolved",
+  },
+  {
+    name: "write landed, a durable confirmed/hydration fact already exists for it — only the marker's own clear was lost, harmless",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: '{"a":1}',
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: true,
+    expected: "resolved",
+  },
+  {
+    name: "canonical key missing entirely (null) while intent expected real bytes — never confused with a match",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    canonicalRaw: null,
+    hasSurvivingEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "stale",
+  },
+];
+
+/**
+ * Reference cases for resolveConfirmedDomainState() — the REQUIRED cases
+ * from the 16th round's architectural contract. Run from Node:
+ *   import { DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES, resolveConfirmedDomainState } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES.forEach(c => {
+ *     const got = resolveConfirmedDomainState(c.facts);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_CONFIRMED_DOMAIN_STATE_CASES: Array<{
+  name: string;
+  facts: Array<ConfirmedDomainFact<unknown>>;
+  expected: ConfirmedDomainResult<unknown>;
+}> = [
+  {
+    name: "empty set — no confirmed state for this domain yet",
+    facts: [],
+    expected: { status: "none" },
+  },
+  {
+    name: "single fact — confirmed trivially",
+    facts: [{ revision: 5, value: "A" }],
+    expected: { status: "confirmed", fact: { revision: 5, value: "A" } },
+  },
+  {
+    name: "two tabs record IDENTICAL rev5 value (as separate physical facts) — one equivalent confirmed result",
+    facts: [
+      { revision: 5, value: { version: 1, items: ["a"] } },
+      { revision: 5, value: { version: 1, items: ["a"] } },
+    ],
+    expected: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: ["a"] } } },
+  },
+  {
+    name: "two tabs record DIFFERENT rev5 values — conflict, neither wins",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+    ],
+    expected: { status: "conflict", revision: 5 },
+  },
+  {
+    name: "required — rev5=A confirmed, rev6 has conflicting facts: reports conflict at rev6, NEVER falls back to rev5 as a usable baseline",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 6, value: "B" },
+      { revision: 6, value: "C" },
+    ],
+    expected: { status: "conflict", revision: 6 },
+  },
+  {
+    name: "required — later unambiguous rev7 arrives after rev6's conflict: rev6's conflict is superseded, normal confirmed state resumes from rev7",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 6, value: "B" },
+      { revision: 6, value: "C" },
+      { revision: 7, value: "D" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 7, value: "D" } },
+  },
+  {
+    name: "different revisions recorded concurrently — highest revision's own status determines the result",
+    facts: [
+      { revision: 6, value: "B" },
+      { revision: 9, value: "D" },
+      { revision: 3, value: "A" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 9, value: "D" } },
+  },
+  {
+    name: "delayed lower revision arriving after a higher unambiguous one remains harmless — still resolves to the higher revision",
+    facts: [
+      { revision: 7, value: "C" },
+      { revision: 6, value: "B-delayed" },
+    ],
+    expected: { status: "confirmed", fact: { revision: 7, value: "C" } },
+  },
+  {
+    name: "only the newest revision is conflicted, with no older revision at all — still 'conflict', never fabricates a fallback",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+    ],
+    expected: { status: "conflict", revision: 5 },
+  },
+];
+
+/**
+ * Reference cases for confirmedFactRevisionIsUnambiguous(). Run from Node:
+ *   import { DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES, confirmedFactRevisionIsUnambiguous } from "@/lib/syncPayload";
+ *   DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES.forEach(c => {
+ *     const got = confirmedFactRevisionIsUnambiguous(c.facts, c.revision);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONFIRMED_FACT_REVISION_IS_UNAMBIGUOUS_CASES: Array<{
+  name: string;
+  facts: Array<ConfirmedDomainFact<unknown>>;
+  revision: number;
+  expected: boolean;
+}> = [
+  {
+    name: "no facts at all for this revision — not unambiguous (nothing to confirm)",
+    facts: [{ revision: 9, value: "X" }],
+    revision: 5,
+    expected: false,
+  },
+  {
+    name: "exactly one fact for this revision — unambiguous",
+    facts: [{ revision: 5, value: "A" }],
+    revision: 5,
+    expected: true,
+  },
+  {
+    name: "multiple facts, same canonical value — unambiguous",
+    facts: [
+      { revision: 5, value: { b: 2, a: 1 } },
+      { revision: 5, value: { a: 1, b: 2 } },
+    ],
+    revision: 5,
+    expected: true,
+  },
+  {
+    name: "multiple facts, different values — NOT unambiguous, regardless of a higher revision existing elsewhere",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 5, value: "B" },
+      { revision: 9, value: "Z" },
+    ],
+    revision: 5,
+    expected: false,
+  },
+  {
+    name: "a lower revision is unambiguous on its own terms even though a HIGHER revision is the domain's overall confirmed max",
+    facts: [
+      { revision: 5, value: "A" },
+      { revision: 9, value: "Z" },
+    ],
+    revision: 5,
+    expected: true,
+  },
+];
+
+// ===== CONFIRMED-CONFLICT RECOVERY (SH.2, Codex P1, 17th round) =====
+
+/**
+ * CONFIRMED-CONFLICT RECOVERY CONTRACT — a conflicted newest-confirmed
+ * revision (resolveConfirmedDomainState() above returning "conflict") must
+ * fail closed, but must not permanently deadlock. Codex P1, 17th round:
+ * the 16th round's own fix made this deadlock structurally guaranteed —
+ * the pull unconditionally bails out the instant ANY domain is conflicted,
+ * but the ONLY way a conflict is ever superseded is a NEW, higher-revision
+ * fact getting recorded, which only happens via the winner-selection/commit
+ * code path the bail-out itself prevents from ever running. A conflict
+ * could never resolve.
+ *
+ * The fix: a conflict at `conflictRevision` is REPAIRABLE by a given pull
+ * if and only if that pull's own authoritative server response carries a
+ * STRICTLY NEWER revision than the conflict itself — never an equal or
+ * older one ("Do not recover from an equal/older response"; "Do not
+ * silently fall back to an older confirmed revision" — both from the 17th
+ * round's own directive). `candidateRevision` is `null` for a response with
+ * no usable revision at all (a 204, or an unparseable GET) — never
+ * repairable, since there is no authoritative newer fact to repair with.
+ *
+ * This is a PURE, per-domain decision only — see each page's
+ * captureConfirmedSnapshotForPull() for how a "repairable" domain is then
+ * treated exactly like "none" (falls through to the ordinary baseline-ref/
+ * ownership-mismatch path), letting the EXISTING winner-selection/
+ * reconciliation/commit machinery record a new fact at the (higher)
+ * candidate revision with zero special-casing — that new fact is what
+ * actually supersedes the conflict, via resolveConfirmedDomainState()'s own
+ * existing "only the highest revision matters" rule, not any special
+ * recovery code path here. A domain that is NOT repairable by this pull's
+ * response still fails closed exactly as the 16th round already ensured.
+ */
+export function isConflictRepairableByRevision(
+  conflictRevision: number,
+  candidateRevision: number | null
+): boolean {
+  return candidateRevision !== null && candidateRevision > conflictRevision;
+}
+
+/**
+ * Reference cases for isConflictRepairableByRevision() — the REQUIRED
+ * cases 3 and 4 from the 17th round's architectural contract (conflicted
+ * rev6 + authoritative rev7 repairs; conflicted rev6 + rev6/rev5 stays
+ * fail-closed), plus the surrounding edge cases. Run from Node:
+ *   import { DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES, isConflictRepairableByRevision } from "@/lib/syncPayload";
+ *   DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES.forEach(c => {
+ *     const got = isConflictRepairableByRevision(c.conflictRevision, c.candidateRevision);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_CONFLICT_REPAIRABLE_BY_REVISION_CASES: Array<{
+  name: string;
+  conflictRevision: number;
+  candidateRevision: number | null;
+  expected: boolean;
+}> = [
+  {
+    name: "required — conflicted rev6 + authoritative GET rev7 — strictly newer, repairs the conflict",
+    conflictRevision: 6,
+    candidateRevision: 7,
+    expected: true,
+  },
+  {
+    name: "required — conflicted rev6 + GET rev6 (equal) — never recovers from an equal response",
+    conflictRevision: 6,
+    candidateRevision: 6,
+    expected: false,
+  },
+  {
+    name: "required — conflicted rev6 + GET rev5 (older) — never falls back to an older confirmed revision",
+    conflictRevision: 6,
+    candidateRevision: 5,
+    expected: false,
+  },
+  {
+    name: "no usable candidate revision at all (204 / unparseable GET) — never repairable",
+    conflictRevision: 6,
+    candidateRevision: null,
+    expected: false,
+  },
+  {
+    name: "candidate far newer — still repairs (any strictly-newer revision suffices)",
+    conflictRevision: 3,
+    candidateRevision: 100,
+    expected: true,
+  },
+];
+
+/**
+ * SH.2 architecture (Codex P1, 11th round) — the per-domain accepted-facts
+ * a caller should record, given a set of domain values all confirmed
+ * together at ONE server revision (a single push's response, or a single
+ * pull's GET response). This replaces the old `nextConfirmedBaseline()`
+ * merge function: there is no "current state" input anymore, and no
+ * accept/reject decision to make here at all — recording an immutable fact
+ * is ALWAYS valid (it is simply a true historical record of what revision
+ * R produced), and whether it ends up being the domain's CURRENT confirmed
+ * value is entirely up to resolveConfirmedDomainState() at READ time. This
+ * function exists only to describe, per domain, WHAT to record — never
+ * whether it's "allowed".
+ */
+export interface AcceptedPlannerDomains {
+  plans?: { version: number; items: unknown[] };
+  lightning?: { version: number; items: unknown[] };
+  days?: string[];
+}
+
+/**
+ * SH.2 architecture (Codex P1, 7th round; generalized 11th) — REPLACES the
+ * 6th round's content-comparison beacon resolution (formerly
+ * SyncIdentityState / resolveSyncIdentityStateAfterPull, both removed).
+ * That approach compared a pendingBeacon's PAYLOAD against a subsequent
+ * GET's current snapshot and treated a mismatch as "the beacon failed".
+ * This is unsound: `user_planner` (see db-schema.sql) stores only the
+ * LATEST state per (user, profile) — no history — so "beacon B failed" and
+ * "beacon B succeeded, then a newer write C superseded it" are
+ * OBSERVATIONALLY IDENTICAL from a single GET's content alone. Both cases
+ * show up as "current cloud content differs from what B sent". No amount
+ * of client-side heuristics (timing, retry counts, event ordering) can
+ * distinguish them, because the information needed — "was B specifically
+ * ever accepted" — simply does not exist in a content-only GET response.
+ * Closing this required a SERVER-VERIFIABLE write-acknowledgment: see
+ * user_planner_writes (db-schema.sql) and lastOpId/clientOpId
+ * (api/sync/planner/route.ts) for the minimal additive mechanism — an
+ * append-only table recording, per client-generated opaque opId, whether
+ * that specific write was ever accepted, independent of whatever the row
+ * looks like now.
+ *
+ * This function is the pure decision core for that resolved contract,
+ * given the GET response's own `opStatus.found` (a direct, deterministic
+ * server fact — never inferred from timing or content comparison):
+ *   • `beaconAccepted` true (server confirms opId was recorded): the
+ *     beacon's contribution is, by definition, already reflected in
+ *     whatever `cloudSnapshot`/`cloudRevision` this SAME GET response
+ *     returned (accepted-then-possibly-superseded is still "this pull's
+ *     cloud state already accounts for it") — returns the per-domain facts
+ *     to record at `cloudRevision`, bundled with that revision. This
+ *     correctly resolves BOTH "accepted, not yet superseded" and
+ *     "accepted, then superseded by C" identically and correctly: either
+ *     way, `cloudSnapshot` IS the accurate current truth to record.
+ *   • `beaconAccepted` false (server confirms opId was never recorded, or
+ *     no opId was pending at all), or `cloudRevision`/`cloudSnapshot` null
+ *     (a 204): returns `null` — nothing to record. The caller's ORDINARY
+ *     pickWinningItems/pickWinningDays comparison decides the rest, exactly
+ *     as it would for any other unresolved local edit.
+ * Never fabricates a revision (always uses this GET's own live
+ * `cloudRevision`) and never consults arrival order or timing.
+ *
+ * Codex P1 fix (11th round) — no longer routes through a "current state"
+ * merge/rejection step (the old nextConfirmedBaseline()): recording a fact
+ * is always valid regardless of what's currently confirmed for any domain,
+ * per-domain OR mixed together — see resolveConfirmedDomainState()'s own doc
+ * for why this is what removes the Web-Locks dependency for confirmed state.
+ */
+export function acceptedDomainFactsFromBeacon(
+  beaconAccepted: boolean,
+  cloudRevision: number | null,
+  cloudSnapshot: SyncedPlannerPayload | null
+): { revision: number; accepted: AcceptedPlannerDomains } | null {
+  if (!beaconAccepted || cloudRevision === null || cloudSnapshot === null) {
+    return null;
+  }
+  return {
+    revision: cloudRevision,
+    accepted: {
+      plans: cloudSnapshot.plans,
+      lightning: cloudSnapshot.lightning,
+      days: cloudSnapshot.days,
+    },
+  };
+}
+
+/**
+ * Reference cases for acceptedDomainFactsFromBeacon() — the two REQUIRED
+ * beacon-resolution cases per the round-7 directive (accepted, accepted-
+ * then-superseded, failed, failed-while-newer-C-exists), plus the
+ * surrounding edge cases, re-pinned against the round-11 per-domain
+ * contract (no more "current confirmed" input/rejection — see the
+ * function's own doc for why). Run from Node:
+ *   import { DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES, acceptedDomainFactsFromBeacon } from "@/lib/syncPayload";
+ *   DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES.forEach(c => {
+ *     const got = acceptedDomainFactsFromBeacon(c.beaconAccepted, c.cloudRevision, c.cloudSnapshot);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
+  name: string;
+  beaconAccepted: boolean;
+  cloudRevision: number | null;
+  cloudSnapshot: SyncedPlannerPayload | null;
+  expected: { revision: number; accepted: AcceptedPlannerDomains } | null;
+}> = [
+  {
+    name: "required — beacon accepted, not yet superseded: records the GET's own snapshot/revision",
+    beaconAccepted: true,
+    cloudRevision: 5,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      revision: 5,
+      accepted: { plans: { version: 1, items: ["S2"] }, lightning: { version: 1, items: [] }, days: undefined },
+    },
+  },
+  {
+    name: "required — beacon accepted, then SUPERSEDED by a newer cloud write C: still records CURRENT cloud (C), the accurate accounting of the beacon's contribution",
+    beaconAccepted: true,
+    cloudRevision: 7,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] } },
+    expected: {
+      revision: 7,
+      accepted: { plans: { version: 1, items: ["C-from-another-device"] }, lightning: { version: 1, items: [] }, days: undefined },
+    },
+  },
+  {
+    name: "required — beacon failed (opId never recorded): nothing to record",
+    beaconAccepted: false,
+    cloudRevision: 4,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["old"] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "required — beacon failed WHILE a newer cloud write C exists (from another device): still nothing to record HERE — ordinary pull logic (commitConfirmedBaseline) handles C separately",
+    beaconAccepted: false,
+    cloudRevision: 9,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["C-unrelated"] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "no beacon was pending at all (beaconAccepted false) — nothing to record",
+    beaconAccepted: false,
+    cloudRevision: 3,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "definitive 204 (cloudRevision/cloudSnapshot both null) even though beaconAccepted somehow true (defensive) — nothing to record",
+    beaconAccepted: true,
+    cloudRevision: null,
+    cloudSnapshot: null,
+    expected: null,
+  },
+  {
+    name: "accepted, with a days[] present — days included in the recorded facts",
+    beaconAccepted: true,
+    cloudRevision: 1,
+    cloudSnapshot: { version: 1, plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    expected: {
+      revision: 1,
+      accepted: { plans: { version: 1, items: ["first"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    },
+  },
+];
+
+// ===== Pending-operation domain evidence (SH.2.3 — Unresolved Write
+// Provenance & Operation Recovery) =====================================
+//
+// SH.2.2 left ordinary PUT pushes and unload beacons as two superficially
+// similar but structurally different recovery paths: a beacon always
+// registered a pending opId (syncHelper.ts's addPendingOp) before this
+// device lost the ability to observe its outcome, but an ordinary PUT
+// (doPush() in syncHelper.ts) only registered its opId AFTER fetch()
+// resolved — a connection drop between the server committing the write and
+// the response arriving lost the evidence entirely, even though the server
+// itself has a durable, server-verifiable record (see
+// acceptedDomainFactsFromBeacon()'s own doc above) that this device could
+// have reconciled on its next pull.
+//
+// A second, subtler gap survived even once BOTH paths register before
+// sending: reconcilePendingOperations() (syncHelper.ts) already resolves an
+// accepted op against THIS PULL'S OWN CURRENT cloud snapshot/revision —
+// never the operation's own stale payload — so an accepted op that cloud
+// has since moved past (op A accepted, then device Y pushes B) correctly
+// promotes the CONFIRMED baseline to B, not back to A. But confirmed-
+// baseline promotion alone does not explain why THIS device's own canonical
+// storage still holds A's bytes: a pull's winner-selection compares fresh
+// disk content against that baseline, and A's own edit-fact (created when
+// the local edit that produced A was made — see LOCAL-EDIT FACT LIFECYCLE
+// in syncHelper.ts) is still "surviving" (no local write has retired it —
+// only a hydration COMMIT does that, and none has run yet), which is an
+// ABSOLUTE VETO against treating A as anything but a fresh, unresolved
+// local edit. Without a way to recognize "A is this operation's own,
+// now-resolved content — not a still-pending user intent", winner selection
+// would treat A as a genuine edit and push it right back over B, silently
+// reverting the change B represents.
+//
+// isPendingOpDomainEvidenceCurrent() is the pure decision this closes: an
+// operation's own per-domain evidence, captured at send time (a COMPACT
+// FINGERPRINT of its own value — see canonicalDigest() below, Codex P1
+// "bound unresolved-operation storage" round — plus the SNAPSHOT of
+// local-edit-fact keys that existed for that domain's canonical key at that
+// moment, its "edit-fact frontier"), is still the CURRENT explanation for a
+// domain's local content only when BOTH:
+//   • no edit-fact key exists right now that wasn't already in that
+//     frontier (mirrors commitLocalDomainRaw's own baselineEditFactIds
+//     re-validation) — a NEWER key means a genuine local edit happened
+//     since this operation was sent, and that edit must remain local-first,
+//     full stop, regardless of what its bytes happen to be (a revert to
+//     the exact same content is still a genuine, newer edit — see
+//     hasSurvivingEditFact's own doc in syncHelper.ts for why value-only
+//     matching can never stand in for this causal check); AND
+//   • the domain's current value's own digest still equals the operation's
+//     own recorded digest — belt-and-suspenders: closes the case where some
+//     OTHER writer (a hydration commit) already retired the frontier AND
+//     moved the canonical key on to a third value, which would otherwise
+//     look "frontier-intact" (nothing newer landed FROM AN EDIT) but is not
+//     this operation's content anymore.
+// When both hold, the caller (reconcilePendingOperations()) may safely
+// retire that domain's edit-fact(s) — the same LOCAL-EDIT FACT LIFECYCLE
+// retirement a hydration commit performs — and record the domain's CURRENT
+// value (already in hand, freshly read to compute the digest above — never
+// re-derived from the compact evidence, which no longer carries the full
+// value at all) as hydration-provenance-equivalent evidence
+// (recordHydrationProvenance() in syncHelper.ts — the SAME non-authoritative
+// provenance store SH.2.2 built for reconciled-but-not-pure-cloud hydration
+// winners; reused here rather than inventing a parallel one, per this
+// phase's "one operation-lifecycle model" requirement), so a subsequent
+// pull's hydration-provenance check recognizes A as explained and lets
+// whatever the CURRENT confirmed baseline is (B, if cloud has advanced) win
+// normally, instead of misreading stale-but-accepted A as fresh intent. See
+// reconcilePendingOperations()'s own doc in syncHelper.ts for the ORDERING
+// this enables — provenance recorded durably BEFORE either the edit-fact or
+// the pending-op itself is retired (Codex P1 "provenance before retirement"
+// round).
+//
+// Codex P1 fix ("bound unresolved-operation storage" round) — the ORIGINAL
+// SH.2.3 design stored each pending operation's own FULL per-domain value
+// (the entire Plans/Lightning/Days dataset) inside the pending-op record,
+// once per unresolved operation. A device that accumulates several
+// unresolved operations (e.g. a flaky connection producing repeated lost
+// responses — precisely the scenario this phase exists to make recoverable)
+// would then durably duplicate the ENTIRE planner dataset once per
+// unresolved op, working directly against the LOCAL-FIRST DURABILITY
+// CONTRACT this codebase treats as a hard invariant (unbounded local
+// storage growth can itself cause localStorage writes — ordinary edits
+// included — to start failing on quota). A bare retention cap (e.g. "keep
+// only the N most recent pending ops") was rejected: an operation dropped
+// under such a cap is UNRESOLVED CORRECTNESS EVIDENCE, not disposable
+// cache — discarding it reopens exactly the "server accepted it, this
+// device can no longer prove what it resolved into" gap this phase closes.
+//
+// canonicalDigest() is the fix: pending-op evidence now stores a small,
+// FIXED-SIZE fingerprint of each domain's value (16 hex characters,
+// regardless of how large the underlying Plans/Lightning/Days dataset is)
+// instead of the value itself. This is sufficient for
+// isPendingOpDomainEvidenceCurrent()'s only actual need — "does the domain's
+// CURRENT value still canonically equal what this operation sent" — a
+// boolean equality check that a digest answers exactly as well as the full
+// value would, at O(1) storage instead of O(dataset size) PER PENDING
+// OPERATION. The full value is never needed again once digested: at
+// reconciliation time, the domain's CURRENT durable value is read fresh
+// anyway (to compute its own digest for comparison) — that SAME freshly-read
+// value is what gets passed to recordHydrationProvenance() on a match, so no
+// caller ever needs the operation's own original value bytes back out of
+// this store. A 16-hex-character fingerprint is not collision-proof in the
+// cryptographic sense, but this is a LOCAL, single-device reconciliation
+// heuristic, not a security boundary — see canonicalDigest()'s own doc for
+// why an accidental collision here is not a realistic concern, and note
+// that even a hypothetical collision could only ever cause a MISSED
+// retire+provenance opportunity or a spurious one on byte-identical
+// content, never data loss (the edit-fact frontier check above is the
+// structural protection against a genuine edit being mistaken for resolved
+// operation content — digest equality alone was never that protection).
+export interface PendingOpDomainEvidence {
+  digest: string;
+  editFactKeys: string[];
+}
+
+export interface PendingOpRecord {
+  opId: string;
+  domains: Partial<Record<"plans" | "lightning" | "days", PendingOpDomainEvidence>>;
+}
+
+/**
+ * A compact, fixed-size (16 hex chars = 64 bits), deterministic fingerprint
+ * of an arbitrary JSON-serializable value, computed over its CANONICAL form
+ * (canonicalizeJSON() above) so key order never affects the result — two
+ * differently-ordered-but-equal objects always digest identically, matching
+ * every OTHER equality check in this codebase (isExactCloudValue,
+ * confirmedDomainResultsEqual, etc.), all of which already compare via
+ * canonicalizeJSON() rather than raw JSON.stringify().
+ *
+ * Two independent 32-bit rolling hashes (different seeds/mixing, FNV-1a and
+ * a DJB2 variant) run over the same canonical string and are concatenated —
+ * cheap enough to compute synchronously on every write, including from a
+ * beforeunload handler (registerUnloadSync()'s beacon path), which cannot
+ * reliably await an async Web Crypto digest. A 64-bit keyspace makes an
+ * accidental collision between two genuinely different planner payloads not
+ * a realistic concern for this use: a LOCAL, single-device reconciliation
+ * heuristic, never a security or integrity boundary (see this section's own
+ * module doc above for what a hypothetical collision could and could not
+ * cause).
+ */
+export function canonicalDigest(value: unknown): string {
+  const canonical = canonicalizeJSON(value);
+  let h1 = 0x811c9dc5;
+  let h2 = 5381;
+  for (let i = 0; i < canonical.length; i++) {
+    const c = canonical.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 = Math.imul(h2, 33) ^ c;
+  }
+  return (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Reference cases for canonicalDigest(). Run from Node:
+ *   import { DEV_CANONICAL_DIGEST_CASES, canonicalDigest } from "@/lib/syncPayload";
+ *   DEV_CANONICAL_DIGEST_CASES.forEach(c => {
+ *     const got = canonicalDigest(c.value);
+ *     const ok = c.equalTo !== undefined ? got === canonicalDigest(c.equalTo) : got !== canonicalDigest(c.differentFrom);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CANONICAL_DIGEST_CASES: Array<{
+  name: string;
+  value: unknown;
+  equalTo?: unknown;
+  differentFrom?: unknown;
+}> = [
+  {
+    name: "required — deterministic: the same value digests identically across calls",
+    value: { version: 1, items: ["A", "B"] },
+    equalTo: { version: 1, items: ["A", "B"] },
+  },
+  {
+    name: "required — canonical: differently-ordered keys digest identically",
+    value: { items: ["A", "B"], version: 1 },
+    equalTo: { version: 1, items: ["A", "B"] },
+  },
+  {
+    name: "required — a genuinely different value digests differently",
+    value: { version: 1, items: ["A"] },
+    differentFrom: { version: 1, items: ["A", "B"] },
+  },
+  {
+    name: "different value shape (array vs object) digests differently",
+    value: ["day-1", "day-2"],
+    differentFrom: { version: 1, items: [] },
+  },
+  {
+    name: "empty vs non-empty digests differently",
+    value: { version: 1, items: [] },
+    differentFrom: { version: 1, items: ["A"] },
+  },
+];
+
+export function isPendingOpDomainEvidenceCurrent(
+  currentEditFactKeys: string[],
+  frontierEditFactKeys: string[],
+  currentDigest: string,
+  operationDigest: string
+): boolean {
+  const frontier = new Set(frontierEditFactKeys);
+  const frontierIntact = currentEditFactKeys.every((key) => frontier.has(key));
+  if (!frontierIntact) return false;
+  return currentDigest === operationDigest;
+}
+
+/**
+ * Reference cases for isPendingOpDomainEvidenceCurrent(). Run from Node:
+ *   import { DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES, isPendingOpDomainEvidenceCurrent, canonicalDigest } from "@/lib/syncPayload";
+ *   DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES.forEach(c => {
+ *     const got = isPendingOpDomainEvidenceCurrent(c.currentEditFactKeys, c.frontierEditFactKeys, canonicalDigest(c.currentValue), canonicalDigest(c.operationValue));
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES: Array<{
+  name: string;
+  currentEditFactKeys: string[];
+  frontierEditFactKeys: string[];
+  currentValue: unknown;
+  operationValue: unknown;
+  expected: boolean;
+}> = [
+  {
+    name: "required — no edit since send, content still matches: evidence current, safe to retire+record",
+    currentEditFactKeys: ["dwp:localEditFact:k:e1"],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["A"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: true,
+  },
+  {
+    name: "required — both empty frontiers (no edit fact ever existed) and content matches: still current",
+    currentEditFactKeys: [],
+    frontierEditFactKeys: [],
+    currentValue: ["day-1"],
+    operationValue: ["day-1"],
+    expected: true,
+  },
+  {
+    name: "required — a NEWER edit-fact key exists beyond the frontier: genuine local edit, never treated as resolved even if bytes happen to match (revert case)",
+    currentEditFactKeys: ["dwp:localEditFact:k:e1", "dwp:localEditFact:k:e2-newer"],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["A"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "required — frontier's own key was already retired by something else (e.g. a hydration commit) and canonical moved on to a third value: not this operation's content anymore",
+    currentEditFactKeys: [],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["C-from-elsewhere"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "frontier intact but content diverges (defensive belt-and-suspenders case): not current",
+    currentEditFactKeys: ["dwp:localEditFact:k:e1"],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["B"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+];
+
+// ===== Hydration-provenance dedup/pruning (SH.2.3 — Codex P1 "deduplicate
+// same-revision hydration provenance facts" round) =========================
+//
+// ROOT ISSUE: recordHydrationProvenance() (syncHelper.ts) writes a new,
+// permanently-unique-keyed full-value record on EVERY call, and previously
+// self-pruned only STRICTLY OLDER revisions (`r < revision`) — deliberately,
+// so a genuinely concurrent OTHER tab's own same-revision-but-different
+// hydration result would never be discarded (see pruneHydrationProvenanceFacts's
+// own doc above for why `<` there and `<=` at recordConfirmedFact's cross-
+// store call site are DIFFERENT, both-correct semantics). But "preserve
+// same-revision siblings" was never meant to mean "preserve same-revision
+// DUPLICATES": repeated reconciliation at an UNCHANGED server revision —
+// ordinary, expected behavior, not an edge case (every reload's mount pull
+// while nothing has changed cloud-side, and SH.2.3's own accepted-operation
+// reconciliation loop, both call recordHydrationProvenance() again and again
+// at the SAME revision with the SAME value once nothing new has happened) —
+// had no mechanism to recognize "this exact value at this exact revision is
+// already durably recorded" and kept accumulating canonically-identical
+// full-value records indefinitely, working directly against the very
+// storage-boundedness canonicalDigest() (above) was built to establish for
+// pending-op evidence.
+//
+// planHydrationProvenanceDedup() is the pure decision this closes, factored
+// out from the actual localStorage scan (which stays in
+// recordHydrationProvenance(), syncHelper.ts — this function only reasons
+// over already-parsed `{key, revision, value}` records) so it can be
+// exercised directly via the DEV_* cases below, matching this codebase's
+// established "pure decision here, I/O wrapper in syncHelper.ts" pattern
+// (decideLocalDomainCommit, resolveConfirmedDomainState, etc.). Given the
+// full CURRENT set of recorded facts for one (userId, profileId, domain) and
+// the `{revision, value}` about to be recorded:
+//   • Any fact strictly OLDER than `revision` is marked for deletion —
+//     UNCHANGED from the previous self-pruning behavior; see
+//     pruneHydrationProvenanceFacts's own doc for why this is safe (a later
+//     write proves the canonical key has moved on, so no older record can
+//     ever again explain current disk content).
+//   • Among facts at EXACTLY `revision`, grouped by their OWN canonical
+//     value: the FIRST fact encountered per distinct canonical value is kept
+//     as that value's sole survivor; any FURTHER fact whose value canonically
+//     matches an already-kept survivor is ALSO marked for deletion — this is
+//     the actual dedup (collapses however many duplicate records have
+//     already accumulated for one distinct value down to one, self-healing
+//     even a keyspace that grew before this fix shipped). A fact at
+//     `revision` whose value canonically DIFFERS from every other same-
+//     revision fact seen so far is always kept as its own group's survivor —
+//     genuinely different same-revision siblings from a real concurrent
+//     writer race are never touched, exactly preserving the existing
+//     "same-revision siblings coexist" guarantee this round must not
+//     regress.
+//   • A fact at any revision STRICTLY NEWER than `revision` is never
+//     inspected or touched by this call at all — unchanged from before;
+//     each write only ever reasons about revisions up to its own.
+//   • `writeNew` is `false` exactly when an EXISTING fact at `revision`
+//     already canonically equals the value about to be recorded — the
+//     durable invariant ("this value at this revision is recorded") already
+//     holds, so writing yet another physically-unique duplicate key would
+//     only grow storage for zero informational gain. `true` otherwise: no
+//     existing same-revision fact matches (either none exist yet at this
+//     revision, or every one present is a genuinely different sibling), so a
+//     new key is needed to preserve that distinct value.
+export interface HydrationProvenanceFactRecord {
+  key: string;
+  revision: number;
+  value: unknown;
+}
+
+export interface HydrationProvenanceDedupPlan {
+  writeNew: boolean;
+  keysToDelete: string[];
+}
+
+export function planHydrationProvenanceDedup(
+  existing: HydrationProvenanceFactRecord[],
+  revision: number,
+  value: unknown
+): HydrationProvenanceDedupPlan {
+  const targetCanonical = canonicalizeJSON(value);
+  const keysToDelete: string[] = [];
+  let alreadyPresent = false;
+  const survivorForCanonical = new Map<string, string>();
+  for (const fact of existing) {
+    if (fact.revision < revision) {
+      keysToDelete.push(fact.key);
+      continue;
+    }
+    if (fact.revision !== revision) continue;
+    const factCanonical = canonicalizeJSON(fact.value);
+    if (factCanonical === targetCanonical) alreadyPresent = true;
+    const survivorKey = survivorForCanonical.get(factCanonical);
+    if (survivorKey === undefined) {
+      survivorForCanonical.set(factCanonical, fact.key);
+    } else {
+      keysToDelete.push(fact.key);
+    }
+  }
+  return { writeNew: !alreadyPresent, keysToDelete };
+}
+
+/**
+ * Reference cases for planHydrationProvenanceDedup(). Run from Node:
+ *   import { DEV_HYDRATION_PROVENANCE_DEDUP_CASES, planHydrationProvenanceDedup } from "@/lib/syncPayload";
+ *   DEV_HYDRATION_PROVENANCE_DEDUP_CASES.forEach(c => {
+ *     const got = planHydrationProvenanceDedup(c.existing, c.revision, c.value);
+ *     const ok = got.writeNew === c.expected.writeNew && JSON.stringify([...got.keysToDelete].sort()) === JSON.stringify([...c.expected.keysToDelete].sort());
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_HYDRATION_PROVENANCE_DEDUP_CASES: Array<{
+  name: string;
+  existing: HydrationProvenanceFactRecord[];
+  revision: number;
+  value: unknown;
+  expected: HydrationProvenanceDedupPlan;
+}> = [
+  {
+    name: "required — repeated identical value at the same revision: no new write, nothing to delete",
+    existing: [{ key: "k1", revision: 5, value: { version: 1, items: ["A"] } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: [] },
+  },
+  {
+    name: "required — no existing fact yet at this revision: write needed, nothing to delete",
+    existing: [],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: [] },
+  },
+  {
+    name: "required — a genuinely DIFFERENT value at the same revision (concurrent writer): both must coexist — write needed, the differing sibling is NOT deleted",
+    existing: [{ key: "k1", revision: 5, value: { version: 1, items: ["OTHER-TAB"] } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: [] },
+  },
+  {
+    name: "required — newer revision prunes obsolete strictly-older facts",
+    existing: [
+      { key: "old1", revision: 3, value: { version: 1, items: ["stale"] } },
+      { key: "old2", revision: 4, value: { version: 1, items: ["also-stale"] } },
+    ],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: ["old1", "old2"] },
+  },
+  {
+    name: "a revision STRICTLY NEWER than this write is never touched",
+    existing: [{ key: "future", revision: 9, value: { version: 1, items: ["from-the-future"] } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: true, keysToDelete: [] },
+  },
+  {
+    name: "self-healing — collapses pre-existing same-revision duplicates of the SAME value down to one survivor, even though no new write is needed",
+    existing: [
+      { key: "dup1", revision: 5, value: { version: 1, items: ["A"] } },
+      { key: "dup2", revision: 5, value: { version: 1, items: ["A"] } },
+      { key: "dup3", revision: 5, value: { version: 1, items: ["A"] } },
+    ],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: ["dup2", "dup3"] },
+  },
+  {
+    name: "mixed — one duplicate of the target value collapsed, one genuinely different sibling preserved, one older revision pruned",
+    existing: [
+      { key: "dup", revision: 5, value: { version: 1, items: ["A"] } },
+      { key: "sibling", revision: 5, value: { version: 1, items: ["B-from-other-tab"] } },
+      { key: "old", revision: 2, value: { version: 1, items: ["ancient"] } },
+    ],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: ["old"] },
+  },
+  {
+    name: "canonical equality — differently-ordered keys count as the same value for dedup purposes too",
+    existing: [{ key: "k1", revision: 5, value: { items: ["A"], version: 1 } }],
+    revision: 5,
+    value: { version: 1, items: ["A"] },
+    expected: { writeNew: false, keysToDelete: [] },
+  },
+];
+
+// ===== Cross-store hydration-provenance pruning (SH.2.3 — Codex P1
+// "preserve hydration provenance that still describes canonical local
+// storage" round) ============================================================
+//
+// ROOT ISSUE: recordConfirmedFactBody() (syncHelper.ts) — the shared core
+// behind BOTH commitDomainHydration()'s pure-cloud-value branch AND
+// commitConfirmedBaseline() (called by doPush()'s synchronous confirmation
+// AND by SH.2.3's own reconcilePendingOperations()) — cross-store-prunes
+// EVERY hydration-provenance fact for a domain at `<= revision` the moment
+// it records ANY confirmed fact for that domain at that revision, on the
+// stated assumption that "this call's own [...] commit already proved the
+// canonical key holds exactly what this write recorded" (see
+// pruneHydrationProvenanceFacts's own doc above).
+//
+// That assumption is TRUE for commitDomainHydration()'s call: it happens
+// immediately after commitLocalDomainRaw() has ALREADY CAS-written
+// `nextRaw` to the SAME canonical key, inside the SAME held lock — canonical
+// storage genuinely does hold exactly the confirmed value at that instant.
+// It is FALSE for doPush()'s (and reconcilePendingOperations()'s) call:
+// commitConfirmedBaseline() never writes canonical storage at all — it
+// merely records, as a confirmed fact, whatever a domain's canonical value
+// ALREADY WAS at some earlier moment (payload-build time for doPush(), or
+// "whatever this pull's own cloud snapshot reported" for
+// reconcilePendingOperations()). A pull may previously have persisted a
+// NON-PURE reconciled local value (recorded only as hydration provenance,
+// per isExactCloudValue()'s own doc — never as confirmed authority, since it
+// is not byte-for-byte the literal cloud value) for some OTHER domain in the
+// SAME combined payload. A later, unrelated push (or accepted-operation
+// reconciliation) that confirms a DIFFERENT domain's edit still calls
+// commitConfirmedBaseline() for ALL THREE domains (the combined payload
+// always includes plans+lightning), advancing confirmed authority's
+// revision ceiling for the untouched domain too — even though canonical
+// local storage for THAT domain was never touched, is still the earlier
+// non-pure reconciled value, and is NOT reliably what the newly-recorded
+// confirmed fact's own value says (a stale doPush() snapshot, or a
+// genuinely conflicted same-revision write, can each record a confirmed
+// fact whose value does not match current canonical bytes). The blind
+// `<= revision` sweep deletes that domain's ONLY hydration-provenance
+// explanation regardless, leaving canonical local storage's still-present,
+// still-unexplained bytes to be misread as a fresh local edit by whichever
+// pull looks next — and pushed right back over newer cloud data.
+//
+// isHydrationProvenanceFactObsoleteAfterConfirm() is the pure fix: a
+// hydration-provenance fact is safe to prune ONLY when it is PROVEN no
+// longer necessary to explain canonical local content — never merely
+// because SOME confirmed fact was recorded at or above its revision. Given
+// one fact's own `{revision, value}`, the revision of the confirm that just
+// happened, and the domain's CURRENT canonical/durable value (read fresh,
+// right now, by the caller — see recordConfirmedFactBody's own doc for how):
+//   • a fact strictly NEWER than the confirmed revision is never touched —
+//     unchanged from the original bound; this call has no basis to reason
+//     about a revision it hasn't reached yet.
+//   • a fact at or below the confirmed revision is obsolete — safe to
+//     delete — ONLY when its OWN value no longer canonically matches
+//     CURRENT canonical content. If it STILL matches, canonical storage has
+//     not moved on from what this record explains — regardless of whether a
+//     newly-recorded confirmed fact's VALUE happens to agree or disagree,
+//     deleting the only surviving explanation for bytes that are still
+//     sitting on disk right now is never safe.
+// This generalizes rather than replaces the original "commitDomainHydration
+// just wrote this value" reasoning: when that assumption holds (the
+// hydration path), current canonical content trivially equals the
+// newly-confirmed value, so every OTHER, genuinely different, older record
+// is still correctly judged obsolete — behavior is unchanged for that path.
+// When it doesn't hold (the push/reconciliation path), reading current
+// canonical content fresh is what makes the decision correct instead of
+// merely convenient.
+export function isHydrationProvenanceFactObsoleteAfterConfirm(
+  factRevision: number,
+  factValue: unknown,
+  confirmedRevision: number,
+  currentCanonicalValue: unknown
+): boolean {
+  if (factRevision > confirmedRevision) return false;
+  return canonicalizeJSON(factValue) !== canonicalizeJSON(currentCanonicalValue);
+}
+
+/**
+ * Reference cases for isHydrationProvenanceFactObsoleteAfterConfirm(). Run
+ * from Node:
+ *   import { DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES, isHydrationProvenanceFactObsoleteAfterConfirm } from "@/lib/syncPayload";
+ *   DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES.forEach(c => {
+ *     const got = isHydrationProvenanceFactObsoleteAfterConfirm(c.factRevision, c.factValue, c.confirmedRevision, c.currentCanonicalValue);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES: Array<{
+  name: string;
+  factRevision: number;
+  factValue: unknown;
+  confirmedRevision: number;
+  currentCanonicalValue: unknown;
+  expected: boolean;
+}> = [
+  {
+    name: "required — the core fix: a non-pure hydration value STILL on canonical storage survives a confirm of an unrelated domain at a higher revision",
+    factRevision: 5,
+    factValue: { version: 1, items: ["non-pure-reconciled-A"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["non-pure-reconciled-A"] },
+    expected: false,
+  },
+  {
+    name: "required — a genuinely superseded older value (canonical has moved on) is obsolete",
+    factRevision: 5,
+    factValue: { version: 1, items: ["stale-A"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["newer-B"] },
+    expected: true,
+  },
+  {
+    name: "required — a fact strictly newer than the confirmed revision is never touched, even if its value differs from current canonical content",
+    factRevision: 10,
+    factValue: { version: 1, items: ["from-the-future"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["something-else"] },
+    expected: false,
+  },
+  {
+    name: "fact revision equals confirmed revision, value matches current canonical: survives (redundant with confirmed authority, but never destructively pruned merely for being redundant)",
+    factRevision: 9,
+    factValue: { version: 1, items: ["A"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "canonical equality — differently-ordered keys still count as matching current canonical content",
+    factRevision: 5,
+    factValue: { items: ["A"], version: 1 },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "days domain — plain array values compare correctly too",
+    factRevision: 5,
+    factValue: ["day-1", "day-2"],
+    confirmedRevision: 9,
+    currentCanonicalValue: ["day-1", "day-3"],
+    expected: true,
+  },
+];
+
 // ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
 
 /**
@@ -406,3 +2001,2189 @@ export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
     expectedUnknown: ["dayParks", "dayAutoFallbacks"],
   },
 ];
+
+/**
+ * Reference cases for parseSyncedPlannerPayload() — SH.2's cloud-confirmed
+ * snapshot contract (see syncHelper.ts's getConfirmedSnapshot) now depends
+ * on this function to validate the stored confirmedSnapshot value before
+ * any page trusts it as a baseline, so its accept/reject/sanitize behavior
+ * is pinned here explicitly. Run from Node:
+ *   import { DEV_PARSE_SYNCED_PAYLOAD_CASES, parseSyncedPlannerPayload } from "@/lib/syncPayload";
+ *   DEV_PARSE_SYNCED_PAYLOAD_CASES.forEach(c => {
+ *     const got = parseSyncedPlannerPayload(c.raw);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
+  name: string;
+  raw: unknown;
+  expected: SyncedPlannerPayload | null;
+}> = [
+  {
+    name: "valid full payload with days — parses as-is",
+    raw: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: ["l"] }, days: ["day-1", "day-2"] },
+    expected: { version: 1, plans: { version: 1, items: ["p"] }, lightning: { version: 1, items: ["l"] }, days: ["day-1", "day-2"] },
+  },
+  {
+    name: "valid payload without days — days omitted from result",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "wrong version — rejected",
+    raw: { version: 2, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "missing plans — rejected",
+    raw: { version: 1, lightning: { version: 1, items: [] } },
+    expected: null,
+  },
+  {
+    name: "lightning.items not an array — rejected",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: "nope" } },
+    expected: null,
+  },
+  {
+    name: "non-object raw — rejected",
+    raw: "not an object",
+    expected: null,
+  },
+  {
+    name: "array raw — rejected",
+    raw: [1, 2, 3],
+    expected: null,
+  },
+  {
+    name: "malformed days entries — sanitized, not rejected (plans/lightning still valid)",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["not-a-day", "day-2"] },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1", "day-2"] },
+  },
+];
+
+// ===== LOCAL-DOMAIN COMMIT DECISION (SH.2, 12th round) =====
+//
+// Codex found two P1s in local persistence after pull reconciliation: (1)
+// hydration's read-current → choose-winner → later setItem() sequence left
+// a window in which another tab's newer same-domain write could land in
+// between and get silently clobbered by the pull's now-stale winner; (2)
+// some persistence-retry checks compared the winning value against REACT
+// STATE (e.g. itemsRef.current) instead of the actual durable localStorage
+// value — if a prior direct write AND its persistence effect had both
+// failed, React state could already equal the winner while disk stayed
+// stale, so the check wrongly concluded "already persisted" and skipped
+// the write, letting sync/ownership gates reopen over unpersisted data.
+//
+// This function is the PURE decision core both bugs are fixed through: it
+// takes the durable value actually on disk right now (`currentRaw`), the
+// durable value that was on disk when the winner was decided
+// (`expectedPreviousRaw`), and the value a caller wants to commit
+// (`nextRaw`) — never React state, never a timestamp, never arrival order —
+// and returns which of three things must happen:
+//   "noop"       — `currentRaw` already equals `nextRaw`; nothing to write,
+//                  and this is a SUCCESS (the durable value already is the
+//                  winner, however it got there).
+//   "superseded" — `currentRaw` no longer equals `expectedPreviousRaw`: a
+//                  write this caller didn't know about landed since the
+//                  decision was made. That write is NEWER by construction
+//                  (it happened after the observation the caller's own
+//                  decision was based on) and must never be overwritten —
+//                  the caller MUST NOT write `nextRaw` in this case.
+//   "write"      — `currentRaw` still matches the caller's own baseline;
+//                  safe to persist `nextRaw`.
+// See commitLocalDomainRaw()/commitLocalDomainRawSync() in syncHelper.ts
+// for the actual localStorage I/O built on this decision — commitLocalDomainRaw()
+// (pull hydration's CAS policy) uses per-key Web Locks serialization when
+// available and fails closed otherwise; commitLocalDomainRawSync() (ordinary
+// user edits, 16th round) is a synchronous, lock-free `write`-or-`noop`
+// application of this SAME decision (its own baseline is always the current
+// value itself, so it can never observe "superseded").
+export type LocalDomainCommitDecision = "write" | "noop" | "superseded";
+
+export function decideLocalDomainCommit(
+  currentRaw: string | null,
+  expectedPreviousRaw: string | null,
+  nextRaw: string
+): LocalDomainCommitDecision {
+  if (currentRaw === nextRaw) return "noop";
+  if (currentRaw !== expectedPreviousRaw) return "superseded";
+  return "write";
+}
+
+/**
+ * Reference cases for decideLocalDomainCommit() — the REQUIRED cases from
+ * the 12th round's architectural contract, reduced to this function's pure
+ * inputs/outputs. Run from Node:
+ *   import { DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES.forEach(c => {
+ *     const got = decideLocalDomainCommit(c.currentRaw, c.expectedPreviousRaw, c.nextRaw);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DECIDE_LOCAL_DOMAIN_COMMIT_CASES: Array<{
+  name: string;
+  currentRaw: string | null;
+  expectedPreviousRaw: string | null;
+  nextRaw: string;
+  expected: LocalDomainCommitDecision;
+}> = [
+  {
+    name: "required — durable value unchanged since decision: safe to write",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "required — a newer write already landed (current diverged from the decision baseline): superseded, must not overwrite",
+    currentRaw: "C",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "superseded",
+  },
+  {
+    name: "required — durable value already equals the winner: successful no-op, regardless of what the stale baseline was",
+    currentRaw: "B",
+    expectedPreviousRaw: "A",
+    nextRaw: "B",
+    expected: "noop",
+  },
+  {
+    name: "force-commit policy (expectedPrevious == currentRaw always): never superseded, writes whenever different",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "A",
+    expected: "noop",
+  },
+  {
+    name: "key never previously existed (null baseline) and still doesn't: safe to write",
+    currentRaw: null,
+    expectedPreviousRaw: null,
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "key never previously existed per the decision baseline, but now does (a concurrent first-write raced in): superseded",
+    currentRaw: "C",
+    expectedPreviousRaw: null,
+    nextRaw: "B",
+    expected: "superseded",
+  },
+];
+
+// ===== PULL EXECUTION CONTEXT (SH.2, 13th round) =====
+//
+// Codex found two P1s that are both instances of one failure class: a
+// durable write or gate transition executing under an execution context
+// that is no longer the one the operation started under — (1) an
+// authenticated identity switch (A -> B) that NextAuth can report without
+// `sessionStatus` ever leaving "authenticated", so nothing told the page's
+// effect to re-run and retarget; (2) an awaited local-domain commit that
+// resumes after cancellation/identity change and keeps performing further
+// writes/ownership transfer/confirmation/syncReady updates regardless.
+//
+// The fix is one immutable per-pull context — { epoch, userId, profileId }
+// (see PullContext/beginPullContext()/isPullContextCurrent() in
+// syncHelper.ts) — captured exactly once at pull start and re-validated
+// after every awaited boundary before any further durable step. This
+// function is the PURE comparison both the outer per-await check and the
+// commit primitive's own last-instant-before-write check reduce to: is the
+// epoch a pull captured still the current one?
+export function isPullEpochCurrent(capturedEpoch: number, currentEpoch: number): boolean {
+  return capturedEpoch === currentEpoch;
+}
+
+/**
+ * Reference cases for isPullEpochCurrent() — the REQUIRED cases from the
+ * 13th round's architectural contract, reduced to this function's pure
+ * inputs/outputs (a real identity/profile switch is exactly "the epoch
+ * counter has advanced since this pull captured it"). Run from Node:
+ *   import { DEV_IS_PULL_EPOCH_CURRENT_CASES, isPullEpochCurrent } from "@/lib/syncPayload";
+ *   DEV_IS_PULL_EPOCH_CURRENT_CASES.forEach(c => {
+ *     const got = isPullEpochCurrent(c.capturedEpoch, c.currentEpoch);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_PULL_EPOCH_CURRENT_CASES: Array<{
+  name: string;
+  capturedEpoch: number;
+  currentEpoch: number;
+  expected: boolean;
+}> = [
+  {
+    name: "required — no transition happened since capture: still current",
+    capturedEpoch: 3,
+    currentEpoch: 3,
+    expected: true,
+  },
+  {
+    name: "required — one identity switch (A -> B) happened since capture: stale",
+    capturedEpoch: 3,
+    currentEpoch: 4,
+    expected: false,
+  },
+  {
+    name: "required — a profile switch AND an identity switch both happened since capture: stale",
+    capturedEpoch: 3,
+    currentEpoch: 5,
+    expected: false,
+  },
+  {
+    name: "the very first pull of a session: epoch 0 captured, nothing has changed",
+    capturedEpoch: 0,
+    currentEpoch: 0,
+    expected: true,
+  },
+];
+
+// ===== CONFIRMED-FACT CANONICALIZATION (SH.2, 14th round; storage model
+// replaced 15th round; status model replaced 16th round) =====
+//
+// The 14th round gave every fact's value ONE deterministic canonical
+// serialization (canonicalizeJSON() below) so two code paths constructing
+// logically-identical content never manufacture a false conflict merely
+// from incidental object-key-order differences — that part still holds and
+// is unchanged. What the 14th round got WRONG was HOW it used
+// canonicalization: recordConfirmedFact() read whatever existed at the
+// (user, profile, domain, revision) key, canonically compared it against
+// the new value, and only THEN decided whether to write
+// (decideConfirmedFactWrite() — REMOVED this round). That read-then-decide-
+// then-write sequence is exactly the un-atomic check-then-act pattern round
+// 13 already established localStorage cannot safely provide without a
+// lock: two tabs can both read the key as absent, both independently decide
+// "write", and the later setItem() silently replaces the earlier fact —
+// Codex's 15th-round finding. See resolveConfirmedDomainState() (16th round;
+// the 15th round's own reduceConfirmedFactRecords() has since been replaced —
+// see that function's own doc) and confirmedFactRevisionIsUnambiguous()
+// below, and confirmedFactKey()'s own
+// doc in syncHelper.ts, for the replacement: every recorded fact now gets
+// its own permanently-unique physical key (an append-only representation),
+// so the write side is a single unconditional setItem with no read-before-
+// write at all — genuinely un-raceable — and canonical-value reconciliation
+// happens entirely at READ time instead, over however many facts a
+// revision ends up with.
+
+/**
+ * Deterministic, canonical JSON serialization: object keys are recursively
+ * sorted so any two JS values with the same LOGICAL content — regardless of
+ * which code path constructed them, or in what order their keys happened to
+ * be assigned — always serialize identically. Array element ORDER is
+ * preserved exactly: order is semantically significant for every value this
+ * module canonicalizes (a days[] sequence, an items[] display order), so it
+ * is never reordered, only recursed into.
+ */
+export function canonicalizeJSON(value: unknown): string {
+  return JSON.stringify(canonicalizeValue(value));
+}
+
+function canonicalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeValue);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      sorted[key] = canonicalizeValue((value as Record<string, unknown>)[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+/**
+ * Reference cases for canonicalizeJSON(). Run from Node:
+ *   import { DEV_CANONICALIZE_JSON_CASES, canonicalizeJSON } from "@/lib/syncPayload";
+ *   DEV_CANONICALIZE_JSON_CASES.forEach(c => {
+ *     const got = canonicalizeJSON(c.value);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CANONICALIZE_JSON_CASES: Array<{
+  name: string;
+  value: unknown;
+  expected: string;
+}> = [
+  {
+    name: "flat object — keys sorted regardless of construction order",
+    value: { b: 2, a: 1 },
+    expected: '{"a":1,"b":2}',
+  },
+  {
+    name: "two objects with same content, different key order, canonicalize identically",
+    value: { version: 1, items: [] },
+    expected: '{"items":[],"version":1}',
+  },
+  {
+    name: "nested objects inside an array — array order preserved, each element's keys sorted",
+    value: { version: 1, items: [{ name: "b", id: "1" }, { id: "2", name: "a" }] },
+    expected: '{"items":[{"id":"1","name":"b"},{"id":"2","name":"a"}],"version":1}',
+  },
+  {
+    name: "days[] array order is NEVER reordered — it is semantically the display sequence",
+    value: ["day-2", "day-1", "day-3"],
+    expected: '["day-2","day-1","day-3"]',
+  },
+  {
+    name: "primitives pass through unchanged",
+    value: null,
+    expected: "null",
+  },
+];
+
+// ===== PULL BASELINE AUTHORITY (SH.2.1) =====
+
+/**
+ * SH.2.1 — a full SH.2 architecture audit traced the latest P1 (SH.2, 18th
+ * round's own conflict-recovery mechanism) to an abstraction failure, not a
+ * one-off conditional bug: plans/page.tsx's and lightning/page.tsx's
+ * (identical) `captureConfirmedSnapshotForPull()` tried to serve TWO
+ * structurally different causal moments — before a pull's own fetch has
+ * even been issued (no authoritative server revision exists yet) and after
+ * it resolves (this pull's own `revision` is now known) — through ONE
+ * function whose behavior depended on an OPTIONAL `preFetchSnapshot`
+ * parameter and a `cloudRevision` argument that defaulted to `null`.
+ *
+ * Because isConflictRepairableByRevision() can only ever return true for a
+ * non-null, strictly-newer candidate revision, and the pre-fetch call site
+ * always passed `cloudRevision: null` (there being no response yet), the
+ * branch meant to freshly capture this domain's on-disk bytes for later
+ * recovery (`items = preFetchSnapshot ? preFetchSnapshot.items :
+ * loadFromStorage(...)`) was gated behind a "this conflict is already
+ * repairable" condition that could NEVER be true on the one call that was
+ * actually supposed to execute it. The fresh capture never ran; a later
+ * repair silently reused whatever the stale itemsBaselineRef/daysBaselineRef/
+ * lightningRawBaselineRef fallback ref happened to hold instead of a
+ * genuine frozen pre-fetch snapshot — undermining the exact guarantee the
+ * 18th round believed it had added ("pre-existing uncertain local bytes
+ * must not overwrite newer cloud state; genuine local edits after the
+ * frozen snapshot remain protected"). The previous DEV_* harness never
+ * caught this because it exercised the INTENDED behavior directly, never
+ * the two real call sites in their real sequence.
+ *
+ * The fix splits the old dual-purpose function into two causal stages so
+ * neither stage's behavior can ever again be inferred from an optional
+ * parameter or a condition that happens to be unreachable:
+ *
+ *   • capturePreFetchDomainSnapshot() — STAGE 1. A trivial, pure passthrough
+ *     that freezes this domain's real on-disk value BEFORE any network/async
+ *     work begins — see its own doc for why it makes NO baseline decision at
+ *     all (a deliberate simplification over this abstraction's first
+ *     revision — see the SH.2.1 P2 doc immediately below for why).
+ *
+ *   • resolvePostFetchDomainBaseline() — STAGE 2. The ONE place a baseline/
+ *     conflict/recovery/staleness decision is ever made, once this pull's
+ *     authoritative server response is known. Takes the frozen stage-1
+ *     snapshot as a REQUIRED parameter (never optional) for its "recovered"
+ *     case, and a freshly-read ConfirmedDomainResult — see its own doc for
+ *     the full authority rule.
+ *
+ * Both funnel through the SAME `DomainBaselineOutcome<T>` discriminated
+ * union, so an unusable domain's absent `value` field is enforced by the
+ * type system: a caller cannot accidentally read `.value` off a "gated" or
+ * "stale-response" outcome and consume it as a real baseline — TypeScript
+ * refuses to narrow it without an explicit `kind` check first. See this
+ * section's own DEV_* cases below, and plans/page.tsx's/lightning/
+ * page.tsx's pull effect, for the per-domain narrowing every consumer must
+ * perform before any outcome's `.value` is used.
+ *
+ * SH.2.1 P2 (Codex) — REVISION-BOUNDED AUTHORITY. A second-round audit found
+ * that resolvePostFetchDomainBaseline()'s original "confirmed" branch
+ * returned a confirmed fact's value UNCONDITIONALLY, never checking it
+ * against `cloudRevision` at all. Concretely: this pull's own fetch resolves
+ * at server revision 7; while that fetch was in flight (or even before this
+ * pull started at all), a DIFFERENT push/pull already durably confirmed
+ * revision 8 (and, being local-first, already wrote revision 8's bytes to
+ * local disk). The old "confirmed" branch would use revision 8's value as
+ * this pull's baseline; a fresh disk read (taken later, downstream in the
+ * page) would find disk STILL equal to that revision-8 value (nothing
+ * genuinely new happened locally) — "unchanged" — so THIS pull's own stale
+ * revision-7 cloud payload would be selected as the winner and PERSISTED,
+ * silently regressing local (and eventually server) state from 8 back to 7.
+ * This is the exact class of bug the SH.2 2nd round's "freeze baseline
+ * before the fetch" fix was meant to close, resurfacing because the
+ * post-fetch resolver never bounded a CONFIRMED fact's revision against the
+ * pull's OWN response revision — only the CONFLICT branch (via
+ * isConflictRepairableByRevision) had ever been revision-bounded.
+ *
+ * STANDING RULE — a pull must never use authority from the future to
+ * justify hydrating an older server response. A pull's authority window is
+ * bounded by the server revision its OWN response carries:
+ *   • confirmed revision < cloud revision → normal progression: the
+ *     confirmed fact predates this response and remains valid (this
+ *     response may still advance it further, via ordinary winner
+ *     selection).
+ *   • confirmed revision == cloud revision → valid same-revision authority:
+ *     this response IS (or matches) that confirmation.
+ *   • confirmed revision > cloud revision, OR `cloudRevision` is `null`
+ *     (this response carries no revision at all — a 204/unparseable GET,
+ *     which establishes no bound whatsoever) → this pull is STALE relative
+ *     to already-confirmed server state. It must NOT use that newer (or
+ *     unbounded) fact as a baseline and then hydrate its own older
+ *     response over it.
+ *
+ * The fail-safe chosen for the stale case is a NEW, explicit
+ * `"stale-response"` outcome — never silently downgraded to "fallback" (a
+ * stale-response domain has a well-known, just-unusable-by-THIS-pull
+ * confirmed value; "fallback" means no confirmed fact exists AT ALL, a
+ * different situation) and never folded into "gated" (a stale-response
+ * domain is not ambiguous/conflicted — its confirmed truth is perfectly
+ * well-defined, just newer than what this pull can safely act on). Both
+ * "gated" and "stale-response" are, identically, unusable-this-pull
+ * outcomes from the caller's point of view: plans/page.tsx's and
+ * lightning/page.tsx's collectGatedDomains() treats them the same way
+ * (whole-pull bail-out — see its own doc for why "whole pull" rather than
+ * per-domain), while still detecting and reporting each PER DOMAIN,
+ * independently, using only that domain's own confirmed revision — one
+ * domain being stale relative to this pull's response never misclassifies
+ * an unrelated, genuinely-current domain as stale too (see this section's
+ * own DEV_* per-domain-independence case, and required case 5).
+ *
+ * SH.2.1 (Codex, stale-response retry round) — UNUSABLE-RESPONSE SPLIT.
+ * A later round added automatic recovery for "stale-response": rejecting a
+ * pull that is genuinely older than confirmed authority is correct, but
+ * leaving syncReady closed forever with nothing scheduled to reopen it was
+ * not — see decideStaleResponseRecovery()'s own doc further down. That
+ * retry mechanism's contract requires a RETRYABLE stale response to
+ * represent a REAL, usable server snapshot whose KNOWN revision is simply
+ * older than already-confirmed authority: retrying is safe there because a
+ * fresh GET will see the newer state. The original "stale-response" kind
+ * above bundled TWO structurally different situations under one label —
+ * `cloudRevision === null` (this pull's OWN response carries no usable
+ * revision at all: a 204, an unparseable/malformed payload, or any other
+ * shape pullPlanner() could not turn into a real revision) treated
+ * identically to `confirmed.fact.revision > cloudRevision` (a REAL, known,
+ * strictly-older revision). Retrying the FIRST case cannot help — the next
+ * GET is exactly as likely to be empty/malformed again, since nothing about
+ * why this response was unusable is revision-related at all — so folding it
+ * into "stale-response" let the retry mechanism repeat that same unusable
+ * GET indefinitely while sync stayed gated the whole time.
+ *
+ * `"unusable-response"` is the new, separate outcome for exactly the
+ * `cloudRevision === null` case (with a confirmed fact present — the ONLY
+ * situation this branch is reached at all; see the "none"/`"fallback"`
+ * branch below for when no confirmed fact exists yet, which never needed
+ * bounding in the first place). `"stale-response"` now ONLY ever carries a
+ * non-null `cloudRevision` — a real, known, older revision — enforced by
+ * the type itself (`cloudRevision: number`, no longer `number | null`) so
+ * a caller can never "invent" a revision for a response that didn't carry
+ * one. Both kinds remain identically unusable-this-pull for hydration
+ * purposes (same whole-pull bail-out, same "never read .value" contract);
+ * they diverge ONLY in whether the automatic retry mechanism may act on
+ * them — see decideStaleResponseRecovery()'s own updated doc.
+ *
+ * Because this bound now lives entirely inside resolvePostFetchDomainBaseline
+ * and is checked on EVERY call, it is now safe — indeed necessary, to catch
+ * a race landing between pre-fetch and post-fetch (required case 4) — for
+ * callers to invoke stage 2 UNCONDITIONALLY on every pull, with a freshly
+ * read ConfirmedDomainResult, rather than only when some other signal
+ * (a just-accepted beacon, or a pre-fetch-time conflict) suggested it might
+ * be needed. That conditional "should we even re-check" heuristic (the
+ * SH.2.1 P1 fix's own `shouldRederiveBaseline`) is exactly what let this P2
+ * go undetected in one of its two forms (required case 4): it could skip
+ * stage 2 entirely, in which case NO revision bound was ever checked at
+ * all for that pull. Stage 1 no longer produces a baseline "decision" for
+ * this same reason — its only remaining job, and the only thing that must
+ * happen strictly BEFORE the fetch, is freezing the disk read a "recovered"
+ * outcome might need later.
+ */
+export type DomainBaselineOutcome<T> =
+  | { kind: "confirmed"; value: T }
+  | { kind: "recovered"; value: T; revision: number }
+  | { kind: "gated"; revision: number }
+  | { kind: "stale-response"; confirmedRevision: number; cloudRevision: number }
+  | { kind: "unusable-response"; confirmedRevision: number }
+  | { kind: "fallback"; value: T };
+
+/**
+ * STAGE 1 output for one domain — this pull's frozen pre-fetch snapshot.
+ * `diskValue` is the real on-disk value at the moment this was captured
+ * (always a genuine read the caller took just before calling this
+ * function, never a ref, never a placeholder). Consumed ONLY by
+ * resolvePostFetchDomainBaseline()'s "recovered" case — stage 1 makes no
+ * baseline decision of its own (see this section's own module doc).
+ */
+export interface DomainPreFetchSnapshot<T> {
+  diskValue: T;
+}
+
+/**
+ * STAGE 1 (pre-fetch) — see this section's own module doc above. Called
+ * once per domain, synchronously, before a pull's fetch is even issued.
+ * `diskValue` must be a fresh read taken by the caller right before this
+ * call — this function never reads storage itself, keeping it pure and
+ * trivially testable. A plain passthrough by design: whether this snapshot
+ * ends up being NEEDED (a later repair) cannot be known until stage 2 runs,
+ * so it is captured unconditionally rather than gated on any status this
+ * function would otherwise have to read confirmed state to determine.
+ */
+export function capturePreFetchDomainSnapshot<T>(diskValue: T): DomainPreFetchSnapshot<T> {
+  return { diskValue };
+}
+
+/**
+ * STAGE 2 (post-fetch) — see this section's own module doc above for the
+ * full authority rule. The ONE place a baseline/conflict/recovery/staleness
+ * decision is made for this domain. Called once this pull's authoritative
+ * server response is known: `cloudRevision` is that response's own
+ * `revision`, or `null` for a 204/unparseable response (which, per the
+ * revision-bounded authority rule, establishes no bound at all). `preFetch`
+ * MUST be this SAME pull's own stage-1 result for this SAME domain — never
+ * re-derived, never borrowed from a different pull or a different domain.
+ * `confirmed` MUST be read fresh (or at least no older than) at this call —
+ * see plans/page.tsx's/lightning/page.tsx's own doc for why callers now
+ * invoke this unconditionally, every pull, rather than only when some other
+ * signal suggested it might be needed.
+ */
+export function resolvePostFetchDomainBaseline<Raw, T>(
+  confirmed: ConfirmedDomainResult<Raw>,
+  cloudRevision: number | null,
+  mapConfirmedValue: (raw: Raw) => T,
+  preFetch: DomainPreFetchSnapshot<T>,
+  fallbackValue: T
+): DomainBaselineOutcome<T> {
+  if (confirmed.status === "confirmed") {
+    // REVISION-BOUNDED AUTHORITY (SH.2.1 P2) — a confirmed fact is usable
+    // as THIS pull's baseline only within this pull's own authority window:
+    // its revision must be no newer than `cloudRevision`, and `cloudRevision`
+    // must actually exist (a null response establishes no bound at all, so
+    // nothing can be proven "within" it). Equal revisions are explicitly
+    // fine (required case 2: this response IS/matches that confirmation).
+    //
+    // UNUSABLE-RESPONSE SPLIT (this round) — `cloudRevision === null` is
+    // checked FIRST and separately: this pull's own response carries no
+    // usable revision at all (204, unparseable/malformed payload), so
+    // there is nothing to compare `confirmed.fact.revision` against —
+    // "stale" would claim knowledge (a real, older revision) this pull
+    // does not have. See UNUSABLE-RESPONSE SPLIT in this section's own
+    // module doc above for the full rationale (this is what stops the
+    // automatic stale-response retry mechanism from repeating the SAME
+    // unusable GET indefinitely).
+    if (cloudRevision === null) {
+      return { kind: "unusable-response", confirmedRevision: confirmed.fact.revision };
+    }
+    if (confirmed.fact.revision > cloudRevision) {
+      return { kind: "stale-response", confirmedRevision: confirmed.fact.revision, cloudRevision };
+    }
+    return { kind: "confirmed", value: mapConfirmedValue(confirmed.fact.value) };
+  }
+  if (confirmed.status === "conflict") {
+    if (isConflictRepairableByRevision(confirmed.revision, cloudRevision)) {
+      // Guaranteed non-null: isConflictRepairableByRevision only ever
+      // returns true for a non-null, strictly-newer candidate revision.
+      return { kind: "recovered", value: preFetch.diskValue, revision: cloudRevision as number };
+    }
+    return { kind: "gated", revision: confirmed.revision };
+  }
+  return { kind: "fallback", value: fallbackValue };
+}
+
+/**
+ * Reference cases for capturePreFetchDomainSnapshot() — run from Node:
+ *   import { DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES, capturePreFetchDomainSnapshot } from "@/lib/syncPayload";
+ *   DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES.forEach(c => {
+ *     const got = capturePreFetchDomainSnapshot(c.diskValue);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES: Array<{
+  name: string;
+  diskValue: string | null;
+  expected: DomainPreFetchSnapshot<string | null>;
+}> = [
+  {
+    name: "captures whatever disk value the caller took, unconditionally",
+    diskValue: "DISK-BYTES",
+    expected: { diskValue: "DISK-BYTES" },
+  },
+  {
+    name: "a null disk read (e.g. Lightning's raw key absent at mount) passes through unchanged",
+    diskValue: null,
+    expected: { diskValue: null },
+  },
+];
+
+/**
+ * Reference cases for resolvePostFetchDomainBaseline() — the REQUIRED cases
+ * from the SH.2.1 P1 fix (conflict/recovery) and the P2 fix (revision-bounded
+ * confirmed authority). Run from Node:
+ *   import { DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES.forEach(c => {
+ *     const got = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, (raw) => raw, c.preFetch, c.fallbackValue);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES: Array<{
+  name: string;
+  confirmed: ConfirmedDomainResult<string>;
+  cloudRevision: number | null;
+  preFetch: DomainPreFetchSnapshot<string>;
+  fallbackValue: string;
+  expected: DomainBaselineOutcome<string>;
+}> = [
+  {
+    name: "required case 1 — confirmed rev6 + GET rev7: normal progression, confirmed value used",
+    confirmed: { status: "confirmed", fact: { revision: 6, value: "CLOUD-V6" } },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "confirmed", value: "CLOUD-V6" },
+  },
+  {
+    name: "required case 2 — confirmed rev7 + GET rev7: valid same-revision authority, confirmed value used",
+    confirmed: { status: "confirmed", fact: { revision: 7, value: "CLOUD-V7" } },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "confirmed", value: "CLOUD-V7" },
+  },
+  {
+    name: "required case 3 — confirmed rev8 + GET rev7: rev7 cannot hydrate over rev8, fails safe as stale-response",
+    confirmed: { status: "confirmed", fact: { revision: 8, value: "CLOUD-V8" } },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "stale-response", confirmedRevision: 8, cloudRevision: 7 },
+  },
+  {
+    name: "revision 0 boundary — confirmed rev0 + GET rev0 is valid same-revision authority, not misread as \"no revision\"",
+    confirmed: { status: "confirmed", fact: { revision: 0, value: "CLOUD-V0" } },
+    cloudRevision: 0,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "confirmed", value: "CLOUD-V0" },
+  },
+  {
+    name: "unusable-response round, required cases 3 & 4 — a null cloudRevision establishes no authority bound at all: fails safe as unusable-response, NOT stale-response (this pull's own response carries no known revision to claim as 'older'; a confirmed fact being present is exactly what makes this branch reachable at all)",
+    confirmed: { status: "confirmed", fact: { revision: 1, value: "CLOUD-V1" } },
+    cloudRevision: null,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "unusable-response", confirmedRevision: 1 },
+  },
+  {
+    name: "no confirmed baseline — falls back to the caller's own fallback value, no revision bound applies (nothing confirmed to bound)",
+    confirmed: { status: "none" },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "fallback", value: "FALLBACK-REF" },
+  },
+  {
+    name: "unusable-response round — a structurally unusable ({} / 204) response with NO confirmed baseline at all is unaffected by the unusable-response split: nothing was ever confirmed to bound, so this stays plain fallback, exactly as before",
+    confirmed: { status: "none" },
+    cloudRevision: null,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "fallback", value: "FALLBACK-REF" },
+  },
+  {
+    name: "required case 6 — conflict rev6 + GET rev7: existing recovery unaffected by the revision-bound fix",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 7,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "recovered", value: "FROZEN-PRE-FETCH-BYTES", revision: 7 },
+  },
+  {
+    name: "conflict + equal revision — never recovers from an equal response, stays gated",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 6,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "gated", revision: 6 },
+  },
+  {
+    name: "conflict + older revision — never falls back to an older confirmed revision, stays gated",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 5,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "gated", revision: 6 },
+  },
+  {
+    name: "conflict + no usable candidate revision (204/unparseable) — stays gated, not stale-response (conflict has its own, already-bounded, rule)",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: null,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "gated", revision: 6 },
+  },
+];
+
+/**
+ * Required case 5 — per-domain independence: one domain's confirmed
+ * revision being newer than this pull's own cloudRevision must NOT cause an
+ * UNRELATED domain (a genuinely different confirmed revision, independently
+ * bounded) to be misclassified. Modeled here as two independent calls
+ * sharing the SAME cloudRevision, exactly as plans/page.tsx's and
+ * lightning/page.tsx's pull effect calls resolvePostFetchDomainBaseline
+ * once per domain. Run from Node:
+ *   import { DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   const c = DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE;
+ *   const stale = resolvePostFetchDomainBaseline(c.staleDomainConfirmed, c.cloudRevision, (r) => r, c.preFetch, c.fallbackValue);
+ *   const healthy = resolvePostFetchDomainBaseline(c.healthyDomainConfirmed, c.cloudRevision, (r) => r, c.preFetch, c.fallbackValue);
+ *   console.log(stale.kind === "stale-response" && healthy.kind === "confirmed" ? "✓" : "✗ FAIL", c.name);
+ */
+export const DEV_PER_DOMAIN_REVISION_BOUND_INDEPENDENCE_CASE: {
+  name: string;
+  cloudRevision: number;
+  staleDomainConfirmed: ConfirmedDomainResult<string>;
+  healthyDomainConfirmed: ConfirmedDomainResult<string>;
+  preFetch: DomainPreFetchSnapshot<string>;
+  fallbackValue: string;
+} = {
+  name: "rev8 on one domain (Plans) while another domain (Days) is only rev6, GET rev7 — Plans fails safe, Days proceeds normally",
+  cloudRevision: 7,
+  staleDomainConfirmed: { status: "confirmed", fact: { revision: 8, value: "PLANS-V8" } },
+  healthyDomainConfirmed: { status: "confirmed", fact: { revision: 6, value: "DAYS-V6" } },
+  preFetch: { diskValue: "DISK-BYTES" },
+  fallbackValue: "FALLBACK-REF",
+};
+
+/**
+ * SH.2.2 — PARTIAL-APPLY PROVENANCE (Codex P1 follow-up round). Root cause:
+ * a multi-domain pull used to batch its commitConfirmedBaseline() call until
+ * every domain had attempted its own commit. If domain A's hydration commit
+ * succeeded but a LATER domain's authority check then aborted the rest of
+ * that pull, A's already-durable write never got a matching confirmed fact.
+ * On the REPLACEMENT pull, resolvePostFetchDomainBaseline() (above) then
+ * resolves A's baseline from whatever OLDER confirmed fact already existed
+ * (if any) — NOT from A's own just-applied hydration — because a genuine
+ * "confirmed" status always takes precedence over the caller's in-memory
+ * fallback ref (see this function's own doc: fallback is used ONLY when
+ * `confirmed.status === "none"`). That older baseline value can diverge
+ * from what's genuinely on disk (A's abandoned-pull hydration bytes),
+ * misreading durably-applied cloud content as an unsynced local edit —
+ * eligible to be pushed back over cloud state newer than A itself ever saw.
+ *
+ * The fix (plans/page.tsx, lightning/page.tsx) calls commitConfirmedBaseline()
+ * PER DOMAIN, immediately once that domain's own eligibility is known,
+ * instead of batching until the whole pull finishes — see each page's own
+ * "PARTIAL-APPLY PROVENANCE" doc near its `supersededDomains` declaration.
+ * These cases prove the effect on resolvePostFetchDomainBaseline() itself —
+ * the REAL production primitive every replacement pull's baseline goes
+ * through — using the SAME `abandonedPullDiskValue` disk read both "before"
+ * and "after" cases compare against: without the fix, the resolved baseline
+ * diverges from disk (the bug); with the fix (the confirmed fact now
+ * recorded at the abandoned pull's own revision/value), it matches (the
+ * pull is symmetric across Plans/Lightning/Days — this primitive is
+ * domain-agnostic, so one generic case proves all three). Run from Node:
+ *   import { DEV_PARTIAL_PULL_PROVENANCE_CASES, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
+ *   DEV_PARTIAL_PULL_PROVENANCE_CASES.forEach(c => {
+ *     const got = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, (raw) => raw, c.preFetch, c.fallbackValue);
+ *     const matchesDisk = got.kind === "confirmed" && got.value === c.abandonedPullDiskValue;
+ *     const ok = JSON.stringify(got) === JSON.stringify(c.expected) && matchesDisk === c.expectMatchesDisk;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PARTIAL_PULL_PROVENANCE_CASES: Array<{
+  name: string;
+  abandonedPullDiskValue: string;
+  confirmed: ConfirmedDomainResult<string>;
+  cloudRevision: number;
+  preFetch: DomainPreFetchSnapshot<string>;
+  fallbackValue: string;
+  expected: DomainBaselineOutcome<string>;
+  expectMatchesDisk: boolean;
+}> = [
+  {
+    name: "WITHOUT the fix (bug) — batched commit never ran for the aborted domain, so confirmed authority is still the OLDER pre-pull fact (rev5); the replacement pull's own baseline (rev5's value) diverges from what the abandoned pull already durably wrote to disk (rev7's value) — exactly the misclassification the fix closes",
+    abandonedPullDiskValue: "CLOUD-V7",
+    confirmed: { status: "confirmed", fact: { revision: 5, value: "CLOUD-V5" } },
+    cloudRevision: 9,
+    preFetch: { diskValue: "PRE-FETCH-UNUSED" },
+    fallbackValue: "FALLBACK-REF-UNUSED",
+    expected: { kind: "confirmed", value: "CLOUD-V5" },
+    expectMatchesDisk: false,
+  },
+  {
+    name: "WITH the fix — commitConfirmedBaseline() ran immediately after the abandoned pull's own domain commit, recording confirmed authority at rev7 (exactly the value it wrote); the replacement pull's own baseline now matches disk, so no misclassification",
+    abandonedPullDiskValue: "CLOUD-V7",
+    confirmed: { status: "confirmed", fact: { revision: 7, value: "CLOUD-V7" } },
+    cloudRevision: 9,
+    preFetch: { diskValue: "PRE-FETCH-UNUSED" },
+    fallbackValue: "FALLBACK-REF-UNUSED",
+    expected: { kind: "confirmed", value: "CLOUD-V7" },
+    expectMatchesDisk: true,
+  },
+  {
+    name: "required case 5 — authority unchanged (no OTHER pull ever advanced it) is the SAME shape as the fixed case: this pull's own recorded fact IS the current confirmed authority, so the very next pull (or this same one, re-entered) resolves it normally",
+    abandonedPullDiskValue: "CLOUD-V3",
+    confirmed: { status: "confirmed", fact: { revision: 3, value: "CLOUD-V3" } },
+    cloudRevision: 3,
+    preFetch: { diskValue: "PRE-FETCH-UNUSED" },
+    fallbackValue: "FALLBACK-REF-UNUSED",
+    expected: { kind: "confirmed", value: "CLOUD-V3" },
+    expectMatchesDisk: true,
+  },
+];
+
+// ===== DURABLE LOCAL AUTHORITY (SH.2.1 P3) =====
+
+/**
+ * SH.2.1 P3 (Codex) — a third audit found that pull winner selection
+ * (plans/page.tsx's and lightning/page.tsx's pull effect) still read the
+ * canonical plans/lightning/days keys DIRECTLY (`localStorage.getItem`/
+ * `loadFromStorage`/`loadDays`) for every sync/conflict decision: the
+ * pre-fetch frozen snapshot (stage 1), the post-fetch "current" candidate
+ * compared against baseline (stage 2 / winner selection), and therefore
+ * `changedLocally` itself. This is a DIFFERENT interpretation of "current
+ * local state" than the one syncHelper.ts's own readLatestDurableValue()
+ * already uses for the unload/push payload path (buildPayloadFromStorage):
+ * that function — see its own doc in syncHelper.ts — prefers a surviving
+ * local-edit-fact over the canonical key, specifically because the
+ * documented cross-tab hydration race (a genuinely concurrent OTHER tab's
+ * plain, unlocked write landing inside pull hydration's own synchronous
+ * lock callback) can leave the canonical key transiently — or, if a PRIOR
+ * pull's hydration incorrectly trusted it, durably — stale relative to an
+ * edit the local-edit-fact log still records faithfully (the log is never
+ * touched by hydration except on a write that actually, provably,
+ * incorporates the exact fact being retired — see
+ * commitLocalDomainRaw()'s own doc).
+ *
+ * Root cause: TWO different "what is local state right now" answers
+ * coexisted in the same sync state machine. The unload/push path asked
+ * readLatestDurableValue() and got the edit-aware answer; pull winner
+ * selection asked the canonical key directly and could get the stale one.
+ * A pull that reads the stale answer can conclude "local unchanged"
+ * (canonical == baseline) even though the true durable local value (the
+ * surviving edit fact) genuinely differs from both baseline AND cloud —
+ * letting cloud win, and — because the write that follows durably matches
+ * what winner selection decided — legitimately (by commitLocalDomainRaw's
+ * OWN rules) retiring the very edit fact that should have won instead.
+ * This is not a bug in commitLocalDomainRaw's CAS or edit-fact retirement
+ * (untouched by this fix, still correct on its own terms — see below); the
+ * bug is entirely in what value winner selection FED it as the decision.
+ *
+ * STANDING RULE (this round) — every sync/conflict decision must use the
+ * SAME definition of local authority: canonical value + unresolved
+ * local-edit facts → effective durable local value, via ONE shared
+ * resolver, consistently, everywhere the pull lifecycle reasons about
+ * "current local state": pre-fetch frozen snapshots, post-fetch current
+ * candidates, changed-locally comparisons, conflict recovery, and winner
+ * selection (unload/push construction already complied — see above).
+ *
+ * resolveEffectiveDurableRaw() below is the PURE core of
+ * readLatestDurableValue() — extracted (not reimplemented: read-
+ * LatestDurableValue() is now a thin I/O wrapper around this exact
+ * function, so every production caller of either gets the identical
+ * decision) so it can carry real DEV_* coverage the way every other pure
+ * decision in this module does. `factRawValues` is the raw string content
+ * of every currently-recorded local-edit-fact key for this domain's
+ * canonical key (0, 1, or — rarely, a genuine same-instant multi-tab
+ * tie — more); exactly one surviving fact outranks the canonical value
+ * (it is durable unresolved intent, by construction more authoritative
+ * than whatever the canonical key happens to contain right now); zero or
+ * more than one falls back to the canonical value itself (nothing
+ * recorded yet, or an ambiguous tie with no ordering information — "last
+ * write wins among peers", same tie-break every other concurrent write to
+ * one value gets).
+ *
+ * WHY commitLocalDomainRaw()'s OWN CAS is intentionally left untouched —
+ * its `expectedPreviousRaw`/internal re-read must both stay the LITERAL
+ * canonical key's bytes, not this effective value: that CAS exists purely
+ * to detect "did the CANONICAL KEY change since I decided what to write
+ * it" (a write-safety concern), which is orthogonal to "what should this
+ * pull have treated as authoritative for ITS OWN decision" (this fix's
+ * concern). A caller now takes TWO separate reads at decision time — the
+ * effective durable value (via this resolver, for the decision itself)
+ * and the literal canonical raw bytes (for commitLocalDomainRaw's CAS
+ * argument) — never conflating them. The write that follows, when local's
+ * effective-durable value wins, naturally carries that exact value as
+ * `nextRaw`; commitLocalDomainRaw's own untouched `baselineEditFactIds`
+ * re-scan (see its own doc) already guarantees the write is abandoned
+ * ("superseded") if a genuinely NEWER edit fact appears between decision
+ * and write — required case 4 needs no change here, it was already
+ * correct, independent of which raw value winner selection compared.
+ */
+export function resolveEffectiveDurableRaw(canonicalRaw: string | null, factRawValues: string[]): string | null {
+  return factRawValues.length === 1 ? factRawValues[0] : canonicalRaw;
+}
+
+/**
+ * Reference cases for resolveEffectiveDurableRaw() — the REQUIRED cases
+ * from the SH.2.1 P3 architectural contract. Run from Node:
+ *   import { DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES.forEach(c => {
+ *     const got = resolveEffectiveDurableRaw(c.canonicalRaw, c.factRawValues);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  factRawValues: string[];
+  expected: string | null;
+}> = [
+  {
+    name: "required case 5 — normal case, no edit facts: durable read equals canonical value",
+    canonicalRaw: "CANONICAL-B",
+    factRawValues: [],
+    expected: "CANONICAL-B",
+  },
+  {
+    name: "required cases 1/6 — exactly one surviving edit fact outranks a stale canonical value",
+    canonicalRaw: "STALE-CANONICAL-B",
+    factRawValues: ["EDIT-FACT-C"],
+    expected: "EDIT-FACT-C",
+  },
+  {
+    name: "no canonical value yet, one edit fact — fact still wins (a fresh domain's very first edit)",
+    canonicalRaw: null,
+    factRawValues: ["EDIT-FACT-C"],
+    expected: "EDIT-FACT-C",
+  },
+  {
+    name: "zero edit facts, canonical absent too — null, same as a plain canonical-only read would give",
+    canonicalRaw: null,
+    factRawValues: [],
+    expected: null,
+  },
+  {
+    name: "ambiguous tie — two facts recorded with no ordering information: falls back to canonical rather than guessing which wins (commitLocalDomainRaw's own edit-fact re-scan is the mechanism that actually protects a genuinely newer one — see this function's own doc)",
+    canonicalRaw: "CANONICAL-B",
+    factRawValues: ["EDIT-FACT-C", "EDIT-FACT-E"],
+    expected: "CANONICAL-B",
+  },
+  {
+    name: "one fact whose content happens to already equal canonical — still resolves via the fact (harmless: same value either way, but proves the rule is purely structural (fact count), never a value comparison)",
+    canonicalRaw: "SAME-VALUE",
+    factRawValues: ["SAME-VALUE"],
+    expected: "SAME-VALUE",
+  },
+];
+
+// ===== ORDINARY-EDIT NOOP DECISION (SH.2.1 P1, this round) =====
+//
+// Codex found a second violation of the SH.2.1 P3 standing rule:
+// commitLocalDomainRawSync() (syncHelper.ts) — the primitive EVERY ordinary
+// user edit across Plans/Lightning/days routes through — decided "noop"
+// (nothing to write) by comparing the caller's requested `nextRaw` against
+// the canonical key's raw bytes ALONE, via decideLocalDomainCommit(
+// currentRaw, currentRaw, nextRaw) with `currentRaw` a plain
+// localStorage.getItem(key). If canonical held a stale value B while an
+// unresolved edit fact C was the true durable authority (the same
+// documented cross-tab hydration race SH.2.1 P3 already covers for pull
+// winner selection), a user who deliberately edited the field back to B —
+// a genuine, fresh user action — would see `nextRaw === currentRaw` (both
+// B) and get "noop": no new edit fact published, canonical left untouched,
+// and the OLDER, unrelated fact C left standing as durable authority
+// forever, even though the user's own newest intent was actually B.
+//
+// The fix (in commitLocalDomainRawSync() itself — see its own doc in
+// syncHelper.ts) reuses exactly the two existing shared primitives SH.2.1
+// P3 already established, composed the SAME way readLatestDurableValue()
+// already composes them: resolveEffectiveDurableRaw() (canonical + edit
+// facts -> effective durable value) feeds decideLocalDomainCommit() (the
+// noop/write/superseded decision) as BOTH its `currentRaw` and
+// `expectedPreviousRaw` — a force-commit, so the outcome can only be
+// "write" or "noop", never "superseded". No new interpretation of local
+// authority is introduced; this is the identical resolver, reused. The
+// cases below exercise that exact composition of the two real,
+// already-covered production functions — not a reimplementation.
+//
+/**
+ * Reference cases for the ORDINARY-EDIT noop decision commitLocalDomainRawSync()
+ * now makes — the REQUIRED cases from the SH.2.1 P1 (this round)
+ * architectural contract. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_COMMIT_CASES, resolveEffectiveDurableRaw, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_COMMIT_CASES.forEach(c => {
+ *     const durable = resolveEffectiveDurableRaw(c.canonicalRaw, c.factRawValues);
+ *     const got = decideLocalDomainCommit(durable, durable, c.nextRaw);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  factRawValues: string[];
+  nextRaw: string;
+  expected: LocalDomainCommitDecision;
+}> = [
+  {
+    name: "required case 3 — canonical B + durable fact C + user deliberately chooses B: must WRITE (publish B as the newest durable intent), never a silent noop against stale canonical bytes",
+    canonicalRaw: "B",
+    factRawValues: ["C"],
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "required case 4 — requested value already equals the effective durable value (the surviving fact itself): true noop",
+    canonicalRaw: "B",
+    factRawValues: ["C"],
+    nextRaw: "C",
+    expected: "noop",
+  },
+  {
+    name: "required case 5 — normal case, no edit facts: noop rule reduces to plain canonical comparison, unchanged from before this fix",
+    canonicalRaw: "B",
+    factRawValues: [],
+    nextRaw: "B",
+    expected: "noop",
+  },
+  {
+    name: "required case 5 (companion) — normal case, no edit facts, genuinely new value: still writes exactly as before this fix",
+    canonicalRaw: "B",
+    factRawValues: [],
+    nextRaw: "D",
+    expected: "write",
+  },
+  {
+    name: "no canonical yet, no facts yet (first-ever edit for this key): writes",
+    canonicalRaw: null,
+    factRawValues: [],
+    nextRaw: "B",
+    expected: "write",
+  },
+  {
+    name: "ambiguous 2-fact tie falls back to canonical for the noop decision too — same tie-break resolveEffectiveDurableRaw always applies, never a special case here",
+    canonicalRaw: "B",
+    factRawValues: ["C", "E"],
+    nextRaw: "B",
+    expected: "noop",
+  },
+];
+
+// ===== ORDINARY-EDIT FACT RETIREMENT (SH.2.4 — Concurrent Local Edit Fact
+// Safety) =====================================================================
+//
+// ROOT CAUSE: commitLocalDomainRawSync() (syncHelper.ts) published its own
+// edit fact, then "pruned" the key's local-edit-fact keyspace by RE-SCANNING
+// it AFTER that write and deleting every key that was not its own —
+// `for (const oldKey of snapshotKeysWithPrefix(...)) if (oldKey !== editFactKey)
+// removeItem(oldKey)`. Ordinary edits are deliberately unlocked and
+// synchronous (16th round, above) so a genuinely concurrent OTHER tab's own
+// commitLocalDomainRawSync() call can publish ITS fact at any point relative
+// to this one's own statements — including strictly BETWEEN this call's own
+// fact/canonical writes and this exact prune loop. That re-scan-after-write
+// re-scan has no way to distinguish "a fact I already knew about and am
+// superseding" from "a fact a different writer just published a moment ago,
+// completely unrelated to my own decision" — it deletes both identically.
+// Two tabs each publishing a fact and then pruning "everything but mine" can
+// therefore each delete the OTHER's still-unresolved fact, leaving
+// readLatestDurableValue() with no surviving evidence for either edit — the
+// exact failure this phase exists to close (see the 17th round's own
+// "DEFERRED — SH.2.3/SH.2.4" note above).
+//
+// THE FIX: never re-derive "what to delete" from a POST-write re-scan. Take
+// the local-edit-fact keyspace SNAPSHOT BEFORE this call's own writes (this
+// writer's OWN observed baseline — the exact same "frontier, captured once,
+// consumed once" discipline commitLocalDomainRaw() already applies for
+// hydration's `baselineEditFactIds` above) and retire ONLY keys that were
+// members of THAT snapshot. A fact that is not in the baseline — because it
+// did not exist yet when this call captured it — is structurally
+// unreachable by this decision: `planOrdinaryEditFactCommit()` below only
+// ever receives the baseline array as its universe of retirement candidates,
+// so it cannot name a key outside it no matter how it reasons. This is what
+// makes "never delete another writer's unresolved fact" hold BY
+// CONSTRUCTION, not by a runtime check that could itself race: retiring the
+// baseline is safe for the SAME reason hydration's retirement of
+// `baselineEditFactIds` is safe (see commitLocalDomainRaw's own "LOCAL-EDIT
+// FACT LIFECYCLE" doc) — every fact in it was already OBSERVED by this
+// decision (folded into the effective-durable-value read that `nextRaw` is
+// this writer's fresh response to), so this writer's own newer publish
+// genuinely supersedes it; a fact NOT in it was never observed, so this
+// writer has no basis — and, with this fix, no ABILITY — to declare it
+// obsolete.
+//
+// SAME-VALUE DEDUP (avoids unnecessary growth without any additional
+// deletion risk): if some baseline fact's raw content already equals
+// `nextRaw` byte-for-byte, that fact already durably records this exact
+// intent — publishing a second, physically-unique duplicate key would only
+// grow storage for zero informational gain (mirrors
+// planHydrationProvenanceDedup()'s own "already present, no new write
+// needed" rule above, applied here to the ordinary-edit fact log instead of
+// the hydration-provenance log). The matching fact is reused as `ownFactKey`
+// (kept, never retired) precisely because it is not obsolete: it already
+// carries the value this decision needed published, whether that fact
+// happens to be this writer's own earlier publish or a genuinely different
+// concurrent writer's. Every OTHER baseline fact (necessarily a different,
+// now-superseded value) is still retired exactly as the no-match case
+// retires the whole baseline.
+export interface LocalEditFactRecord {
+  key: string;
+  raw: string;
+}
+
+export interface OrdinaryEditFactCommitPlan {
+  /** Whether a NEW fact key needs to be written at `ownFactKey`. False when
+   * an existing baseline fact already carries `nextRaw`'s exact bytes. */
+  writeNew: boolean;
+  /** The fact key that durably represents `nextRaw` after this commit —
+   * either the freshly-generated `candidateFactKey`, or a reused baseline
+   * fact whose content already matched. Never retired by this same plan. */
+  ownFactKey: string;
+  /** Baseline fact keys to remove — always a SUBSET of `baselineFacts`,
+   * never a key outside it (see this section's own module doc for why that
+   * containment is the entire safety property this function exists to
+   * provide). */
+  keysToRetire: string[];
+}
+
+export function planOrdinaryEditFactCommit(
+  baselineFacts: LocalEditFactRecord[],
+  nextRaw: string,
+  candidateFactKey: string
+): OrdinaryEditFactCommitPlan {
+  const matching = baselineFacts.find((fact) => fact.raw === nextRaw);
+  const ownFactKey = matching ? matching.key : candidateFactKey;
+  const keysToRetire = baselineFacts.filter((fact) => fact.key !== ownFactKey).map((fact) => fact.key);
+  return { writeNew: !matching, ownFactKey, keysToRetire };
+}
+
+/**
+ * Reference cases for planOrdinaryEditFactCommit() — the REQUIRED cases from
+ * the SH.2.4 architectural contract. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_FACT_COMMIT_CASES, planOrdinaryEditFactCommit } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_FACT_COMMIT_CASES.forEach(c => {
+ *     const got = planOrdinaryEditFactCommit(c.baselineFacts, c.nextRaw, c.candidateFactKey);
+ *     const ok = got.writeNew === c.expected.writeNew && got.ownFactKey === c.expected.ownFactKey &&
+ *       JSON.stringify([...got.keysToRetire].sort()) === JSON.stringify([...c.expected.keysToRetire].sort());
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_FACT_COMMIT_CASES: Array<{
+  name: string;
+  baselineFacts: LocalEditFactRecord[];
+  nextRaw: string;
+  candidateFactKey: string;
+  expected: OrdinaryEditFactCommitPlan;
+}> = [
+  {
+    name: "required — first-ever edit for this key: no baseline, writes a new fact, retires nothing",
+    baselineFacts: [],
+    nextRaw: "A",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: [] },
+  },
+  {
+    name: "required — ordinary sequential edit: this writer's own prior fact is in its baseline and is genuinely superseded",
+    baselineFacts: [{ key: "F1", raw: "OLD" }],
+    nextRaw: "NEW",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: ["F1"] },
+  },
+  {
+    name: "required — SH.2.4 root cause: two concurrent writers' facts, BOTH observed in this decision's own baseline, are legitimately superseded together by a genuinely newer third value",
+    baselineFacts: [
+      { key: "F1", raw: "TAB-A" },
+      { key: "F2", raw: "TAB-B" },
+    ],
+    nextRaw: "TAB-C",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: ["F1", "F2"] },
+  },
+  {
+    name: "required — a fact NOT in the baseline can never appear in keysToRetire: an empty baseline retires nothing no matter what nextRaw is, even though a concurrent OTHER tab may have just published a fact this call never observed",
+    baselineFacts: [],
+    nextRaw: "WHATEVER",
+    candidateFactKey: "candidate",
+    expected: { writeNew: true, ownFactKey: "candidate", keysToRetire: [] },
+  },
+  {
+    name: "required — same-value concurrent edit: an already-surviving baseline fact exactly matches nextRaw, so it is reused (not retired) and no duplicate fact is written",
+    baselineFacts: [{ key: "F1", raw: "SAME" }],
+    nextRaw: "SAME",
+    candidateFactKey: "candidate",
+    expected: { writeNew: false, ownFactKey: "F1", keysToRetire: [] },
+  },
+  {
+    name: "same-value dedup among an ambiguous multi-fact baseline: the matching sibling is kept, the genuinely different one is still retired as obsolete",
+    baselineFacts: [
+      { key: "F1", raw: "MATCH" },
+      { key: "F2", raw: "OTHER" },
+    ],
+    nextRaw: "MATCH",
+    candidateFactKey: "candidate",
+    expected: { writeNew: false, ownFactKey: "F1", keysToRetire: ["F2"] },
+  },
+];
+
+// ===== ORDINARY-EDIT PERSIST OUTCOME (SH.2.4 Codex P1 follow-up round —
+// "fact allocation near quota must not block a best-effort canonical
+// write") ====================================================================
+//
+// ROOT CAUSE: commitLocalDomainRawSync() published the new local-edit-fact
+// key (`plan.ownFactKey`, when `plan.writeNew`) BEFORE writing the canonical
+// key. A brand-new key can fail near localStorage quota (`QuotaExceededError`)
+// in a case where overwriting the EXISTING canonical key with the same or
+// smaller value would still succeed — a new key needs genuinely additional
+// storage, while overwriting an existing one usually does not. The previous
+// code returned "failed" the instant the fact `setItem` threw, WITHOUT ever
+// attempting the canonical write — so a user's edit that could have been
+// preserved was instead left only in React state, and lost on reload.
+//
+// THE FIX: attempt BOTH writes unconditionally (never let one leg's failure
+// skip the other), then classify the outcome from what actually landed.
+// decideOrdinaryEditPersistOutcome() is the pure decision, given only
+// whether each leg durably succeeded:
+//   • neither leg landed — "failed". Fail safely: nothing changed on disk,
+//     so the baseline facts this decision observed are left completely
+//     untouched (the caller must not retire anything in this case — see
+//     commitLocalDomainRawSync's own doc for how this return value gates
+//     that).
+//   • BOTH legs landed — "committed", exactly the pre-existing full-success
+//     outcome. Every SH.2.4 concurrent-fact guarantee applies unchanged:
+//     the new fact durably backs this exact edit, so this case must never
+//     be weakened by this round.
+//   • exactly ONE leg landed — "committed-unprotected": the requested value
+//     IS durably recoverable (readLatestDurableValue() will still resolve
+//     to it — via the surviving fact, when only the fact leg landed and it
+//     is the sole surviving fact for this key; via canonical directly,
+//     when only the canonical leg landed), but this write no longer carries
+//     the FULL SH.2.4 protection a genuine fact+canonical pair provides —
+//     see isLocalDomainCommitSuccess()'s own doc for why this is still
+//     treated as a durable success for gating purposes (the overriding
+//     LOCAL-FIRST DURABILITY CONTRACT is "never lose the user's edit to
+//     React state alone", which this outcome satisfies) while remaining
+//     distinctly reported so it is never confused with the fully-protected
+//     case. This is the SAME class of already-accepted, narrower-window
+//     residual risk documented for the no-Web-Locks case generally — never
+//     a new correctness gap, only an honest name for an unavoidable
+//     degraded outcome.
+// Retirement of this decision's own observed baseline facts (`keysToRetire`
+// from planOrdinaryEditFactCommit() above) is safe whenever this function
+// does NOT return "failed" — i.e. whenever nextRaw is durably held by
+// EITHER leg — for the identical reason the fully-successful path was
+// already safe: those facts are proven-stale evidence the moment ANY
+// surviving representation (fact or canonical) of the newer value exists,
+// regardless of which leg happened to be the one that landed.
+export type OrdinaryEditPersistOutcome = "committed" | "committed-unprotected" | "failed";
+
+export function decideOrdinaryEditPersistOutcome(
+  factPublished: boolean,
+  canonicalWritten: boolean
+): OrdinaryEditPersistOutcome {
+  if (!factPublished && !canonicalWritten) return "failed";
+  if (factPublished && canonicalWritten) return "committed";
+  return "committed-unprotected";
+}
+
+/**
+ * Reference cases for decideOrdinaryEditPersistOutcome() — the REQUIRED
+ * cases from the SH.2.4 Codex P1 follow-up round. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES, decideOrdinaryEditPersistOutcome } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES.forEach(c => {
+ *     const got = decideOrdinaryEditPersistOutcome(c.factPublished, c.canonicalWritten);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES: Array<{
+  name: string;
+  factPublished: boolean;
+  canonicalWritten: boolean;
+  expected: OrdinaryEditPersistOutcome;
+}> = [
+  {
+    name: "required case 1 — fact allocation fails near quota, canonical overwrite still succeeds: durably preserved, but reported distinctly from a fully-protected commit",
+    factPublished: false,
+    canonicalWritten: true,
+    expected: "committed-unprotected",
+  },
+  {
+    name: "required case 2 — both fact allocation and the canonical write fail: fail safely, nothing durable changed",
+    factPublished: false,
+    canonicalWritten: false,
+    expected: "failed",
+  },
+  {
+    name: "required case 3 — normal successful fact publication: full SH.2.4 protection, unweakened",
+    factPublished: true,
+    canonicalWritten: true,
+    expected: "committed",
+  },
+  {
+    name: "symmetric case — canonical write fails but the new fact still lands: still durably recoverable via the surviving fact, reported as unprotected rather than a full commit",
+    factPublished: true,
+    canonicalWritten: false,
+    expected: "committed-unprotected",
+  },
+];
+
+// ===== PROFILE-OWNED SYNC STATE (SH.2.1 P1, this round) =====
+//
+// Codex found a second architectural gap: deleteProfile() (profileStorage.ts)
+// removes a deleted profile's plain `dwp:{profileId}:{baseKey}` canonical
+// keys, but every OTHER per-profile key shape this module's sync layer
+// owns — local-edit facts, confirmed facts, pending pushes, the local-
+// content-owner marker — lives under a DIFFERENT prefix
+// (`dwp:localEditFact:...` / `dwp:sync:...`) that deleteProfile()'s own
+// simple `dwp:{profileId}:` prefix scan never matches. Left behind, these
+// are DURABLE, profile-owned sync state: recreating a profile with the
+// SAME normalized id (trivial — normalizeId() is deterministic) can
+// resurrect them. A leftover local-edit fact in particular can outrank the
+// new profile's own (empty) canonical value the moment ANY sync/conflict
+// decision reads durable local authority for that key (mount hydration,
+// pull winner selection, or an ordinary edit's own noop check — see
+// resolveEffectiveDurableRaw()'s standing rule above), letting deleted
+// planner content silently reappear under a profile the user believes is
+// brand new.
+//
+// isProfileOwnedSyncKey() is the ONE shared predicate for "does this
+// localStorage KEY belong to this profileId's sync-layer state" — covering
+// every shape syncHelper.ts's own key-builders produce for a profile:
+//   - local-edit facts:    dwp:localEditFact:dwp:{profileId}:{baseKey}:{editId}
+//   - local content owner: dwp:sync:{profileId}:localContentOwner
+//   - sync status:         dwp:sync:{profileId}:status
+//   - last-synced time:    dwp:sync:{profileId}:lastSyncedAt
+//   - last sync error:     dwp:sync:{profileId}:lastError
+//   - confirmed facts:     dwp:sync:{userId}:{profileId}:confirmedFact:{domain}:{revision}:{instanceId}
+//   - hydration provenance: dwp:sync:{userId}:{profileId}:hydrationFact:{domain}:{revision}:{instanceId}
+//   - pending ops:         dwp:sync:{userId}:{profileId}:pendingOp:{opId}
+//   - pending op cursor:   dwp:sync:{userId}:{profileId}:pendingOpCursor
+// `userId` is unknown to a profile-deletion caller (profileStorage.ts has
+// no auth context, by design — profiles are device-local), so the
+// confirmedFact/hydrationFact/pendingOp/pendingOpCursor family — all
+// namespaced `dwp:sync:{userId}:{profileId}:...` — is matched
+// STRUCTURALLY: profileId must appear as the exact 4th colon-delimited
+// segment (0-indexed 3), wherever `userId` actually is, rather than
+// requiring the caller to enumerate every identity that may ever have
+// synced this profile.
+//
+// Codex P2 (SH.2.2 cleanup round) — the profile-level status/lastSyncedAt/
+// lastError keys are NOT userId-scoped (`dwp:sync:{profileId}:status`, a
+// 4-segment key — the structural `parts.length >= 5` branch above never
+// matches them, exactly like localContentOwner needed its own explicit
+// check) and were missing from this predicate entirely: deleting a profile
+// left them behind, so recreating the same normalized profile ID inherited
+// a stale sync status ("error"/"syncing"), a stale lastSyncedAt timestamp,
+// and a stale lastError message from the profile that used to occupy that
+// ID — never reflecting the fact that this is now a brand-new profile that
+// has never synced.
+//
+// This is a PURE string predicate deliberately kept in this module (not
+// syncHelper.ts) so it carries real DEV_* coverage the same way every
+// other decision in this file does; syncHelper.ts's purgeProfileSyncState()
+// (the I/O wrapper profileStorage.ts's deleteProfile() calls) is a thin
+// scan-and-remove loop built directly on this exact predicate — see its
+// own doc there.
+export function isProfileOwnedSyncKey(key: string, profileId: string): boolean {
+  if (key.startsWith(`dwp:localEditFact:dwp:${profileId}:`)) return true;
+  if (key === `dwp:sync:${profileId}:localContentOwner`) return true;
+  if (key === `dwp:sync:${profileId}:status`) return true;
+  if (key === `dwp:sync:${profileId}:lastSyncedAt`) return true;
+  if (key === `dwp:sync:${profileId}:lastError`) return true;
+  if (key.startsWith("dwp:sync:")) {
+    const parts = key.split(":");
+    // ["dwp", "sync", userId, profileId, domainKind, ...] — profileId is
+    // always the 4th segment (index 3) in every userId-scoped shape.
+    if (parts.length >= 5 && parts[3] === profileId) return true;
+  }
+  return false;
+}
+
+/**
+ * Reference cases for isProfileOwnedSyncKey() — the REQUIRED cases from the
+ * SH.2.1 P1 (this round) architectural contract. Run from Node:
+ *   import { DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES, isProfileOwnedSyncKey } from "@/lib/syncPayload";
+ *   DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES.forEach(c => {
+ *     const got = isProfileOwnedSyncKey(c.key, c.profileId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
+  name: string;
+  key: string;
+  profileId: string;
+  expected: boolean;
+}> = [
+  {
+    name: "required case 1 — a plans local-edit fact for this profile is matched",
+    key: "dwp:localEditFact:dwp:my-family:plans:op-123",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a lightning local-edit fact for this profile is matched",
+    key: "dwp:localEditFact:dwp:my-family:lightning:op-456",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a days local-edit fact for this profile is matched",
+    key: "dwp:localEditFact:dwp:my-family:days:op-789",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — the local-content-owner marker for this profile is matched",
+    key: "dwp:sync:my-family:localContentOwner",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — the profile-level sync status key is matched",
+    key: "dwp:sync:my-family:status",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — the profile-level lastSyncedAt key is matched",
+    key: "dwp:sync:my-family:lastSyncedAt",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — the profile-level lastError key is matched",
+    key: "dwp:sync:my-family:lastError",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a confirmed fact for this profile, under some userId, is matched without knowing the userId in advance",
+    key: "dwp:sync:user-abc123:my-family:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a hydration-provenance fact for this profile, under some userId, is matched without knowing the userId in advance (SAME structural shape as a confirmed fact, so deletion coverage is automatic)",
+    key: "dwp:sync:user-abc123:my-family:hydrationFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — a pending op for this profile, under some userId, is matched",
+    key: "dwp:sync:user-abc123:my-family:pendingOp:op-321",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 1 — the pending-op cursor for this profile, under some userId, is matched",
+    key: "dwp:sync:user-abc123:my-family:pendingOpCursor",
+    profileId: "my-family",
+    expected: true,
+  },
+  {
+    name: "required case 2 — a DIFFERENT profile's local-edit fact must never be matched (no cross-profile resurrection risk introduced by this purge)",
+    key: "dwp:localEditFact:dwp:other-profile:plans:op-123",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "required case 2 — a different profile's confirmed fact, even under the SAME userId, must never be matched",
+    key: "dwp:sync:user-abc123:other-profile:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "Codex P2 (SH.2.2 cleanup round) — a different profile's sync status key must never be matched",
+    key: "dwp:sync:other-profile:status",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a different profile's hydration-provenance fact must never be matched",
+    key: "dwp:sync:user-abc123:other-profile:hydrationFact:plans:7:op-999",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "a profile's own plain canonical key is NOT matched here — deleteProfile()'s existing dwp:{id}: prefix scan already owns that shape; this predicate only covers the sync-layer shapes it misses",
+    key: "dwp:my-family:plans",
+    profileId: "my-family",
+    expected: false,
+  },
+  {
+    name: "an unrelated global key is never matched",
+    key: "dwp.activeProfile",
+    profileId: "my-family",
+    expected: false,
+  },
+];
+
+// ===== STALE-RESPONSE PULL RECOVERY (SH.2.1, this round) =====
+//
+// Codex found that a pull correctly REJECTING a stale response (a confirmed
+// revision newer than this pull's own GET, per SH.2.1 P2's revision bound —
+// see UnusableDomain's own doc in each page) had no RECOVERY: the pull
+// effect simply returned, leaving syncReady false and scheduling nothing
+// further. The page could then sit indefinitely with cloud sync disabled
+// until an unrelated auth cycle or reload happened to re-run the pull
+// effect for some other reason.
+//
+// Root cause: "gated" (an ambiguous/conflicted confirmed revision this
+// pull's response could not repair) and "stale-response" (this pull's OWN
+// response is simply OLDER than already-confirmed authority) were both
+// treated as identical, permanent-until-something-else-changes bail-out
+// conditions — correct for "gated" (a real conflict needs a genuinely NEW
+// server state to resolve, which nothing here can force), but wrong for
+// "stale-response": that domain's true current state is now KNOWN to this
+// tab (the confirmed fact that made the response stale IS a real, already-
+// durable answer) — there is no reason to wait for an unrelated event; a
+// fresh GET will simply see it.
+//
+// decideStaleResponseRecovery() is the ONE shared, pure decision: a
+// replacement pull is warranted if and only if EVERY unusable domain this
+// pull bailed out on is "stale-response" — never when ANY domain is
+// "gated" (required case 6: a real conflict must not silently reuse retry
+// behavior it never asked for; recovering a conflict already has its own,
+// separate contract — a later pull's own confirmed-state read repairing it
+// via isConflictRepairableByRevision, untouched by this round) and never
+// when ANY domain is "unusable-response" (this round's Codex finding —
+// required cases 3 & 4: a pull whose OWN response carried no usable
+// revision at all — a 204, or an unparseable/malformed payload, the kind
+// of response `{}` or similar structurally-broken JSON produces — is not
+// "a real snapshot that is merely older"; retrying it is not safe, since
+// the very next GET is exactly as likely to be unusable again for the SAME
+// reason, and nothing about that reason is revision-related — repeating it
+// automatically would recreate an unbounded GET loop while sync stays
+// gated the whole time). An empty input is "no-retry" — defensively
+// correct (there is nothing to recover from), though the pull effect only
+// ever calls this once it has already confirmed
+// `unusableDomains.length > 0`.
+//
+// ===== COMMIT-TIME AUTHORITY & RECONCILIATION RECOVERY (SH.2.2) =====
+//
+// SH.2.1 P2's revision bound (resolvePostFetchDomainBaseline, above) is only
+// checked ONCE per pull, at the moment this pull's GET response is known.
+// Codex found the architectural gap this left: winner selection and the
+// actual local write (commitLocalDomainRaw, syncHelper.ts) happen LATER,
+// separated from that one check — and from EACH OTHER — by real awaited
+// boundaries (reconcilePendingOperations, then one commitLocalDomainRaw
+// call per domain, sequentially). Two DIFFERENT kinds of authority can move
+// during those gaps, and neither was re-checked before the write that
+// finally lands on disk:
+//   (1) CONFIRMED AUTHORITY can advance — e.g. an already-in-flight push
+//       (started before this pull, never aborted by cancelScheduledSync()
+//       per its own contract — see syncHelper.ts's module doc — since that
+//       only clears a PENDING timer, never an in-flight fetch) resolves
+//       and calls commitConfirmedBaseline() for a NEWER revision, in the
+//       window between this pull's one-time baseline check and its own
+//       commitLocalDomainRaw() write. That push never touches the
+//       canonical plans/lightning/days storage key itself (it only reads
+//       and uploads it), so commitLocalDomainRaw()'s own CAS — which
+//       compares literal canonical bytes — cannot detect this: the bytes
+//       genuinely have not changed, yet the WINNER this pull already
+//       decided is now a strictly older, already-superseded value.
+//       Required case: GET rev7 resolves; before this pull's hydration
+//       commit runs, a concurrent push confirms rev8 for the same domain.
+//       This pull's rev7-based winner must never land — the domain must be
+//       treated exactly as "stale-response" would have been treated had
+//       this been visible at the ORIGINAL baseline check.
+//   (2) LOCAL AUTHORITY can advance — an ordinary user edit
+//       (commitLocalDomainRawSync) lands between winner selection's fresh
+//       "current" read and this pull's own commitLocalDomainRaw() write.
+//       commitLocalDomainRaw()'s CAS already detects this correctly and
+//       reports "superseded" (never overwriting the edit — this protection
+//       is untouched by SH.2.2), but nothing previously told the pull
+//       EFFECT to do anything about it: syncReady stayed false (correctly
+//       — this pull's own hydration did not durably land) but no
+//       replacement pull was ever scheduled, so the page could sit with
+//       cloud sync permanently disabled after a single benign local-edit
+//       race, since the scheduleSync()-triggering effect is itself gated
+//       on syncReady.
+//
+// Both are, architecturally, THE SAME problem: "a winner selected earlier
+// must remain provisional until the instant it is actually committed."
+// Both are RECOVERABLE the same way "stale-response" already is: the true
+// current state (confirmed authority for (1), the surviving local edit for
+// (2)) is already durably known to this device; there is no reason to wait
+// for an unrelated event before trying again. Neither is ever safe to
+// retry when mixed with a genuine "conflict" or "unusable-response" — see
+// decideStaleResponseRecovery()'s own established rule above, extended
+// (not replaced) below to also treat a local-edit CAS supersession as an
+// always-safe-to-retry reason, exactly like "stale-response".
+//
+// `"local-edit-superseded"` is used ONLY for case (2) above — a
+// commitLocalDomainRaw() "superseded" outcome — and carries no revision
+// (there is none to carry: this is a local CAS decision, not a confirmed
+// fact comparison). Case (1) reuses the EXISTING "stale-response"/
+// "conflict"/"unusable-response" reasons unchanged: a commit-time
+// revalidation is just resolvePostFetchDomainBaseline()/
+// collectUnusableDomains() called again, fresh, immediately before each
+// hydration commit — the SAME primitives the original once-per-pull check
+// already uses, not a duplicated decision. See each page's pull effect
+// (`revalidateAuthorityBeforeCommit()`/`handlePullDeferral()`) for the
+// wiring: never a new polling loop or arbitrary delay — a revalidation
+// check is one synchronous, already-in-memory read (getConfirmedState()),
+// not a fetch, and a scheduled retry is the SAME ordinary React
+// effect-dependency re-run (`staleRetryTick`) SH.2.1 already established,
+// deduplicated by the SAME `staleRetryPendingRef` guard so multiple
+// domains superseding within one pull (either kind, or a mix) still
+// schedule at most one replacement pull.
+//
+// CODEX P1 FOLLOW-UP ROUND — case (1) above, as originally implemented,
+// only ran the page-level revalidateAuthorityBeforeCommit() re-check
+// BEFORE calling commitLocalDomainRaw() — but that function can then
+// itself wait on the Web Lock if another writer currently holds this key's
+// lock, and confirmed authority can advance DURING that wait without
+// tripping either the canonical CAS (never touches this key) or
+// `isStillValid` (confirmed-state changes never advance the pull epoch).
+// Fixed by moving the authoritative re-check INSIDE commitLocalDomainRaw()
+// itself, as a new `isAuthorityStillValid` parameter checked as the LAST
+// gate, still inside the lock, immediately before the write and edit-fact
+// retirement — see that function's own doc in syncHelper.ts and the
+// "COMMIT-TIME AUTHORITY GATE ORDER" DEV_* section below for the full
+// gate-ordering contract this establishes (a distinct "authority-superseded"
+// LocalDomainCommitStatus, never conflated with "superseded"). Each page's
+// pull effect now passes a `checkAuthorityStillValid` closure — built from
+// the SAME `revalidateAuthorityBeforeCommit()` this section already
+// established — to every domain's commitLocalDomainRaw() call, and maps an
+// "authority-superseded" result back through the SAME `handlePullDeferral()`
+// recovery path used everywhere else, using the FRESH unusable-domain list
+// that closure itself just captured.
+//
+// CODEX P1 THIRD FOLLOW-UP ROUND — "Reject any changed confirmed baseline
+// before commit." The check above (and the first follow-up round's
+// `revalidateAuthorityBeforeCommit()`) asked "is the CURRENT confirmed
+// state still USABLE relative to this pull's own cloudRevision" — reusing
+// resolvePostFetchDomainBaseline()/collectUnusableDomains(), and therefore
+// the "stale-response"/"conflict"/"unusable-response" reasons. That
+// question has a real gap: winner selection was made against a SPECIFIC
+// confirmed authority X (captured once, right when the pull's baseline was
+// first computed). If confirmed authority changes to Y WHILE hydration
+// waits for the lock, and Y is NEWER but still perfectly usable relative
+// to this pull's own cloudRevision (e.g. X=revision 5, Y=revision 6,
+// cloudRevision=7 — 6 <= 7 is a completely normal "confirmed" outcome),
+// the old check reported "still valid" — even though the winner already
+// selected was never recomputed against Y at all. "Usable" and "unchanged
+// from what was actually used" are different questions; only the second
+// one is safe to gate a commit on.
+//
+// `revalidateAuthorityBeforeCommit()` (each page) is now built on
+// confirmedDomainResultsEqual() (above) instead: it compares a FRESH
+// getConfirmedState() read against `winnerSelectionAuthority` — the EXACT
+// ConfirmedPlannerState this pull's baseline check captured (via
+// buildPostFetchPullBaseline()'s own `confirmed` return field) the ONE
+// time winner selection actually ran. ANY difference — revision advanced
+// OR regressed, the value at an unchanged revision differs, "none"
+// becoming "confirmed", a "conflict" resolving or advancing — produces a
+// NEW reason, `"authority-changed"`, for that domain. This SUBSUMES the
+// old usability question rather than running alongside it: a domain whose
+// confirmed authority is IDENTICAL to what winner selection used is, by
+// construction, exactly as usable as it was already proven to be at the
+// original baseline check (cloudRevision is fixed for the whole pull), so
+// no separate usability re-derivation is needed at commit time anymore —
+// see confirmedDomainResultsEqual()'s own doc above for the full
+// rationale. The OLD "stale-response"/"conflict"/"unusable-response"
+// reasons remain exactly as they were for the INITIAL, once-per-pull
+// baseline-stage check (collectUnusableDomains(baselineOutcomes), BEFORE
+// winner selection even runs) — untouched by this round; only the LATER,
+// commit-time re-checks now produce "authority-changed" instead of
+// reusing them.
+//
+// CODEX P1 "MAKE CONFIRMED-AUTHORITY SCANS ATOMIC" ROUND — the commit-time
+// re-check above (`revalidateAuthorityBeforeCommit()`/`checkAuthorityStillValid()`)
+// used getConfirmedState()'s plain scan, which captures `localStorage.length`
+// then enumerates by index — NOT an atomic snapshot against a DIFFERENT
+// tab's concurrent confirmed-fact write (see confirmedAuthorityLockName's
+// own doc in syncHelper.ts for the full root-cause). Both pages' commit-time
+// checks now call the NEW getConfirmedStateAtomic() (syncHelper.ts) instead
+// — the SAME scan, serialized via a dedicated Web Lock against every
+// recordConfirmedFact() write for this identity, so a torn read is
+// impossible. `"authority-unavailable"` is the new reason for when that
+// atomic read itself cannot be performed (Web Locks unavailable) — FAIL
+// CLOSED, per this round's explicit requirement, rather than silently
+// falling back to the non-atomic scan. Unlike "authority-changed"/
+// "local-edit-superseded", this is NEVER auto-retried below: it reflects a
+// permanent environment limitation (this browser lacks Web Locks), not a
+// transient race a fresh pull could resolve — mirrors
+// commitLocalDomainRaw()'s own "unavailable" status, which
+// isLocalDomainCommitSuccess() also never treats as retryable.
+//
+// CODEX P1 "AUTHORITY VS. HYDRATION-PROVENANCE" ROUND — two DISTINCT durable
+// records can now be written after a domain's own hydration commit succeeds
+// (see isExactCloudValue()'s own doc above and recordHydrationProvenance()'s
+// in syncHelper.ts): commitConfirmedBaseline() for a PURE cloud winner, or
+// recordHydrationProvenance() for a locally-reconciled one. EITHER write can
+// fail (a real I/O exception, or — for the confirmed-fact path only — a
+// genuine cross-tab ambiguity at that exact domain/revision). Required this
+// round: "on persistence failure/conflict, fail closed before authority
+// ratchet, ownership transfer, syncReady, or push." `"provenance-write-failed"`
+// is the ONE new reason covering BOTH writers — the caller (each page)
+// checks the SAME boolean return either write already produced and, on
+// `false`, defers the whole pull via this reason before EVER reaching the
+// ratchet/ownership/syncReady/push steps that follow it in the same
+// sequence, exactly as this round requires. Never auto-retried below —
+// same treatment as "authority-unavailable": a fresh pull cannot itself
+// resolve a write-time conflict or a genuine storage failure, so retrying
+// blindly would just repeat it.
+export type UnusableDomainReason =
+  | "conflict"
+  | "stale-response"
+  | "unusable-response"
+  | "local-edit-superseded"
+  | "authority-changed"
+  | "authority-unavailable"
+  | "provenance-write-failed";
+
+export function decideStaleResponseRecovery(
+  unusableDomains: Array<{ reason: UnusableDomainReason }>
+): "retry" | "no-retry" {
+  if (unusableDomains.length === 0) return "no-retry";
+  // SH.2.2 — "local-edit-superseded" (a commit-time CAS supersession by a
+  // genuine local edit) and "authority-changed" (a commit-time confirmed-
+  // authority identity mismatch — see this section's own "CODEX P1 THIRD
+  // FOLLOW-UP ROUND" doc above) are, like "stale-response", always safe to
+  // retry on their own: the true current state is already durably known to
+  // this device. Mixed with any of these three alone, or with each other,
+  // the whole set stays retry-eligible; mixed with a "conflict" or
+  // "unusable-response" anywhere in the set, it stays fail-closed —
+  // unchanged from SH.2.1's own rule, just widened to recognize each new
+  // always-safe reason as it was added. "authority-unavailable" (this
+  // round's "make confirmed-authority scans atomic" fix) is deliberately
+  // EXCLUDED from the always-safe set above — falls through to the default
+  // "no-retry" below — since it reflects a permanent environment limitation
+  // (no Web Locks), which a fresh pull cannot fix. "provenance-write-failed"
+  // (the "authority vs. hydration-provenance" round) is EXCLUDED for the
+  // same reason: a real I/O exception or a genuine cross-tab confirmed-fact
+  // conflict is not something blindly retrying this same pull can resolve.
+  return unusableDomains.every(
+    (d) => d.reason === "stale-response" || d.reason === "local-edit-superseded" || d.reason === "authority-changed"
+  )
+    ? "retry"
+    : "no-retry";
+}
+
+/**
+ * Reference cases for decideStaleResponseRecovery() — the REQUIRED cases
+ * from the SH.2.1 (this round, and the stale-response-retry round before
+ * it) architectural contract. Run from Node:
+ *   import { DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES, decideStaleResponseRecovery } from "@/lib/syncPayload";
+ *   DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES.forEach(c => {
+ *     const got = decideStaleResponseRecovery(c.unusableDomains);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
+  name: string;
+  unusableDomains: Array<{ reason: UnusableDomainReason }>;
+  expected: "retry" | "no-retry";
+}> = [
+  {
+    name: "required case 1 — a single stale-response domain (rev7 rejected in favor of confirmed rev8): retry",
+    unusableDomains: [{ reason: "stale-response" }],
+    expected: "retry",
+  },
+  {
+    name: "all unusable domains stale-response (plans+lightning+days all stale together): retry",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "stale-response" }, { reason: "stale-response" }],
+    expected: "retry",
+  },
+  {
+    name: "required case 6 — a conflicted ('gated') domain must NEVER auto-retry via this mechanism, even alone",
+    unusableDomains: [{ reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "required case 6 — ANY conflicted domain blocks retry even when every other domain is merely stale-response — conflict recovery has its own separate contract, never silently inherited",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "required case 3 — a structurally unusable response (this pull's own GET carried no usable revision at all) must NEVER auto-retry, even alone: retrying cannot help and would repeat the same unusable GET indefinitely",
+    unusableDomains: [{ reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "required case 4 — an unusable-response domain blocks retry even when every other domain is merely stale-response (confirmed facts present elsewhere does not make THIS domain's unusable response safe to retry)",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "no unusable domains — nothing to recover from",
+    unusableDomains: [],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 required case — a single local-edit-superseded domain (commit-time CAS lost to a genuine local edit): retry",
+    unusableDomains: [{ reason: "local-edit-superseded" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 — multiple domains all local-edit-superseded (items+days+lightning all raced a local edit in one pull): retry",
+    unusableDomains: [
+      { reason: "local-edit-superseded" },
+      { reason: "local-edit-superseded" },
+      { reason: "local-edit-superseded" },
+    ],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 — mixed stale-response (confirmed authority advanced) + local-edit-superseded (a different domain raced a local edit) in the SAME pull: still retry, both reasons are independently always-safe",
+    unusableDomains: [{ reason: "stale-response" }, { reason: "local-edit-superseded" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 — a local-edit-superseded domain must NEVER make an unrelated conflict retry-eligible: a real conflict elsewhere still blocks the whole pull",
+    unusableDomains: [{ reason: "local-edit-superseded" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 — a local-edit-superseded domain must NEVER make an unrelated unusable-response retry-eligible",
+    unusableDomains: [{ reason: "local-edit-superseded" }, { reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 third follow-up required case — a single authority-changed domain (winner selected against rev5, confirmed authority moved to rev6 during the lock wait): retry",
+    unusableDomains: [{ reason: "authority-changed" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — multiple domains all authority-changed in one pull: retry",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "authority-changed" }, { reason: "authority-changed" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — mixed authority-changed + local-edit-superseded + stale-response in the SAME pull: still retry, all three reasons are independently always-safe",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "local-edit-superseded" }, { reason: "stale-response" }],
+    expected: "retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — an authority-changed domain must NEVER make an unrelated conflict retry-eligible",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "conflict" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 third follow-up — an authority-changed domain must NEVER make an unrelated unusable-response retry-eligible",
+    unusableDomains: [{ reason: "authority-changed" }, { reason: "unusable-response" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 'make confirmed-authority scans atomic' round — a single authority-unavailable domain (Web Locks absent, atomic read could not be performed) must NEVER auto-retry, even alone: this is a permanent environment limitation, not a transient race",
+    unusableDomains: [{ reason: "authority-unavailable" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 atomic-scans round — an authority-unavailable domain blocks retry even when every other domain is merely authority-changed/stale-response/local-edit-superseded (all otherwise-safe reasons)",
+    unusableDomains: [
+      { reason: "authority-unavailable" },
+      { reason: "authority-changed" },
+      { reason: "stale-response" },
+      { reason: "local-edit-superseded" },
+    ],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a single provenance-write-failed domain (confirmed-fact or hydration-provenance write did not durably succeed) must NEVER auto-retry, even alone",
+    unusableDomains: [{ reason: "provenance-write-failed" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.2 authority-vs-provenance round — a provenance-write-failed domain blocks retry even when every other domain is merely authority-changed/stale-response/local-edit-superseded",
+    unusableDomains: [
+      { reason: "provenance-write-failed" },
+      { reason: "authority-changed" },
+      { reason: "stale-response" },
+      { reason: "local-edit-superseded" },
+    ],
+    expected: "no-retry",
+  },
+];
+
+// ===== HYDRATION NOOP SAFETY (SH.2.1, this round) =====
+//
+// Codex found that commitLocalDomainRaw() (syncHelper.ts) — the CAS/lock
+// primitive every pull's hydration commit uses — could report "noop"
+// whenever canonical bytes already equalled the hydration winner, even
+// when a surviving, unresolved local-edit fact still held a genuinely
+// DIFFERENT value. `decideLocalDomainCommit()`'s own "noop" branch only
+// ever proved a byte-level fact (canonical === nextRaw); it was never
+// asked whether DURABLE AUTHORITY (canonical + facts) also agreed.
+// Reporting that byte-level coincidence as a safe "noop" let hydration
+// count as successful (isLocalDomainCommitSuccess treats noop and
+// committed identically) while leaving the stale fact fully intact and
+// unretired — durably authoritative for the next readLatestDurableValue()
+// read, and capable of later being pushed back over the very cloud state
+// this pull just recorded as confirmed.
+//
+// The fix (commitLocalDomainRaw()'s own doc in syncHelper.ts has the full
+// rationale) adds ONE more check, reached only on a byte-level "noop": ask
+// resolveEffectiveDurableRaw() — the SAME shared resolver every other
+// durable-authority decision in this codebase uses, never a competing
+// interpretation — whether canonical + this decision's OWN
+// baselineEditFactIds frontier already agrees with nextRaw. Agreement
+// keeps the fast "noop" path; disagreement falls through to the EXACT
+// SAME write-and-retire path a genuine "write" decision already took
+// (including its own re-scan for a fact that lands AFTER the snapshot,
+// which still reports "superseded" — untouched by this fix).
+//
+// The cases below model that exact two-step decision purely — real
+// resolveEffectiveDurableRaw() calls, plus the same frontier-membership
+// check commitLocalDomainRaw()'s own re-scan performs — reduced to
+// commitLocalDomainRaw()'s actual inputs/outputs, not a reimplementation.
+export type HydrationNoopSafetyOutcome = "noop" | "committed" | "superseded";
+
+/**
+ * Reference cases for commitLocalDomainRaw()'s hydration-noop-safety
+ * decision — the REQUIRED cases from the SH.2.1 (this round) architectural
+ * contract. Deliberately NOT a new production function: the real decision
+ * stays inline in commitLocalDomainRaw() (syncHelper.ts) per this round's
+ * "fix centrally in the existing primitive" instruction. This composes the
+ * SAME real resolveEffectiveDurableRaw() production primitive the fix
+ * itself calls, plus the same frontier-membership condition
+ * commitLocalDomainRaw()'s own re-scan already checks — reduced to that
+ * function's actual inputs/outputs, not a reimplementation. Run from Node:
+ *   import { DEV_HYDRATION_NOOP_SAFETY_CASES, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_HYDRATION_NOOP_SAFETY_CASES.forEach(c => {
+ *     const effectiveDurableRaw = resolveEffectiveDurableRaw(c.canonicalRaw, c.baselineFactRawValues);
+ *     const got = effectiveDurableRaw === c.nextRaw ? "noop" : (c.liveFactKeysGrew ? "superseded" : "committed");
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_HYDRATION_NOOP_SAFETY_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  baselineFactRawValues: string[];
+  nextRaw: string;
+  liveFactKeysGrew: boolean;
+  expected: HydrationNoopSafetyOutcome;
+}> = [
+  {
+    name: "required case 4 — canonical=A, no surviving facts, hydration wants A: durable authority already agrees, safe noop",
+    canonicalRaw: "A",
+    baselineFactRawValues: [],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "noop",
+  },
+  {
+    name: "required case 5 — canonical=A, surviving fact=B, hydration wants A: durable authority (B) disagrees — must NOT report a safe noop that leaves B authoritative; commits (idempotent canonical rewrite) and retires B",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["B"],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "committed",
+  },
+  {
+    name: "required case 6 — same as required case 5, but a NEW conflicting fact (C) lands after this commit's own baseline snapshot: the conflicting frontier is NOT safe to retire — reports superseded, exactly like a genuine 'write' decision would, so C is never touched",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["B"],
+    nextRaw: "A",
+    liveFactKeysGrew: true,
+    expected: "superseded",
+  },
+  {
+    name: "fact exactly matches the hydration winner already — genuinely redundant, safe noop (structural rule, not a value comparison coincidence)",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["A"],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "noop",
+  },
+  {
+    name: "ambiguous 2-fact tie falls back to canonical for this decision too — ANY conflicting fact resolution defers to the established resolveEffectiveDurableRaw() tie-break, never a special case here",
+    canonicalRaw: "A",
+    baselineFactRawValues: ["B", "C"],
+    nextRaw: "A",
+    liveFactKeysGrew: false,
+    expected: "noop",
+  },
+  {
+    name: "required case 7 (Plans/Lightning/days symmetry) — a days[]-shaped payload (JSON array raw string) goes through the identical decision: surviving fact disagrees, commits and retires, same as the Plans/Lightning-shaped cases above",
+    canonicalRaw: JSON.stringify(["day-1", "day-2"]),
+    baselineFactRawValues: [JSON.stringify(["day-1", "day-2", "day-3"])],
+    nextRaw: JSON.stringify(["day-1", "day-2"]),
+    liveFactKeysGrew: false,
+    expected: "committed",
+  },
+];
+
+// ===== COMMIT-TIME AUTHORITY GATE ORDER (SH.2.2, Codex P1 follow-up +
+// second follow-up rounds) =====
+//
+// Codex found that SH.2.2's original commit-time revalidation ran ONLY at
+// the page level, BEFORE calling commitLocalDomainRaw() — but that
+// function can then itself wait on the Web Lock (navigator.locks.request())
+// if another writer (this tab's own concurrent commit, or another tab's)
+// currently holds this key's lock. Confirmed authority can advance DURING
+// that wait (an already-in-flight push resolves and confirms a newer
+// revision) without ever touching this key's canonical bytes — so the
+// raw-value CAS still passes — and without advancing the pull epoch — so a
+// caller's own `isStillValid` (isPullContextCurrent) still passes too.
+// Neither existing gate can observe a page-level-only pre-check's own blind
+// spot: the LOCK WAIT ITSELF, which only commitLocalDomainRaw() can see.
+//
+// The FIRST follow-up round added `isAuthorityStillValid` as a FIFTH
+// commitLocalDomainRaw() parameter, checked INSIDE the lock — but only on
+// the path to a "committed" return; a "noop" (canonical bytes already
+// equal `nextRaw`) still returned immediately, bypassing `isStillValid`,
+// the edit-fact re-scan, AND `isAuthorityStillValid` entirely. Since
+// isLocalDomainCommitSuccess() treats "noop" and "committed" identically,
+// this let a stale pull be reported successful — reopening syncReady and
+// continuing from an obsolete server revision — purely because the bytes
+// it wanted to write already happened to already be on disk.
+//
+// The SECOND follow-up round (modeled below) closes this: a "noop"
+// verdict (`decideLocalDomainCommit()` says "noop" AND
+// resolveEffectiveDurableRaw() agrees with `nextRaw`) now only sets a flag
+// (`isSafeNoop`) — it does NOT return early. The corrected gate order,
+// evaluated UNCONDITIONALLY on the path to ANY success return ("noop" OR
+// "committed"): canonical CAS ("superseded") -> compute `isSafeNoop` (never
+// returns) -> `isStillValid` ("aborted") -> edit-fact re-scan
+// ("superseded") -> `isAuthorityStillValid` ("authority-superseded") ->
+// `isSafeNoop`? ("noop") : write + retire ("committed"). A genuine local
+// edit or a stale pull/auth/profile context still wins over a commit-time
+// authority regression, and BOTH still win over a would-be noop being
+// reported as success (required cases 1, 3, 4) — never the reverse.
+// "authority-superseded" is a DISTINCT status from "superseded" (see
+// LocalDomainCommitStatus in syncHelper.ts) — never conflated — so a
+// caller can still log/report which kind of commit-time race actually
+// happened, even though both route through the SAME SH.2.2 one-shot
+// recovery decision once resolved back at the page level (a fresh
+// revalidateAuthorityBeforeCommit() re-scan for "authority-superseded",
+// reusing the already-established "stale-response"/"conflict"/
+// "unusable-response" reasons; decideStaleResponseRecovery()'s
+// "local-edit-superseded" reason above for a genuine CAS "superseded").
+// Retirement of edit facts happens ONLY on the actual "committed" write —
+// never on "noop" (genuine or otherwise unaffected by this round), and the
+// authority check itself never reads/writes/retires any edit fact — it is
+// a pure boolean gate, identical in shape to `isStillValid`.
+//
+// The cases below model the EXACT gate sequence commitLocalDomainRaw()
+// evaluates — composing the SAME real decideLocalDomainCommit()/
+// resolveEffectiveDurableRaw() production primitives for the canonical-CAS
+// and noop-safety gates (unchanged, untouched by this round), plus the
+// THREE caller-supplied boolean predicates
+// (isStillValid/editFactGrew/isAuthorityStillValid) commitLocalDomainRaw()
+// itself receives as closures — reduced to the exact order that function
+// evaluates them in, never a reimplementation of the decision. Deliberately
+// NOT a new production function, matching the SAME "fix centrally in the
+// existing primitive" precedent the HYDRATION NOOP SAFETY cases above
+// already established.
+export type CommitTimeGateOutcome = "noop" | "committed" | "superseded" | "authority-superseded" | "aborted";
+
+/**
+ * Reference cases for commitLocalDomainRaw()'s full gate sequence,
+ * INCLUDING the SH.2.2 Codex P1 follow-up round's `isAuthorityStillValid`
+ * gate and the second follow-up round's fix (a "noop" verdict is no longer
+ * an early exit that bypasses it) — the REQUIRED cases from both rounds'
+ * architectural contract. Run from Node:
+ *   import { DEV_COMMIT_TIME_AUTHORITY_GATE_CASES, decideLocalDomainCommit, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_COMMIT_TIME_AUTHORITY_GATE_CASES.forEach(c => {
+ *     let got;
+ *     const decision = decideLocalDomainCommit(c.currentRaw, c.expectedPreviousRaw, c.nextRaw);
+ *     if (decision === "superseded") {
+ *       got = "superseded";
+ *     } else {
+ *       const isSafeNoop =
+ *         decision === "noop" && resolveEffectiveDurableRaw(c.currentRaw, c.baselineFactRawValues) === c.nextRaw;
+ *       if (!c.isStillValid) got = "aborted";
+ *       else if (c.editFactGrew) got = "superseded";
+ *       else if (!c.isAuthorityStillValid) got = "authority-superseded";
+ *       else got = isSafeNoop ? "noop" : "committed";
+ *     }
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_COMMIT_TIME_AUTHORITY_GATE_CASES: Array<{
+  name: string;
+  currentRaw: string | null;
+  expectedPreviousRaw: string | null;
+  nextRaw: string;
+  baselineFactRawValues: string[];
+  isStillValid: boolean;
+  editFactGrew: boolean;
+  isAuthorityStillValid: boolean;
+  expected: CommitTimeGateOutcome;
+}> = [
+  {
+    name: "required case 1 — bytes already on disk are noop-eligible (rev7 winner), but confirmed rev8 lands while this commit waits for the lock: NOT reported as noop — authority-superseded instead, so the caller's page-level pull effect schedules exactly one fresh replacement pull",
+    currentRaw: "REV7-WINNER",
+    expectedPreviousRaw: "REV7-WINNER",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "authority-superseded",
+  },
+  {
+    name: "required case 2 — authority unchanged while waiting for the lock, effective durable value already equals nextRaw: safe noop",
+    currentRaw: "REV7-WINNER",
+    expectedPreviousRaw: "REV7-WINNER",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: true,
+    expected: "noop",
+  },
+  {
+    name: "required case 3 — a genuine local edit lands while waiting for the lock (edit-fact keyspace grew) for what would otherwise be a safe noop, AND authority also went stale in the SAME window: the existing local-edit supersession still takes precedence — reported as 'superseded', never 'noop' or 'authority-superseded', and the edit itself survives untouched (this gate only compares key sets, it never retires anything)",
+    currentRaw: "REV7-WINNER",
+    expectedPreviousRaw: "REV7-WINNER",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: true,
+    isAuthorityStillValid: false,
+    expected: "superseded",
+  },
+  {
+    name: "required case 4 — auth/profile/pull context goes stale while waiting for the lock, for what would otherwise be a safe noop: aborted — no success and no retry scheduled from the old context (isStillValid is checked before isAuthorityStillValid is ever consulted)",
+    currentRaw: "REV7-WINNER",
+    expectedPreviousRaw: "REV7-WINNER",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: false,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "aborted",
+  },
+  {
+    name: "canonical CAS still takes absolute priority over a would-be noop — a genuinely different canonical value already on disk reports 'superseded' before isStillValid/editFactGrew/isAuthorityStillValid are ever consulted, exactly as before this round",
+    currentRaw: "SOMEONE-ELSES-NEWER-VALUE",
+    expectedPreviousRaw: "REV7-WINNER",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "superseded",
+  },
+  {
+    name: "required case 5 — actual persistence failure behavior unaffected by this round: a genuine WRITE decision (canonical bytes differ from nextRaw) with authority stale reports authority-superseded, symmetric with the noop case above — this was already correct in the first follow-up round",
+    currentRaw: "DISK-BYTES",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "authority-superseded",
+  },
+  {
+    name: "no authority change + a genuine WRITE decision: normal commit succeeds, unchanged from before this round",
+    currentRaw: "DISK-BYTES",
+    expectedPreviousRaw: "DISK-BYTES",
+    nextRaw: "REV7-WINNER",
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: true,
+    expected: "committed",
+  },
+  {
+    name: "HYDRATION NOOP MUST NOT OUTRANK A SURVIVING FACT still holds, unaffected by this round — a byte-level noop with a genuinely disagreeing surviving fact falls through to the write-and-retire path (idempotent canonical rewrite + fact retirement) even with authority valid, since it was never a SAFE noop to begin with",
+    currentRaw: "A",
+    expectedPreviousRaw: "A",
+    nextRaw: "A",
+    baselineFactRawValues: ["B"],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: true,
+    expected: "committed",
+  },
+  {
+    name: "required case 6 (Plans/Lightning/days symmetry) — a days[]-shaped noop-eligible payload goes through the identical corrected gate order: authority regression at the last gate still reports authority-superseded, never a stale noop",
+    currentRaw: JSON.stringify(["day-1", "day-2"]),
+    expectedPreviousRaw: JSON.stringify(["day-1", "day-2"]),
+    nextRaw: JSON.stringify(["day-1", "day-2"]),
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: false,
+    expected: "authority-superseded",
+  },
+  {
+    name: "required case 6 (Plans/Lightning/days symmetry) — the SAME days[]-shaped payload with authority still valid: safe noop, exactly like the Plans/Lightning-shaped case above",
+    currentRaw: JSON.stringify(["day-1", "day-2"]),
+    expectedPreviousRaw: JSON.stringify(["day-1", "day-2"]),
+    nextRaw: JSON.stringify(["day-1", "day-2"]),
+    baselineFactRawValues: [],
+    isStillValid: true,
+    editFactGrew: false,
+    isAuthorityStillValid: true,
+    expected: "noop",
+  },
+];
+
