@@ -78,16 +78,18 @@ function formatRelativeTime(isoString: string): string {
   return `${diffDay} day${diffDay === 1 ? "" : "s"} ago`;
 }
 
-const SYNC_STATUS_COLOR: Record<"idle" | "syncing" | "error", string> = {
+const SYNC_STATUS_COLOR: Record<"idle" | "syncing" | "error" | "unresolved", string> = {
   idle: "#6b7280",
   syncing: "#2563eb",
   error: "#dc2626",
+  unresolved: "#d97706",
 };
 
-const SYNC_STATUS_LABEL: Record<"idle" | "syncing" | "error", string> = {
+const SYNC_STATUS_LABEL: Record<"idle" | "syncing" | "error" | "unresolved", string> = {
   idle: "Idle",
   syncing: "Syncing\u2026",
   error: "Error",
+  unresolved: "Confirming\u2026",
 };
 
 /** Minimum ms "Syncing…" remains visible — prevents sub-100ms flicker. */
