@@ -1146,6 +1146,149 @@ export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
   },
 ];
 
+// ===== Pending-operation domain evidence (SH.2.3 — Unresolved Write
+// Provenance & Operation Recovery) =====================================
+//
+// SH.2.2 left ordinary PUT pushes and unload beacons as two superficially
+// similar but structurally different recovery paths: a beacon always
+// registered a pending opId (syncHelper.ts's addPendingOp) before this
+// device lost the ability to observe its outcome, but an ordinary PUT
+// (doPush() in syncHelper.ts) only registered its opId AFTER fetch()
+// resolved — a connection drop between the server committing the write and
+// the response arriving lost the evidence entirely, even though the server
+// itself has a durable, server-verifiable record (see
+// acceptedDomainFactsFromBeacon()'s own doc above) that this device could
+// have reconciled on its next pull.
+//
+// A second, subtler gap survived even once BOTH paths register before
+// sending: reconcilePendingOperations() (syncHelper.ts) already resolves an
+// accepted op against THIS PULL'S OWN CURRENT cloud snapshot/revision —
+// never the operation's own stale payload — so an accepted op that cloud
+// has since moved past (op A accepted, then device Y pushes B) correctly
+// promotes the CONFIRMED baseline to B, not back to A. But confirmed-
+// baseline promotion alone does not explain why THIS device's own canonical
+// storage still holds A's bytes: a pull's winner-selection compares fresh
+// disk content against that baseline, and A's own edit-fact (created when
+// the local edit that produced A was made — see LOCAL-EDIT FACT LIFECYCLE
+// in syncHelper.ts) is still "surviving" (no local write has retired it —
+// only a hydration COMMIT does that, and none has run yet), which is an
+// ABSOLUTE VETO against treating A as anything but a fresh, unresolved
+// local edit. Without a way to recognize "A is this operation's own,
+// now-resolved content — not a still-pending user intent", winner selection
+// would treat A as a genuine edit and push it right back over B, silently
+// reverting the change B represents.
+//
+// isPendingOpDomainEvidenceCurrent() is the pure decision this closes: an
+// operation's own per-domain evidence, captured at send time (its own
+// value, plus the SNAPSHOT of local-edit-fact keys that existed for that
+// domain's canonical key at that moment — its "edit-fact frontier"), is
+// still the CURRENT explanation for a domain's local content only when
+// BOTH:
+//   • no edit-fact key exists right now that wasn't already in that
+//     frontier (mirrors commitLocalDomainRaw's own baselineEditFactIds
+//     re-validation) — a NEWER key means a genuine local edit happened
+//     since this operation was sent, and that edit must remain local-first,
+//     full stop, regardless of what its bytes happen to be (a revert to
+//     the exact same content is still a genuine, newer edit — see
+//     hasSurvivingEditFact's own doc in syncHelper.ts for why value-only
+//     matching can never stand in for this causal check); AND
+//   • the domain's current value still canonically equals the operation's
+//     own recorded value — belt-and-suspenders: closes the case where some
+//     OTHER writer (a hydration commit) already retired the frontier AND
+//     moved the canonical key on to a third value, which would otherwise
+//     look "frontier-intact" (nothing newer landed FROM AN EDIT) but is not
+//     this operation's content anymore.
+// When both hold, the caller (reconcilePendingOperations()) may safely
+// retire that domain's edit-fact(s) — the same LOCAL-EDIT FACT LIFECYCLE
+// retirement a hydration commit performs — and record the operation's own
+// value as hydration-provenance-equivalent evidence (recordHydrationProvenance()
+// in syncHelper.ts — the SAME non-authoritative provenance store SH.2.2
+// built for reconciled-but-not-pure-cloud hydration winners; reused here
+// rather than inventing a parallel one, per this phase's "one
+// operation-lifecycle model" requirement), so a subsequent pull's
+// hydration-provenance check recognizes A as explained and lets whatever
+// the CURRENT confirmed baseline is (B, if cloud has advanced) win
+// normally, instead of misreading stale-but-accepted A as fresh intent.
+export interface PendingOpDomainEvidence {
+  value: unknown;
+  editFactKeys: string[];
+}
+
+export interface PendingOpRecord {
+  opId: string;
+  domains: Partial<Record<"plans" | "lightning" | "days", PendingOpDomainEvidence>>;
+}
+
+export function isPendingOpDomainEvidenceCurrent(
+  currentEditFactKeys: string[],
+  frontierEditFactKeys: string[],
+  currentValue: unknown,
+  operationValue: unknown
+): boolean {
+  const frontier = new Set(frontierEditFactKeys);
+  const frontierIntact = currentEditFactKeys.every((key) => frontier.has(key));
+  if (!frontierIntact) return false;
+  return canonicalizeJSON(currentValue) === canonicalizeJSON(operationValue);
+}
+
+/**
+ * Reference cases for isPendingOpDomainEvidenceCurrent(). Run from Node:
+ *   import { DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES, isPendingOpDomainEvidenceCurrent } from "@/lib/syncPayload";
+ *   DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES.forEach(c => {
+ *     const got = isPendingOpDomainEvidenceCurrent(c.currentEditFactKeys, c.frontierEditFactKeys, c.currentValue, c.operationValue);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES: Array<{
+  name: string;
+  currentEditFactKeys: string[];
+  frontierEditFactKeys: string[];
+  currentValue: unknown;
+  operationValue: unknown;
+  expected: boolean;
+}> = [
+  {
+    name: "required — no edit since send, content still matches: evidence current, safe to retire+record",
+    currentEditFactKeys: ["dwp:localEditFact:k:e1"],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["A"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: true,
+  },
+  {
+    name: "required — both empty frontiers (no edit fact ever existed) and content matches: still current",
+    currentEditFactKeys: [],
+    frontierEditFactKeys: [],
+    currentValue: ["day-1"],
+    operationValue: ["day-1"],
+    expected: true,
+  },
+  {
+    name: "required — a NEWER edit-fact key exists beyond the frontier: genuine local edit, never treated as resolved even if bytes happen to match (revert case)",
+    currentEditFactKeys: ["dwp:localEditFact:k:e1", "dwp:localEditFact:k:e2-newer"],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["A"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "required — frontier's own key was already retired by something else (e.g. a hydration commit) and canonical moved on to a third value: not this operation's content anymore",
+    currentEditFactKeys: [],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["C-from-elsewhere"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "frontier intact but content diverges (defensive belt-and-suspenders case): not current",
+    currentEditFactKeys: ["dwp:localEditFact:k:e1"],
+    frontierEditFactKeys: ["dwp:localEditFact:k:e1"],
+    currentValue: { version: 1, items: ["B"] },
+    operationValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+];
+
 // ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
 
 /**

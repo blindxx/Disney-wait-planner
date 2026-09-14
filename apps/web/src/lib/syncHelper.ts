@@ -343,7 +343,39 @@ Reviewers should check any changes affecting:
  *                                                         key write/delete
  *                                                         that can never
  *                                                         race or clobber a
- *                                                         DIFFERENT op's key
+ *                                                         DIFFERENT op's key.
+ *                                                         SH.2.3 — the VALUE
+ *                                                         stored at this key
+ *                                                         is now a
+ *                                                         JSON-serialized
+ *                                                         PendingOpRecord
+ *                                                         (opId + this
+ *                                                         operation's own
+ *                                                         per-domain
+ *                                                         evidence — see
+ *                                                         buildPendingOpDomains()/
+ *                                                         getPendingOpRecord()
+ *                                                         below), not the
+ *                                                         bare opId string
+ *                                                         the 9th round
+ *                                                         wrote; every
+ *                                                         reader that only
+ *                                                         needs the SET OF
+ *                                                         opIds (listPendingOps,
+ *                                                         selectPendingOpBatch)
+ *                                                         still derives it
+ *                                                         from the KEY
+ *                                                         suffix, unaffected
+ *                                                         by this value
+ *                                                         format change. A
+ *                                                         pre-SH.2.3 entry
+ *                                                         (bare opId as the
+ *                                                         value) still reads
+ *                                                         back safely via
+ *                                                         getPendingOpRecord()'s
+ *                                                         own JSON.parse
+ *                                                         failure fallback —
+ *                                                         see its own doc.
  *   dwp:sync:{userId}:{profileId}:pendingOpCursor      — the ROTATION
  *                                                         CURSOR
  *                                                         selectPendingOpBatch()
@@ -756,12 +788,14 @@ import {
   isProfileOwnedSyncKey,
   confirmedDomainResultsEqual,
   resolveHydrationApplyIntentDisposition,
+  isPendingOpDomainEvidenceCurrent,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
   type ConfirmedDomainResult,
   type AcceptedPlannerDomains,
   type HydrationApplyIntent,
+  type PendingOpRecord,
 } from "./syncPayload";
 
 /**
@@ -2795,10 +2829,107 @@ export function listPendingOps(userId: string, profileId: string): string[] {
   return snapshotKeysWithPrefix(prefix).map((key) => key.slice(prefix.length));
 }
 
-function addPendingOp(userId: string, profileId: string, opId: string): void {
+/**
+ * SH.2.3 — the canonical localStorage key for a synced domain, keyed only
+ * by profileId (matches buildPayloadFromStorage's own reads) — used to
+ * locate a domain's local-edit-fact keyspace (localEditFactPrefix below)
+ * when capturing or re-checking a pending operation's own per-domain
+ * evidence. `ConfirmedDomainName` and the payload's own domain field names
+ * ("plans"/"lightning"/"days") are deliberately identical strings.
+ */
+function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): string {
+  return buildNamespacedKey(profileId, domain);
+}
+
+/**
+ * SH.2.3 — captures a pending operation's own per-domain evidence AT SEND
+ * TIME, right before it is persisted (addPendingOp) and the request is
+ * actually sent: each domain's own value from the payload just built, plus
+ * the SNAPSHOT of local-edit-fact keys currently present for that domain's
+ * canonical key (this operation's own "edit-fact frontier" — the SAME kind
+ * of snapshot commitLocalDomainRaw's own `baselineEditFactIds` takes, just
+ * from the SEND side rather than the WRITE side). See
+ * isPendingOpDomainEvidenceCurrent()'s own doc in syncPayload.ts for why
+ * this frontier is what lets reconcilePendingOperations() later tell "this
+ * operation's own now-resolved content" apart from "a genuine local edit
+ * made after it" — never from content alone.
+ */
+function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload): PendingOpRecord["domains"] {
+  const domains: PendingOpRecord["domains"] = {
+    plans: {
+      value: payload.plans,
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "plans"))),
+    },
+    lightning: {
+      value: payload.lightning,
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "lightning"))),
+    },
+  };
+  if (payload.days !== undefined) {
+    domains.days = {
+      value: payload.days,
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "days"))),
+    };
+  }
+  return domains;
+}
+
+/**
+ * SH.2.3 — registers a pending operation's full evidence record (not merely
+ * its opId, as before this phase — see this phase's own module note above
+ * "Pending-operation domain evidence" doc in syncPayload.ts) under its
+ * existing per-opId key. `domains` is `null` for a caller that has no
+ * per-domain evidence to attach (there is none today — every caller now
+ * builds one via buildPendingOpDomains() — but the parameter stays
+ * optional so a record without evidence still round-trips through
+ * getPendingOpRecord() exactly like a pre-SH.2.3 legacy entry would).
+ * Still a single unconditional setItem — see pendingOpKeyForIdentity's own
+ * doc above for why this can never race a DIFFERENT op's key.
+ */
+function addPendingOp(
+  userId: string,
+  profileId: string,
+  opId: string,
+  domains: PendingOpRecord["domains"] | null = null
+): void {
   try {
-    localStorage.setItem(pendingOpKeyForIdentity(userId, profileId, opId), opId);
+    const record: PendingOpRecord = { opId, domains: domains ?? {} };
+    localStorage.setItem(pendingOpKeyForIdentity(userId, profileId, opId), JSON.stringify(record));
   } catch {}
+}
+
+/**
+ * SH.2.3 — reads a pending operation's full evidence record. Handles TWO
+ * legacy/degraded shapes gracefully, both falling back to "no per-domain
+ * evidence available" rather than throwing or treating the op as absent:
+ * a pre-SH.2.3 entry (this key's value was the bare opId string, not JSON —
+ * JSON.parse throws) and a value that parses but doesn't match the expected
+ * shape (defensive). Either way the caller still gets a valid record with
+ * `domains: {}`, so reconcilePendingOperations() simply skips the
+ * retire+record step for every domain (no evidence to check) while still
+ * retiring the pending-op key itself once accepted — exactly the pre-SH.2.3
+ * behavior for an op registered before this phase shipped.
+ */
+function getPendingOpRecord(userId: string, profileId: string, opId: string): PendingOpRecord {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(pendingOpKeyForIdentity(userId, profileId, opId));
+  } catch {}
+  if (raw !== null) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        typeof (parsed as Record<string, unknown>).opId === "string" &&
+        typeof (parsed as Record<string, unknown>).domains === "object" &&
+        (parsed as Record<string, unknown>).domains !== null
+      ) {
+        return parsed as PendingOpRecord;
+      }
+    } catch {}
+  }
+  return { opId, domains: {} };
 }
 
 function removePendingOp(userId: string, profileId: string, opId: string): void {
@@ -2996,6 +3127,74 @@ export async function reconcilePendingOperations(
   // being retired speculatively, and the caller must fail this pull closed.
   if (!allOk) return false;
   for (const opId of acceptedOpIds) {
+    // SH.2.3 — before retiring this op's pending-evidence key, check
+    // whether its OWN captured per-domain evidence is still the CURRENT
+    // explanation for that domain's local content (see
+    // isPendingOpDomainEvidenceCurrent()'s own doc in syncPayload.ts for
+    // the full rationale). This is what stops an accepted-but-now-stale
+    // operation's payload from being misread as a fresh local edit on a
+    // LATER pull, once confirmed authority has advanced past it (op A
+    // accepted here, then device Y's B becomes the newer confirmed
+    // baseline): without this, A's own still-surviving local-edit fact
+    // would remain an absolute veto against recognizing A as resolved, and
+    // winner selection would push stale A right back over newer B.
+    //
+    // Best-effort: a failure here never blocks retiring the pending-op key
+    // itself below — the op's core "was it accepted" fact is already
+    // durably promoted via commitConfirmedBaseline() above regardless, and
+    // the worst case of skipping this step is a redundant local-first
+    // re-push of still-unexplained content next cycle, never a destructive
+    // one (see this function's own PULL OUTCOME CONTRACT doc above).
+    try {
+      const record = getPendingOpRecord(userId, profileId, opId);
+      for (const domain of CONFIRMED_DOMAIN_NAMES) {
+        const evidence = record.domains[domain];
+        if (!evidence) continue;
+        const key = domainCanonicalKey(profileId, domain);
+        const currentEditFactKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
+        // Read via the SAME normalization buildPayloadFromStorage() used to
+        // produce `evidence.value` in the first place (parseLocalDatasetEntry
+        // for plans/lightning, a plain array for days) — comparing raw JSON
+        // directly would spuriously disagree with a legacy array-only shape
+        // still on disk for plans/lightning even when it represents the
+        // identical dataset this operation sent.
+        let currentValue: unknown = null;
+        try {
+          const currentRaw = readLatestDurableValue(key);
+          if (domain === "days") {
+            const parsed: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
+            currentValue = Array.isArray(parsed) ? parsed : null;
+          } else {
+            currentValue = parseLocalDatasetEntry(currentRaw);
+          }
+        } catch {
+          currentValue = null;
+        }
+        const isCurrent = isPendingOpDomainEvidenceCurrent(
+          currentEditFactKeys,
+          evidence.editFactKeys,
+          currentValue,
+          evidence.value
+        );
+        if (!isCurrent) continue;
+        // No genuine local edit has landed since this operation was sent —
+        // its own edit-fact(s) are resolved: retire them (the SAME
+        // LOCAL-EDIT FACT LIFECYCLE retirement a hydration commit performs
+        // — see commitLocalDomainRaw's own doc above) and record the
+        // operation's own value as hydration-provenance-equivalent
+        // evidence, so a subsequent pull's winner selection recognizes this
+        // domain's still-on-disk bytes as explained rather than a fresh
+        // edit, and defers to whatever the CURRENT confirmed baseline is.
+        for (const factKey of currentEditFactKeys) {
+          try {
+            localStorage.removeItem(factKey);
+          } catch {}
+        }
+        try {
+          await recordHydrationProvenance(userId, profileId, domain, resolved.revision, evidence.value);
+        } catch {}
+      }
+    } catch {}
     removePendingOp(userId, profileId, opId);
   }
   return true;
@@ -3364,12 +3563,25 @@ export function registerUnloadSync(): () => void {
     const body = JSON.stringify(payload);
     if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
     const opId = generateOpId();
+    // SH.2.3 — persist this beacon's pending evidence BEFORE calling
+    // sendBeacon(), not after it returns: sendBeacon()'s own return value
+    // only tells us the browser accepted the request for background
+    // delivery (see this function's own doc above), and a beforeunload
+    // handler can itself be interrupted by page teardown at any statement
+    // boundary — registering first, then undoing the registration if the
+    // browser never actually queued it (below), closes that ordering gap
+    // the same way doPush() now does for ordinary PUTs.
+    if (userId) {
+      addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+    }
     const queued = navigator.sendBeacon(
       `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}`,
       new Blob([body], { type: "application/json" })
     );
-    if (queued && userId) {
-      addPendingOp(userId, profileId, opId);
+    if (!queued && userId) {
+      // Never actually sent — nothing for a later pull to reconcile, so
+      // don't leave phantom pending-op evidence behind.
+      removePendingOp(userId, profileId, opId);
     }
   };
 
@@ -3513,20 +3725,39 @@ async function doPush(): Promise<void> {
   const body = JSON.stringify(payload);
   if (new TextEncoder().encode(body).length > MAX_SYNC_BYTES) return;
 
-  // SH.2.2 ("fail closed when push confirmation is not durable" round) —
-  // every push is now tagged with its own clientOpId, exactly like
-  // registerUnloadSync()'s beacon already is: if the response below turns
-  // out NOT to be durably confirmable locally (a malformed/missing
-  // `revision`, or commitConfirmedBaseline() itself reporting a conflict),
-  // this SAME opId is registered as a pending operation (addPendingOp) so
-  // the next successful pull's reconcilePendingOperations() resolves it
-  // conclusively against the server's own state — the identical, already-
-  // durable mechanism the beacon path has always relied on for exactly
-  // this "server accepted it, this device doesn't yet know for certain"
-  // gap. An ordinary push that DOES confirm synchronously below never
-  // touches the pending-op store at all — this tag costs nothing beyond a
-  // harmless extra ledger row on the server.
+  // SH.2.3 ("persist pending evidence before sending" fix) — every push is
+  // tagged with its own clientOpId and, when an identity is known,
+  // registered as a pending operation BEFORE fetch() is ever called — not
+  // after it resolves (the SH.2.2-era version of this function only
+  // registered on a confirmed-non-durable response, which meant a
+  // connection drop between the server committing this write and its
+  // response arriving lost the evidence entirely: the server has a durable,
+  // server-verifiable record of this write via `clientOpId`, but this
+  // device would have had no pending-op key to hand a later pull as
+  // `lastOpId`, so that record could never be reconciled). Registering
+  // unconditionally, before the request is even sent, is what "every
+  // network write whose outcome can become uncertain must have durable
+  // per-operation evidence BEFORE it can reach the server" (this phase's
+  // own target model) requires — exactly mirroring what
+  // registerUnloadSync()'s beacon now also does below. `domains` (built
+  // from THIS payload, right now) is the per-domain evidence
+  // reconcilePendingOperations() later uses to tell this operation's own,
+  // now-resolved content apart from a genuine local edit made after it —
+  // see buildPendingOpDomains()'s and isPendingOpDomainEvidenceCurrent()'s
+  // own docs above/syncPayload.ts.
+  //
+  // If the response below DOES confirm durably (synchronously, in this
+  // same call), the op is retired immediately — see `confirmedDurably`
+  // below — rather than left for a later pull to rediscover; if it does
+  // not (a malformed/missing revision, a genuine recordConfirmedFact
+  // conflict, a non-2xx response, or the fetch itself throwing), the
+  // already-durable pending-op record is exactly what lets the next
+  // successful pull's reconcilePendingOperations() resolve it conclusively
+  // against the server's own state.
   const opId = generateOpId();
+  if (userId) {
+    addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+  }
 
   inFlight = true;
   // Mark syncing for the originating profile. This write is intentionally
@@ -3605,8 +3836,17 @@ async function doPush(): Promise<void> {
           // stays false, handled identically to any other non-durable
           // outcome below.
         }
-        if (!confirmedDurably) {
-          addPendingOp(userId, profileId, opId);
+        // SH.2.3 — this op was already registered as pending BEFORE the
+        // request was sent (above); retire it now only on PROVEN durable
+        // confirmation, never merely because the request returned (see this
+        // function's own doc above and reconcilePendingOperations' PULL
+        // OUTCOME CONTRACT doc for why "the request returned" and "the
+        // outcome is durably known" are deliberately different gates). When
+        // it is NOT durable, the already-registered record is left exactly
+        // as pending as it always was — no redundant re-registration
+        // needed.
+        if (confirmedDurably) {
+          removePendingOp(userId, profileId, opId);
         }
       }
       // Status writes are best-effort; event dispatch MUST always execute.
