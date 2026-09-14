@@ -2483,6 +2483,31 @@ export function hasHydrationProvenanceMatch(
 // two back-to-back synchronous statements with no further `await` between
 // them, and giving a future reload durable evidence to reconcile even a
 // genuine interruption in that narrow window.
+//
+// REQUIRED PRECONDITION (SH.2.2, Codex P1 "require the hydration intent
+// before mutating" round) — when `provenance` is non-null (this commit, if
+// it succeeds, WILL attempt a follow-up confirmed/hydration-provenance
+// write, opening the exact gap the intent marker exists to cover), durably
+// storing that marker is no longer best-effort: a `localStorage.setItem`
+// failure here now reports "provenance-write-failed" and returns
+// IMMEDIATELY, BEFORE commitLocalDomainRaw() is ever called — canonical
+// storage is never touched. Root cause this closes: the marker used to be
+// written inside a swallowing try/catch and this function proceeded
+// regardless of whether it landed. If that write failed (e.g. a transient
+// quota error affecting only THIS new key) but the canonical mutation
+// itself then succeeded, AND the follow-up provenance write also failed
+// (a correlated quota exhaustion is the realistic case — overwriting an
+// EXISTING canonical key needs no new space, but two NEW small keys next
+// to it can each independently fail), a reload would find durably-mutated
+// canonical bytes with NO marker at all to explain them — silently
+// defeating the very crash/reload-safety mechanism this round's own prior
+// pass built. Requiring the marker as a precondition means: whenever this
+// function's canonical write can actually happen, the durable evidence
+// needed to recover from a worse failure later in the SAME call already
+// exists on disk first. `provenance === null` commits are unaffected —
+// they never attempt a follow-up provenance write, so there is no gap for
+// a marker to cover, and none is written (unchanged from before this
+// round).
 export type DomainHydrationCommitStatus =
   | "committed"
   | "noop"
@@ -2587,10 +2612,20 @@ export async function commitDomainHydration(input: {
       }
       const intentKey = hydrationApplyIntentKey(userId, profileId, domain);
       if (provenance) {
+        // SH.2.2 (Codex P1 "require the hydration intent before mutating"
+        // round) — REQUIRED PRECONDITION, not best-effort: see this
+        // section's own doc above for the full root-cause. A failure to
+        // durably store the marker aborts BEFORE commitLocalDomainRaw() is
+        // ever called — canonical storage is guaranteed untouched.
+        let intentStored = false;
         try {
           const intent: HydrationApplyIntent = { key, revision: provenance.revision, nextRaw };
           localStorage.setItem(intentKey, JSON.stringify(intent));
+          intentStored = true;
         } catch {}
+        if (!intentStored) {
+          return { status: "provenance-write-failed", authority: freshAuthority };
+        }
       }
       // commitLocalDomainRaw()'s own `isAuthorityStillValid` parameter is
       // left at its default (always-valid) — see this section's own doc
