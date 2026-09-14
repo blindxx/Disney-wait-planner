@@ -791,6 +791,7 @@ import {
   isPendingOpDomainEvidenceCurrent,
   canonicalDigest,
   planHydrationProvenanceDedup,
+  isHydrationProvenanceFactObsoleteAfterConfirm,
   type SyncedPlannerPayload,
   type ConfirmedDomainFact,
   type ConfirmedPlannerState,
@@ -2125,25 +2126,73 @@ function recordConfirmedFactBody(
     // to a failure, and never blocks pruning from being retried on a
     // later call.
   }
-  // SH.2.2 (Codex P1 "prune superseded hydration provenance" round) —
-  // CROSS-STORE prune: genuine CONFIRMED authority now exists for this
-  // domain AT this revision (this call's own CAS-protected commit
-  // already proved the canonical key holds exactly what this write
-  // recorded), so any hydration-provenance record AT OR BELOW this
-  // revision — from any writer, this tab or another — can never again
-  // explain current disk content. `<=`, not `<`: unlike hydration
-  // provenance's OWN self-pruning (which preserves same-revision
-  // siblings from a genuinely concurrent writer, since neither can prove
-  // the other is stale), confirmed authority is a strictly stronger,
-  // single-truth signal that supersedes even same-revision hydration
-  // records — see pruneHydrationProvenanceFacts's own doc below. Runs
-  // regardless of this call's own `success` flag: a confirmed-fact
-  // AMBIGUITY (two different values at the same revision) is a separate
-  // question from whether disk has moved past older hydration bytes,
-  // which this write's own successful CAS-protected commit already
-  // settled independently.
+  // SH.2.2 (Codex P1 "prune superseded hydration provenance" round),
+  // corrected by SH.2.3 (Codex P1 "preserve hydration provenance that
+  // still describes canonical local storage" round) — CROSS-STORE prune:
+  // recording a confirmed fact for THIS domain at THIS revision is NOT, by
+  // itself, proof that every hydration-provenance record at or below that
+  // revision is obsolete. That was only ever true for the caller where a
+  // CAS-protected canonical WRITE to this SAME key just happened in this
+  // SAME held lock (commitDomainHydration()'s pure-cloud-value branch,
+  // immediately before it calls this function) — commitConfirmedBaseline()
+  // (doPush()'s synchronous confirmation, and reconcilePendingOperations()'s
+  // accepted-operation reconciliation, both calling THIS SAME shared body)
+  // never writes canonical storage at all: it records whatever a domain's
+  // canonical value already was at an earlier moment, and — because the
+  // combined payload always includes plans+lightning together — routinely
+  // confirms a domain the current write never touched. If a PRIOR pull had
+  // persisted a non-pure reconciled value for that untouched domain
+  // (recorded only as hydration provenance — see isExactCloudValue()'s own
+  // doc for why a reconciled value is never eligible for confirmed
+  // authority), that value is STILL sitting on canonical storage right now,
+  // completely unrelated to whatever THIS confirm's own value says — and a
+  // blind `<= revision` sweep would delete the ONLY record that explains it,
+  // leaving it to be misread as a fresh local edit and pushed back over
+  // newer cloud data by whichever pull looks next.
+  //
+  // The fix: read this domain's CURRENT canonical/durable value fresh,
+  // right now, and prune a hydration-provenance record only when
+  // isHydrationProvenanceFactObsoleteAfterConfirm() (syncPayload.ts) proves
+  // it no longer matches — i.e. canonical storage has actually moved past
+  // it — never merely because a confirm happened. When the original
+  // assumption DOES hold (the hydration-commit caller), current canonical
+  // content trivially equals the newly-confirmed value, so every genuinely
+  // superseded older record is still pruned exactly as before — this is a
+  // strict correction, not a behavior change, for that path. Runs
+  // regardless of this call's own `success` flag, same as before: a
+  // confirmed-fact AMBIGUITY is a separate question from whether any
+  // INDIVIDUAL hydration-provenance record still explains current disk
+  // content, which this check answers directly rather than assuming.
+  //
+  // If the current canonical value itself cannot be reliably read (a
+  // genuine parse failure — see parseLocalDatasetEntry's own doc; a merely
+  // MISSING key is a legitimate empty value, not a failure), this call has
+  // no safe basis to judge ANY record obsolete — per the invariant
+  // ("removed only when proven no longer necessary"), it skips this
+  // domain's cross-store prune entirely rather than guess. Nothing is lost
+  // by skipping: hydration provenance's own self-pruning
+  // (planHydrationProvenanceDedup(), recordHydrationProvenance() below)
+  // independently bounds this store's growth on every future write
+  // regardless of whether this cross-store pass ever fires for it.
   try {
-    pruneHydrationProvenanceFacts(userId, profileId, domain, (r) => r <= revision);
+    const domainKey = domainCanonicalKey(profileId, domain);
+    let currentCanonicalValue: unknown = null;
+    try {
+      const currentRaw = readLatestDurableValue(domainKey);
+      if (domain === "days") {
+        const parsedDays: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
+        currentCanonicalValue = Array.isArray(parsedDays) ? parsedDays : null;
+      } else {
+        currentCanonicalValue = parseLocalDatasetEntry(currentRaw);
+      }
+    } catch {
+      currentCanonicalValue = null;
+    }
+    if (currentCanonicalValue !== null) {
+      pruneHydrationProvenanceFacts(userId, profileId, domain, (factRevision, factValue) =>
+        isHydrationProvenanceFactObsoleteAfterConfirm(factRevision, factValue, revision, currentCanonicalValue)
+      );
+    }
   } catch {}
   return success;
 }
@@ -2385,11 +2434,20 @@ function hydrationProvenanceKey(
  * one, occasionally a few during a real race, never growing across
  * repeated ordinary reconciliations.
  */
+/**
+ * SH.2.3 (Codex P1 "preserve hydration provenance that still describes
+ * canonical local storage" round) — `isPrunable` now receives the fact's OWN
+ * value alongside its revision, not merely its revision: the sole remaining
+ * caller (recordConfirmedFactBody's cross-store prune, below) needs it to
+ * decide obsolescence via isHydrationProvenanceFactObsoleteAfterConfirm()
+ * (syncPayload.ts) rather than a revision-only bound. See that function's
+ * own doc for why a revision-only predicate is no longer sufficient.
+ */
 function pruneHydrationProvenanceFacts(
   userId: string,
   profileId: string,
   domain: ConfirmedDomainName,
-  isPrunable: (factRevision: number) => boolean
+  isPrunable: (factRevision: number, factValue: unknown) => boolean
 ): void {
   for (const key of snapshotKeysWithPrefix(hydrationProvenancePrefix(userId, profileId, domain))) {
     let raw: string | null;
@@ -2407,7 +2465,7 @@ function pruneHydrationProvenanceFacts(
     }
     const fact = parseConfirmedFactForDomain(domain, parsed);
     if (fact === null) continue;
-    if (isPrunable(fact.revision)) {
+    if (isPrunable(fact.revision, fact.value)) {
       try {
         localStorage.removeItem(key);
       } catch {}

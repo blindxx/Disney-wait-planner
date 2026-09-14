@@ -1593,6 +1593,150 @@ export const DEV_HYDRATION_PROVENANCE_DEDUP_CASES: Array<{
   },
 ];
 
+// ===== Cross-store hydration-provenance pruning (SH.2.3 — Codex P1
+// "preserve hydration provenance that still describes canonical local
+// storage" round) ============================================================
+//
+// ROOT ISSUE: recordConfirmedFactBody() (syncHelper.ts) — the shared core
+// behind BOTH commitDomainHydration()'s pure-cloud-value branch AND
+// commitConfirmedBaseline() (called by doPush()'s synchronous confirmation
+// AND by SH.2.3's own reconcilePendingOperations()) — cross-store-prunes
+// EVERY hydration-provenance fact for a domain at `<= revision` the moment
+// it records ANY confirmed fact for that domain at that revision, on the
+// stated assumption that "this call's own [...] commit already proved the
+// canonical key holds exactly what this write recorded" (see
+// pruneHydrationProvenanceFacts's own doc above).
+//
+// That assumption is TRUE for commitDomainHydration()'s call: it happens
+// immediately after commitLocalDomainRaw() has ALREADY CAS-written
+// `nextRaw` to the SAME canonical key, inside the SAME held lock — canonical
+// storage genuinely does hold exactly the confirmed value at that instant.
+// It is FALSE for doPush()'s (and reconcilePendingOperations()'s) call:
+// commitConfirmedBaseline() never writes canonical storage at all — it
+// merely records, as a confirmed fact, whatever a domain's canonical value
+// ALREADY WAS at some earlier moment (payload-build time for doPush(), or
+// "whatever this pull's own cloud snapshot reported" for
+// reconcilePendingOperations()). A pull may previously have persisted a
+// NON-PURE reconciled local value (recorded only as hydration provenance,
+// per isExactCloudValue()'s own doc — never as confirmed authority, since it
+// is not byte-for-byte the literal cloud value) for some OTHER domain in the
+// SAME combined payload. A later, unrelated push (or accepted-operation
+// reconciliation) that confirms a DIFFERENT domain's edit still calls
+// commitConfirmedBaseline() for ALL THREE domains (the combined payload
+// always includes plans+lightning), advancing confirmed authority's
+// revision ceiling for the untouched domain too — even though canonical
+// local storage for THAT domain was never touched, is still the earlier
+// non-pure reconciled value, and is NOT reliably what the newly-recorded
+// confirmed fact's own value says (a stale doPush() snapshot, or a
+// genuinely conflicted same-revision write, can each record a confirmed
+// fact whose value does not match current canonical bytes). The blind
+// `<= revision` sweep deletes that domain's ONLY hydration-provenance
+// explanation regardless, leaving canonical local storage's still-present,
+// still-unexplained bytes to be misread as a fresh local edit by whichever
+// pull looks next — and pushed right back over newer cloud data.
+//
+// isHydrationProvenanceFactObsoleteAfterConfirm() is the pure fix: a
+// hydration-provenance fact is safe to prune ONLY when it is PROVEN no
+// longer necessary to explain canonical local content — never merely
+// because SOME confirmed fact was recorded at or above its revision. Given
+// one fact's own `{revision, value}`, the revision of the confirm that just
+// happened, and the domain's CURRENT canonical/durable value (read fresh,
+// right now, by the caller — see recordConfirmedFactBody's own doc for how):
+//   • a fact strictly NEWER than the confirmed revision is never touched —
+//     unchanged from the original bound; this call has no basis to reason
+//     about a revision it hasn't reached yet.
+//   • a fact at or below the confirmed revision is obsolete — safe to
+//     delete — ONLY when its OWN value no longer canonically matches
+//     CURRENT canonical content. If it STILL matches, canonical storage has
+//     not moved on from what this record explains — regardless of whether a
+//     newly-recorded confirmed fact's VALUE happens to agree or disagree,
+//     deleting the only surviving explanation for bytes that are still
+//     sitting on disk right now is never safe.
+// This generalizes rather than replaces the original "commitDomainHydration
+// just wrote this value" reasoning: when that assumption holds (the
+// hydration path), current canonical content trivially equals the
+// newly-confirmed value, so every OTHER, genuinely different, older record
+// is still correctly judged obsolete — behavior is unchanged for that path.
+// When it doesn't hold (the push/reconciliation path), reading current
+// canonical content fresh is what makes the decision correct instead of
+// merely convenient.
+export function isHydrationProvenanceFactObsoleteAfterConfirm(
+  factRevision: number,
+  factValue: unknown,
+  confirmedRevision: number,
+  currentCanonicalValue: unknown
+): boolean {
+  if (factRevision > confirmedRevision) return false;
+  return canonicalizeJSON(factValue) !== canonicalizeJSON(currentCanonicalValue);
+}
+
+/**
+ * Reference cases for isHydrationProvenanceFactObsoleteAfterConfirm(). Run
+ * from Node:
+ *   import { DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES, isHydrationProvenanceFactObsoleteAfterConfirm } from "@/lib/syncPayload";
+ *   DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES.forEach(c => {
+ *     const got = isHydrationProvenanceFactObsoleteAfterConfirm(c.factRevision, c.factValue, c.confirmedRevision, c.currentCanonicalValue);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES: Array<{
+  name: string;
+  factRevision: number;
+  factValue: unknown;
+  confirmedRevision: number;
+  currentCanonicalValue: unknown;
+  expected: boolean;
+}> = [
+  {
+    name: "required — the core fix: a non-pure hydration value STILL on canonical storage survives a confirm of an unrelated domain at a higher revision",
+    factRevision: 5,
+    factValue: { version: 1, items: ["non-pure-reconciled-A"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["non-pure-reconciled-A"] },
+    expected: false,
+  },
+  {
+    name: "required — a genuinely superseded older value (canonical has moved on) is obsolete",
+    factRevision: 5,
+    factValue: { version: 1, items: ["stale-A"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["newer-B"] },
+    expected: true,
+  },
+  {
+    name: "required — a fact strictly newer than the confirmed revision is never touched, even if its value differs from current canonical content",
+    factRevision: 10,
+    factValue: { version: 1, items: ["from-the-future"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["something-else"] },
+    expected: false,
+  },
+  {
+    name: "fact revision equals confirmed revision, value matches current canonical: survives (redundant with confirmed authority, but never destructively pruned merely for being redundant)",
+    factRevision: 9,
+    factValue: { version: 1, items: ["A"] },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "canonical equality — differently-ordered keys still count as matching current canonical content",
+    factRevision: 5,
+    factValue: { items: ["A"], version: 1 },
+    confirmedRevision: 9,
+    currentCanonicalValue: { version: 1, items: ["A"] },
+    expected: false,
+  },
+  {
+    name: "days domain — plain array values compare correctly too",
+    factRevision: 5,
+    factValue: ["day-1", "day-2"],
+    confirmedRevision: 9,
+    currentCanonicalValue: ["day-1", "day-3"],
+    expected: true,
+  },
+];
+
 // ===== SERVER-SIDE MERGE-ON-WRITE (SH.1 — Authoritative Planner Sync Core) =====
 
 /**
