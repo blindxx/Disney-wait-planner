@@ -3513,8 +3513,10 @@ export default function PlansPage() {
     // removed day; otherwise they survive in localStorage (and get pushed to
     // cloud sync) with no owning day left to display them against. This page
     // holds no Lightning React state of its own (see lightning/page.tsx for
-    // the owning UI), so — same direct-localStorage pattern already used by
-    // handleClearAll/handleExportBackup above — read, filter, and write back
+    // the owning UI), so — same profile-scoped Lightning storage key pattern
+    // handleClearAll uses for its own unconditional reset, and (as of
+    // SH.2.6) the same durable-read pattern handleExportBackup now also
+    // uses for its own Lightning read — read, filter, and write back
     // through the existing profile-scoped Lightning storage key. scheduleSync()
     // picks this up automatically: setItems() above already changes `items`,
     // which triggers the existing items-effect that debounces a cloud push,
@@ -4139,10 +4141,19 @@ export default function PlansPage() {
   // Phase 8.2 — Export full planner backup (planner-backup format).
   function handleExportBackup() {
     // Phase 8.3.2 — include current Lightning items in full backup.
+    // SH.2.6 — reads Lightning's EFFECTIVE DURABLE value (canonical + any
+    // still-unresolved edit fact — see readLatestDurableValue()'s own doc
+    // in syncHelper.ts), never canonical-only localStorage.getItem(): same
+    // rationale as handleRemoveDay's own SH.2.1 P1 fix above (this
+    // function's own prior comment referenced it as still using "the same
+    // direct-localStorage pattern" — that gap is what this closes). An
+    // exported backup is user-visible/exported planner state; a
+    // "committed-unprotected" Lightning edit surviving only in an edit
+    // fact must not be silently dropped from it.
     let lightningItems: LightningBackupItem[] = [];
     try {
       const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-      const rawLightning = localStorage.getItem(_lightningKey);
+      const rawLightning = readLatestDurableValue(_lightningKey);
       if (rawLightning) {
         const parsed = JSON.parse(rawLightning) as unknown;
         if (

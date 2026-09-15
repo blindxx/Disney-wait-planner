@@ -4629,6 +4629,95 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
 
 // ── internal push ─────────────────────────────────────────────────────────────
 
+/**
+ * SH.2.6 — pure decision core for whether doPush() may publish its
+ * UI-facing completion state (syncStatusKeyForProfile/syncErrorKeyForProfile/
+ * lastSyncedKeyForProfile + SYNC_STATE_CHANGED_EVENT) once its network round
+ * trip resolves. Codex P1 finding: those three keys are namespaced ONLY by
+ * profileId, never by userId (see their own doc above) — correct for the
+ * documented "profile, not tab" isolation, but it means an in-flight push
+ * captured under user A can complete AFTER the same profile slot has
+ * transitioned to user B (e.g. A signs out, B signs in, both on the
+ * "default" profile), silently overwriting B's sync-status UI with A's
+ * now-irrelevant completion (settings/page.tsx's SYNC_STATE_CHANGED_EVENT
+ * listener re-reads that SAME profile-keyed status with no identity check
+ * at all — see getSyncStateForProfile()'s own callers).
+ *
+ * Deliberately identical logic to isPullEpochCurrent() — push completion
+ * and pull continuation are answering the exact same question ("has a
+ * genuine identity/profile transition happened since I started"), so this
+ * reuses currentPullEpoch/isPullEpochCurrent (bumped by setSyncUserId()/
+ * setSyncProfileId() on every genuine change) rather than introducing a
+ * second status-storage or identity-tracking architecture. `pushEpoch` is
+ * the epoch doPush() captured at start (alongside userId/profileId);
+ * `epochAtCompletion` is a FRESH read of currentPullEpoch taken at each
+ * point after an awaited boundary (the network fetch, and again after the
+ * inner commitConfirmedBaseline() await on the 2xx path) — never a value
+ * cached from before that await, which could already be stale by the time
+ * it's checked.
+ *
+ * This gates ONLY the UI-facing status publication, never the underlying
+ * operation: removePendingOp()/commitConfirmedBaseline() and the
+ * STALE_OPERATION_REJECTED_EVENT dispatch remain unconditional, exactly as
+ * before — they are already correctly scoped to the CAPTURED (userId,
+ * profileId), not the current one (per this module's existing "an
+ * already-running, origin-scoped operation may finish safely" invariant —
+ * see the module doc), and STALE_OPERATION_REJECTED_EVENT's own listeners
+ * already self-filter on `detail.userId`/`detail.profileId` (see
+ * plans/page.tsx's own handler). Only the profile-keyed UI status writes
+ * have no such per-event identity to filter on, which is exactly the gap
+ * this closes.
+ */
+export function shouldPublishPushCompletionStatus(pushEpoch: number, epochAtCompletion: number): boolean {
+  return isPullEpochCurrent(pushEpoch, epochAtCompletion);
+}
+
+/**
+ * Reference cases for shouldPublishPushCompletionStatus() — run from Node:
+ *   import { DEV_SHOULD_PUBLISH_PUSH_COMPLETION_STATUS_CASES, shouldPublishPushCompletionStatus } from "@/lib/syncHelper";
+ *   DEV_SHOULD_PUBLISH_PUSH_COMPLETION_STATUS_CASES.forEach(c => {
+ *     const got = shouldPublishPushCompletionStatus(c.pushEpoch, c.epochAtCompletion);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_SHOULD_PUBLISH_PUSH_COMPLETION_STATUS_CASES: Array<{
+  name: string;
+  pushEpoch: number;
+  epochAtCompletion: number;
+  expected: boolean;
+}> = [
+  {
+    name: "no transition since push started — publish normally",
+    pushEpoch: 3,
+    epochAtCompletion: 3,
+    expected: true,
+  },
+  {
+    name: "required — in-flight A -> B auth transition (setSyncUserId bumps epoch) completing as a 409/unresolved write — suppressed, B's UI must not inherit A's unresolved status",
+    pushEpoch: 3,
+    epochAtCompletion: 4,
+    expected: false,
+  },
+  {
+    name: "required — same scenario, an ordinary 2xx/idle completion instead of unresolved — still suppressed, any stale completion value is blocked identically regardless of which status it is",
+    pushEpoch: 5,
+    epochAtCompletion: 6,
+    expected: false,
+  },
+  {
+    name: "profile switch (setSyncProfileId) during the same push — also suppressed, same epoch mechanism covers both identity and profile transitions",
+    pushEpoch: 10,
+    epochAtCompletion: 11,
+    expected: false,
+  },
+  {
+    name: "multiple transitions while this push was in flight — still suppressed, not merely off-by-one",
+    pushEpoch: 2,
+    epochAtCompletion: 9,
+    expected: false,
+  },
+];
+
 async function doPush(): Promise<void> {
   if (inFlight) {
     // Re-schedule so the latest payload gets sent after the current request
@@ -4642,6 +4731,12 @@ async function doPush(): Promise<void> {
   // user switches profiles or signs into a different account mid-flight.
   const profileId = currentSyncProfileId;
   const userId = currentSyncUserId;
+  // SH.2.6 — capture the sync epoch (bumped by setSyncUserId()/
+  // setSyncProfileId() on every genuine transition) alongside identity, so
+  // this push's own UI-facing completion writes can be gated against it
+  // later via shouldPublishPushCompletionStatus() — see that function's own
+  // doc for the full rationale.
+  const pushEpoch = currentPullEpoch;
 
   // SH.2.6 — capture this push's base revision BEFORE snapshotting
   // localStorage into a payload, not after (the pre-SH.2.6 order, which
@@ -4763,16 +4858,31 @@ async function doPush(): Promise<void> {
       // state is, exactly as it already does for any other unsynced local
       // edit. "unresolved" (not "idle") because this device's local state
       // is genuinely not yet known to match the cloud.
+      //
+      // This retirement is UNCONDITIONAL on identity currency — it is
+      // already correctly scoped to the CAPTURED (userId, profileId), not
+      // whichever identity is active now (see this module's "an already-
+      // running, origin-scoped operation may finish safely" invariant).
       removePendingOp(userId, profileId, opId);
-      try {
-        localStorage.setItem(syncStatusKeyForProfile(profileId), "unresolved");
-      } catch {}
-      try {
-        localStorage.removeItem(syncErrorKeyForProfile(profileId));
-      } catch {}
-      try {
-        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
-      } catch {}
+      // SH.2.6 — the UI-facing status/error writes below are NOT scoped by
+      // identity (syncStatusKeyForProfile/syncErrorKeyForProfile are keyed
+      // only by profileId — see shouldPublishPushCompletionStatus's own
+      // doc), so publish them only while no genuine identity/profile
+      // transition has happened since this push captured `pushEpoch`.
+      // Suppressing them here is exactly what stops a since-superseded
+      // user A's "unresolved" from overwriting a since-signed-in user B's
+      // sync-status UI for the same profile slot.
+      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+        try {
+          localStorage.setItem(syncStatusKeyForProfile(profileId), "unresolved");
+        } catch {}
+        try {
+          localStorage.removeItem(syncErrorKeyForProfile(profileId));
+        } catch {}
+        try {
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+        } catch {}
+      }
       // SH.2.5.1 Codex P1 follow-up (problem 2) — retiring the rejected op
       // above is NOT enough on its own: this device's `baseRevision`
       // knowledge is still exactly as stale as it was before this push (the
@@ -4793,18 +4903,19 @@ async function doPush(): Promise<void> {
         );
       } catch {}
     } else if (res.ok) {
-      // Write completion state to the originating profileId unconditionally —
-      // storage is per-profile so this is always safe regardless of whether
-      // the user has switched to a different profile mid-flight.
-      // lastSyncedAt is also written unconditionally: the originating profile
-      // completed a real successful HTTP round-trip and should always record
-      // its own timestamp — a push "happened" regardless of whether local
-      // confirmation below turns out to be durable this attempt.
-      // Timestamp write is best-effort — quota or private-mode errors must not
-      // prevent the status transition and event dispatch below.
-      try {
-        localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
-      } catch {}
+      // SH.2.6 — lastSyncedAt is a UI-facing datum exactly like status/error
+      // (same profile-only key shape — see shouldPublishPushCompletionStatus's
+      // own doc), so it is gated the same way: only published while this
+      // push's captured identity/profile is still the active one. A push
+      // "happened" is true regardless, but recording ITS timestamp as if it
+      // were the CURRENTLY active identity's own last-synced moment would be
+      // exactly the same stale-completion leak this round closes.
+      const identityCurrentAfterFetch = shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch);
+      if (identityCurrentAfterFetch) {
+        try {
+          localStorage.setItem(lastSyncedKeyForProfile(profileId), new Date().toISOString());
+        } catch {}
+      }
       // SH.2 architecture (Codex P1, 3rd round) — commit the EXACT payload
       // this request just sent as a CANDIDATE confirmed snapshot, gated by
       // the server-issued `revision` in this response (never blind
@@ -4862,51 +4973,76 @@ async function doPush(): Promise<void> {
           removePendingOp(userId, profileId, opId);
         }
       }
-      // Status writes are best-effort; event dispatch MUST always execute.
-      try {
-        localStorage.setItem(syncStatusKeyForProfile(profileId), userId && !confirmedDurably ? "unresolved" : "idle");
-      } catch {}
-      try {
-        localStorage.removeItem(syncErrorKeyForProfile(profileId));
-      } catch {}
-      try {
-        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
-      } catch {}
+      // SH.2.6 — re-check identity currency HERE, not reusing
+      // `identityCurrentAfterFetch` captured above: the `await res.json()`/
+      // `await commitConfirmedBaseline()` calls inside the `if (userId)`
+      // block above are ANOTHER awaited boundary this function crossed
+      // since that snapshot, during which a fresh transition could have
+      // happened. Status writes are best-effort; event dispatch MUST
+      // always execute when publication is allowed.
+      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+        try {
+          localStorage.setItem(syncStatusKeyForProfile(profileId), userId && !confirmedDurably ? "unresolved" : "idle");
+        } catch {}
+        try {
+          localStorage.removeItem(syncErrorKeyForProfile(profileId));
+        } catch {}
+        try {
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+        } catch {}
+      }
     } else if (res.status !== 401) {
       // Non-401 failure — record error state for the originating profile.
+      // SH.2.6 — gated the same way as every other completion write above:
+      // an HTTP failure for a since-superseded identity must not overwrite
+      // the currently active identity's sync-status UI for this profile.
+      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+        try {
+          localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
+        } catch {}
+        try {
+          localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
+        } catch {}
+        try {
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+        } catch {}
+      }
+    } else {
+      // 401 — user not signed in; return originating profile to a clean idle state.
+      // Also clear lastError so the profile doesn't show a stale error after sign-out.
+      // SH.2.6 — gated identically: a 401 for a since-superseded identity
+      // must not force the currently active identity's status back to
+      // "idle" out from under it.
+      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+        try {
+          localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
+        } catch {}
+        try {
+          localStorage.removeItem(syncErrorKeyForProfile(profileId));
+        } catch {}
+        try {
+          window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+        } catch {}
+      }
+    }
+  } catch {
+    // Network error — record error state on the originating profile.
+    // SH.2.6 — gated identically: this catch can be entered after any
+    // awaited boundary in the try block above (the outer fetch, or the
+    // inner res.json()/commitConfirmedBaseline() calls), so identity
+    // currency must be re-checked fresh here too, never assumed from an
+    // earlier snapshot.
+    if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
       } catch {}
       try {
-        localStorage.setItem(syncErrorKeyForProfile(profileId), `HTTP ${res.status}`);
-      } catch {}
-      try {
-        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
-      } catch {}
-    } else {
-      // 401 — user not signed in; return originating profile to a clean idle state.
-      // Also clear lastError so the profile doesn't show a stale error after sign-out.
-      try {
-        localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
-      } catch {}
-      try {
-        localStorage.removeItem(syncErrorKeyForProfile(profileId));
+        localStorage.setItem(syncErrorKeyForProfile(profileId), "Network error");
       } catch {}
       try {
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
     }
-  } catch {
-    // Network error — record error state on the originating profile
-    try {
-      localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
-    } catch {}
-    try {
-      localStorage.setItem(syncErrorKeyForProfile(profileId), "Network error");
-    } catch {}
-    try {
-      window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
-    } catch {}
   } finally {
     inFlight = false;
   }

@@ -260,10 +260,20 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
  * timeLabel is read (not just name) so the active-day Lightning conflict
  * section can compare plan times against Lightning times.
  * Handles both v0 (raw array) and v1 ({version,items}) schemas.
+ *
+ * SH.2.6 — reads Plans' EFFECTIVE DURABLE value (canonical + any still-
+ * unresolved edit fact — see readLatestDurableValue()'s own doc in
+ * syncHelper.ts), never a raw canonical-only localStorage.getItem(). This
+ * is a user-visible Plans-derived conflict/display read: a "committed-
+ * unprotected" persist can leave the newest durable Plans intent existing
+ * only in an edit fact, not yet reflected on the canonical key, and this
+ * function feeding the active-day Lightning conflict section from stale
+ * canonical bytes would silently miss/mismatch against the user's actual
+ * latest Plans edit.
  */
 function loadPlanItemsForDay(plansKey: string, dayId: string): { name: string; timeLabel?: string }[] {
   try {
-    const raw = localStorage.getItem(plansKey);
+    const raw = readLatestDurableValue(plansKey);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     let items: unknown[];
@@ -298,10 +308,15 @@ function loadPlanItemsForDay(plansKey: string, dayId: string): { name: string; t
  * Mirrors loadPlanItemsForDay but without the day filter — used by the
  * shared cross-day engine (computeCrossDayChecks) for full conflict parity
  * with My Plans and for the "Lightning Lane on Multiple Days" section.
+ *
+ * SH.2.6 — mirrors loadPlanItemsForDay's own fix: reads Plans' effective
+ * durable value via readLatestDurableValue(), never canonical-only, so the
+ * cross-day conflict engine can never regress behind a surviving Plans
+ * edit fact.
  */
 function loadAllPlanItems(plansKey: string): { name: string; dayId: string; timeLabel?: string }[] {
   try {
-    const raw = localStorage.getItem(plansKey);
+    const raw = readLatestDurableValue(plansKey);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     let items: unknown[];
