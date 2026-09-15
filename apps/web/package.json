@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
-    "start": "next start -p 3000"
+    "start": "next start -p 3000",
+    "db:migrate": "node scripts/migrate-db.mjs"
   },
   "dependencies": {
     "@auth/pg-adapter": "^1.11.1",
