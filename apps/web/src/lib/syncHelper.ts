@@ -1367,10 +1367,25 @@ export function commitLocalDomainRaw(
   expectedPreviousRaw: string | null,
   nextRaw: string,
   isStillValid: () => boolean = () => true,
-  isAuthorityStillValid: () => Promise<boolean> = () => Promise.resolve(true)
+  isAuthorityStillValid: () => Promise<boolean> = () => Promise.resolve(true),
+  precomputedBaselineEditFactIds?: readonly string[]
 ): Promise<LocalDomainCommitStatus> {
   if (!hasLocalDomainSerialization()) return Promise.resolve("unavailable");
-  const baselineEditFactIds = new Set(snapshotKeysWithPrefix(localEditFactPrefix(key)));
+  // SH.2.4.1 — when a caller (commitDomainHydration(), which durably
+  // records this SAME frontier into its HydrationApplyIntent BEFORE this
+  // function is ever invoked) already snapshotted the pre-write edit-fact
+  // keyspace, reuse that EXACT snapshot rather than taking a second,
+  // independently-timed one here — the intent's own crash-recovery frontier
+  // (see resolveHydrationApplyIntentDisposition's own doc in syncPayload.ts)
+  // must be provably identical to the set this function actually retires on
+  // a "committed" write, by construction, not merely by the two calls
+  // happening to run back-to-back with no `await` between them. Callers
+  // with no such pre-existing snapshot (the unauthenticated path, and every
+  // pre-SH.2.4.1 caller) are unaffected — this function takes its own
+  // snapshot exactly as before.
+  const baselineEditFactIds = precomputedBaselineEditFactIds
+    ? new Set(precomputedBaselineEditFactIds)
+    : new Set(snapshotKeysWithPrefix(localEditFactPrefix(key)));
   return withLocalDomainCommitLock(key, async (): Promise<LocalDomainCommitStatus> => {
     let currentRaw: string | null;
     try {
@@ -2837,7 +2852,18 @@ function readHydrationApplyIntent(
       Number.isFinite(parsed.revision) &&
       typeof parsed.nextRaw === "string"
     ) {
-      return { key: parsed.key, revision: parsed.revision, nextRaw: parsed.nextRaw };
+      // SH.2.4.1 — `baselineEditFactIds` is `null` (never fabricated as
+      // `[]`) whenever it is missing or malformed, e.g. an intent written
+      // by pre-SH.2.4.1 code that survived a crash across a deploy boundary
+      // — see resolveHydrationApplyIntentDisposition's own "FAIL CLOSED ON
+      // UNKNOWN BASELINE" doc in syncPayload.ts for why that distinction
+      // (unknown vs. genuinely empty) must be preserved rather than
+      // collapsed to a default.
+      const baselineEditFactIds =
+        Array.isArray(parsed.baselineEditFactIds) && parsed.baselineEditFactIds.every((id) => typeof id === "string")
+          ? parsed.baselineEditFactIds
+          : null;
+      return { key: parsed.key, revision: parsed.revision, nextRaw: parsed.nextRaw, baselineEditFactIds };
     }
   } catch {}
   return null;
@@ -2874,6 +2900,14 @@ export async function commitDomainHydration(input: {
         return { status: "authority-changed", authority: freshAuthority };
       }
       const intentKey = hydrationApplyIntentKey(userId, profileId, domain);
+      // SH.2.4.1 — captured BEFORE the intent is written (and reused,
+      // below, as the EXACT snapshot commitLocalDomainRaw() itself retires)
+      // so the intent's own crash-recovery frontier can never drift from
+      // what actually gets retired on a successful commit. Only needed when
+      // `provenance` is set — a `provenance === null` commit never writes
+      // an intent at all (see the REQUIRED PRECONDITION doc above), so
+      // there is nothing for a frontier to protect.
+      const baselineEditFactIds = provenance ? snapshotKeysWithPrefix(localEditFactPrefix(key)) : null;
       if (provenance) {
         // SH.2.2 (Codex P1 "require the hydration intent before mutating"
         // round) — REQUIRED PRECONDITION, not best-effort: see this
@@ -2882,7 +2916,12 @@ export async function commitDomainHydration(input: {
         // ever called — canonical storage is guaranteed untouched.
         let intentStored = false;
         try {
-          const intent: HydrationApplyIntent = { key, revision: provenance.revision, nextRaw };
+          const intent: HydrationApplyIntent = {
+            key,
+            revision: provenance.revision,
+            nextRaw,
+            baselineEditFactIds,
+          };
           localStorage.setItem(intentKey, JSON.stringify(intent));
           intentStored = true;
         } catch {}
@@ -2894,7 +2933,20 @@ export async function commitDomainHydration(input: {
       // left at its default (always-valid) — see this section's own doc
       // above for why the race it exists to catch cannot occur while this
       // call holds confirmedAuthorityLockName() for the whole operation.
-      const commitStatus = await commitLocalDomainRaw(key, expectedPreviousRaw, nextRaw, isStillValid);
+      // Its `precomputedBaselineEditFactIds` parameter is passed the SAME
+      // frontier just durably recorded above (`undefined` when no intent
+      // was written at all) — see commitLocalDomainRaw's own doc for why
+      // reusing this exact snapshot, rather than letting it take a second,
+      // independently-timed one, is what makes the intent's frontier
+      // provably identical to what gets retired.
+      const commitStatus = await commitLocalDomainRaw(
+        key,
+        expectedPreviousRaw,
+        nextRaw,
+        isStillValid,
+        () => Promise.resolve(true),
+        baselineEditFactIds ?? undefined
+      );
       if (
         commitStatus === "unavailable" ||
         commitStatus === "failed" ||
@@ -2941,6 +2993,40 @@ export async function commitDomainHydration(input: {
 }
 
 /**
+ * SH.2.4.1 (Codex P1 "hydration-intent crash-recovery frontier" round) —
+ * the caller-side half of `hasNewerEditFact` that
+ * resolveHydrationApplyIntentDisposition() (syncPayload.ts) needs: true
+ * only when a CURRENTLY-surviving local-edit-fact key for `intent.key` is
+ * NOT a member of `intent.baselineEditFactIds` — i.e. it was published
+ * strictly after this hydration attempt's own pre-write snapshot, so it can
+ * only be a genuinely newer post-baseline user edit, never the same stale
+ * pre-hydration evidence a crash between commitLocalDomainRaw()'s canonical
+ * `setItem` and its baseline-retirement loop can leave behind (see that
+ * function's own doc for the write/retire pairing this recovers from).
+ *
+ * Deliberately DISTINCT from hasSurvivingEditFact() (unchanged, still
+ * correct for every other caller): that function's own invariant — "any
+ * surviving fact is newer" — holds only once a hydration commit has
+ * actually retired its baseline, which is exactly what this specific
+ * recovery path cannot assume happened.
+ *
+ * `baselineEditFactIds === null` (an intent written before this round, or
+ * otherwise unparseable — see readHydrationApplyIntent's own doc) always
+ * returns `false`: with no captured frontier to diff against, this cannot
+ * PROVE any surviving fact is newer, and FAILS CLOSED rather than either
+ * assuming "every surviving fact is newer" (silently reinstating the bug
+ * this round closes) or "none is" in a way that would resolve the intent
+ * outright (it does not — see resolveHydrationApplyIntentDisposition's own
+ * "FAIL CLOSED ON UNKNOWN BASELINE" doc for how an unproven `false` here
+ * still falls through to "incomplete" absent a matching durable fact).
+ */
+function hasNewerEditFactBeyondHydrationBaseline(intent: HydrationApplyIntent): boolean {
+  if (intent.baselineEditFactIds === null) return false;
+  const baseline = new Set(intent.baselineEditFactIds);
+  return snapshotKeysWithPrefix(localEditFactPrefix(intent.key)).some((factKey) => !baseline.has(factKey));
+}
+
+/**
  * True when ANY domain of (userId, profileId) has a leftover
  * hydration-apply-intent marker whose disposition is "incomplete" — see
  * resolveHydrationApplyIntentDisposition()'s own doc in syncPayload.ts.
@@ -2979,7 +3065,7 @@ function hasIncompleteHydrationApplyIntent(userId: string, profileId: string): b
     const disposition = resolveHydrationApplyIntentDisposition(
       intent,
       canonicalRaw,
-      hasSurvivingEditFact(intent.key),
+      hasNewerEditFactBeyondHydrationBaseline(intent),
       hasMatchingDurableFact
     );
     if (disposition === "incomplete") {

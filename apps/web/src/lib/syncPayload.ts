@@ -649,7 +649,8 @@ export const DEV_IS_EXACT_CLOUD_VALUE_CASES: Array<{
  *     all, or a later genuine edit/commit has since moved past it) — the
  *     intent is simply moot — "stale".
  *   • `canonicalRaw === intent.nextRaw` (the write DID land) and a
- *     surviving local-edit fact exists for this key — a genuine, newer user
+ *     surviving local-edit fact exists for this key that postdates this
+ *     intent's own `baselineEditFactIds` frontier — a genuine, newer user
  *     edit happens to byte-for-byte coincide with the hydration write; the
  *     local-edit-fact priority rule (see hasSurvivingEditFact's own doc in
  *     syncHelper.ts) already makes this content trustworthy on its own
@@ -660,15 +661,74 @@ export const DEV_IS_EXACT_CLOUD_VALUE_CASES: Array<{
  *     equivalent provenance); only the intent marker's own clear step was
  *     lost — harmless — "resolved".
  *   • Otherwise — canonical bytes match exactly what this device was in the
- *     middle of hydrating, with NEITHER a local edit NOR a fact to explain
- *     them — the fact write genuinely never landed — "incomplete": the
- *     caller must not treat this content as safe, pushable local intent
- *     until a fresh pull re-establishes real provenance for it.
+ *     middle of hydrating, with no PROVEN-newer local edit and no fact to
+ *     explain them — the fact write may never have landed, OR the only
+ *     surviving edit fact(s) are pre-hydration baseline evidence this
+ *     intent already knows about — "incomplete" either way: the caller must
+ *     not treat this content as safe, pushable local intent until a fresh
+ *     pull re-establishes real provenance for it, or a genuinely newer edit
+ *     actually appears.
+ *
+ * SH.2.4.1 (Codex P1 "hydration-intent crash-recovery frontier" round) —
+ * BASELINE vs. NEWER EDIT FACTS. A crash landing after
+ * commitLocalDomainRaw()'s canonical `setItem` but before its own
+ * `baselineEditFactIds` retirement loop (see that function's own doc in
+ * syncHelper.ts) leaves exactly the facts THAT SAME HYDRATION ATTEMPT
+ * already knew about — its own pre-write baseline — still durably present.
+ * Before this round, `resolveHydrationApplyIntentDisposition()` took a
+ * plain `hasSurvivingEditFact: boolean` and treated ANY surviving fact as
+ * proof of a newer user edit, exactly the invariant `hasSurvivingEditFact`
+ * itself documents as holding ONLY after a hydration commit has run to
+ * completion (baseline retired). Recovering from THIS specific crash window
+ * violates that precondition: the surviving fact is the same stale
+ * pre-hydration evidence the hydration attempt was already superseding, not
+ * a newer edit — yet the old boolean could not tell the difference, so
+ * recovery could clear the intent and let a later readLatestDurableValue()
+ * (syncHelper.ts) prefer that stale fact over the cloud winner this
+ * hydration just wrote.
+ *
+ * The fix: `HydrationApplyIntent` now durably captures
+ * `baselineEditFactIds` — the EXACT same pre-write edit-fact-key frontier
+ * commitDomainHydration() hands to commitLocalDomainRaw() to retire on
+ * success (see commitDomainHydration's own doc in syncHelper.ts) — snapshot
+ * identity, not merely a count. `hasNewerEditFact` (replacing the old
+ * `hasSurvivingEditFact` parameter) must now be TRUE only when a currently-
+ * surviving edit-fact key for `intent.key` is NOT a member of
+ * `intent.baselineEditFactIds` — i.e. it was published strictly after this
+ * hydration attempt's own decision point, so it could only be a genuinely
+ * newer post-baseline user edit (see hasNewerEditFactBeyondHydrationBaseline()
+ * in syncHelper.ts, the caller-side function that performs this diff against
+ * live storage — this function stays pure and takes the already-computed
+ * boolean, unchanged in shape).
+ *
+ * FAIL CLOSED ON UNKNOWN BASELINE — `intent.baselineEditFactIds === null`
+ * means this intent predates this round (a leftover marker written by
+ * pre-fix code, surviving a crash across a deploy boundary) and therefore
+ * carries no frontier to diff against at all. The caller
+ * (hasNewerEditFactBeyondHydrationBaseline()) always reports `false` in that
+ * case — NOT "every surviving fact counts as newer" (that would silently
+ * reinstate the exact bug this round closes) and NOT "resolved outright"
+ * either (this function never inspects `baselineEditFactIds` itself; a
+ * `null` baseline simply cannot produce `hasNewerEditFact = true`). With no
+ * provable newer edit and no matching durable fact, such an intent falls
+ * through to "incomplete" — safe, self-healing (a fresh pull's own matching
+ * provenance, or the user's next edit moving canonical bytes off
+ * `intent.nextRaw` entirely, each independently clears it — see their own
+ * cases below), never a silent reversion to trusting stale evidence.
  */
 export interface HydrationApplyIntent {
   key: string;
   revision: number;
   nextRaw: string;
+  /**
+   * The local-edit-fact keys for `key` that already existed immediately
+   * before this hydration attempt's own CAS commit was requested — the
+   * SAME snapshot commitLocalDomainRaw() itself retires on a successful
+   * "committed" write (see its own `baselineEditFactIds` doc in
+   * syncHelper.ts). `null` only for an intent written before this field
+   * existed — see FAIL CLOSED ON UNKNOWN BASELINE above.
+   */
+  baselineEditFactIds: string[] | null;
 }
 
 export type HydrationApplyIntentDisposition = "resolved" | "incomplete" | "stale";
@@ -676,12 +736,12 @@ export type HydrationApplyIntentDisposition = "resolved" | "incomplete" | "stale
 export function resolveHydrationApplyIntentDisposition(
   intent: HydrationApplyIntent | null,
   canonicalRaw: string | null,
-  hasSurvivingEditFact: boolean,
+  hasNewerEditFact: boolean,
   hasMatchingDurableFact: boolean
 ): HydrationApplyIntentDisposition {
   if (intent === null) return "resolved";
   if (canonicalRaw !== intent.nextRaw) return "stale";
-  if (hasSurvivingEditFact || hasMatchingDurableFact) return "resolved";
+  if (hasNewerEditFact || hasMatchingDurableFact) return "resolved";
   return "incomplete";
 }
 
@@ -689,15 +749,22 @@ export function resolveHydrationApplyIntentDisposition(
  * Reference cases for resolveHydrationApplyIntentDisposition(). Run from Node:
  *   import { DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES, resolveHydrationApplyIntentDisposition } from "@/lib/syncPayload";
  *   DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES.forEach(c => {
- *     const got = resolveHydrationApplyIntentDisposition(c.intent, c.canonicalRaw, c.hasSurvivingEditFact, c.hasMatchingDurableFact);
+ *     const got = resolveHydrationApplyIntentDisposition(c.intent, c.canonicalRaw, c.hasNewerEditFact, c.hasMatchingDurableFact);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
+ *
+ * SH.2.4.1 — cases below use `hasNewerEditFact` (the already-diffed "a
+ * surviving edit fact exists that postdates intent.baselineEditFactIds"
+ * verdict a caller like hasNewerEditFactBeyondHydrationBaseline() in
+ * syncHelper.ts computes) rather than the pre-round "any fact survives"
+ * boolean — see this function's own doc above for the crash-recovery root
+ * cause this distinction closes.
  */
 export const DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES: Array<{
   name: string;
   intent: HydrationApplyIntent | null;
   canonicalRaw: string | null;
-  hasSurvivingEditFact: boolean;
+  hasNewerEditFact: boolean;
   hasMatchingDurableFact: boolean;
   expected: HydrationApplyIntentDisposition;
 }> = [
@@ -705,49 +772,94 @@ export const DEV_RESOLVE_HYDRATION_APPLY_INTENT_DISPOSITION_CASES: Array<{
     name: "no leftover intent — nothing to reconcile",
     intent: null,
     canonicalRaw: '{"version":1,"items":[]}',
-    hasSurvivingEditFact: false,
+    hasNewerEditFact: false,
     hasMatchingDurableFact: false,
     expected: "resolved",
   },
   {
     name: "canonical bytes no longer match the intent — superseded by something newer, moot",
-    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: [] },
     canonicalRaw: '{"a":2}',
-    hasSurvivingEditFact: false,
+    hasNewerEditFact: false,
     hasMatchingDurableFact: false,
     expected: "stale",
   },
   {
     name: "write landed, no fact recorded yet, no local edit either — the genuine gap this exists to catch",
-    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: [] },
     canonicalRaw: '{"a":1}',
-    hasSurvivingEditFact: false,
+    hasNewerEditFact: false,
     hasMatchingDurableFact: false,
     expected: "incomplete",
   },
   {
-    name: "write landed, but a surviving local-edit fact explains it — a genuine newer edit, trust it on its own terms",
-    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    name: "write landed, a surviving edit fact postdates the baseline — a genuine newer edit, trust it on its own terms",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: ["dwp:localEditFact:k:old"] },
     canonicalRaw: '{"a":1}',
-    hasSurvivingEditFact: true,
+    hasNewerEditFact: true,
     hasMatchingDurableFact: false,
     expected: "resolved",
   },
   {
     name: "write landed, a durable confirmed/hydration fact already exists for it — only the marker's own clear was lost, harmless",
-    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: [] },
     canonicalRaw: '{"a":1}',
-    hasSurvivingEditFact: false,
+    hasNewerEditFact: false,
     hasMatchingDurableFact: true,
     expected: "resolved",
   },
   {
     name: "canonical key missing entirely (null) while intent expected real bytes — never confused with a match",
-    intent: { key: "k", revision: 5, nextRaw: '{"a":1}' },
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: [] },
     canonicalRaw: null,
-    hasSurvivingEditFact: false,
+    hasNewerEditFact: false,
     hasMatchingDurableFact: false,
     expected: "stale",
+  },
+  {
+    name: "REQUIRED (SH.2.4.1) — crash after canonical write but before baseline-fact retirement: the only surviving fact IS the recorded baseline (hasNewerEditFact computed false by the caller-side diff) — must stay incomplete, never resolved off stale pre-hydration evidence",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: ["dwp:localEditFact:k:pre-hydration"] },
+    canonicalRaw: '{"a":1}',
+    hasNewerEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "incomplete",
+  },
+  {
+    name: "REQUIRED (SH.2.4.1) — same crash window, but a genuinely newer post-baseline edit ALSO exists (hasNewerEditFact true) — the newer edit still wins and resolves the intent",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: ["dwp:localEditFact:k:pre-hydration"] },
+    canonicalRaw: '{"a":1}',
+    hasNewerEditFact: true,
+    hasMatchingDurableFact: false,
+    expected: "resolved",
+  },
+  {
+    name: "REQUIRED (SH.2.4.1) — same crash window, but matching hydration provenance already exists at intent.revision — resolves via existing proof, independent of the stale baseline fact",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: ["dwp:localEditFact:k:pre-hydration"] },
+    canonicalRaw: '{"a":1}',
+    hasNewerEditFact: false,
+    hasMatchingDurableFact: true,
+    expected: "resolved",
+  },
+  {
+    name: "REQUIRED (SH.2.4.1) — unknown baseline (null; a leftover intent from before this round) with a surviving fact the caller cannot prove is newer — fails closed to incomplete, never silently resolved",
+    intent: { key: "k", revision: 5, nextRaw: '{"a":1}', baselineEditFactIds: null },
+    canonicalRaw: '{"a":1}',
+    hasNewerEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "incomplete",
+  },
+  {
+    name: "REQUIRED (SH.2.4.1) — replacement pull: a second hydration attempt's own baseline snapshot correctly re-absorbed the first attempt's still-unretired stale fact as ITS OWN baseline too — that fact is still not 'newer', still incomplete",
+    intent: {
+      key: "k",
+      revision: 6,
+      nextRaw: '{"a":2}',
+      baselineEditFactIds: ["dwp:localEditFact:k:pre-hydration", "dwp:localEditFact:k:still-stale-from-first-attempt"],
+    },
+    canonicalRaw: '{"a":2}',
+    hasNewerEditFact: false,
+    hasMatchingDurableFact: false,
+    expected: "incomplete",
   },
 ];
 
