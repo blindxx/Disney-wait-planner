@@ -2799,6 +2799,44 @@ export type DomainHydrationCommitStatus =
 export interface DomainHydrationCommitResult {
   status: DomainHydrationCommitStatus;
   /**
+   * SH.2.4.1 (Codex P1 "provenance failure must not mask primary hydration
+   * success" round) — the canonical commit's OWN outcome, captured
+   * INDEPENDENTLY of whether a subsequent provenance/confirmed-fact write
+   * later downgrades the outward-facing `status` to
+   * "provenance-write-failed". `"committed"`/`"noop"` here means the
+   * winning value is DURABLY on disk right now, full stop — regardless of
+   * what `status` says.
+   *
+   * ROOT CAUSE this closes: `status` is a single field forced to carry two
+   * logically separate outcomes — "did the canonical write land" and "did
+   * the follow-up provenance/confirmed-fact write also land" — and the
+   * second could silently overwrite the first. Every existing caller
+   * (plans/page.tsx, lightning/page.tsx) derived its
+   * `primaryPersistSucceeded`/`hydrationSucceeded`/`daysWriteFailed` gates
+   * by comparing `status` directly against `"committed"`/`"noop"`, so a
+   * provenance failure AFTER a genuinely successful canonical write made
+   * those gates read as "primary persistence failed" — skipping the
+   * `setItems`/`setDays`/`setLightningVersion` React-state reconciliation
+   * that should have run unconditionally once disk already held the
+   * winner. A subsequent local edit could then persist THAT stale React
+   * state back over the already-durable canonical value, silently
+   * reverting it.
+   *
+   * `null` whenever the canonical commit itself did not reach
+   * "committed"/"noop" — including a `provenance-write-failed` result from
+   * the INTENT marker write failing (see the REQUIRED PRECONDITION doc
+   * above): that failure aborts BEFORE commitLocalDomainRaw() is ever
+   * called, so canonical storage is provably untouched and there is no
+   * primary success to report. Callers must keep checking `status` for
+   * every OTHER purpose this field does not replace — telling
+   * "provenance-write-failed" apart from a genuine full success (so
+   * ownership/syncReady/push still fail closed, and decideStaleResponseRecovery()
+   * in syncPayload.ts still never auto-retries it), and telling
+   * "committed" apart from "noop" where that distinction itself matters
+   * (e.g. invalidating a content-derived cache only on a REAL write).
+   */
+  primaryCommitStatus: "committed" | "noop" | null;
+  /**
    * The confirmed-authority state as of the moment this call returned —
    * `null` only when no authenticated identity was available to look one
    * up. For "committed"/"noop", this is the EXACT state this call itself
@@ -2882,7 +2920,7 @@ export async function commitDomainHydration(input: {
 }): Promise<DomainHydrationCommitResult> {
   const { userId, profileId, domain, key, expectedPreviousRaw, nextRaw, isStillValid, expectedAuthority, provenance } =
     input;
-  if (!hasLocalDomainSerialization()) return { status: "unavailable", authority: null };
+  if (!hasLocalDomainSerialization()) return { status: "unavailable", primaryCommitStatus: null, authority: null };
   if (!userId) {
     // No authenticated identity — no confirmed-authority concept applies
     // (unauthenticated local-only usage); behaves exactly like a plain
@@ -2890,14 +2928,15 @@ export async function commitDomainHydration(input: {
     const commitStatus = await commitLocalDomainRaw(key, expectedPreviousRaw, nextRaw, isStillValid);
     const status: DomainHydrationCommitStatus =
       commitStatus === "authority-superseded" ? "authority-changed" : commitStatus;
-    return { status, authority: null };
+    const primaryCommitStatus = commitStatus === "committed" || commitStatus === "noop" ? commitStatus : null;
+    return { status, primaryCommitStatus, authority: null };
   }
   return navigator.locks.request(
     confirmedAuthorityLockName(userId, profileId),
     async (): Promise<DomainHydrationCommitResult> => {
       const freshAuthority = getConfirmedState(userId, profileId);
       if (!confirmedDomainResultsEqual(freshAuthority[domain], expectedAuthority)) {
-        return { status: "authority-changed", authority: freshAuthority };
+        return { status: "authority-changed", primaryCommitStatus: null, authority: freshAuthority };
       }
       const intentKey = hydrationApplyIntentKey(userId, profileId, domain);
       // SH.2.4.1 — captured BEFORE the intent is written (and reused,
@@ -2926,7 +2965,13 @@ export async function commitDomainHydration(input: {
           intentStored = true;
         } catch {}
         if (!intentStored) {
-          return { status: "provenance-write-failed", authority: freshAuthority };
+          // The intent marker itself never landed — REQUIRED PRECONDITION
+          // above means commitLocalDomainRaw() was never even called, so
+          // canonical storage is provably untouched: `primaryCommitStatus`
+          // is `null` here, unlike the two provenance-write-failed returns
+          // further below (which happen strictly AFTER a successful
+          // canonical commit).
+          return { status: "provenance-write-failed", primaryCommitStatus: null, authority: freshAuthority };
         }
       }
       // commitLocalDomainRaw()'s own `isAuthorityStillValid` parameter is
@@ -2958,22 +3003,30 @@ export async function commitDomainHydration(input: {
             localStorage.removeItem(intentKey);
           } catch {}
         }
-        return { status: commitStatus, authority: freshAuthority };
+        return { status: commitStatus, primaryCommitStatus: null, authority: freshAuthority };
       }
       // commitStatus is "noop" or "committed" here at runtime
       // ("authority-superseded" cannot occur — see above); narrow the type
       // explicitly since TypeScript cannot infer that from the default
       // isAuthorityStillValid argument alone.
       if (commitStatus === "authority-superseded") {
-        return { status: "authority-changed", authority: freshAuthority };
+        return { status: "authority-changed", primaryCommitStatus: null, authority: freshAuthority };
       }
       if (!provenance) {
-        return { status: commitStatus, authority: freshAuthority };
+        return { status: commitStatus, primaryCommitStatus: commitStatus, authority: freshAuthority };
       }
+      // SH.2.4.1 — from here on, `commitStatus` ("committed" or "noop") is
+      // the canonical commit's OWN, ALREADY-DURABLE outcome: every return
+      // below carries it as `primaryCommitStatus` regardless of whether the
+      // follow-up provenance write that follows succeeds, so a caller can
+      // always tell "the winning value is on disk" apart from "the
+      // provenance/confirmed-fact record describing it also landed" — see
+      // DomainHydrationCommitResult's own doc for the full root cause this
+      // closes.
       let updatedAuthority = freshAuthority;
       if (provenance.isPureCloudValue) {
         const ok = recordConfirmedFactBody(userId, profileId, domain, provenance.revision, provenance.confirmedValue);
-        if (!ok) return { status: "provenance-write-failed", authority: freshAuthority };
+        if (!ok) return { status: "provenance-write-failed", primaryCommitStatus: commitStatus, authority: freshAuthority };
         // Re-read, STILL inside this SAME held lock — reflects exactly the
         // fact this call itself just wrote; no external writer for this
         // identity could have run anything while this lock was held, so
@@ -2982,12 +3035,12 @@ export async function commitDomainHydration(input: {
         updatedAuthority = getConfirmedState(userId, profileId);
       } else {
         const ok = await recordHydrationProvenance(userId, profileId, domain, provenance.revision, provenance.hydrationValue);
-        if (!ok) return { status: "provenance-write-failed", authority: freshAuthority };
+        if (!ok) return { status: "provenance-write-failed", primaryCommitStatus: commitStatus, authority: freshAuthority };
       }
       try {
         localStorage.removeItem(intentKey);
       } catch {}
-      return { status: commitStatus, authority: updatedAuthority };
+      return { status: commitStatus, primaryCommitStatus: commitStatus, authority: updatedAuthority };
     }
   );
 }

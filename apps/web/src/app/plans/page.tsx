@@ -2817,7 +2817,16 @@ export default function PlansPage() {
           return;
         }
         const itemsCommitStatus = itemsCommit.status;
-        const primaryPersistSucceeded = itemsCommitStatus === "committed" || itemsCommitStatus === "noop";
+        // SH.2.4.1 (Codex P1 "provenance failure must not mask primary
+        // hydration success" round) — derived from `primaryCommitStatus`,
+        // NOT `status` directly: a provenance/confirmed-fact write that
+        // fails AFTER the canonical commit already landed downgrades
+        // `status` to "provenance-write-failed" without undoing that
+        // commit (see DomainHydrationCommitResult's own doc in
+        // syncHelper.ts). Using `status` here would wrongly skip the
+        // `setItems` reconciliation below even though the winner is
+        // already durably on disk — the exact bug this round closes.
+        const primaryPersistSucceeded = itemsCommit.primaryCommitStatus !== null;
         // SH.2.2 — a "superseded" outcome means a genuine local edit landed
         // after winner selection but before this write; the edit itself is
         // untouched (commitDomainHydration() never wrote over it — CAS
@@ -2901,7 +2910,13 @@ export default function PlansPage() {
           return;
         }
         const daysCommitStatus = daysCommit.status;
-        const daysWriteFailed = !(daysCommitStatus === "committed" || daysCommitStatus === "noop");
+        // SH.2.4.1 — see itemsCommit's own `primaryPersistSucceeded` doc
+        // above: derived from `primaryCommitStatus`, not `status`, so a
+        // provenance failure after a successful canonical write doesn't
+        // skip `setDays` below. The explicit `daysCommit.status ===
+        // "provenance-write-failed"` check further down still defers the
+        // pull (fail closed) before syncReady/ownership are ever reached.
+        const daysWriteFailed = daysCommit.primaryCommitStatus === null;
         if (daysCommitStatus === "superseded") {
           supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });
         }
@@ -3007,7 +3022,11 @@ export default function PlansPage() {
           return;
         }
         const lightningCommitStatus = lightningCommit.status;
-        const hydrationSucceeded = lightningCommitStatus === "committed" || lightningCommitStatus === "noop";
+        // SH.2.4.1 — derived from `primaryCommitStatus`, not `status`, so a
+        // provenance failure after a successful canonical write doesn't
+        // hide the fact that the winning value is already durably on disk
+        // (see itemsCommit's own `primaryPersistSucceeded` doc above).
+        const hydrationSucceeded = lightningCommit.primaryCommitStatus !== null;
         if (lightningCommitStatus === "superseded") {
           supersededDomains.push({ domain: "lightning", reason: "local-edit-superseded" });
         }
@@ -3018,7 +3037,7 @@ export default function PlansPage() {
         const lightningHydrationWritten = hydrationSucceeded && lightningCloudSourced;
         if (hydrationSucceeded) {
           lightningRawBaselineRef.current = winningLightningRawToWrite;
-          if (lightningCommitStatus === "committed") {
+          if (lightningCommit.primaryCommitStatus === "committed") {
             // Invalidate crossDayChecks so Lightning duplicates recompute
             // immediately without waiting for a plan/day state change.
             setLightningVersion((v) => v + 1);

@@ -1562,7 +1562,16 @@ export default function LightningPage() {
           return;
         }
         const itemsCommitStatus = itemsCommit.status;
-        const primaryPersistSucceeded = itemsCommitStatus === "committed" || itemsCommitStatus === "noop";
+        // SH.2.4.1 (Codex P1 "provenance failure must not mask primary
+        // hydration success" round) — derived from `primaryCommitStatus`,
+        // NOT `status` directly: a provenance/confirmed-fact write that
+        // fails AFTER the canonical commit already landed downgrades
+        // `status` to "provenance-write-failed" without undoing that
+        // commit (see DomainHydrationCommitResult's own doc in
+        // syncHelper.ts). Using `status` here would wrongly skip the
+        // `setItems` reconciliation below even though the winner is
+        // already durably on disk — the exact bug this round closes.
+        const primaryPersistSucceeded = itemsCommit.primaryCommitStatus !== null;
         // SH.2.2 — mirrors plans/page.tsx exactly: accumulate a genuine
         // local-edit CAS supersession (never "failed"/"aborted"/
         // "unavailable") so the end-of-pull recovery check schedules
@@ -1648,7 +1657,9 @@ export default function LightningPage() {
           return;
         }
         const plansCommitStatus = plansCommit.status;
-        const hydrationSucceeded = plansCommitStatus === "committed" || plansCommitStatus === "noop";
+        // SH.2.4.1 — see itemsCommit's own `primaryPersistSucceeded` doc
+        // above: derived from `primaryCommitStatus`, not `status`.
+        const hydrationSucceeded = plansCommit.primaryCommitStatus !== null;
         if (plansCommitStatus === "superseded") {
           supersededDomains.push({ domain: "plans", reason: "local-edit-superseded" });
         }
@@ -1690,7 +1701,12 @@ export default function LightningPage() {
           return;
         }
         const daysCommitStatus = daysCommit.status;
-        const daysWriteFailed = !(daysCommitStatus === "committed" || daysCommitStatus === "noop");
+        // SH.2.4.1 — see itemsCommit's own `primaryPersistSucceeded` doc
+        // above: derived from `primaryCommitStatus`, not `status`. The
+        // explicit `daysCommit.status === "provenance-write-failed"` check
+        // further below still defers the pull (fail closed) before
+        // syncReady/ownership are ever reached.
+        const daysWriteFailed = daysCommit.primaryCommitStatus === null;
         if (daysCommitStatus === "superseded") {
           supersededDomains.push({ domain: "days", reason: "local-edit-superseded" });
         }
