@@ -43,6 +43,17 @@
 // FATAL verification failure for a human to resolve, never
 // auto-converted.
 //
+// The one exception is `user_planner_revision_seq`'s POSITION (never
+// its shape/configuration): if it's behind the highest `revision`
+// already stored in `user_planner` — e.g. it was reset, recreated, or
+// restored independently of that table's data — this script advances
+// it (via `setval`) so every future `nextval()` is guaranteed strictly
+// greater than every stored revision. This is safe and deterministic
+// (computed fresh from the actual stored data, every run) and never
+// touches a single row of planner data; it only ever moves the
+// sequence FORWARD, never backward, and only when it's provably
+// behind. See verifySequenceAheadOfStoredRevisions below.
+//
 // Usage:
 //   DATABASE_URL=postgres://... node apps/web/scripts/migrate-db.mjs
 // or, from the repo root:
@@ -108,7 +119,20 @@ const TABLE_CONTRACTS = {
   },
 };
 
-const REQUIRED_SEQUENCES = ["user_planner_revision_seq"];
+// `guards` ties a sequence to the (table, column) whose stored values
+// it must always stay strictly ahead of — see
+// verifySequenceAheadOfStoredRevisions below for why name/type/PK
+// checks alone can't catch a sequence that's simply behind the data.
+const SEQUENCE_CONTRACTS = [
+  {
+    name: "user_planner_revision_seq",
+    guards: { table: "user_planner", column: "revision" },
+  },
+];
+
+function quoteIdent(id) {
+  return `"${String(id).replace(/"/g, '""')}"`;
+}
 
 // Resolves `name` exactly the way an UNQUALIFIED reference in
 // route.ts (a bare `user_planner`, or `nextval('user_planner_revision_seq')`)
@@ -228,6 +252,109 @@ async function verifyTable(client, name, contract) {
   return relation.schema_name;
 }
 
+// SH.2.5 (Migration Verification Hardening, Codex P1 follow-up) —
+// column/type/PK checks alone cannot catch a sequence whose POSITION
+// is simply behind the data it's meant to order: `user_planner_writes`
+// having the exact right shape says nothing about whether
+// `nextval('user_planner_revision_seq')` will return a value greater
+// than a `revision` already sitting in `user_planner` — e.g. after the
+// sequence (but not the table) was reset, recreated, or restored from
+// an older backup. Undetected, the very next accepted write after a
+// "successful" migration could assign a LOWER revision than data
+// already committed, silently breaking SH.2's monotonic ordering
+// contract that /api/sync/planner and syncHelper.ts's
+// commitConfirmedBaseline both depend on.
+//
+// `schemaName` is the single schema every SH.2 object already resolved
+// to (the caller only reaches this after that ambiguity check passes),
+// so both objects are addressed directly rather than re-resolved
+// through search_path a second time.
+async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequenceName, tableName, columnName) {
+  const qualifiedSeq = `${quoteIdent(schemaName)}.${quoteIdent(sequenceName)}`;
+  const qualifiedTable = `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`;
+
+  // Sequence CONFIGURATION (not position) — read from pg_sequence via
+  // the already-resolved oid. A non-positive increment or CYCLE means
+  // no amount of ratcheting forward right now can guarantee
+  // monotonicity going forward (a cycling sequence will eventually
+  // wrap back down regardless of where it's currently positioned), so
+  // those fail outright rather than being "fixed" by setval.
+  const { rows: configRows } = await client.query(
+    `SELECT seqincrement, seqcycle
+     FROM pg_sequence
+     WHERE seqrelid = to_regclass($1)::oid`,
+    [`${schemaName}.${sequenceName}`]
+  );
+  const config = configRows[0];
+  if (!config) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: could not read sequence configuration from pg_sequence in schema "${schemaName}"`
+    );
+  }
+  const increment = BigInt(config.seqincrement);
+  if (increment <= 0n) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: INCREMENT BY ${config.seqincrement} is not a positive step — nextval() would not ` +
+        "produce strictly increasing revisions as /api/sync/planner's ordering contract requires"
+    );
+  }
+  if (config.seqcycle) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: is CYCLE — it can wrap back to a low value after reaching its MAXVALUE, which would ` +
+        "eventually violate the monotonic revision contract no matter where it's currently positioned"
+    );
+  }
+
+  // Effective NEXT value: what nextval() would actually return right
+  // now, without consuming it. `is_called = false` is the state right
+  // after CREATE SEQUENCE, before its first-ever nextval() — in that
+  // state the sequence's own `last_value` (its configured START value)
+  // IS the next value nextval() will hand out; only once
+  // `is_called = true` does the NEXT call add `increment` on top of
+  // `last_value`.
+  async function readEffectiveNext() {
+    const { rows } = await client.query(`SELECT last_value, is_called FROM ${qualifiedSeq}`);
+    const lastValue = BigInt(rows[0].last_value);
+    return rows[0].is_called ? lastValue + increment : lastValue;
+  }
+
+  const { rows: maxRows } = await client.query(
+    `SELECT COALESCE(MAX(${quoteIdent(columnName)}), 0) AS max_value FROM ${qualifiedTable}`
+  );
+  const maxStoredRevision = BigInt(maxRows[0].max_value);
+
+  const effectiveNext = await readEffectiveNext();
+  if (effectiveNext > maxStoredRevision) {
+    return { ratcheted: false, effectiveNext, maxStoredRevision };
+  }
+
+  // Behind (or equal to) the stored max — ratchet forward. This is
+  // deterministic (computed fresh, in this same run, from the actual
+  // stored data), touches only the sequence's own internal counter
+  // (never a row of `user_planner`), and can only move the sequence
+  // FORWARD here: this branch is only reached when
+  // effectiveNext <= maxStoredRevision, so setting it to
+  // maxStoredRevision is always a forward-or-equal move, never a
+  // regression — the guard above already returned early for any
+  // sequence that was ahead.
+  await client.query(`SELECT setval($1::regclass, $2, true)`, [
+    `${schemaName}.${sequenceName}`,
+    maxStoredRevision.toString(),
+  ]);
+
+  const postRatchetNext = await readEffectiveNext();
+  if (postRatchetNext <= maxStoredRevision) {
+    // Should be unreachable given the setval() above — never report
+    // success on an unverified assumption.
+    throw new SchemaVerificationError(
+      `${sequenceName}: ratcheted toward the stored max revision (${maxStoredRevision}) but the next ` +
+        `nextval() would still return ${postRatchetNext}, which is not strictly greater`
+    );
+  }
+
+  return { ratcheted: true, effectiveNext: postRatchetNext, maxStoredRevision };
+}
+
 async function main() {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
@@ -281,7 +408,7 @@ async function main() {
     try {
       const resolvedSchemas = new Map();
 
-      for (const sequenceName of REQUIRED_SEQUENCES) {
+      for (const { name: sequenceName } of SEQUENCE_CONTRACTS) {
         const schemaName = await verifySequence(client, sequenceName);
         resolvedSchemas.set(sequenceName, schemaName);
         console.log(`  ok — ${sequenceName} (sequence, schema "${schemaName}")`);
@@ -304,6 +431,33 @@ async function main() {
           `SH.2 objects resolved to more than one schema via this connection's search_path (${detail}) — ` +
             "this is ambiguous and must be resolved before deploying application code"
         );
+      }
+      const [resolvedSchema] = distinctSchemas;
+
+      // Shape is confirmed — now confirm POSITION: every guarded
+      // sequence must be strictly ahead of the stored data it orders.
+      // See verifySequenceAheadOfStoredRevisions's own doc for why this
+      // is a distinct check from everything above.
+      for (const { name: sequenceName, guards } of SEQUENCE_CONTRACTS) {
+        if (!guards) continue;
+        const result = await verifySequenceAheadOfStoredRevisions(
+          client,
+          resolvedSchema,
+          sequenceName,
+          guards.table,
+          guards.column
+        );
+        if (result.ratcheted) {
+          console.log(
+            `  ratcheted — ${sequenceName} was behind ${guards.table}.${guards.column}'s stored max ` +
+              `(${result.maxStoredRevision}); advanced so the next nextval() will return ${result.effectiveNext}`
+          );
+        } else {
+          console.log(
+            `  ok — ${sequenceName}'s next value (${result.effectiveNext}) is already greater than ` +
+              `${guards.table}.${guards.column}'s stored max (${result.maxStoredRevision})`
+          );
+        }
       }
     } catch (err) {
       if (err instanceof SchemaVerificationError) {
