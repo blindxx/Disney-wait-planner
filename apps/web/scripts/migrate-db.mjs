@@ -265,6 +265,18 @@ async function verifyTable(client, name, contract) {
 // contract that /api/sync/planner and syncHelper.ts's
 // commitConfirmedBaseline both depend on.
 //
+// SH.2.5 (Codex P1 follow-up #2) — "next value" is not just
+// `last_value + increment`: a non-cycling sequence that has already
+// reached its configured MAXVALUE will have Postgres RAISE on the next
+// nextval() call rather than return anything. `last_value == seqmax`
+// with `is_called == true` looks numerically fine to a naive
+// `last_value + increment` calculation but is actually EXHAUSTED — and
+// ratcheting toward a stored max revision that itself leaves no
+// headroom below seqmax has the exact same failure mode one call
+// later. Both are checked against `seqmax` (read once, alongside
+// increment/cycle, from the same pg_sequence row) before this function
+// ever reports success or attempts a ratchet.
+//
 // `schemaName` is the single schema every SH.2 object already resolved
 // to (the caller only reaches this after that ambiguity check passes),
 // so both objects are addressed directly rather than re-resolved
@@ -278,9 +290,11 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
   // no amount of ratcheting forward right now can guarantee
   // monotonicity going forward (a cycling sequence will eventually
   // wrap back down regardless of where it's currently positioned), so
-  // those fail outright rather than being "fixed" by setval.
+  // those fail outright rather than being "fixed" by setval. `seqmax`
+  // is this sequence's hard ceiling — see the function's own doc above
+  // for why it must gate both the current position AND any ratchet.
   const { rows: configRows } = await client.query(
-    `SELECT seqincrement, seqcycle
+    `SELECT seqincrement, seqcycle, seqmax
      FROM pg_sequence
      WHERE seqrelid = to_regclass($1)::oid`,
     [`${schemaName}.${sequenceName}`]
@@ -304,18 +318,28 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
         "eventually violate the monotonic revision contract no matter where it's currently positioned"
     );
   }
+  const seqMax = BigInt(config.seqmax);
 
   // Effective NEXT value: what nextval() would actually return right
-  // now, without consuming it. `is_called = false` is the state right
-  // after CREATE SEQUENCE, before its first-ever nextval() — in that
-  // state the sequence's own `last_value` (its configured START value)
-  // IS the next value nextval() will hand out; only once
-  // `is_called = true` does the NEXT call add `increment` on top of
-  // `last_value`.
+  // now, without consuming it — or `null` if the sequence is
+  // EXHAUSTED (nextval() would raise rather than return anything).
+  // `is_called = false` is the state right after CREATE SEQUENCE,
+  // before its first-ever nextval() — in that state the sequence's own
+  // `last_value` (its configured START value) IS the next value
+  // nextval() will hand out, and Postgres already guaranteed it's
+  // within [MINVALUE, MAXVALUE] at CREATE/setval time, so no bounds
+  // check is needed on that branch. Only once `is_called = true` does
+  // the NEXT call add `increment` on top of `last_value` — and THAT
+  // result must be checked against `seqmax`, since a non-cycling
+  // sequence errors instead of wrapping once it would exceed it.
   async function readEffectiveNext() {
     const { rows } = await client.query(`SELECT last_value, is_called FROM ${qualifiedSeq}`);
     const lastValue = BigInt(rows[0].last_value);
-    return rows[0].is_called ? lastValue + increment : lastValue;
+    if (!rows[0].is_called) {
+      return lastValue;
+    }
+    const next = lastValue + increment;
+    return next > seqMax ? null : next;
   }
 
   const { rows: maxRows } = await client.query(
@@ -324,15 +348,38 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
   const maxStoredRevision = BigInt(maxRows[0].max_value);
 
   const effectiveNext = await readEffectiveNext();
+  if (effectiveNext === null) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: is exhausted — it has reached its MAXVALUE (${seqMax}) and is not CYCLE, so the next ` +
+        "nextval() (as /api/sync/planner issues on every accepted write) would raise an error instead of " +
+        "returning a usable revision; it must be recreated with a higher MAXVALUE (a manual, data-preserving " +
+        "operation — see db-schema.sql) before this database can be migrated"
+    );
+  }
   if (effectiveNext > maxStoredRevision) {
     return { ratcheted: false, effectiveNext, maxStoredRevision };
   }
 
-  // Behind (or equal to) the stored max — ratchet forward. This is
-  // deterministic (computed fresh, in this same run, from the actual
-  // stored data), touches only the sequence's own internal counter
-  // (never a row of `user_planner`), and can only move the sequence
-  // FORWARD here: this branch is only reached when
+  // Behind (or equal to) the stored max — ratchet forward, but only if
+  // there's still enough headroom below `seqmax` for BOTH the ratchet
+  // itself (setval rejects a target outside [seqmin, seqmax]) and the
+  // very next nextval() afterward to succeed. Without this check,
+  // setval(seq, maxStoredRevision, true) could "succeed" while leaving
+  // the sequence exhausted for the next call — relocating exactly the
+  // failure this function exists to catch, one call later.
+  if (maxStoredRevision + increment > seqMax) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: cannot be ratcheted to stay ahead of the stored max revision (${maxStoredRevision}) — ` +
+        `doing so would leave no headroom below its MAXVALUE (${seqMax}) for the next nextval() to succeed; ` +
+        "it must be recreated with a higher MAXVALUE (a manual, data-preserving operation — see db-schema.sql) " +
+        "before this database can be migrated"
+    );
+  }
+
+  // This is deterministic (computed fresh, in this same run, from the
+  // actual stored data), touches only the sequence's own internal
+  // counter (never a row of `user_planner`), and can only move the
+  // sequence FORWARD here: this branch is only reached when
   // effectiveNext <= maxStoredRevision, so setting it to
   // maxStoredRevision is always a forward-or-equal move, never a
   // regression — the guard above already returned early for any
@@ -343,12 +390,14 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
   ]);
 
   const postRatchetNext = await readEffectiveNext();
-  if (postRatchetNext <= maxStoredRevision) {
-    // Should be unreachable given the setval() above — never report
-    // success on an unverified assumption.
+  if (postRatchetNext === null || postRatchetNext <= maxStoredRevision) {
+    // Should be unreachable given the headroom check and setval()
+    // above — never report success on an unverified assumption.
     throw new SchemaVerificationError(
       `${sequenceName}: ratcheted toward the stored max revision (${maxStoredRevision}) but the next ` +
-        `nextval() would still return ${postRatchetNext}, which is not strictly greater`
+        (postRatchetNext === null
+          ? "nextval() would raise an error (sequence exhausted)"
+          : `nextval() would still return ${postRatchetNext}, which is not strictly greater`)
     );
   }
 
