@@ -40,6 +40,9 @@ import {
   beginPullContext,
   isPullContextCurrent,
   readLatestDurableValue,
+  recordObservedServerRevision,
+  STALE_OPERATION_REJECTED_EVENT,
+  type StaleOperationRejectedDetail,
   type DomainHydrationCommitResult,
 } from "@/lib/syncHelper";
 import {
@@ -1130,6 +1133,15 @@ export default function LightningPage() {
       : [];
     void pullPlanner(pullCtx.profileId, pendingOpIds)
       .then(async (planner) => {
+        // SH.2.5.1 Codex P1 follow-up (problem 1) — record this pull's own
+        // observed server revision UNCONDITIONALLY, before the
+        // isPullCurrent() bail-out below. Mirrors plans/page.tsx exactly —
+        // see its own doc and getObservedServerRevision's doc in
+        // syncHelper.ts for why this must never be gated on any domain
+        // becoming cloud-confirmed.
+        if (pullCtx.userId && planner && typeof planner.revision === "number" && Number.isFinite(planner.revision)) {
+          recordObservedServerRevision(pullCtx.userId, pullCtx.profileId, planner.revision);
+        }
         if (!isPullCurrent()) return;
         const cloud = planner?.lightning ?? null;
         // SH.2.2 (Codex P1 "keep raw cloud values for provenance checks"
@@ -1838,6 +1850,24 @@ export default function LightningPage() {
   // this effect again — mirrors plans/page.tsx exactly, see its own doc.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionStatus, loaded, authenticatedUserId, staleRetryTick]);
+
+  // SH.2.5.1 Codex P1 follow-up (problem 2) — mirrors plans/page.tsx
+  // exactly, see its own detailed doc: a second trigger source for the SAME
+  // replacement-pull mechanism above, fed by doPush()'s
+  // STALE_OPERATION_REJECTED_EVENT (syncHelper.ts) since that module owns
+  // no page lifecycle of its own.
+  useEffect(() => {
+    function handleStaleOperationRejected(e: Event): void {
+      const detail = (e as CustomEvent<StaleOperationRejectedDetail>).detail;
+      if (!detail) return;
+      if (detail.userId !== activeUserIdRef.current || detail.profileId !== activeProfileIdRef.current) return;
+      if (staleRetryPendingRef.current) return;
+      staleRetryPendingRef.current = true;
+      setStaleRetryTick((t) => t + 1);
+    }
+    window.addEventListener(STALE_OPERATION_REJECTED_EVENT, handleStaleOperationRejected);
+    return () => window.removeEventListener(STALE_OPERATION_REJECTED_EVENT, handleStaleOperationRejected);
+  }, []);
 
   // Register a best-effort sendBeacon push on page unload.
   useEffect(() => {

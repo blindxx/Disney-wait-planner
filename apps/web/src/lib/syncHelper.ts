@@ -796,6 +796,9 @@ import {
   isPendingOpDomainEvidenceCurrent,
   canonicalDigest,
   knownBaseRevisionFromConfirmedState,
+  parseObservedRevisionFact,
+  resolveObservedServerRevision,
+  resolveObservedServerRevisionAdvance,
   planHydrationProvenanceDedup,
   isHydrationProvenanceFactObsoleteAfterConfirm,
   planOrdinaryEditFactCommit,
@@ -809,6 +812,7 @@ import {
   type HydrationApplyIntent,
   type PendingOpRecord,
   type HydrationProvenanceFactRecord,
+  type ObservedRevisionFact,
 } from "./syncPayload";
 
 /**
@@ -2116,6 +2120,95 @@ export function getConfirmedState(userId: string, profileId: string): ConfirmedP
   return state;
 }
 
+// ── Observed server revision (SH.2.5.1 Codex P1 follow-up) ─────────────────
+// See syncPayload.ts's own "Observed server revision" section doc for the
+// full root-cause and architecture. This is a SECOND, deliberately separate
+// physically-immutable-fact store from confirmedFact* above: facts here
+// carry no domain and no value, only `{ revision }`, so there is no
+// canonical-value conflict to ever detect — recording is always simply
+// true, and reducing to "the max ever observed" is safe under any
+// interleaving of concurrent readers/writers without a lock.
+function observedRevisionFactPrefix(userId: string, profileId: string): string {
+  return `dwp:sync:${userId}:${profileId}:observedRevision:`;
+}
+
+function observedRevisionFactKey(userId: string, profileId: string, revision: number, instanceId: string): string {
+  return `${observedRevisionFactPrefix(userId, profileId)}${revision}:${instanceId}`;
+}
+
+function scanObservedRevisionFacts(
+  userId: string,
+  profileId: string
+): Array<{ key: string; fact: ObservedRevisionFact }> {
+  const entries: Array<{ key: string; fact: ObservedRevisionFact }> = [];
+  for (const key of snapshotKeysWithPrefix(observedRevisionFactPrefix(userId, profileId))) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === null) continue;
+      const fact = parseObservedRevisionFact(JSON.parse(raw));
+      if (fact) entries.push({ key, fact });
+    } catch {
+      // Corrupted entry — simply excluded from the max reduction below.
+    }
+  }
+  return entries;
+}
+
+/**
+ * Read this device's best current knowledge of the highest server revision
+ * ever observed for this (userId, profileId) pair — from ANY usable pull
+ * response, independent of whether any domain's value was ever recorded as
+ * server-confirmed. 0 ("nothing observed yet") when nothing has been
+ * recorded. See getKnownBaseRevision() below for how this is combined with
+ * knownBaseRevisionFromConfirmedState() to produce the `baseRevision` a
+ * tagged operation actually sends.
+ */
+export function getObservedServerRevision(userId: string, profileId: string): number {
+  if (typeof window === "undefined") return 0;
+  return resolveObservedServerRevision(scanObservedRevisionFacts(userId, profileId).map((e) => e.fact));
+}
+
+/**
+ * Records that a usable pull observed `revision` as this (userId,
+ * profileId) row's server revision — called for EVERY pull response that
+ * carries a definite numeric revision, whether or not any domain hydrated
+ * from it (see each page's pull effect). MONOTONIC by construction:
+ * resolveObservedServerRevisionAdvance() (syncPayload.ts) skips the write
+ * entirely when `revision` would not exceed what is already durably
+ * recorded, so a stale/delayed pull response landing after a newer one was
+ * already processed can never regress this device's knowledge, regardless
+ * of arrival order. When it IS a genuine advance, the new fact is written
+ * FIRST (a fresh, permanently-unique key — never a read-modify-write of an
+ * existing one), and only then are the now-superseded lower facts pruned —
+ * this ordering guarantees a concurrent reader's own scan-max is always
+ * monotonically non-decreasing, even mid-prune: it can only ever see the
+ * new higher fact ADDED before older ones are removed, never a transient
+ * gap where nothing is recorded at all.
+ */
+export function recordObservedServerRevision(userId: string, profileId: string, revision: number): void {
+  if (typeof window === "undefined") return;
+  const existing = scanObservedRevisionFacts(userId, profileId);
+  const currentMax = resolveObservedServerRevision(existing.map((e) => e.fact));
+  if (!resolveObservedServerRevisionAdvance(revision, currentMax)) return;
+  const key = observedRevisionFactKey(userId, profileId, revision, generateOpId());
+  try {
+    localStorage.setItem(key, JSON.stringify({ revision }));
+  } catch {
+    return; // write failed — nothing durable changed, nothing to prune
+  }
+  // Opportunistic prune — pure optimization, never a correctness dependency
+  // (a stray lower fact left behind changes nothing about the max this or
+  // any other reader computes). Only removes keys THIS call itself observed
+  // in its own pre-write scan, never a key some OTHER concurrent writer may
+  // have added since — mirroring selectConfirmedFactPruneKeys' own
+  // never-delete-what-you-didn't-verify discipline above.
+  for (const { key: staleKey } of existing) {
+    try {
+      localStorage.removeItem(staleKey);
+    } catch {}
+  }
+}
+
 /**
  * Selects which of this domain's currently-recorded fact keys are safe to
  * prune (delete), given `confirmedRevision` — the revision
@@ -3227,18 +3320,26 @@ function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): str
  * SH.2.5.1 — the `baseRevision` a tagged operation (doPush()'s PUT,
  * registerUnloadSync()'s beacon) binds itself to: this device's best
  * current knowledge of this (userId, profileId) row's server revision,
- * captured AT SEND TIME from the SAME per-domain confirmed-state facts
- * getConfirmedState() already exposes — see
- * knownBaseRevisionFromConfirmedState()'s own doc in syncPayload.ts for why
- * the max across domains is sufficient evidence for this single-row write,
- * and evaluateOperationBaseRevision()'s own doc for the server-side
- * decision this evidence feeds. Callers only invoke this when `userId` is
- * known (mirroring the existing `if (userId) { addPendingOp(...) }` gating
- * both send paths already use) — there is no safe identity to scope a
- * confirmed-state scan under otherwise.
+ * captured AT SEND TIME. Combines TWO independent sources, taking the max:
+ *   • knownBaseRevisionFromConfirmedState() — the highest revision any
+ *     domain's own value was actually recorded as server-confirmed at (see
+ *     its own doc in syncPayload.ts).
+ *   • getObservedServerRevision() (SH.2.5.1 Codex P1 follow-up) — the
+ *     highest revision ANY usable pull response has ever reported for this
+ *     row, independent of whether any domain's value won that pull (see
+ *     its own doc above and the "Observed server revision" section in
+ *     syncPayload.ts). This is what keeps `baseRevision` advancing even for
+ *     a device whose local edits keep legitimately winning every pull —
+ *     without that pull ever needing to falsely mark a local-winning
+ *     domain as server-confirmed just to make revision knowledge progress.
+ * Callers only invoke this when `userId` is known (mirroring the existing
+ * `if (userId) { addPendingOp(...) }` gating both send paths already use)
+ * — there is no safe identity to scope either store under otherwise.
  */
 function getKnownBaseRevision(userId: string, profileId: string): number {
-  return knownBaseRevisionFromConfirmedState(getConfirmedState(userId, profileId));
+  const fromConfirmedDomains = knownBaseRevisionFromConfirmedState(getConfirmedState(userId, profileId));
+  const fromObservedPulls = getObservedServerRevision(userId, profileId);
+  return Math.max(fromConfirmedDomains, fromObservedPulls);
 }
 
 /**
@@ -3690,6 +3791,41 @@ export async function reconcilePendingOperations(
  * Listen to this for same-tab reactive updates (e.g. on the Settings page).
  */
 export const SYNC_STATE_CHANGED_EVENT = "dwp:syncStateChanged";
+
+/**
+ * SH.2.5.1 Codex P1 follow-up (problem 2) — custom event dispatched on
+ * `window` when doPush() receives a DETERMINISTIC stale-first-delivery 409
+ * (see evaluateOperationBaseRevision's own doc in syncPayload.ts).
+ * `user_planner` was never touched by that rejected write, so the mounted
+ * page's own local edit (still fully intact — this module never writes
+ * canonical storage) needs a fresh pull to learn the row's actual current
+ * revision before it can be retried; without one, this device would keep
+ * retrying with the SAME now-known-stale `baseRevision` until an unrelated
+ * reload/auth transition happened to trigger a pull anyway.
+ *
+ * `detail` is `{ userId, profileId }` — the identity the REJECTED push was
+ * for (captured at that push's own start, exactly like every other
+ * profile-scoped write in this module). A listener (see each page's pull
+ * effect) MUST compare this against its OWN currently active identity
+ * before reacting — a rejection for a profile/user this tab has since
+ * navigated away from must never trigger a pull under the WRONG identity.
+ *
+ * Deliberately a SEPARATE event from SYNC_STATE_CHANGED_EVENT above: that
+ * one fires on every ordinary status transition (idle/syncing/error/…) and
+ * would be a poor signal to schedule a whole extra pull from — this one
+ * fires ONLY for the narrow, DETERMINISTIC condition that actually needs
+ * one. Listeners are expected to feed this into the SAME existing
+ * "replacement pull" mechanism each page already has for stale-response
+ * recovery (staleRetryTick/staleRetryPendingRef — see
+ * decideStaleResponseRecovery's own doc in syncPayload.ts and each page's
+ * pull effect) rather than scheduling a pull through any new mechanism.
+ */
+export const STALE_OPERATION_REJECTED_EVENT = "dwp:staleOperationRejected";
+
+export interface StaleOperationRejectedDetail {
+  userId: string;
+  profileId: string;
+}
 
 /**
  * SH.2.2 ("fail closed when push confirmation is not durable" round) —
@@ -4344,6 +4480,25 @@ async function doPush(): Promise<void> {
       } catch {}
       try {
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
+      // SH.2.5.1 Codex P1 follow-up (problem 2) — retiring the rejected op
+      // above is NOT enough on its own: this device's `baseRevision`
+      // knowledge is still exactly as stale as it was before this push (the
+      // rejection told it "you were wrong", not "here is the truth"). Without
+      // a fresh pull, every SUBSEQUENT push/beacon would keep resending the
+      // SAME stale baseRevision and keep getting rejected — see
+      // STALE_OPERATION_REJECTED_EVENT's own doc above for why this event
+      // (rather than pulling directly from this module, which owns no page
+      // lifecycle) is what lets the mounted page's EXISTING replacement-pull
+      // mechanism (staleRetryTick/staleRetryPendingRef) pick this up, so the
+      // recovery pull goes through the SAME winner-selection path that
+      // already preserves local edits — never a raw forced overwrite.
+      try {
+        window.dispatchEvent(
+          new CustomEvent<StaleOperationRejectedDetail>(STALE_OPERATION_REJECTED_EVENT, {
+            detail: { userId, profileId },
+          })
+        );
       } catch {}
     } else if (res.ok) {
       // Write completion state to the originating profileId unconditionally —

@@ -95,6 +95,9 @@ import {
   beginPullContext,
   isPullContextCurrent,
   readLatestDurableValue,
+  recordObservedServerRevision,
+  STALE_OPERATION_REJECTED_EVENT,
+  type StaleOperationRejectedDetail,
   type DomainHydrationCommitResult,
 } from "@/lib/syncHelper";
 import {
@@ -2166,6 +2169,22 @@ export default function PlansPage() {
       : [];
     void pullPlanner(pullCtx.profileId, pendingOpIds)
       .then(async (planner) => {
+        // SH.2.5.1 Codex P1 follow-up (problem 1) — record this pull's own
+        // observed server revision UNCONDITIONALLY, before the
+        // isPullCurrent() bail-out below and before any winner-selection
+        // decision: this is a plain fact about pullCtx's (userId,
+        // profileId) row ("the server revision was AT LEAST this, as of
+        // this GET"), true regardless of whether THIS pull instance is
+        // still the active one for the UI, and regardless of which domain
+        // (if any) the cloud ends up winning — see
+        // getObservedServerRevision's own doc in syncHelper.ts for why this
+        // must NOT be gated on any domain becoming cloud-confirmed. A 204
+        // or a response missing a definite numeric revision carries no
+        // usable fact and is simply skipped — never coerced to 0, which
+        // would be indistinguishable from "never observed".
+        if (pullCtx.userId && planner && typeof planner.revision === "number" && Number.isFinite(planner.revision)) {
+          recordObservedServerRevision(pullCtx.userId, pullCtx.profileId, planner.revision);
+        }
         if (!isPullCurrent()) return;
         // Extract the plans portion from the combined planner payload.
         const cloud = planner?.plans ?? null;
@@ -3133,6 +3152,38 @@ export default function PlansPage() {
   // effect, so it cannot cause any OTHER unrelated re-run.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionStatus, initialized, authenticatedUserId, staleRetryTick]);
+
+  // SH.2.5.1 Codex P1 follow-up (problem 2) — a SECOND trigger source for
+  // the SAME replacement-pull mechanism the pull effect above owns
+  // (staleRetryTick/staleRetryPendingRef): doPush() (syncHelper.ts) has no
+  // access to this page's React state at all, so a deterministic
+  // stale-first-delivery 409 there can only reach this page via a window
+  // event — see STALE_OPERATION_REJECTED_EVENT's own doc in syncHelper.ts.
+  // This listener does nothing more than the SAME guarded bump
+  // handlePullDeferral() performs inside the pull effect: it never pulls,
+  // hydrates, or touches storage directly, so local edits are preserved
+  // exactly as they already are by that existing flow — this only decides
+  // WHETHER to ask for one more run of it.
+  useEffect(() => {
+    function handleStaleOperationRejected(e: Event): void {
+      const detail = (e as CustomEvent<StaleOperationRejectedDetail>).detail;
+      if (!detail) return;
+      // Only react when this rejection was for the identity THIS page is
+      // currently scoped to right now — a rejection for a profile/user this
+      // tab has since navigated away from must never schedule a pull under
+      // the wrong identity (mirrors every other activeUserIdRef/
+      // activeProfileIdRef-scoped check in this file).
+      if (detail.userId !== activeUserIdRef.current || detail.profileId !== activeProfileIdRef.current) return;
+      // Same one-at-a-time guard as handlePullDeferral() above — never
+      // schedule a second replacement pull while one is already pending,
+      // from either trigger source.
+      if (staleRetryPendingRef.current) return;
+      staleRetryPendingRef.current = true;
+      setStaleRetryTick((t) => t + 1);
+    }
+    window.addEventListener(STALE_OPERATION_REJECTED_EVENT, handleStaleOperationRejected);
+    return () => window.removeEventListener(STALE_OPERATION_REJECTED_EVENT, handleStaleOperationRejected);
+  }, []);
 
   // Register a best-effort sendBeacon push on page unload.
   // Requires both syncReady (initial pull resolved) AND authenticated session.

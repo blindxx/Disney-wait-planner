@@ -1463,6 +1463,162 @@ export const DEV_KNOWN_BASE_REVISION_CASES: Array<{
   },
 ];
 
+// ===== Observed server revision (SH.2.5.1 Codex P1 follow-up) ==============
+//
+// Codex P1 finding (problem 1): knownBaseRevisionFromConfirmedState() above
+// derives `baseRevision` ENTIRELY from per-domain CONFIRMED facts — facts
+// only ever recorded for a domain the CLOUD won (see the module doc's
+// "Cloud-confirmed local snapshot contract" and commitConfirmedBaseline's
+// own doc in syncHelper.ts). A perfectly usable pull can legitimately
+// return server revision R while EVERY domain's own local edit wins the
+// per-domain comparison (the user has genuinely newer local changes in
+// every domain) — nothing is ever recorded as "confirmed" for that pull, on
+// purpose, because none of it is true: the cloud's own R-revision VALUES
+// were never adopted. But R itself — "this (user, profile) row's server
+// revision was AT LEAST R as of this GET" — is a plain, unconditional fact
+// about the ROW, independent of which VALUES won. Without a place to record
+// that fact, a device whose local edits keep winning never advances its
+// `baseRevision` past whatever it last happened to get from a push/cloud-won
+// pull, and every later tagged operation keeps getting rejected as stale
+// against a server revision the device has, in fact, already seen.
+//
+// The fix is a SECOND, deliberately separate ratchet — "observed server
+// revision" — recorded independently of any domain's value, extending the
+// SAME per-(user,profile), physically-immutable-fact architecture
+// confirmedFactKey() already established (see its own doc in
+// syncHelper.ts), rather than inventing a different sync-state mechanism:
+//   • Every fact is just `{ revision }` — no value, so there is no
+//     canonical-value conflict to ever detect or fail closed on: two tabs
+//     recording the SAME revision cannot disagree, unlike a domain's
+//     content. This is strictly simpler than confirmedFactKey's contract.
+//   • resolveObservedServerRevision() below reduces any set of these facts
+//     to a single number: the maximum `revision` among them, 0 when there
+//     are none — mirroring knownBaseRevisionFromConfirmedState()'s own "max
+//     across whatever has been recorded" reduction, just over a single flat
+//     fact store instead of three per-domain ones.
+//   • Because taking a max is commutative and a fact can never be "wrong"
+//     (a revision that was genuinely observed stays genuinely observed
+//     forever), recordObservedServerRevision() (syncHelper.ts) can prune
+//     every fact strictly below the new max immediately after recording a
+//     higher one, with NO Web Locks and no read-modify-write hazard: unlike
+//     a domain value (where two racing writers could disagree and need a
+//     lock-free-but-conflict-aware design), two racing writers here can
+//     only ever converge — whichever recorded the higher revision is simply
+//     correct, and the reduction at read time is safe regardless of which
+//     write's prune pass ran first or was interleaved with the other's scan.
+//   • Called from each page's pull effect for EVERY usable pull response
+//     (any response carrying a definite numeric `revision`, whether or not
+//     it hydrates any domain) — see resolveObservedServerRevisionAdvance()
+//     below for the pure "should this call actually write" decision, which
+//     is what makes the monotonic guarantee ("never move backward") hold
+//     for a genuinely older/delayed pull response landing after a newer one
+//     already advanced this device's knowledge.
+//   • getKnownBaseRevision() (syncHelper.ts) — the value doPush()/
+//     registerUnloadSync() actually attach as `baseRevision` — is now
+//     `max(knownBaseRevisionFromConfirmedState(...), getObservedServerRevision(...))`,
+//     so a device whose local edits keep winning still advances its
+//     baseRevision from the OBSERVED row revision alone, without ever
+//     falsely recording any domain's local value as server-confirmed.
+export interface ObservedRevisionFact {
+  revision: number;
+}
+
+export function parseObservedRevisionFact(raw: unknown): ObservedRevisionFact | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  return { revision: r.revision };
+}
+
+/**
+ * Reduces any set of recorded observed-revision facts to the single
+ * "highest server revision this device has ever observed for this (user,
+ * profile) pair" — 0 (the same "nothing known yet" sentinel used
+ * everywhere else in this protocol) when `facts` is empty.
+ */
+export function resolveObservedServerRevision(facts: ObservedRevisionFact[]): number {
+  let max = 0;
+  for (const fact of facts) {
+    if (fact.revision > max) max = fact.revision;
+  }
+  return max;
+}
+
+/**
+ * Pure decision core for recordObservedServerRevision() (syncHelper.ts):
+ * should recording `candidateRevision`, given the CURRENT max already
+ * durably recorded (`currentMax`), actually write anything? Returns `true`
+ * only when `candidateRevision` is a genuine advance (strictly greater than
+ * `currentMax`) — this is what makes the ratchet MONOTONIC: a stale/older
+ * pull response (candidateRevision <= currentMax) is a no-op, never
+ * regressing what a later, already-processed response already established,
+ * regardless of arrival order.
+ */
+export function resolveObservedServerRevisionAdvance(candidateRevision: number, currentMax: number): boolean {
+  return candidateRevision > currentMax;
+}
+
+/**
+ * Reference cases for resolveObservedServerRevision()/
+ * resolveObservedServerRevisionAdvance() — run from Node:
+ *   import { DEV_OBSERVED_SERVER_REVISION_CASES, resolveObservedServerRevision, resolveObservedServerRevisionAdvance } from "@/lib/syncPayload";
+ *   DEV_OBSERVED_SERVER_REVISION_CASES.forEach(c => {
+ *     const gotMax = resolveObservedServerRevision(c.facts);
+ *     const gotAdvance = resolveObservedServerRevisionAdvance(c.candidateRevision, gotMax);
+ *     console.log(gotMax === c.expectedMax && gotAdvance === c.expectedAdvance ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_OBSERVED_SERVER_REVISION_CASES: Array<{
+  name: string;
+  facts: ObservedRevisionFact[];
+  candidateRevision: number;
+  expectedMax: number;
+  expectedAdvance: boolean;
+}> = [
+  {
+    name: "nothing ever observed — max 0, a genuinely first observation advances",
+    facts: [],
+    candidateRevision: 5,
+    expectedMax: 0,
+    expectedAdvance: true,
+  },
+  {
+    name: "required — a usable pull observed R while every domain stayed a local winner — still advances",
+    facts: [],
+    candidateRevision: 7,
+    expectedMax: 0,
+    expectedAdvance: true,
+  },
+  {
+    name: "required — a genuinely NEWER observation (R+1) after an earlier one (R) — advances",
+    facts: [{ revision: 7 }],
+    candidateRevision: 8,
+    expectedMax: 7,
+    expectedAdvance: true,
+  },
+  {
+    name: "required — a stale/older/delayed response (R) arriving after a newer one (R+1) was already recorded — never regresses",
+    facts: [{ revision: 8 }],
+    candidateRevision: 7,
+    expectedMax: 8,
+    expectedAdvance: false,
+  },
+  {
+    name: "an exact repeat of the current max is a no-op (redundant, not an advance)",
+    facts: [{ revision: 5 }],
+    candidateRevision: 5,
+    expectedMax: 5,
+    expectedAdvance: false,
+  },
+  {
+    name: "multiple recorded facts (e.g. a transient race between two tabs) — max is taken, not the latest write",
+    facts: [{ revision: 3 }, { revision: 9 }, { revision: 6 }],
+    candidateRevision: 9,
+    expectedMax: 9,
+    expectedAdvance: false,
+  },
+];
+
 // ===== Pending-operation domain evidence (SH.2.3 — Unresolved Write
 // Provenance & Operation Recovery) =====================================
 //
