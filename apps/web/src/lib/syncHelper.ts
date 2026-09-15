@@ -4718,6 +4718,168 @@ export const DEV_SHOULD_PUBLISH_PUSH_COMPLETION_STATUS_CASES: Array<{
   },
 ];
 
+/**
+ * SH.2.6 Codex P2 follow-up — "clear syncing status when suppressing stale
+ * completion". shouldPublishPushCompletionStatus() above correctly stops a
+ * superseded push (pushEpoch stale relative to currentPullEpoch) from
+ * publishing ITS OWN completion, but suppressing that completion alone can
+ * leave the profile's status key stuck at "syncing" forever: doPush()
+ * writes "syncing" UNCONDITIONALLY before the request goes out (always
+ * correct at that instant — no transition can happen between capturing
+ * identity/epoch and that synchronous write), and if the identity then
+ * transitions before this push's response resolves, nothing else is left
+ * to move the key off "syncing" until the NEW identity happens to run its
+ * own successful push/pull — which may never happen (e.g. the new identity
+ * only views Settings, or signs out again immediately). Symptom: Settings
+ * shows "Syncing..." indefinitely for an identity that never actually has
+ * anything syncing.
+ *
+ * This is the full three-way decision doPush() now makes at every
+ * post-fetch completion point, replacing a bare
+ * shouldPublishPushCompletionStatus() boolean check:
+ *   - "publish" — no transition since `pushEpoch` was captured; publish
+ *     this push's own completion exactly as before this round.
+ *   - "clear-stale-syncing" — a transition DID happen, but the profile's
+ *     status key is STILL EXACTLY "syncing" (a fresh read taken at the
+ *     same moment as this decision, never a cached value): nothing else
+ *     has published a status since this push's own pre-request write, so
+ *     it can only be this now-superseded push's own leftover — safe to
+ *     downgrade it back to a neutral "idle", the same terminal state an
+ *     ordinary completion would have left behind if nothing were wrong.
+ *   - "noop" — a transition happened AND the status key is no longer
+ *     "syncing" (already idle/error/unresolved). That value can only
+ *     belong to something else (this module's serialized `inFlight` guard
+ *     means no OTHER same-tab push could have started before this one's
+ *     own completion runs — see doPush()'s own doc — so a changed value
+ *     here means a different tab's independent write). This push must
+ *     never touch it: neither publishing a normal completion NOR clearing
+ *     "syncing" is safe once the key no longer holds what this push itself
+ *     put there. This is what makes "clear stale syncing" strictly
+ *     narrower than "publish a normal completion just to reset the key" —
+ *     exactly the distinction Codex's finding requires.
+ *
+ * `currentStatus` must be a FRESH read of syncStatusKeyForProfile(profileId)
+ * taken at the same call site as this decision — never a value captured
+ * before an awaited boundary.
+ */
+export type PushCompletionAction = "publish" | "clear-stale-syncing" | "noop";
+
+export function resolvePushCompletionAction(
+  pushEpoch: number,
+  epochAtCompletion: number,
+  currentStatus: string | null
+): PushCompletionAction {
+  if (isPullEpochCurrent(pushEpoch, epochAtCompletion)) return "publish";
+  return currentStatus === "syncing" ? "clear-stale-syncing" : "noop";
+}
+
+/**
+ * Reference cases for resolvePushCompletionAction() — run from Node:
+ *   import { DEV_RESOLVE_PUSH_COMPLETION_ACTION_CASES, resolvePushCompletionAction } from "@/lib/syncHelper";
+ *   DEV_RESOLVE_PUSH_COMPLETION_ACTION_CASES.forEach(c => {
+ *     const got = resolvePushCompletionAction(c.pushEpoch, c.epochAtCompletion, c.currentStatus);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RESOLVE_PUSH_COMPLETION_ACTION_CASES: Array<{
+  name: string;
+  pushEpoch: number;
+  epochAtCompletion: number;
+  currentStatus: string | null;
+  expected: PushCompletionAction;
+}> = [
+  {
+    name: "required — ordinary same-identity push: no transition, status still syncing at completion — publish normally, behavior unchanged from before this round",
+    pushEpoch: 4,
+    epochAtCompletion: 4,
+    currentStatus: "syncing",
+    expected: "publish",
+  },
+  {
+    name: "required — A writes syncing, then an A -> B transition occurs before completion, status still exactly syncing (nothing else wrote since) — clear the stale syncing back to idle, never publish A's own completion for B",
+    pushEpoch: 1,
+    epochAtCompletion: 2,
+    currentStatus: "syncing",
+    expected: "clear-stale-syncing",
+  },
+  {
+    name: "required — sign-out during an in-flight push (setSyncUserId(null) also bumps the epoch): same clear-stale-syncing outcome as any other transition",
+    pushEpoch: 7,
+    epochAtCompletion: 8,
+    currentStatus: "syncing",
+    expected: "clear-stale-syncing",
+  },
+  {
+    name: "required — stale completion remains suppressed even when a clear is also warranted: never 'publish' once the epoch has moved, regardless of currentStatus",
+    pushEpoch: 3,
+    epochAtCompletion: 5,
+    currentStatus: "syncing",
+    expected: "clear-stale-syncing",
+  },
+  {
+    name: "transition happened, but status is no longer syncing (already idle) — noop: nothing left to clear, and this push must not touch a value it didn't leave behind",
+    pushEpoch: 1,
+    epochAtCompletion: 2,
+    currentStatus: "idle",
+    expected: "noop",
+  },
+  {
+    name: "transition happened, status shows error from something else — noop: never overwrite a value that isn't this push's own 'syncing' leftover, and never downgrade an error to idle on this push's say-so",
+    pushEpoch: 1,
+    epochAtCompletion: 2,
+    currentStatus: "error",
+    expected: "noop",
+  },
+  {
+    name: "transition happened, status shows unresolved from something else — noop, same rationale as the error case",
+    pushEpoch: 1,
+    epochAtCompletion: 2,
+    currentStatus: "unresolved",
+    expected: "noop",
+  },
+  {
+    name: "transition happened, status key missing entirely (null) — noop: nothing to clear",
+    pushEpoch: 1,
+    epochAtCompletion: 2,
+    currentStatus: null,
+    expected: "noop",
+  },
+];
+
+/**
+ * SH.2.6 Codex P2 follow-up — the write side of the "clear-stale-syncing"
+ * action above. Re-reads the status key itself (never trusts a value the
+ * caller already had) so the ONLY thing this ever downgrades is a status
+ * key still holding exactly "syncing" at the moment of the write — the
+ * same freshness discipline resolvePushCompletionAction()'s own doc
+ * requires of `currentStatus`. Resets to "idle" and clears any stale error
+ * text, mirroring exactly what an ordinary successful completion would
+ * have left behind — this is a neutral terminal state, never a fabricated
+ * "success" for a push whose actual outcome this device no longer has any
+ * business reporting for the current identity.
+ */
+function clearStaleSyncingStatus(profileId: string): void {
+  let currentStatus: string | null = null;
+  try {
+    currentStatus = localStorage.getItem(syncStatusKeyForProfile(profileId));
+  } catch {
+    return;
+  }
+  // Same rule resolvePushCompletionAction() encodes for its own
+  // "clear-stale-syncing" branch: only ever touch the key when it is
+  // STILL exactly "syncing" right now.
+  if (currentStatus !== "syncing") return;
+  try {
+    localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
+  } catch {}
+  try {
+    localStorage.removeItem(syncErrorKeyForProfile(profileId));
+  } catch {}
+  try {
+    window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+  } catch {}
+}
+
 async function doPush(): Promise<void> {
   if (inFlight) {
     // Re-schedule so the latest payload gets sent after the current request
@@ -4834,6 +4996,33 @@ async function doPush(): Promise<void> {
   try {
     window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
   } catch {}
+  // SH.2.6 Codex P2 follow-up — every completion branch below (including
+  // the catch block, reached when the fetch itself throws before any
+  // response exists) funnels its UI-facing writes through this SAME
+  // three-way decision (resolvePushCompletionAction) instead of a bare
+  // shouldPublishPushCompletionStatus() boolean, so a superseded push can
+  // downgrade its own stale "syncing" leftover back to idle instead of
+  // leaving Settings stuck on "Syncing..." forever — never by publishing a
+  // normal completion for an identity this push no longer represents.
+  // Declared here (before the try block), not inside it, specifically so
+  // the catch block below can also reach it. Reads the profile's status
+  // key FRESH at each call site (never a value cached before this await,
+  // or before an inner one), matching every other "re-check after an
+  // awaited boundary" gate in this function.
+  const applyCompletion = (publish: () => void): void => {
+    let currentStatus: string | null = null;
+    try {
+      currentStatus = localStorage.getItem(syncStatusKeyForProfile(profileId));
+    } catch {}
+    const action = resolvePushCompletionAction(pushEpoch, currentPullEpoch, currentStatus);
+    if (action === "publish") {
+      publish();
+    } else if (action === "clear-stale-syncing") {
+      clearStaleSyncingStatus(profileId);
+    }
+    // action === "noop": this push must not touch a status value it did
+    // not itself leave behind — see resolvePushCompletionAction's own doc.
+  };
   try {
     const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
     const res = await fetch(
@@ -4871,8 +5060,10 @@ async function doPush(): Promise<void> {
       // transition has happened since this push captured `pushEpoch`.
       // Suppressing them here is exactly what stops a since-superseded
       // user A's "unresolved" from overwriting a since-signed-in user B's
-      // sync-status UI for the same profile slot.
-      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+      // sync-status UI for the same profile slot — and applyCompletion()
+      // still downgrades A's own stale "syncing" leftover to idle when
+      // suppressed, rather than leaving it stuck.
+      applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), "unresolved");
         } catch {}
@@ -4882,7 +5073,7 @@ async function doPush(): Promise<void> {
         try {
           window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
         } catch {}
-      }
+      });
       // SH.2.5.1 Codex P1 follow-up (problem 2) — retiring the rejected op
       // above is NOT enough on its own: this device's `baseRevision`
       // knowledge is still exactly as stale as it was before this push (the
@@ -4978,9 +5169,13 @@ async function doPush(): Promise<void> {
       // `await commitConfirmedBaseline()` calls inside the `if (userId)`
       // block above are ANOTHER awaited boundary this function crossed
       // since that snapshot, during which a fresh transition could have
-      // happened. Status writes are best-effort; event dispatch MUST
-      // always execute when publication is allowed.
-      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+      // happened. applyCompletion() re-reads currentPullEpoch AND the
+      // status key itself fresh right now, so it correctly downgrades a
+      // stale "syncing" left behind by a transition that happened during
+      // THESE inner awaits, not merely the outer fetch. Status writes are
+      // best-effort; event dispatch MUST always execute when publication
+      // is allowed.
+      applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), userId && !confirmedDurably ? "unresolved" : "idle");
         } catch {}
@@ -4990,13 +5185,15 @@ async function doPush(): Promise<void> {
         try {
           window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
         } catch {}
-      }
+      });
     } else if (res.status !== 401) {
       // Non-401 failure — record error state for the originating profile.
       // SH.2.6 — gated the same way as every other completion write above:
       // an HTTP failure for a since-superseded identity must not overwrite
-      // the currently active identity's sync-status UI for this profile.
-      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+      // the currently active identity's sync-status UI for this profile
+      // (applyCompletion() still downgrades a stale "syncing" to idle when
+      // suppressed).
+      applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
         } catch {}
@@ -5006,14 +5203,14 @@ async function doPush(): Promise<void> {
         try {
           window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
         } catch {}
-      }
+      });
     } else {
       // 401 — user not signed in; return originating profile to a clean idle state.
       // Also clear lastError so the profile doesn't show a stale error after sign-out.
       // SH.2.6 — gated identically: a 401 for a since-superseded identity
       // must not force the currently active identity's status back to
       // "idle" out from under it.
-      if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+      applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
         } catch {}
@@ -5023,7 +5220,7 @@ async function doPush(): Promise<void> {
         try {
           window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
         } catch {}
-      }
+      });
     }
   } catch {
     // Network error — record error state on the originating profile.
@@ -5031,8 +5228,10 @@ async function doPush(): Promise<void> {
     // awaited boundary in the try block above (the outer fetch, or the
     // inner res.json()/commitConfirmedBaseline() calls), so identity
     // currency must be re-checked fresh here too, never assumed from an
-    // earlier snapshot.
-    if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
+    // earlier snapshot. `applyCompletion` was declared BEFORE the try
+    // block specifically so it is reachable here too, even when the fetch
+    // itself throws before any response exists.
+    applyCompletion(() => {
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
       } catch {}
@@ -5042,7 +5241,7 @@ async function doPush(): Promise<void> {
       try {
         window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
       } catch {}
-    }
+    });
   } finally {
     inFlight = false;
   }
