@@ -277,6 +277,27 @@ async function verifyTable(client, name, contract) {
 // increment/cycle, from the same pg_sequence row) before this function
 // ever reports success or attempts a ratchet.
 //
+// SH.2.5 (Codex P1 follow-up #3) — `CACHE N` (N > 1) lets a Postgres
+// BACKEND pre-allocate a whole block of N sequence values locally on
+// its first nextval() call, advancing the shared counter by N at once
+// but then handing out the REST of that block from local memory on
+// later calls from that SAME connection, without consulting the
+// shared state again. Because /api/sync/planner runs behind connection
+// pooling (route.ts's getPool()), consecutive writes to the SAME
+// (user_id, profile_id) — themselves fully serialized by
+// pg_advisory_xact_lock, one at a time — can still land on DIFFERENT
+// backend connections. If connection A caches [1..10] and returns 1,
+// then connection B (a different, later transaction, still for the
+// same profile, still strictly after A's commit released the lock)
+// caches [11..20] and returns 11, a LATER write that happens to reuse
+// connection A can return 2 from its leftover cache — a revision LOWER
+// than 11, even though it's chronologically and lock-order AFTER it.
+// This is a real monotonicity violation, not a theoretical one, so
+// `CACHE 1` (db-schema.sql's own CREATE SEQUENCE never specifies
+// CACHE, so it defaults to 1) is required exactly like a positive
+// increment or non-cycling — fail loud rather than accept or silently
+// alter an unexpected CACHE on an existing production sequence.
+//
 // `schemaName` is the single schema every SH.2 object already resolved
 // to (the caller only reaches this after that ambiguity check passes),
 // so both objects are addressed directly rather than re-resolved
@@ -286,15 +307,15 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
   const qualifiedTable = `${quoteIdent(schemaName)}.${quoteIdent(tableName)}`;
 
   // Sequence CONFIGURATION (not position) — read from pg_sequence via
-  // the already-resolved oid. A non-positive increment or CYCLE means
-  // no amount of ratcheting forward right now can guarantee
-  // monotonicity going forward (a cycling sequence will eventually
-  // wrap back down regardless of where it's currently positioned), so
-  // those fail outright rather than being "fixed" by setval. `seqmax`
-  // is this sequence's hard ceiling — see the function's own doc above
-  // for why it must gate both the current position AND any ratchet.
+  // the already-resolved oid. A non-positive increment, CYCLE, or a
+  // CACHE greater than 1 all mean no amount of ratcheting forward right
+  // now can guarantee monotonicity going forward (see the doc above for
+  // why CACHE > 1 is unsafe across pooled connections), so those fail
+  // outright rather than being "fixed" by setval. `seqmax` is this
+  // sequence's hard ceiling — see the function's own doc above for why
+  // it must gate both the current position AND any ratchet.
   const { rows: configRows } = await client.query(
-    `SELECT seqincrement, seqcycle, seqmax
+    `SELECT seqincrement, seqcycle, seqmax, seqcache
      FROM pg_sequence
      WHERE seqrelid = to_regclass($1)::oid`,
     [`${schemaName}.${sequenceName}`]
@@ -316,6 +337,17 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
     throw new SchemaVerificationError(
       `${sequenceName}: is CYCLE — it can wrap back to a low value after reaching its MAXVALUE, which would ` +
         "eventually violate the monotonic revision contract no matter where it's currently positioned"
+    );
+  }
+  const cache = BigInt(config.seqcache);
+  if (cache !== 1n) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: CACHE is ${config.seqcache}, not 1 — a backend connection can pre-allocate and hand out ` +
+        "a whole block of values from local memory without consulting the shared sequence state, which lets a " +
+        "later write on a different pooled connection return a LOWER revision than one already committed for " +
+        "the same (user_id, profile_id), even though pg_advisory_xact_lock fully serialized them; it must be " +
+        "recreated with CACHE 1 (a manual, data-preserving operation — see db-schema.sql) before this database " +
+        "can be migrated"
     );
   }
   const seqMax = BigInt(config.seqmax);
