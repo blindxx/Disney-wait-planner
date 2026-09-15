@@ -1684,7 +1684,47 @@ export function commitLocalDomainRawSync(key: string, nextRaw: string): LocalDom
     baselineFacts.map((fact) => fact.raw)
   );
   const decision = decideLocalDomainCommit(durableRaw, durableRaw, nextRaw);
-  if (decision === "noop") return "noop";
+  if (decision === "noop") {
+    // SH.2.5.2 (Codex review, "effective-value local-write noops" finding)
+    // — `decision === "noop"` only proves the EFFECTIVE durable value
+    // (canonical, or a surviving fact outranking a stale canonical — see
+    // resolveEffectiveDurableRaw()) already equals `nextRaw`. It does NOT
+    // prove canonical storage itself holds those bytes: when a surviving
+    // fact is the one supplying `durableRaw`, canonical can still be
+    // stale. Treating this as a true no-op and returning immediately would
+    // leave canonical stale indefinitely, relying on the protecting fact
+    // never being retired by anything else in the meantime — exactly the
+    // gap that let a later reconciliation/retirement elsewhere expose
+    // stale canonical bytes once the fact was gone (see
+    // reconcilePendingOperations()'s own "materialize before retire" doc
+    // below for the accepted-operation half of this same root cause).
+    //
+    // The fix: a noop still reports "noop" (nothing NEW was durably
+    // recorded — this is not a fresh edit, and no new fact is published,
+    // exactly as before), but first REPAIRS canonical storage with a
+    // plain, unconditional overwrite whenever it does not already hold
+    // `nextRaw`'s bytes — a best-effort materialization of authority that
+    // already exists, never a new decision. This is safe unconditionally:
+    // `nextRaw` is already durable authority by construction (that is what
+    // "noop" means here), so writing it to canonical can never regress
+    // anything, only bring canonical in line with what is already true.
+    // Consistent with this function's own established synchronous,
+    // lock-free write policy (16th round, above) — no new locking is
+    // introduced, and a failed repair attempt is not a durability loss:
+    // the surviving fact(s) already keep `nextRaw` durably recoverable via
+    // readLatestDurableValue(), so this call simply leaves the repair for
+    // a later noop/edit/reconciliation to retry. The protecting fact(s)
+    // are left completely untouched either way — retirement is reserved
+    // for the paths that already own it (an ordinary edit's own
+    // planOrdinaryEditFactCommit() retirement, or accepted-operation
+    // reconciliation's materialize-then-retire — never duplicated here).
+    if (canonicalRaw !== nextRaw) {
+      try {
+        localStorage.setItem(key, nextRaw);
+      } catch {}
+    }
+    return "noop";
+  }
   const plan = planOrdinaryEditFactCommit(baselineFacts, nextRaw, localEditFactKey(key, generateOpId()));
   // SH.2.4 Codex P1 follow-up — attempt BOTH the new fact and the canonical
   // overwrite unconditionally; neither leg's failure is allowed to skip the
@@ -3717,8 +3757,14 @@ export async function reconcilePendingOperations(
         // operation storage" doc in syncPayload.ts) is what gets recorded as
         // provenance below on a match.
         let currentValue: unknown = null;
+        // SH.2.5.2 — hoisted out of the try block below (was previously
+        // block-scoped and discarded) so the materialize-before-retire step
+        // further down can reuse this EXACT same effective-durable raw
+        // string as the value to materialize into canonical storage, never
+        // a re-read that could observe a different moment in time.
+        let currentRaw: string | null = null;
         try {
-          const currentRaw = readLatestDurableValue(key);
+          currentRaw = readLatestDurableValue(key);
           if (domain === "days") {
             const parsed: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
             currentValue = Array.isArray(parsed) ? parsed : null;
@@ -3727,6 +3773,7 @@ export async function reconcilePendingOperations(
           }
         } catch {
           currentValue = null;
+          currentRaw = null;
         }
         const isCurrent = isPendingOpDomainEvidenceCurrent(
           currentEditFactKeys,
@@ -3761,10 +3808,85 @@ export async function reconcilePendingOperations(
         // a subsequent pull's winner selection recognizes this domain's
         // still-on-disk bytes as explained rather than a fresh edit, and
         // defers to whatever the CURRENT confirmed baseline is.
-        for (const factKey of currentEditFactKeys) {
-          try {
-            localStorage.removeItem(factKey);
-          } catch {}
+        //
+        // SH.2.5.2 (Codex review, "accepted-operation reconciliation"
+        // finding) — MATERIALIZE BEFORE RETIRE. `currentRaw` is the
+        // EFFECTIVE durable value this now-accepted operation's evidence
+        // matched (canonical + any surviving edit fact — see
+        // readLatestDurableValue()/resolveEffectiveDurableRaw()'s own
+        // docs), not necessarily what canonical storage itself currently
+        // holds: `currentEditFactKeys` can outrank a canonical key that is
+        // still stale (e.g. a prior edit whose canonical leg never landed —
+        // SH.2.4's own "committed-unprotected" persist outcome). Retiring
+        // those facts BEFORE canonical durably holds this exact value would
+        // leave canonical's stale bytes as the ONLY surviving evidence for
+        // readLatestDurableValue() from that point on — exactly the "an
+        // authoritative fact retires while canonical still contains an
+        // older value" gap this round closes. `currentRaw === null` (both
+        // the fact read and the fallback failed) means there is nothing
+        // durable to materialize or retire — fail this domain closed rather
+        // than guessing.
+        if (currentRaw === null) {
+          domainFailed = true;
+          continue;
+        }
+        let canonicalRawAtDecision: string | null;
+        try {
+          canonicalRawAtDecision = localStorage.getItem(key);
+        } catch {
+          domainFailed = true;
+          continue;
+        }
+        if (canonicalRawAtDecision === currentRaw) {
+          // Canonical already durably holds the accepted value — nothing to
+          // materialize, safe to retire the observed baseline directly.
+          for (const factKey of currentEditFactKeys) {
+            try {
+              localStorage.removeItem(factKey);
+            } catch {}
+          }
+        } else {
+          // Canonical is stale relative to the accepted value — materialize
+          // it via the SAME CAS/authority-protected primitive every other
+          // durable local-domain write uses, never a bespoke setItem.
+          // `currentEditFactKeys` is passed as this commit's own baseline:
+          // on a genuine "committed" write, commitLocalDomainRaw() retires
+          // EXACTLY that frontier itself (see its own LOCAL-EDIT FACT
+          // LIFECYCLE doc) — a fact that appeared AFTER this snapshot (a
+          // genuinely newer/concurrent edit) is, by construction, not a
+          // member of it, so the CAS's own re-scan reports "superseded"
+          // instead of ever touching it: never deleted, never overwritten.
+          const materializeStatus = await commitLocalDomainRaw(
+            key,
+            canonicalRawAtDecision,
+            currentRaw,
+            undefined,
+            undefined,
+            currentEditFactKeys
+          );
+          if (materializeStatus === "committed") {
+            // commitLocalDomainRaw() already retired currentEditFactKeys.
+          } else if (materializeStatus === "noop") {
+            // A concurrent writer already materialized this exact value —
+            // commitLocalDomainRaw()'s own re-scan already proved no fact
+            // outside this frontier survived, so retiring it directly here
+            // is exactly as safe as the already-matching branch above.
+            for (const factKey of currentEditFactKeys) {
+              try {
+                localStorage.removeItem(factKey);
+              } catch {}
+            }
+          } else {
+            // "superseded" / "authority-superseded" / "aborted" / "failed" /
+            // "unavailable" — safe materialization could not be proven.
+            // Fail conservatively: retain the fact(s) and the pending-op
+            // record untouched for a later pull to retry the identical
+            // check, exactly like a provenance-write failure above. A
+            // newer/concurrent fact is never deleted or overwritten by this
+            // branch.
+            domainFailed = true;
+            continue;
+          }
         }
       }
     } catch {

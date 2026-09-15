@@ -1883,6 +1883,109 @@ export const DEV_PENDING_OP_DOMAIN_EVIDENCE_CASES: Array<{
   },
 ];
 
+// ===== ACCEPTED-OPERATION MATERIALIZATION (SH.2.5.2, Codex review
+// "accepted-operation reconciliation" finding) =====
+//
+// ROOT CAUSE: once isPendingOpDomainEvidenceCurrent() (above) confirmed an
+// accepted operation's evidence is still current, reconcilePendingOperations()
+// (syncHelper.ts) recorded replacement hydration-provenance and then retired
+// this domain's `currentEditFactKeys` directly — but it never checked
+// whether CANONICAL STORAGE ITSELF already held the accepted value.
+// `currentRaw` (the value evidence matched) comes from
+// readLatestDurableValue(), which can be authoritative via a SURVIVING
+// FACT while canonical underneath stays stale (e.g. SH.2.4's own
+// "committed-unprotected" persist outcome — the fact leg of an edit
+// landed, the canonical leg did not). Retiring that fact the moment its
+// operation is accepted, without first writing the accepted value into
+// canonical, deletes the ONLY durable evidence for it: the very next
+// readLatestDurableValue() call for this key resolves to stale canonical
+// bytes, which a later pull can then treat as this device's own current
+// state and push right back over the server.
+//
+// THE FIX (reconcilePendingOperations()'s own doc in syncHelper.ts has the
+// full rationale): before retiring `currentEditFactKeys`, first check
+// whether canonical already holds `currentRaw`. If so, retirement is
+// already safe exactly as before. If not, materialize `currentRaw` into
+// canonical via commitLocalDomainRaw() — the SAME CAS/authority-protected
+// primitive every other durable local-domain write uses — passing
+// `currentEditFactKeys` as that commit's own baseline, so retirement stays
+// scoped to EXACTLY the frontier this decision observed (never a fact
+// outside it — see commitLocalDomainRaw's own LOCAL-EDIT FACT LIFECYCLE
+// doc). Only a "committed" or "noop" outcome (canonical durably holds the
+// value, by this call or a concurrent one) permits retirement; any other
+// outcome — most importantly "superseded", when a genuinely newer/
+// concurrent fact landed after this decision's own snapshot — leaves the
+// fact(s) and the pending-op record fully intact for a later pull to
+// retry, never deleting or overwriting the newer evidence.
+//
+// The cases below model that exact decision purely, composing the SAME
+// real resolveEffectiveDurableRaw() production primitive the fix itself
+// calls (to derive `currentRaw` from canonical + the observed fact
+// frontier) plus a `newerFactLanded` flag standing in for
+// commitLocalDomainRaw()'s own re-scan (modeled the SAME way
+// DEV_HYDRATION_NOOP_SAFETY_CASES' `liveFactKeysGrew` and
+// DEV_COMMIT_TIME_AUTHORITY_GATE_CASES' `editFactGrew` already do) —
+// reduced to this decision's actual inputs/outputs, not a reimplementation.
+export type AcceptedOperationMaterializationOutcome = "retired-noop" | "materialized-and-retired" | "retained";
+
+/**
+ * Reference cases for reconcilePendingOperations()'s materialize-before-
+ * retire decision — the REQUIRED cases from the SH.2.5.2 architectural
+ * contract. Run from Node:
+ *   import { DEV_ACCEPTED_OPERATION_MATERIALIZATION_CASES, resolveEffectiveDurableRaw } from "@/lib/syncPayload";
+ *   DEV_ACCEPTED_OPERATION_MATERIALIZATION_CASES.forEach(c => {
+ *     const currentRaw = resolveEffectiveDurableRaw(c.canonicalRawAtDecision, c.factRawValues);
+ *     let got: string;
+ *     if (c.canonicalRawAtDecision === currentRaw) got = "retired-noop";
+ *     else if (c.newerFactLanded) got = "retained";
+ *     else got = "materialized-and-retired";
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ACCEPTED_OPERATION_MATERIALIZATION_CASES: Array<{
+  name: string;
+  canonicalRawAtDecision: string | null;
+  factRawValues: string[];
+  newerFactLanded: boolean;
+  expected: AcceptedOperationMaterializationOutcome;
+}> = [
+  {
+    name: "SH.2.5.2 required — canonical B + authoritative fact A + accepted operation A: reconciliation must NOT retire A while canonical still holds stale B — materializes A into canonical first, then retires",
+    canonicalRawAtDecision: "B",
+    factRawValues: ["A"],
+    newerFactLanded: false,
+    expected: "materialized-and-retired",
+  },
+  {
+    name: "already-materialized happy path — canonical already holds the accepted value (the common case, both legs of the original edit landed): retire directly, no write needed",
+    canonicalRawAtDecision: "A",
+    factRawValues: ["A"],
+    newerFactLanded: false,
+    expected: "retired-noop",
+  },
+  {
+    name: "SH.2.5.2 required — a newer/concurrent fact appears during materialization: must never be deleted or overwritten — the whole domain is retained (left untouched) for a later pull to retry",
+    canonicalRawAtDecision: "B",
+    factRawValues: ["A"],
+    newerFactLanded: true,
+    expected: "retained",
+  },
+  {
+    name: "SH.2.5.2 — unanimous multi-fact agreement protecting a stale canonical value materializes exactly like a single fact would",
+    canonicalRawAtDecision: "B",
+    factRawValues: ["A", "A"],
+    newerFactLanded: false,
+    expected: "materialized-and-retired",
+  },
+  {
+    name: "no facts at all, canonical alone already carries the accepted value (evidence matched via canonical, not a fact): retire (trivially empty) directly",
+    canonicalRawAtDecision: "A",
+    factRawValues: [],
+    newerFactLanded: false,
+    expected: "retired-noop",
+  },
+];
+
 // ===== Hydration-provenance dedup/pruning (SH.2.3 — Codex P1 "deduplicate
 // same-revision hydration provenance facts" round) =========================
 //
@@ -3342,13 +3445,30 @@ export const DEV_PARTIAL_PULL_PROVENANCE_CASES: Array<{
  * decision in this module does. `factRawValues` is the raw string content
  * of every currently-recorded local-edit-fact key for this domain's
  * canonical key (0, 1, or — rarely, a genuine same-instant multi-tab
- * tie — more); exactly one surviving fact outranks the canonical value
- * (it is durable unresolved intent, by construction more authoritative
- * than whatever the canonical key happens to contain right now); zero or
- * more than one falls back to the canonical value itself (nothing
- * recorded yet, or an ambiguous tie with no ordering information — "last
- * write wins among peers", same tie-break every other concurrent write to
- * one value gets).
+ * tie — more); one OR MORE surviving facts that all agree on the same raw
+ * value outrank the canonical value (durable unresolved intent, by
+ * construction more authoritative than whatever the canonical key happens
+ * to contain right now — this holds whether it is a single fact or several
+ * peers who all independently recorded the identical value); zero facts,
+ * or two-or-more that genuinely DISAGREE, fall back to the canonical value
+ * itself (nothing recorded yet, or an ambiguous tie with no ordering
+ * information — "last write wins among peers", same tie-break every other
+ * concurrent write to one value gets).
+ *
+ * SH.2.5.2 (Codex review, "unanimous edit facts" finding) — a same-instant
+ * multi-tab tie where every surviving fact happens to carry the SAME
+ * value (e.g. two tabs each independently record an edit fact for an
+ * identical user action, or a fact written by an in-flight
+ * commitLocalDomainRawSync() survives alongside a copy already published
+ * by another tab) is not genuinely ambiguous: there is only one candidate
+ * winner, so it must win, exactly as a lone surviving fact already does.
+ * Falling back to canonical in that case (the pre-fix behavior, which only
+ * ever special-cased `factRawValues.length === 1`) could resurrect a
+ * stale canonical value even though every recorded fact agreed on
+ * something newer. Only a fact set that genuinely disagrees (two or more
+ * DISTINCT values) is a real ambiguous tie with no ordering information —
+ * that case is unchanged: it still defers to canonical, the same
+ * conservative "last write wins among peers" fallback as before.
  *
  * WHY commitLocalDomainRaw()'s OWN CAS is intentionally left untouched —
  * its `expectedPreviousRaw`/internal re-read must both stay the LITERAL
@@ -3368,7 +3488,9 @@ export const DEV_PARTIAL_PULL_PROVENANCE_CASES: Array<{
  * correct, independent of which raw value winner selection compared.
  */
 export function resolveEffectiveDurableRaw(canonicalRaw: string | null, factRawValues: string[]): string | null {
-  return factRawValues.length === 1 ? factRawValues[0] : canonicalRaw;
+  if (factRawValues.length === 0) return canonicalRaw;
+  const [first, ...rest] = factRawValues;
+  return rest.every((raw) => raw === first) ? first : canonicalRaw;
 }
 
 /**
@@ -3411,16 +3533,34 @@ export const DEV_RESOLVE_EFFECTIVE_DURABLE_RAW_CASES: Array<{
     expected: null,
   },
   {
-    name: "ambiguous tie — two facts recorded with no ordering information: falls back to canonical rather than guessing which wins (commitLocalDomainRaw's own edit-fact re-scan is the mechanism that actually protects a genuinely newer one — see this function's own doc)",
+    name: "genuinely disagreeing tie — two facts recorded with no ordering information and DIFFERENT values: falls back to canonical rather than guessing which wins (commitLocalDomainRaw's own edit-fact re-scan is the mechanism that actually protects a genuinely newer one — see this function's own doc)",
     canonicalRaw: "CANONICAL-B",
     factRawValues: ["EDIT-FACT-C", "EDIT-FACT-E"],
     expected: "CANONICAL-B",
   },
   {
-    name: "one fact whose content happens to already equal canonical — still resolves via the fact (harmless: same value either way, but proves the rule is purely structural (fact count), never a value comparison)",
+    name: "one fact whose content happens to already equal canonical — still resolves via the fact (harmless: same value either way, but proves the rule is purely structural (fact count/agreement), never a value comparison against canonical)",
     canonicalRaw: "SAME-VALUE",
     factRawValues: ["SAME-VALUE"],
     expected: "SAME-VALUE",
+  },
+  {
+    name: "SH.2.5.2 required — UNANIMOUS multi-fact tie: two distinct surviving fact keys that both recorded the SAME value are not ambiguous — the shared value wins over a stale canonical value, exactly as a lone fact would",
+    canonicalRaw: "STALE-CANONICAL-B",
+    factRawValues: ["EDIT-FACT-A", "EDIT-FACT-A"],
+    expected: "EDIT-FACT-A",
+  },
+  {
+    name: "SH.2.5.2 — unanimous tie among three or more surviving facts still resolves to the shared value",
+    canonicalRaw: "STALE-CANONICAL-B",
+    factRawValues: ["EDIT-FACT-A", "EDIT-FACT-A", "EDIT-FACT-A"],
+    expected: "EDIT-FACT-A",
+  },
+  {
+    name: "SH.2.5.2 — three facts where only two agree is still a genuine disagreement (not unanimous): falls back to canonical",
+    canonicalRaw: "CANONICAL-B",
+    factRawValues: ["EDIT-FACT-A", "EDIT-FACT-A", "EDIT-FACT-C"],
+    expected: "CANONICAL-B",
   },
 ];
 
@@ -3507,11 +3647,101 @@ export const DEV_ORDINARY_EDIT_COMMIT_CASES: Array<{
     expected: "write",
   },
   {
-    name: "ambiguous 2-fact tie falls back to canonical for the noop decision too — same tie-break resolveEffectiveDurableRaw always applies, never a special case here",
+    name: "genuinely disagreeing 2-fact tie falls back to canonical for the noop decision too — same tie-break resolveEffectiveDurableRaw always applies, never a special case here",
     canonicalRaw: "B",
     factRawValues: ["C", "E"],
     nextRaw: "B",
     expected: "noop",
+  },
+];
+
+// ===== ORDINARY-EDIT NOOP CANONICAL REPAIR (SH.2.5.2, Codex review
+// "effective-value local-write noops" finding) =====
+//
+// ROOT CAUSE: the noop decision above (DEV_ORDINARY_EDIT_COMMIT_CASES,
+// required case 4) correctly recognizes `nextRaw === effectiveDurableRaw`
+// as "nothing NEW to record", but commitLocalDomainRawSync() (syncHelper.ts)
+// then returned immediately on ANY "noop" without ever checking whether
+// CANONICAL STORAGE ITSELF already held those bytes. When the effective
+// durable value came from a surviving fact outranking a stale canonical
+// key (e.g. a prior edit whose canonical leg failed near quota — SH.2.4's
+// own "committed-unprotected" outcome), a later ordinary edit that
+// deliberately reproduces that exact value looked like a true no-op and
+// left canonical permanently stale, with only the fact protecting it —
+// forever, unless something else independently repaired or retired it.
+//
+// THE FIX (commitLocalDomainRawSync()'s own doc in syncHelper.ts has the
+// full rationale): a noop still reports "noop", but first repairs
+// canonical with a plain, unconditional overwrite whenever canonical does
+// not already hold `nextRaw`'s bytes — always safe, since `nextRaw` is
+// already durable authority by construction the moment `decision` says
+// "noop". The protecting fact is left completely untouched by this repair
+// either way — this is a canonical-storage materialization step, never a
+// fact retirement decision (that stays owned by planOrdinaryEditFactCommit
+// above / accepted-operation reconciliation's own materialize-then-retire,
+// never duplicated here).
+//
+// The cases below model that exact decision purely, composing the SAME
+// real resolveEffectiveDurableRaw()/decideLocalDomainCommit() production
+// primitives the fix itself calls — reduced to whether a canonical repair
+// write is needed, not a reimplementation.
+export type OrdinaryEditNoopOutcome = "unchanged" | "repaired" | "write";
+
+/**
+ * Reference cases for commitLocalDomainRawSync()'s noop-canonical-repair
+ * decision — the REQUIRED cases from the SH.2.5.2 architectural contract.
+ * Deliberately NOT a new production function, matching the SAME
+ * "fix centrally in the existing primitive" precedent DEV_HYDRATION_NOOP_SAFETY_CASES
+ * and DEV_COMMIT_TIME_AUTHORITY_GATE_CASES already established. Run from Node:
+ *   import { DEV_ORDINARY_EDIT_NOOP_REPAIR_CASES, resolveEffectiveDurableRaw, decideLocalDomainCommit } from "@/lib/syncPayload";
+ *   DEV_ORDINARY_EDIT_NOOP_REPAIR_CASES.forEach(c => {
+ *     const durable = resolveEffectiveDurableRaw(c.canonicalRaw, c.factRawValues);
+ *     const decision = decideLocalDomainCommit(durable, durable, c.nextRaw);
+ *     const got = decision === "write" ? "write" : (c.canonicalRaw !== c.nextRaw ? "repaired" : "unchanged");
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ORDINARY_EDIT_NOOP_REPAIR_CASES: Array<{
+  name: string;
+  canonicalRaw: string | null;
+  factRawValues: string[];
+  nextRaw: string;
+  expected: OrdinaryEditNoopOutcome;
+}> = [
+  {
+    name: "SH.2.5.2 required — canonical B + fact A + ordinary save A: NOT a false durable noop, canonical is repaired to A even though nothing new is recorded",
+    canonicalRaw: "B",
+    factRawValues: ["A"],
+    nextRaw: "A",
+    expected: "repaired",
+  },
+  {
+    name: "true noop — canonical already holds nextRaw, no facts at all: nothing to repair",
+    canonicalRaw: "B",
+    factRawValues: [],
+    nextRaw: "B",
+    expected: "unchanged",
+  },
+  {
+    name: "true noop — canonical already holds nextRaw AND a fact also agrees (fully steady state): nothing to repair",
+    canonicalRaw: "B",
+    factRawValues: ["B"],
+    nextRaw: "B",
+    expected: "unchanged",
+  },
+  {
+    name: "unanimous multi-fact agreement (SH.2.5.2) protecting a stale canonical value: still repaired, same as the single-fact case",
+    canonicalRaw: "B",
+    factRawValues: ["A", "A"],
+    nextRaw: "A",
+    expected: "repaired",
+  },
+  {
+    name: "genuinely new value (not a noop at all): writes exactly as before, no repair logic involved",
+    canonicalRaw: "B",
+    factRawValues: [],
+    nextRaw: "D",
+    expected: "write",
   },
 ];
 
