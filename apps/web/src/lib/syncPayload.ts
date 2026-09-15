@@ -1258,6 +1258,211 @@ export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
   },
 ];
 
+// ===== Stale first-delivery operation rejection (SH.2.5.1) =================
+//
+// Codex P1 finding: operation idempotency (the `user_planner_writes` ledger
+// keyed by `client_op_id` — see this file's module doc and
+// api/sync/planner/route.ts) only ever protects a SECOND delivery of an
+// opId already recorded as accepted. It does nothing for the FIRST delivery
+// of a delayed unload/beacon operation, because a delayed operation has no
+// ledger row yet, so it sails straight past the duplicate check. Scenario:
+// a beacon is built from this device's known base state (server revision A),
+// stays queued (network delay, backgrounded tab, a slow/retried request),
+// and only reaches the server AFTER some other write (this tab, another
+// tab, or another device) has already advanced the row to revision B. The
+// merge-on-write at that point has no way to tell "a legitimately current
+// write" apart from "a stale write that never knew B existed" — both look
+// like an ordinary first delivery — so the stale payload gets merged
+// straight over B, silently reverting it.
+//
+// The fix binds each TAGGED operation (one carrying `clientOpId`) to the
+// minimal evidence needed to detect this: `baseRevision`, the single
+// server-issued `revision` (see this file's/route.ts's own revision-
+// ordering doc) this device believed was current for this (user, profile)
+// row at the moment the operation was built — 0 is the sentinel for "no
+// row has ever been observed yet" (mirrors `currentRevision` below, which
+// route.ts derives identically from "no user_planner row exists"). Because
+// `user_planner` is a SINGLE row per (user, profile) — every domain in one
+// write shares one `revision`, assigned fresh via `nextval()` on every
+// write regardless of which domains changed — one number is sufficient
+// evidence; there is no per-domain base to track, and no new ordering
+// system is introduced. `evaluateOperationBaseRevision()` below is the pure
+// decision core route.ts's handleWrite() calls, under the SAME
+// per-(user,profile) advisory-lock transaction it already uses for
+// duplicate detection, so the comparison against the row's CURRENT revision
+// is exactly as serialized/deterministic as idempotency itself:
+//   • `baseRevision` absent (an old, pre-SH.2.5.1 client, or any write that
+//     doesn't opt in) — "no-evidence": the staleness check is skipped
+//     entirely, preserving old-client safety and every existing DEV_*
+//     operation/revision case unchanged.
+//   • `baseRevision === currentRevision` — "current": this operation was
+//     built from exactly today's row state; the ordinary merge/upsert
+//     proceeds normally.
+//   • any other value (lower, e.g. a genuinely stale build; OR higher, e.g.
+//     a malformed/impossible client claim) — "stale": route.ts must reject
+//     the write outright, WITHOUT touching `user_planner`, and durably
+//     record the rejection (not merely decline to write) so a later
+//     `lastOpId` GET lookup — see this file's `acceptedDomainFactsFromBeacon`
+//     doc above for why an unlocked/un-recorded outcome is unobservable —
+//     can report a THIRD, DETERMINISTIC status distinct from the existing
+//     ambiguous `found: false` ("not accepted as of this instant, but might
+//     still be in flight"): `rejected: true` ("this exact operation will
+//     NEVER be accepted, full stop — safe to retire without further
+//     checking"). This is sound forever, not just at the instant of
+//     rejection, because `revision` only ever increases for a given (user,
+//     profile) row (nextval() never rewinds) — a `baseRevision` that
+//     mismatches `currentRevision` once can never later match it again, so
+//     a duplicate delivery of the SAME rejected operation is safe to
+//     reject identically without re-deriving anything (route.ts's duplicate
+//     check, extended to branch on the ledger row's `status`, handles this
+//     directly — see its own doc).
+//
+// This intentionally treats "baseRevision higher than currentRevision" as
+// stale rather than accepting it: a genuinely current client can never
+// observe a revision that doesn't exist yet, so such a value is either
+// malformed evidence or a corrupted/impossible claim — "fail closed" means
+// never merging on the strength of a base this server cannot verify,
+// exactly like the genuinely-lower case.
+export type BaseRevisionOutcome =
+  | { outcome: "no-evidence" }
+  | { outcome: "current"; baseRevision: number }
+  | { outcome: "stale"; baseRevision: number; currentRevision: number };
+
+export function evaluateOperationBaseRevision(
+  baseRevision: number | null,
+  currentRevision: number
+): BaseRevisionOutcome {
+  if (baseRevision === null) return { outcome: "no-evidence" };
+  if (baseRevision === currentRevision) return { outcome: "current", baseRevision };
+  return { outcome: "stale", baseRevision, currentRevision };
+}
+
+/**
+ * Reference cases for evaluateOperationBaseRevision() — run from Node:
+ *   import { DEV_EVALUATE_OPERATION_BASE_REVISION_CASES, evaluateOperationBaseRevision } from "@/lib/syncPayload";
+ *   DEV_EVALUATE_OPERATION_BASE_REVISION_CASES.forEach(c => {
+ *     const got = evaluateOperationBaseRevision(c.baseRevision, c.currentRevision);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_EVALUATE_OPERATION_BASE_REVISION_CASES: Array<{
+  name: string;
+  baseRevision: number | null;
+  currentRevision: number;
+  expected: BaseRevisionOutcome;
+}> = [
+  {
+    name: "no evidence supplied (old client / untagged write) — skip check regardless of current revision",
+    baseRevision: null,
+    currentRevision: 42,
+    expected: { outcome: "no-evidence" },
+  },
+  {
+    name: "required — fresh device, no row ever existed, base 0 matches current 0 — accepted normally",
+    baseRevision: 0,
+    currentRevision: 0,
+    expected: { outcome: "current", baseRevision: 0 },
+  },
+  {
+    name: "required — current-base first delivery: base matches today's row revision — accepted normally",
+    baseRevision: 5,
+    currentRevision: 5,
+    expected: { outcome: "current", baseRevision: 5 },
+  },
+  {
+    name: "required — operation created at revision A(3), newer write B(7) already landed — stale, rejected",
+    baseRevision: 3,
+    currentRevision: 7,
+    expected: { outcome: "stale", baseRevision: 3, currentRevision: 7 },
+  },
+  {
+    name: "client believes no row exists (base 0) but a row already exists at revision 5 — stale, rejected",
+    baseRevision: 0,
+    currentRevision: 5,
+    expected: { outcome: "stale", baseRevision: 0, currentRevision: 5 },
+  },
+  {
+    name: "impossible claim — base HIGHER than current revision — fails closed as stale, never accepted",
+    baseRevision: 9,
+    currentRevision: 4,
+    expected: { outcome: "stale", baseRevision: 9, currentRevision: 4 },
+  },
+];
+
+/**
+ * Reduces a client's per-domain confirmed state (see "Per-domain confirmed
+ * state" above) down to the single best-known `baseRevision` to tag an
+ * outgoing tagged operation with — see this section's own doc for why one
+ * number is sufficient evidence for a single-row (user, profile) write.
+ * Every domain confirmed/conflicted from the SAME push or pull shares one
+ * server revision (the row is written as a whole), so the MAXIMUM revision
+ * across whatever domains this device has ever observed a fact for is
+ * exactly this device's best knowledge of the row's current revision — 0
+ * ("no evidence of any prior state") when nothing has ever been confirmed
+ * for any domain. A "conflict" result still carries a real revision (the
+ * highest one recorded, even though its value is ambiguous) and is
+ * included in the max for the same reason: it is still proof that AT LEAST
+ * that revision was, at some point, the row's revision — a lower bound
+ * that remains valid regardless of which conflicting value was genuinely
+ * current at that revision.
+ */
+export function knownBaseRevisionFromConfirmedState(state: ConfirmedPlannerState): number {
+  let max = 0;
+  const results: Array<ConfirmedDomainResult<unknown>> = [state.plans, state.lightning, state.days];
+  for (const result of results) {
+    if (result.status === "confirmed" && result.fact.revision > max) max = result.fact.revision;
+    else if (result.status === "conflict" && result.revision > max) max = result.revision;
+  }
+  return max;
+}
+
+/**
+ * Reference cases for knownBaseRevisionFromConfirmedState() — run from Node:
+ *   import { DEV_KNOWN_BASE_REVISION_CASES, knownBaseRevisionFromConfirmedState } from "@/lib/syncPayload";
+ *   DEV_KNOWN_BASE_REVISION_CASES.forEach(c => {
+ *     const got = knownBaseRevisionFromConfirmedState(c.state);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_KNOWN_BASE_REVISION_CASES: Array<{
+  name: string;
+  state: ConfirmedPlannerState;
+  expected: number;
+}> = [
+  {
+    name: "nothing ever confirmed for any domain — 0 (no evidence)",
+    state: { plans: { status: "none" }, lightning: { status: "none" }, days: { status: "none" } },
+    expected: 0,
+  },
+  {
+    name: "all three domains confirmed at the same revision (an ordinary push/pull) — that revision",
+    state: {
+      plans: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
+      lightning: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
+      days: { status: "confirmed", fact: { revision: 5, value: ["day-1"] } },
+    },
+    expected: 5,
+  },
+  {
+    name: "disjoint per-domain revisions (e.g. a days-only cloud win at 7, plans still at 5) — the max",
+    state: {
+      plans: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
+      lightning: { status: "none" },
+      days: { status: "confirmed", fact: { revision: 7, value: ["day-1"] } },
+    },
+    expected: 7,
+  },
+  {
+    name: "a conflicted domain's revision still counts toward the max (it is a valid lower bound)",
+    state: {
+      plans: { status: "conflict", revision: 9 },
+      lightning: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
+      days: { status: "none" },
+    },
+    expected: 9,
+  },
+];
+
 // ===== Pending-operation domain evidence (SH.2.3 — Unresolved Write
 // Provenance & Operation Recovery) =====================================
 //

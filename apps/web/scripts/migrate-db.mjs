@@ -68,8 +68,8 @@ const REQUIRED_CHECKS = [
     label: "user_planner_writes has required columns",
     sql: `SELECT column_name FROM information_schema.columns
           WHERE table_name = 'user_planner_writes'
-            AND column_name IN ('user_id', 'profile_id', 'client_op_id', 'revision', 'updated_at', 'created_at')`,
-    expectedRowCount: 6,
+            AND column_name IN ('user_id', 'profile_id', 'client_op_id', 'revision', 'updated_at', 'created_at', 'status')`,
+    expectedRowCount: 7,
   },
   {
     label: "user_planner_writes primary key is (user_id, profile_id, client_op_id)",

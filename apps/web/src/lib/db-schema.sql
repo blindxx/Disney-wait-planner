@@ -140,3 +140,23 @@ CREATE TABLE IF NOT EXISTS user_planner_writes (
 -- backfill above: picks up `updated_at` on a table created by round 7,
 -- before this column existed, on an already-deployed database.
 ALTER TABLE user_planner_writes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- SH.2.5.1 — Stale First-Delivery Operation Rejection: distinguishes an
+-- ACCEPTED write (the only outcome this table recorded before this column
+-- existed — every pre-existing row is correctly backfilled 'accepted' by
+-- the DEFAULT below) from a durably-recorded STALE REJECTION, where a
+-- first-delivery operation's own `baseRevision` did not match this
+-- (user_id, profile_id) row's actual revision at the moment it was
+-- evaluated (see api/sync/planner/route.ts's handleWrite and
+-- evaluateOperationBaseRevision in syncPayload.ts for the full contract).
+-- For a 'rejected' row, `revision` holds the CURRENT row revision as
+-- observed at rejection time (informational — never this operation's own
+-- base, which was rejected precisely because it did NOT match), not a
+-- revision this operation produced. This is the minimal additive column
+-- that lets a later `lastOpId` GET lookup answer "was this exact operation
+-- ever accepted OR definitively, permanently rejected" — the third,
+-- deterministic status a client needs to retire a stale operation without
+-- treating it as an unresolved/uncertain outcome (see lookupOpStatus's own
+-- doc) — without introducing a second ledger table or a new ordering
+-- system alongside the existing `revision` sequence.
+ALTER TABLE user_planner_writes ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'accepted';

@@ -4,7 +4,11 @@
  *   query MULTIPLE pending operations in one request (Codex P1, 9th round —
  *   see below).
  *   200: { plannerJson: SyncedPlannerPayload, updatedAt: string, revision: number,
- *          opStatuses: Array<{ opId: string; found: boolean; revision: number | null }> }
+ *          opStatuses: Array<{ opId: string; found: boolean; revision: number | null;
+ *            rejected?: boolean }> } — `rejected` (SH.2.5.1) is true only when this
+ *          opId was durably, DETERMINISTICALLY rejected as a stale first delivery
+ *          (see evaluateOperationBaseRevision in syncPayload.ts); always omitted/false
+ *          when `found` is true
  *   204: no usable planner payload available; this includes:
  *          • no row in user_planner and no legacy row in user_plans
  *          • user_planner row exists but planner_json is corrupt/unparseable
@@ -66,23 +70,44 @@
  * unlocked fast path (unchanged from prior rounds) is used, since there is
  * no pending operation to verify.
  *
- * PUT  /api/sync/planner?profileId=…&clientOpId=… — merge-write the planner
- *   blob for (user, profile)
- * POST /api/sync/planner?profileId=…&clientOpId=… — same as PUT (supports
- *   navigator.sendBeacon on unload)
+ * PUT  /api/sync/planner?profileId=…&clientOpId=…&baseRevision=… — merge-write
+ *   the planner blob for (user, profile)
+ * POST /api/sync/planner?profileId=…&clientOpId=…&baseRevision=… — same as PUT
+ *   (supports navigator.sendBeacon on unload)
  *   200: { updatedAt: string, revision: number }
  *   400: invalid JSON, malformed body, structurally invalid planner shape,
  *        an otherwise-valid payload carrying a top-level domain this
  *        server build doesn't recognize (see findUnknownDomainKeys in
- *        syncPayload.ts — never silently dropped with a 200), or
- *        missing/invalid profileId
+ *        syncPayload.ts — never silently dropped with a 200),
+ *        missing/invalid profileId, or (SH.2.5.1) a `baseRevision` that is
+ *        malformed OR supplied without `clientOpId` — see
+ *        validateBaseRevision's own doc
  *   401: not signed in
+ *   409: (SH.2.5.1) a first-delivery operation whose `baseRevision` does
+ *        not match this (user, profile) row's actual current revision, OR
+ *        a replayed delivery of an operation already durably rejected for
+ *        that same reason — `{ error, staleRejected: true, currentRevision }`;
+ *        `user_planner` is never touched — see evaluateOperationBaseRevision's
+ *        own doc in syncPayload.ts
  *   413: payload exceeds size limit
  *
  * `clientOpId` (SH.2, Codex P1 7th/8th rounds) is OPTIONAL and, when
  * present, is always a QUERY parameter — NEVER a body field, since a body
  * field would trip findUnknownDomainKeys' unknown-top-level-key rejection
  * below.
+ *
+ * `baseRevision` (SH.2.5.1) is likewise OPTIONAL and always a QUERY
+ * parameter. It closes a gap TRUE IDEMPOTENCY below does not: idempotency
+ * only ever protects a SECOND delivery of an opId already recorded as
+ * accepted — it does nothing for the FIRST delivery of a delayed unload/
+ * beacon operation built from stale local state, which idempotency has
+ * never seen before and so lets straight through to merge over whatever
+ * newer state has landed since. See evaluateOperationBaseRevision's own
+ * doc in syncPayload.ts for the full contract and
+ * knownBaseRevisionFromConfirmedState() for how the client derives the
+ * value it sends. Supplying `baseRevision` without `clientOpId` is
+ * rejected (400) rather than silently ignored — see validateBaseRevision's
+ * own doc below.
  *
  * Codex P1 fix (8th round) — TRUE IDEMPOTENCY. The 7th round recorded
  * acceptance into `user_planner_writes` AFTER an UNCONDITIONAL merge/
@@ -172,7 +197,12 @@ import { getServerSession, type Session } from "next-auth";
 import type { Pool, PoolClient } from "pg";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { findUnknownDomainKeys, mergePlannerDomains, parseSyncedPlannerPayload } from "@/lib/syncPayload";
+import {
+  evaluateOperationBaseRevision,
+  findUnknownDomainKeys,
+  mergePlannerDomains,
+  parseSyncedPlannerPayload,
+} from "@/lib/syncPayload";
 
 // 1 MB hard limit; realistic planner payloads are well under 100 KB.
 const MAX_BODY_BYTES = 1_000_000;
@@ -209,6 +239,32 @@ function validateOpId(raw: string | null): string | null {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.length > 128) return null;
   return trimmed;
+}
+
+/**
+ * SH.2.5.1 — parses the OPTIONAL `baseRevision` query parameter (see
+ * evaluateOperationBaseRevision's own doc in syncPayload.ts for the full
+ * stale-first-delivery-rejection contract this feeds). Returns:
+ *   • `undefined` — parameter not supplied at all. Callers treat this as
+ *     "no evidence" (skip the staleness check entirely — old-client-safe).
+ *   • `null` — supplied but MALFORMED (not a plain non-negative integer, or
+ *     outside the safe-integer range `Number()`/Postgres BIGINT round-trips
+ *     safely — matching how every other revision value in this file is
+ *     read back via `Number(row.revision)`). Callers must FAIL CLOSED on
+ *     this (reject the request outright, touching nothing) rather than
+ *     silently treat malformed evidence as absent — see this file's
+ *     handleWrite doc for why.
+ *   • a finite non-negative integer — a well-formed value, ready to compare
+ *     against this (user, profile) row's actual current revision.
+ */
+const BASE_REVISION_RE = /^[0-9]+$/;
+function validateBaseRevision(raw: string | null): number | null | undefined {
+  if (raw === null) return undefined;
+  const trimmed = raw.trim();
+  if (!BASE_REVISION_RE.test(trimmed)) return null;
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value)) return null;
+  return value;
 }
 
 // Defensive cap — the client's pending-operation set is expected to stay
@@ -252,12 +308,14 @@ function validateOpIds(raw: string[]): string[] {
   return result;
 }
 
-type OpStatus = { opId: string; found: boolean; revision: number | null };
+type OpStatus = { opId: string; found: boolean; revision: number | null; rejected?: boolean };
 type Queryable = Pool | PoolClient;
 
 /**
- * Look up whether `opId` was ever durably recorded as accepted for this
- * (userId, profileId) — see user_planner_writes' own doc in db-schema.sql.
+ * Look up whether `opId` was ever durably recorded for this
+ * (userId, profileId) — either ACCEPTED or (SH.2.5.1) definitively
+ * STALE-REJECTED — see user_planner_writes' own doc in db-schema.sql and
+ * evaluateOperationBaseRevision's own doc in syncPayload.ts.
  *
  * Codex P1 fix (8th round) — accepts a `Queryable` (a bare `Pool` OR an
  * already-`BEGIN`-ed `PoolClient` holding the per-(user,profile) advisory
@@ -268,6 +326,19 @@ type Queryable = Pool | PoolClient;
  * (user, profile) — see this file's module doc for why an unlocked lookup
  * could return a stale `found: false` while a concurrent write was still
  * committing.
+ *
+ * SH.2.5.1 — `status` distinguishes the two possible ledger outcomes:
+ *   • 'accepted' — `found: true`, the write's own `revision` is returned,
+ *     exactly as before this round.
+ *   • 'rejected' — `found: false`, but `rejected: true` is now also set.
+ *     Unlike ordinary `found: false` (ambiguous — "not accepted as of this
+ *     instant, might still be pending"), `rejected: true` is a DETERMINISTIC
+ *     fact: this exact operation was rejected as stale and, since a row's
+ *     `revision` never decreases, can never later become accepted — the
+ *     caller (reconcilePendingOperations in syncHelper.ts) may retire this
+ *     op's pending evidence unconditionally, without treating it as an
+ *     uncertain transport failure.
+ * No row at all is still the ordinary, genuinely ambiguous `found: false`.
  */
 async function lookupOpStatus(
   db: Queryable,
@@ -275,13 +346,13 @@ async function lookupOpStatus(
   profileId: string,
   opId: string
 ): Promise<OpStatus> {
-  const { rows } = await db.query<{ revision: string }>(
-    "SELECT revision FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
+  const { rows } = await db.query<{ revision: string; status: string }>(
+    "SELECT revision, status FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
     [userId, profileId, opId]
   );
-  return rows.length > 0
-    ? { opId, found: true, revision: Number(rows[0].revision) }
-    : { opId, found: false, revision: null };
+  if (rows.length === 0) return { opId, found: false, revision: null };
+  if (rows[0].status === "rejected") return { opId, found: false, revision: null, rejected: true };
+  return { opId, found: true, revision: Number(rows[0].revision) };
 }
 
 // ── GET ──────────────────────────────────────────────────────────────────────
@@ -609,6 +680,30 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
   }
   const clientOpId = validateOpId(req.nextUrl.searchParams.get("clientOpId"));
 
+  // SH.2.5.1 — parse the OPTIONAL `baseRevision` evidence (see
+  // evaluateOperationBaseRevision's own doc in syncPayload.ts). Validated
+  // BEFORE the body is even read or the lock is taken, mirroring every
+  // other up-front 400 in this handler: a malformed or ambiguous value
+  // must fail closed with zero effect on stored data, never be silently
+  // downgraded to "no evidence" (which would silently disable the
+  // staleness protection this phase adds). Two failure shapes:
+  //   • the parameter fails to parse as a plain non-negative integer —
+  //     MALFORMED evidence.
+  //   • the parameter is present without `clientOpId` — evidence with no
+  //     operation identity to bind it to is meaningless (there is no
+  //     ledger key to check it against, now or on a later duplicate/GET
+  //     lookup), and silently ignoring it would let a client bypass the
+  //     staleness check just by omitting `clientOpId` — AMBIGUOUS
+  //     evidence, same fail-closed treatment.
+  // Absent entirely (`undefined`) is the old-client-safe case: skip the
+  // staleness check below completely, unchanged from pre-SH.2.5.1
+  // behavior.
+  const baseRevisionRaw = req.nextUrl.searchParams.get("baseRevision");
+  const baseRevision = validateBaseRevision(baseRevisionRaw);
+  if (baseRevisionRaw !== null && (baseRevision === null || !clientOpId)) {
+    return NextResponse.json({ error: "Invalid or ambiguous baseRevision" }, { status: 400 });
+  }
+
   // Reject oversized payloads early using Content-Length if present
   const contentLength = req.headers.get("content-length");
   if (contentLength && parseInt(contentLength, 10) > MAX_BODY_BYTES) {
@@ -712,13 +807,33 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
     // duplicate can therefore never merge/overwrite a planner revision
     // written after the original (see this file's module doc for the full
     // rationale, and required case #4/#5 in the round-8 report).
+    // SH.2.5.1 — the duplicate check now also branches on the ledger row's
+    // `status`: a PRIOR delivery of this exact clientOpId may have been
+    // durably recorded as 'accepted' (unchanged behavior below) OR
+    // 'rejected' (a stale first delivery — see evaluateOperationBaseRevision's
+    // own doc in syncPayload.ts). Either way this is a REPLAY, not a fresh
+    // operation, and must return the SAME original outcome without
+    // touching `user_planner` or re-evaluating anything — a rejected
+    // operation's `baseRevision` can never become current again (the row's
+    // `revision` only ever increases), so replaying the identical rejection
+    // is always correct, not merely a shortcut.
     if (clientOpId) {
-      const { rows: existingOpRows } = await client.query<{ revision: string; updated_at: Date }>(
-        "SELECT revision, updated_at FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
+      const { rows: existingOpRows } = await client.query<{ revision: string; updated_at: Date; status: string }>(
+        "SELECT revision, updated_at, status FROM user_planner_writes WHERE user_id = $1 AND profile_id = $2 AND client_op_id = $3",
         [userId, profileId, clientOpId]
       );
       if (existingOpRows.length > 0) {
         await client.query("COMMIT");
+        if (existingOpRows[0].status === "rejected") {
+          return NextResponse.json(
+            {
+              error: "Stale operation rejected",
+              staleRejected: true,
+              currentRevision: Number(existingOpRows[0].revision),
+            },
+            { status: 409 }
+          );
+        }
         return NextResponse.json({
           updatedAt: existingOpRows[0].updated_at.toISOString(),
           revision: Number(existingOpRows[0].revision),
@@ -726,18 +841,60 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
       }
     }
 
-    const { rows: existingRows } = await client.query<{ planner_json: string }>(
-      "SELECT planner_json FROM user_planner WHERE user_id = $1 AND profile_id = $2",
+    const { rows: existingRows } = await client.query<{ planner_json: string; revision: string }>(
+      "SELECT planner_json, revision FROM user_planner WHERE user_id = $1 AND profile_id = $2",
       [userId, profileId]
     );
     let existingRaw: unknown = null;
+    // SH.2.5.1 — 0 is the sentinel for "no row exists yet", matching the
+    // client's own knownBaseRevisionFromConfirmedState() (syncPayload.ts),
+    // which reports 0 when this device has never observed any confirmed
+    // state for this (user, profile) pair either.
+    let currentRevision = 0;
     if (existingRows.length > 0) {
+      currentRevision = Number(existingRows[0].revision);
       try {
         existingRaw = JSON.parse(existingRows[0].planner_json);
       } catch {
         existingRaw = null; // corrupted existing row — nothing recoverable to preserve from it
       }
     }
+
+    // SH.2.5.1 — THIS is the first-delivery staleness check the Codex P1
+    // finding requires: a first delivery (no ledger row yet, per the
+    // duplicate check above) whose own `baseRevision` does not match this
+    // row's actual CURRENT revision — read fresh, inside this SAME
+    // advisory-lock transaction, immediately above — must be rejected
+    // WITHOUT running the merge/upsert below, so it can never overwrite
+    // state that advanced past the base it was built from. Skipped
+    // entirely when no `baseRevision` was supplied (old-client-safe
+    // passthrough — evaluateOperationBaseRevision returns "no-evidence").
+    const baseRevisionForCheck: number | null = typeof baseRevision === "number" ? baseRevision : null;
+    const baseRevisionDecision = evaluateOperationBaseRevision(baseRevisionForCheck, currentRevision);
+    if (baseRevisionDecision.outcome === "stale") {
+      // Durably record the rejection so a later `lastOpId` GET lookup can
+      // report the DETERMINISTIC `rejected: true` fact (see lookupOpStatus's
+      // own doc) instead of an ambiguous `found: false` that could be
+      // mistaken for "still might be accepted". `clientOpId` is guaranteed
+      // non-null here — the up-front validation above rejects any
+      // `baseRevision` supplied without one.
+      await client.query(
+        `INSERT INTO user_planner_writes (user_id, profile_id, client_op_id, revision, updated_at, status)
+         VALUES ($1, $2, $3, $4, NOW(), 'rejected')
+         ON CONFLICT (user_id, profile_id, client_op_id) DO NOTHING`,
+        [userId, profileId, clientOpId, baseRevisionDecision.currentRevision]
+      );
+      await client.query("COMMIT");
+      return NextResponse.json(
+        {
+          error: "Stale operation rejected",
+          staleRejected: true,
+          currentRevision: baseRevisionDecision.currentRevision,
+        },
+        { status: 409 }
+      );
+    }
+
     const bodyToStore = JSON.stringify(
       mergePlannerDomains(existingRaw, incomingRaw, incomingParsed)
     );
@@ -777,8 +934,8 @@ async function handleWrite(req: NextRequest): Promise<NextResponse> {
     // is ever violated.
     if (clientOpId) {
       await client.query(
-        `INSERT INTO user_planner_writes (user_id, profile_id, client_op_id, revision, updated_at)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO user_planner_writes (user_id, profile_id, client_op_id, revision, updated_at, status)
+         VALUES ($1, $2, $3, $4, $5, 'accepted')
          ON CONFLICT (user_id, profile_id, client_op_id) DO NOTHING`,
         [userId, profileId, clientOpId, rows[0].revision, rows[0].updated_at]
       );

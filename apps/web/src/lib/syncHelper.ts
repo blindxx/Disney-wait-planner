@@ -795,6 +795,7 @@ import {
   resolveHydrationApplyIntentDisposition,
   isPendingOpDomainEvidenceCurrent,
   canonicalDigest,
+  knownBaseRevisionFromConfirmedState,
   planHydrationProvenanceDedup,
   isHydrationProvenanceFactObsoleteAfterConfirm,
   planOrdinaryEditFactCommit,
@@ -820,6 +821,19 @@ export interface OpStatus {
   opId: string;
   found: boolean;
   revision: number | null;
+  /**
+   * SH.2.5.1 — true only when the server has durably, DETERMINISTICALLY
+   * rejected this exact operation as a stale first delivery (see
+   * evaluateOperationBaseRevision's own doc in syncPayload.ts and
+   * lookupOpStatus's own doc in api/sync/planner/route.ts). Unlike
+   * `found: false` (merely "not accepted as of this instant" — still
+   * possibly in flight), `rejected: true` means this operation can NEVER
+   * become accepted later (a row's revision only ever increases), so
+   * reconcilePendingOperations() below retires it unconditionally rather
+   * than leaving it pending indefinitely. Always false/absent when `found`
+   * is true.
+   */
+  rejected?: boolean;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -3210,6 +3224,24 @@ function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): str
 }
 
 /**
+ * SH.2.5.1 — the `baseRevision` a tagged operation (doPush()'s PUT,
+ * registerUnloadSync()'s beacon) binds itself to: this device's best
+ * current knowledge of this (userId, profileId) row's server revision,
+ * captured AT SEND TIME from the SAME per-domain confirmed-state facts
+ * getConfirmedState() already exposes — see
+ * knownBaseRevisionFromConfirmedState()'s own doc in syncPayload.ts for why
+ * the max across domains is sufficient evidence for this single-row write,
+ * and evaluateOperationBaseRevision()'s own doc for the server-side
+ * decision this evidence feeds. Callers only invoke this when `userId` is
+ * known (mirroring the existing `if (userId) { addPendingOp(...) }` gating
+ * both send paths already use) — there is no safe identity to scope a
+ * confirmed-state scan under otherwise.
+ */
+function getKnownBaseRevision(userId: string, profileId: string): number {
+  return knownBaseRevisionFromConfirmedState(getConfirmedState(userId, profileId));
+}
+
+/**
  * SH.2.3 — captures a pending operation's own per-domain evidence AT SEND
  * TIME, right before it is persisted (addPendingOp) and the request is
  * actually sent: a COMPACT FINGERPRINT (canonicalDigest(), syncPayload.ts —
@@ -3499,9 +3531,30 @@ export async function reconcilePendingOperations(
   cloudRevision: number | null,
   cloudSnapshot: SyncedPlannerPayload | null
 ): Promise<boolean> {
+  if (typeof window === "undefined") return true;
+
+  // SH.2.5.1 — retire every DEFINITIVELY rejected op's pending-evidence key
+  // unconditionally, before anything else this function does. `rejected:
+  // true` (see OpStatus's own doc above) is a permanent, deterministic
+  // fact — unlike an accepted op, there is no confirmed-baseline promotion
+  // to gate this retirement on: the operation never mutated `user_planner`
+  // at all, so there is nothing here to reconcile against this pull's own
+  // cloudSnapshot/cloudRevision, and no provenance to record. The
+  // underlying local content (canonical storage + edit-fact(s)) this
+  // rejected operation was built from is completely untouched by this —
+  // buildPayloadFromStorage() only ever reads — so it remains exactly as
+  // durable as it already was, ready for a LATER debounced push/beacon
+  // (tagged with a fresh opId and, by then, this device's now-current
+  // baseRevision) to resend normally rather than being stuck as an
+  // unresolved pending record forever.
+  for (const status of opStatuses) {
+    if (status.rejected) {
+      removePendingOp(userId, profileId, status.opId);
+    }
+  }
+
   const acceptedOpIds = opStatuses.filter((s) => s.found).map((s) => s.opId);
   if (acceptedOpIds.length === 0) return true;
-  if (typeof window === "undefined") return true;
   const resolved = acceptedDomainFactsFromBeacon(true, cloudRevision, cloudSnapshot);
   if (!resolved) return true;
   const allOk = await commitConfirmedBaseline(userId, profileId, resolved.revision, resolved.accepted);
@@ -3821,7 +3874,13 @@ function parseOpStatus(raw: unknown): OpStatus | null {
   const r = raw as Record<string, unknown>;
   if (typeof r.opId !== "string" || typeof r.found !== "boolean") return null;
   const revision = typeof r.revision === "number" && Number.isFinite(r.revision) ? r.revision : null;
-  return { opId: r.opId, found: r.found, revision };
+  // SH.2.5.1 — the DETERMINISTIC "this operation was rejected as stale and
+  // will never be accepted" fact (see lookupOpStatus's own doc in
+  // api/sync/planner/route.ts). Only ever true when `found` is false;
+  // absent/malformed defaults to false (the ordinary, ambiguous case),
+  // never fabricated.
+  const rejected = r.rejected === true;
+  return { opId: r.opId, found: r.found, revision, ...(rejected ? { rejected: true } : {}) };
 }
 
 function parseOpStatuses(raw: unknown): OpStatus[] {
@@ -4011,12 +4070,23 @@ export function registerUnloadSync(): () => void {
     // local-edit fact, exactly as it was before this handler ran, for a
     // LATER session's ordinary doPush()/beacon to pick up and push
     // (correctly evidenced) once storage pressure clears.
+    // SH.2.5.1 — bind this beacon to the base revision this device knew
+    // as current at the moment it was built, so a first delivery arriving
+    // AFTER some other write has already advanced this row is rejected
+    // rather than silently merged over it (see getKnownBaseRevision's own
+    // doc above and evaluateOperationBaseRevision's in syncPayload.ts).
+    // Only computed/sent when `userId` is known, mirroring the pending-op
+    // registration gating immediately below — there is no confirmed-state
+    // scope to read otherwise, and an old/untagged beacon (no `userId`)
+    // must remain exactly as unprotected as it already was.
+    const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
     if (userId) {
       const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
       if (!registered) return;
     }
+    const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
     const queued = navigator.sendBeacon(
-      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}`,
+      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}${baseRevisionParam}`,
       new Blob([body], { type: "application/json" })
     );
     if (!queued && userId) {
@@ -4196,6 +4266,14 @@ async function doPush(): Promise<void> {
   // successful pull's reconcilePendingOperations() resolve it conclusively
   // against the server's own state.
   const opId = generateOpId();
+  // SH.2.5.1 — bind this push to the base revision this device knew as
+  // current at the moment the payload was built — see getKnownBaseRevision's
+  // own doc above and evaluateOperationBaseRevision's in syncPayload.ts.
+  // Gated on `userId` exactly like the pending-op registration immediately
+  // below: without a known identity there is no confirmed-state scope to
+  // read, and this push stays exactly as unprotected as any pre-SH.2.5.1
+  // write.
+  const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
   // Codex P1 fix ("pending evidence persistence" round) — "no durable
   // pending evidence → do not send": if addPendingOp() could not durably
   // persist this operation's recovery evidence (a localStorage write
@@ -4234,8 +4312,9 @@ async function doPush(): Promise<void> {
     window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
   } catch {}
   try {
+    const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
     const res = await fetch(
-      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}`,
+      `/api/sync/planner?profileId=${encodeURIComponent(profileId)}&clientOpId=${encodeURIComponent(opId)}${baseRevisionParam}`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -4243,7 +4322,30 @@ async function doPush(): Promise<void> {
         body,
       }
     );
-    if (res.ok) {
+    if (res.status === 409 && userId) {
+      // SH.2.5.1 — a DETERMINISTIC stale-first-delivery rejection (see
+      // evaluateOperationBaseRevision's own doc in syncPayload.ts):
+      // `user_planner` was never touched, so there is nothing to reconcile
+      // against this response, only this op's own now-resolved fate. Retire
+      // it immediately rather than treating it as an uncertain transport
+      // failure ("error") — the underlying local content this push read
+      // from remains completely untouched (this function never writes
+      // canonical storage) and the next successful pull's ordinary winner
+      // selection reconciles it against whatever the ACTUAL current cloud
+      // state is, exactly as it already does for any other unsynced local
+      // edit. "unresolved" (not "idle") because this device's local state
+      // is genuinely not yet known to match the cloud.
+      removePendingOp(userId, profileId, opId);
+      try {
+        localStorage.setItem(syncStatusKeyForProfile(profileId), "unresolved");
+      } catch {}
+      try {
+        localStorage.removeItem(syncErrorKeyForProfile(profileId));
+      } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
+      } catch {}
+    } else if (res.ok) {
       // Write completion state to the originating profileId unconditionally —
       // storage is per-profile so this is always safe regardless of whether
       // the user has switched to a different profile mid-flight.
