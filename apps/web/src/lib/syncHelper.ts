@@ -4152,6 +4152,150 @@ function parseOpStatuses(raw: unknown): OpStatus[] {
 }
 
 /**
+ * SH.2.6 — the shape pullPlanner() resolves to for every HTTP 200 response.
+ * Deliberately a discriminated union on `plans`/`lightning` rather than
+ * extending `SyncedPlannerPayload` unconditionally: a 200 response's
+ * `plannerJson` can independently be USABLE (parses and validates via
+ * parseSyncedPlannerPayload) or UNUSABLE (malformed/unexpected shape — see
+ * api/sync/planner/route.ts's GET doc for how `null`/`{}`/legacy-shaped
+ * `planner_json` reaches the client as a 200, not a 204), while `revision`
+ * and `opStatuses` are independently valid server facts about this (user,
+ * profile) row's WRITE history either way — a corrupted/unexpected
+ * `plannerJson` says nothing about whether the row's `revision` counter or
+ * the requested `lastOpId` lookups are trustworthy. `plans`/`lightning` are
+ * both `null` together (never one without the other) exactly when content
+ * was unusable — parseSyncedPlannerPayload() itself is all-or-nothing, so
+ * there is no partial-content case to represent.
+ */
+export type PulledPlannerEnvelope =
+  | (SyncedPlannerPayload & { revision: number | null; opStatuses: OpStatus[] })
+  | { plans: null; lightning: null; days?: undefined; revision: number | null; opStatuses: OpStatus[] };
+
+/**
+ * SH.2.6 — pure decision core for a single HTTP 200 `/api/sync/planner` GET
+ * response body: separates "is the planner CONTENT safe to hydrate from"
+ * from "are the revision/opStatuses METADATA usable" (see PulledPlannerEnvelope's
+ * own doc). Never called for a 204 (no body to derive from — pullPlanner()
+ * returns `null` directly for that case, before this function is reached).
+ *
+ * Unusable content (`parseSyncedPlannerPayload` returns null — malformed
+ * JSON already coerced to `null` by the caller, an unexpected shape like
+ * `{}`, or a legacy-only response this device's caller could not normalize)
+ * NEVER falls back to an empty planner (`{version:1,items:[]}`) — that
+ * would be indistinguishable from a genuinely empty cloud planner and could
+ * let a later winner-selection treat "content we couldn't read" as "content
+ * that says delete everything". `plans`/`lightning` stay `null` instead,
+ * exactly like every existing call site's own `planner?.plans`/
+ * `planner?.lightning` truthy-checks already treat "no usable domain
+ * value" — those checks continue to behave identically whether `planner`
+ * itself is absent (204) or present-but-content-null (this case).
+ *
+ * `revision`/`opStatuses` are extracted independently of content validity
+ * and never fabricated: a non-finite/non-numeric `revision` stays `null`
+ * (see this function's own DEV cases), and a missing/malformed `opStatuses`
+ * stays `[]` (parseOpStatuses' own contract) — both regardless of whether
+ * `plannerJson` was usable.
+ */
+export function derivePulledPlannerEnvelope(data: {
+  plannerJson?: unknown;
+  revision?: unknown;
+  opStatuses?: unknown;
+}): PulledPlannerEnvelope {
+  const revision = typeof data.revision === "number" && Number.isFinite(data.revision) ? data.revision : null;
+  const opStatuses = parseOpStatuses(data.opStatuses);
+  const parsed = parseSyncedPlannerPayload(data.plannerJson ?? null);
+  if (!parsed) {
+    return { plans: null, lightning: null, revision, opStatuses };
+  }
+  return { ...parsed, revision, opStatuses };
+}
+
+/**
+ * Reference cases for derivePulledPlannerEnvelope() — run from Node:
+ *   import { DEV_PULLED_PLANNER_ENVELOPE_CASES, derivePulledPlannerEnvelope } from "@/lib/syncHelper";
+ *   DEV_PULLED_PLANNER_ENVELOPE_CASES.forEach(c => {
+ *     const got = derivePulledPlannerEnvelope(c.data);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PULLED_PLANNER_ENVELOPE_CASES: Array<{
+  name: string;
+  data: { plannerJson?: unknown; revision?: unknown; opStatuses?: unknown };
+  expected: PulledPlannerEnvelope;
+}> = [
+  {
+    name: "valid planner + valid revision + valid opStatuses — full content preserved",
+    data: {
+      plannerJson: { version: 1, plans: { version: 1, items: ["a"] }, lightning: { version: 1, items: [] } },
+      revision: 7,
+      opStatuses: [{ opId: "op-1", found: true, revision: 7 }],
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["a"] },
+      lightning: { version: 1, items: [] },
+      revision: 7,
+      opStatuses: [{ opId: "op-1", found: true, revision: 7 }],
+    },
+  },
+  {
+    name: "required — 200 with unusable plannerJson (null) + valid revision — revision preserved, content null (never empty)",
+    data: { plannerJson: null, revision: 5, opStatuses: [] },
+    expected: { plans: null, lightning: null, revision: 5, opStatuses: [] },
+  },
+  {
+    name: "required — 200 with unusable plannerJson ({}) — content null, revision still preserved",
+    data: { plannerJson: {}, revision: 3, opStatuses: [] },
+    expected: { plans: null, lightning: null, revision: 3, opStatuses: [] },
+  },
+  {
+    name: "required — valid queried opStatuses survive unusable planner content",
+    data: { plannerJson: { version: 1 }, revision: 4, opStatuses: [{ opId: "op-9", found: true, revision: 4 }] },
+    expected: {
+      plans: null,
+      lightning: null,
+      revision: 4,
+      opStatuses: [{ opId: "op-9", found: true, revision: 4 }],
+    },
+  },
+  {
+    name: "required — malformed revision (non-numeric) is never fabricated as authoritative, even with valid content",
+    data: {
+      plannerJson: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+      revision: "not-a-number",
+      opStatuses: [],
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      revision: null,
+      opStatuses: [],
+    },
+  },
+  {
+    name: "missing revision field entirely — stays null, not coerced to 0",
+    data: { plannerJson: null, opStatuses: [] },
+    expected: { plans: null, lightning: null, revision: null, opStatuses: [] },
+  },
+  {
+    name: "malformed opStatuses (not an array) — degrades to [], never fabricated, content still preserved",
+    data: {
+      plannerJson: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+      revision: 2,
+      opStatuses: "not-an-array",
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      revision: 2,
+      opStatuses: [],
+    },
+  },
+];
+
+/**
  * Pull the latest combined planner blob for the signed-in user + profile.
  *
  * `lastOpIds` (Codex P1, 7th round; generalized to a set in the 9th) is
@@ -4162,31 +4306,32 @@ function parseOpStatuses(raw: unknown): OpStatus[] {
  * pending operations to resolve.
  *
  * Returns:
- *   SyncedPlannerPayload & { revision: number | null; opStatuses: OpStatus[] } —
- *     a valid combined planner payload was parsed. `revision` is the
- *     server-authoritative ordering value for this exact response (see
- *     api/sync/planner/route.ts's module doc) — null only if the server
- *     response unexpectedly omitted it (defensive; should not happen
- *     against this server build). Callers must treat a null `revision` as
- *     "cannot safely advance the confirmed baseline from this response"
- *     and skip the commitConfirmedBaseline() call entirely for it — never
- *     substitute 0 or any other sentinel, which could wrongly compare as
- *     "older" or, worse, coincidentally valid. `opStatuses` is `[]` when
- *     `lastOpIds` was not supplied/empty, or the server response omitted/
- *     malformed it (defensive) — callers should treat a missing entry for
- *     a queried opId the same as `found: false` for it (still pending).
- *   null — no usable planner payload could be parsed; this includes: 204
- *     No Content (nothing stored yet), a payload that failed JSON parsing
- *     or shape validation in parseSyncedPlannerPayload(), or a legacy
- *     plans-only response that could not be normalized into the combined
- *     shape. A 204 specifically is itself a CONCLUSIVE "none of the queried
- *     opIds were ever accepted" answer — a write that records an opId
- *     always also upserts a `user_planner` row in the SAME transaction (see
+ *   PulledPlannerEnvelope — an HTTP 200 response was received. `revision`/
+ *     `opStatuses` are always independently derived (see
+ *     derivePulledPlannerEnvelope's own doc) regardless of content
+ *     usability. `plans`/`lightning` are the parsed domain values when
+ *     `plannerJson` was usable, or BOTH `null` (SH.2.6 — never coerced to
+ *     an empty `{version:1,items:[]}`) when it was not — callers' existing
+ *     `planner?.plans`/`planner?.lightning` truthy-checks already treat
+ *     "no usable domain value" identically to the pre-SH.2.6 "planner is
+ *     null" case, so this never widens what gets hydrated; it only widens
+ *     what `revision`/`opStatuses` remain available for reconciliation.
+ *     Callers that need a genuine `SyncedPlannerPayload` for downstream
+ *     reconciliation (e.g. reconcilePendingOperations' `cloudSnapshot` —
+ *     see its own doc) must narrow on `plans` (or `lightning`) being
+ *     non-null first, exactly like `!!planner?.lightning` already does.
+ *   null — genuinely empty: HTTP 204 No Content, nothing stored yet for
+ *     this user+profile. Distinct from the 200-but-unusable-content case
+ *     above — a 204 is itself a CONCLUSIVE "none of the queried opIds were
+ *     ever accepted" answer (a write that records an opId always also
+ *     upserts a `user_planner` row in the SAME transaction — see
  *     handleWrite in api/sync/planner/route.ts), so 204 (no row in
  *     user_planner at all) is structurally incompatible with ANY opId
  *     having been accepted. Callers may safely treat a null pullPlanner()
  *     result as "no queried op was accepted" unconditionally, without
- *     needing to inspect (nonexistent, since 204 has no body) opStatuses.
+ *     needing to inspect (nonexistent, since 204 has no body) opStatuses —
+ *     this contract does NOT extend to the 200-but-unusable-content case,
+ *     whose own `opStatuses` must still be consulted normally.
  *
  * Throws on:
  *   non-OK HTTP responses (401, 5xx, etc.)
@@ -4198,7 +4343,7 @@ function parseOpStatuses(raw: unknown): OpStatus[] {
 export async function pullPlanner(
   profileId: string,
   lastOpIds?: string[]
-): Promise<(SyncedPlannerPayload & { revision: number | null; opStatuses: OpStatus[] }) | null> {
+): Promise<PulledPlannerEnvelope | null> {
   const params = new URLSearchParams({ profileId });
   for (const opId of lastOpIds ?? []) {
     params.append("lastOpId", opId);
@@ -4210,11 +4355,7 @@ export async function pullPlanner(
   // Any other non-OK status is a real failure; let it throw
   if (!res.ok) throw new Error(`sync/planner GET ${res.status}`);
   const data = (await res.json()) as { plannerJson?: unknown; revision?: unknown; opStatuses?: unknown };
-  const parsed = parseSyncedPlannerPayload(data.plannerJson ?? null);
-  if (!parsed) return null;
-  const revision = typeof data.revision === "number" && Number.isFinite(data.revision) ? data.revision : null;
-  const opStatuses = parseOpStatuses(data.opStatuses);
-  return { ...parsed, revision, opStatuses };
+  return derivePulledPlannerEnvelope(data);
 }
 
 /**
@@ -4305,6 +4446,30 @@ export function registerUnloadSync(): () => void {
     }
     const profileId = currentSyncProfileId;
     const userId = currentSyncUserId;
+    // SH.2.6 — capture this beacon's base revision BEFORE snapshotting
+    // localStorage into a payload, not after. localStorage is shared
+    // across tabs: reading `baseRevision` AFTER buildPayloadFromStorage()
+    // (the pre-SH.2.6 order) let a concurrent write from ANOTHER tab —
+    // its own doPush() or beacon completing and calling
+    // commitConfirmedBaseline()/recordObservedServerRevision() — land in
+    // the gap between the two calls. That tab's revision advance would
+    // then be attached to THIS tab's already-stale payload P (built
+    // before the advance), so `baseRevision` would claim knowledge P's own
+    // snapshot never actually reflected — exactly what let a stale P sail
+    // through evaluateOperationBaseRevision()'s "current" branch (server
+    // sees baseRevision === currentRevision and accepts P outright) instead
+    // of being rejected as stale. Reading `baseRevision` FIRST bounds it to
+    // AT MOST what was known when this snapshot began: if another tab's
+    // write still lands in the (now much smaller) gap before
+    // buildPayloadFromStorage() runs, the worst case is a spurious 409
+    // (baseRevision is stale relative to a revision this device hadn't
+    // captured yet) — handled by the existing STALE_OPERATION_REJECTED_EVENT
+    // recovery pull below — never a false accept of a stale payload.
+    // Only computed when `userId` is known, mirroring the pending-op
+    // registration gating immediately below — there is no confirmed-state
+    // scope to read otherwise, and an old/untagged beacon (no `userId`)
+    // must remain exactly as unprotected as it already was.
+    const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
     const payload = buildPayloadFromStorage(profileId, userId);
     if (!payload) return;
     const body = JSON.stringify(payload);
@@ -4328,16 +4493,6 @@ export function registerUnloadSync(): () => void {
     // local-edit fact, exactly as it was before this handler ran, for a
     // LATER session's ordinary doPush()/beacon to pick up and push
     // (correctly evidenced) once storage pressure clears.
-    // SH.2.5.1 — bind this beacon to the base revision this device knew
-    // as current at the moment it was built, so a first delivery arriving
-    // AFTER some other write has already advanced this row is rejected
-    // rather than silently merged over it (see getKnownBaseRevision's own
-    // doc above and evaluateOperationBaseRevision's in syncPayload.ts).
-    // Only computed/sent when `userId` is known, mirroring the pending-op
-    // registration gating immediately below — there is no confirmed-state
-    // scope to read otherwise, and an old/untagged beacon (no `userId`)
-    // must remain exactly as unprotected as it already was.
-    const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
     if (userId) {
       const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
       if (!registered) return;
@@ -4488,6 +4643,29 @@ async function doPush(): Promise<void> {
   const profileId = currentSyncProfileId;
   const userId = currentSyncUserId;
 
+  // SH.2.6 — capture this push's base revision BEFORE snapshotting
+  // localStorage into a payload, not after (the pre-SH.2.6 order, which
+  // read `baseRevision` down near `opId` below). localStorage is shared
+  // across tabs: reading it second let a concurrent write from ANOTHER tab
+  // — its own doPush()/beacon completing and calling
+  // commitConfirmedBaseline()/recordObservedServerRevision() — land in the
+  // gap between building payload P and reading `baseRevision`, tagging P
+  // with a revision its own snapshot never actually reflected. Because the
+  // server's evaluateOperationBaseRevision() (syncPayload.ts) accepts
+  // outright whenever baseRevision === currentRevision, that stale P would
+  // sail straight through as "current" instead of being rejected — exactly
+  // the coherence gap this fix closes. Reading `baseRevision` FIRST bounds
+  // it to AT MOST what this device knew when the snapshot began: if
+  // another tab's write still lands in the (now much smaller) gap before
+  // buildPayloadFromStorage() runs, the worst case is a spurious 409 (this
+  // device's baseRevision is stale relative to a revision it hadn't
+  // captured yet), handled by the existing STALE_OPERATION_REJECTED_EVENT
+  // recovery pull below — never a false accept of a stale payload.
+  // Gated on `userId` exactly like the pending-op registration below:
+  // without a known identity there is no confirmed-state scope to read,
+  // and this push stays exactly as unprotected as any pre-SH.2.5.1 write.
+  const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
+
   const payload = buildPayloadFromStorage(profileId, userId);
   if (!payload) return;
 
@@ -4524,14 +4702,6 @@ async function doPush(): Promise<void> {
   // successful pull's reconcilePendingOperations() resolve it conclusively
   // against the server's own state.
   const opId = generateOpId();
-  // SH.2.5.1 — bind this push to the base revision this device knew as
-  // current at the moment the payload was built — see getKnownBaseRevision's
-  // own doc above and evaluateOperationBaseRevision's in syncPayload.ts.
-  // Gated on `userId` exactly like the pending-op registration immediately
-  // below: without a known identity there is no confirmed-state scope to
-  // read, and this push stays exactly as unprotected as any pre-SH.2.5.1
-  // write.
-  const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
   // Codex P1 fix ("pending evidence persistence" round) — "no durable
   // pending evidence → do not send": if addPendingOp() could not durably
   // persist this operation's recovery evidence (a localStorage write

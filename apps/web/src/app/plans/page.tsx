@@ -2228,9 +2228,24 @@ export default function PlansPage() {
         // proven (see its own doc in syncHelper.ts). Defaults to `true`
         // when there was nothing to reconcile at all (no pending op, or no
         // userId yet) — there is no promotion step to fail in that case.
+        // SH.2.6 — `planner` may now be a non-null envelope whose content is
+        // unusable (`plans`/`lightning` both null — see pullPlanner's own
+        // doc in syncHelper.ts) while still carrying valid revision/
+        // opStatuses. reconcilePendingOperations()'s `cloudSnapshot` param
+        // needs an actual SyncedPlannerPayload to promote domain facts
+        // from, so narrow on `planner.plans` being present (never pass an
+        // unusable-content envelope through as if it were a real snapshot)
+        // — mirrors every other `planner?.plans`/`planner?.lightning`
+        // truthy-check already used below for the exact same reason.
         const promotionOk =
           pullCtx.userId && pendingOpIds.length > 0
-            ? await reconcilePendingOperations(pullCtx.userId, pullCtx.profileId, opStatuses, planner?.revision ?? null, planner)
+            ? await reconcilePendingOperations(
+                pullCtx.userId,
+                pullCtx.profileId,
+                opStatuses,
+                planner?.revision ?? null,
+                planner?.plans ? planner : null
+              )
             : true;
         // A newer pull may have started, or this exact effect instance may
         // have been cleaned up, while the await above was in flight —

@@ -1168,9 +1168,20 @@ export default function LightningPage() {
         const opStatuses = planner?.opStatuses ?? [];
         // PULL OUTCOME CONTRACT (Codex P1, 17th round) — mirrors
         // plans/page.tsx exactly, see its own detailed doc.
+        // SH.2.6 — `planner` may be a non-null envelope with unusable
+        // content (`plans`/`lightning` both null — see pullPlanner's own
+        // doc in syncHelper.ts); narrow on `planner.plans` before passing
+        // it as a real SyncedPlannerPayload, mirroring the
+        // `planner?.plans`/`planner?.lightning` truthy-checks used below.
         const promotionOk =
           pullCtx.userId && pendingOpIds.length > 0
-            ? await reconcilePendingOperations(pullCtx.userId, pullCtx.profileId, opStatuses, planner?.revision ?? null, planner)
+            ? await reconcilePendingOperations(
+                pullCtx.userId,
+                pullCtx.profileId,
+                opStatuses,
+                planner?.revision ?? null,
+                planner?.plans ? planner : null
+              )
             : true;
         // A newer pull may have started, or this exact effect instance may
         // have been cleaned up, while the await above was in flight —
