@@ -54,6 +54,34 @@
 // sequence FORWARD, never backward, and only when it's provably
 // behind. See verifySequenceAheadOfStoredRevisions below.
 //
+// SH.2.7 (Migration Contract Closure) closed three remaining gaps in
+// this verification:
+//
+//   1. DEFAULT verification used to accept any actual default whose
+//      string form merely CONTAINED the expected value as a substring
+//      (e.g. expected `accepted` matched an actual default of
+//      `unaccepted`, and expected `0` matched an actual default of
+//      `10`). It now parses the actual Postgres default expression
+//      into its semantic literal value (stripping quoting/casts like
+//      `'accepted'::text` or `(0)::bigint`) and requires exact
+//      equality — see parseDefaultLiteral/defaultMatchesExpected.
+//   2. `user_plans` (the Phase 7.2 legacy plans-only table) is now a
+//      full TABLE_CONTRACTS entry. `/api/sync/planner`'s
+//      default-profile fallback still queries it directly at runtime,
+//      so an incompatible pre-existing `user_plans` (wrong column
+//      type, missing PRIMARY KEY) is now a FATAL verification failure
+//      instead of silently passing migration and only breaking at
+//      request time.
+//   3. `user_planner.revision` (BIGINT in Postgres) is converted to a
+//      JS `number` by both route.ts and syncHelper.ts. This script now
+//      rejects a stored max revision or an effective next sequence
+//      value that exceeds `Number.MAX_SAFE_INTEGER`, since distinct
+//      revisions above that bound could collapse to the same JS number
+//      and silently break monotonic ordering / stale-base protection.
+//      Folded into verifySequenceAheadOfStoredRevisions, which already
+//      reads both values under the same EXCLUSIVE lock, rather than a
+//      second pass.
+//
 // Usage:
 //   DATABASE_URL=postgres://... node apps/web/scripts/migrate-db.mjs
 // or, from the repo root:
@@ -94,6 +122,20 @@ class SchemaVerificationError extends Error {}
 //     default (see db-schema.sql's own ALTER TABLE comments for why
 //     `status`'s DEFAULT 'accepted' is what makes a pre-SH.2.5.1 row
 //     correctly backfill as accepted).
+//   - user_plans (SH.2.7): the Phase 7.2 legacy plans-only table.
+//     /api/sync/planner's default-profile fallback (route.ts, both the
+//     unlocked GET fast path and the locked getPlannerWithOpStatus
+//     path) queries it by `user_id` and reads `plans_json`/
+//     `updated_at` off the result whenever the new `user_planner` row
+//     is missing or unparseable; /api/sync/plans's own legacy endpoint
+//     additionally requires `ON CONFLICT (user_id)`, so `user_id` must
+//     be its exact PRIMARY KEY. Still a live runtime dependency, not
+//     dead legacy schema — CREATE TABLE IF NOT EXISTS alone cannot
+//     repair an incompatible pre-existing table (see module doc above).
+//
+// `expectedDefault` (where present) is the exact semantic literal value
+// the DEFAULT must produce — compared via defaultMatchesExpected, never
+// by substring — not just "some default exists" (that's `hasDefault`).
 const TABLE_CONTRACTS = {
   user_planner: {
     columns: [
@@ -101,7 +143,13 @@ const TABLE_CONTRACTS = {
       { name: "profile_id", dataType: "text", notNull: true },
       { name: "planner_json", dataType: "text", notNull: true },
       { name: "updated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
-      { name: "revision", dataType: "bigint", notNull: true, hasDefault: true, defaultIncludes: "0" },
+      {
+        name: "revision",
+        dataType: "bigint",
+        notNull: true,
+        hasDefault: true,
+        expectedDefault: { kind: "numeric", value: 0n },
+      },
     ],
     primaryKey: ["user_id", "profile_id"],
   },
@@ -113,11 +161,49 @@ const TABLE_CONTRACTS = {
       { name: "revision", dataType: "bigint", notNull: true },
       { name: "updated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
       { name: "created_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
-      { name: "status", dataType: "text", notNull: true, hasDefault: true, defaultIncludes: "accepted" },
+      {
+        name: "status",
+        dataType: "text",
+        notNull: true,
+        hasDefault: true,
+        expectedDefault: { kind: "text", value: "accepted" },
+      },
     ],
     primaryKey: ["user_id", "profile_id", "client_op_id"],
   },
+  user_plans: {
+    columns: [
+      { name: "user_id", dataType: "text", notNull: true },
+      { name: "plans_json", dataType: "text", notNull: true },
+      { name: "updated_at", dataType: "timestamp with time zone", notNull: true },
+    ],
+    primaryKey: ["user_id"],
+  },
 };
+
+// SH.2.7 — route.ts (`Number(rows[0].revision)`) and syncHelper.ts both
+// convert the BIGINT `revision` column to a JS `number` for ordering and
+// stale-base comparisons. JS numbers only represent integers exactly up
+// to Number.MAX_SAFE_INTEGER; two distinct BIGINT revisions above that
+// bound could convert to the SAME JS number, which would silently break
+// monotonic ordering and stale-base protection. Checked as a BigInt
+// against a BigInt bound (never converting the value itself through
+// Number) so this guard can never suffer the exact precision loss it
+// exists to catch.
+export const JS_MAX_SAFE_REVISION = BigInt(Number.MAX_SAFE_INTEGER);
+
+function assertJsSafeRevision(sequenceName, label, value) {
+  if (value > JS_MAX_SAFE_REVISION) {
+    throw new SchemaVerificationError(
+      `${sequenceName}: ${label} is ${value}, greater than Number.MAX_SAFE_INTEGER ` +
+        `(${JS_MAX_SAFE_REVISION}) — route.ts and syncHelper.ts convert BIGINT revisions to a JS number ` +
+        "(Number(...)) for ordering and stale-base comparisons, so distinct revisions above this bound " +
+        "could collapse to the same JS number and silently break monotonic ordering/stale-base protection; " +
+        "this must be resolved (e.g. a data audit, or recreating the sequence with a safe MAXVALUE) before " +
+        "this database can be migrated"
+    );
+  }
+}
 
 // `guards` ties a sequence to the (table, column) whose stored values
 // it must always stay strictly ahead of — see
@@ -132,6 +218,108 @@ const SEQUENCE_CONTRACTS = [
 
 function quoteIdent(id) {
   return `"${String(id).replace(/"/g, '""')}"`;
+}
+
+// SH.2.7 — parses a Postgres `information_schema.columns.column_default`
+// expression into the semantic constant it evaluates to, for the narrow
+// set of forms Postgres itself renders a plain-literal default as: a bare
+// literal (`0`), a quoted literal with an explicit trailing cast
+// (`'0'::bigint`, `'accepted'::text`, `'accepted'::character varying`),
+// or a parenthesized cast (`(0)::bigint`). Never used for non-constant
+// defaults like `now()` or `nextval(...)` — those are only checked via
+// `hasDefault` (existence), never `expectedDefault` (exact value).
+//
+// This exists to replace substring matching (`String(default).includes(x)`),
+// which could incorrectly accept an incompatible default: an actual
+// `'unaccepted'::text` contains `accepted` as a substring, and an actual
+// bigint default of `10` contains `0` as a substring. Both must be
+// rejected, while legitimate casts/formats of the true required value
+// (`'0'::bigint`, `(0)::bigint`, `'accepted'::character varying`) must
+// still be accepted.
+const NUMERIC_CAST_TYPES = new Set(["bigint", "int8", "integer", "int", "int4", "smallint", "int2", "numeric", "decimal"]);
+const TEXT_CAST_TYPES = new Set(["text", "character varying", "varchar", "character", "char", "bpchar"]);
+
+export function parseDefaultLiteral(raw) {
+  let expr = String(raw ?? "").trim();
+  // The OUTERMOST (rightmost, first one stripped) cast is the literal's
+  // FINAL type — e.g. `'0'::bigint` must be read as the bigint value 0,
+  // not the text "0", so the cast target (not just the quoting) decides
+  // whether the underlying literal is numeric or text.
+  let outermostCastType = null;
+
+  // Strip a trailing `::typename` cast — typename may contain spaces
+  // (`character varying`, `timestamp with time zone`). Greedy `.*` paired
+  // with the `$` anchor naturally matches only the RIGHTMOST such suffix,
+  // so a quoted literal that happens to contain "::" internally (closed by
+  // a trailing quote, which isn't in the typename character class) is left
+  // untouched.
+  for (;;) {
+    const castMatch = expr.match(/^(.*)::([A-Za-z_][A-Za-z0-9_ ]*)$/);
+    if (!castMatch) break;
+    expr = castMatch[1].trim();
+    if (outermostCastType === null) {
+      outermostCastType = castMatch[2].trim().toLowerCase();
+    }
+  }
+
+  // Strip one layer of parentheses that wraps the ENTIRE expression (not
+  // just a parenthesized sub-term).
+  if (expr.startsWith("(") && expr.endsWith(")")) {
+    let depth = 0;
+    let fullyWrapped = true;
+    for (let i = 0; i < expr.length; i++) {
+      if (expr[i] === "(") depth++;
+      else if (expr[i] === ")") {
+        depth--;
+        if (depth === 0 && i !== expr.length - 1) {
+          fullyWrapped = false;
+          break;
+        }
+      }
+    }
+    if (fullyWrapped) {
+      expr = expr.slice(1, -1).trim();
+    }
+  }
+
+  const quoted = expr.match(/^'([\s\S]*)'$/);
+  const literalText = quoted ? quoted[1].replace(/''/g, "'") : expr;
+
+  if (outermostCastType && NUMERIC_CAST_TYPES.has(outermostCastType)) {
+    return /^-?\d+$/.test(literalText)
+      ? { kind: "numeric", value: BigInt(literalText) }
+      : { kind: "unknown", value: expr };
+  }
+  if (outermostCastType && TEXT_CAST_TYPES.has(outermostCastType)) {
+    return { kind: "text", value: literalText };
+  }
+
+  // No cast (or a cast to a type this contract never needs to compare
+  // against) — infer purely from the literal's own syntax.
+  if (quoted) {
+    return { kind: "text", value: literalText };
+  }
+  if (/^-?\d+$/.test(expr)) {
+    return { kind: "numeric", value: BigInt(expr) };
+  }
+  return { kind: "unknown", value: expr };
+}
+
+// Exact (never substring) comparison between an actual `column_default`
+// and the semantic value the app's runtime behavior actually requires.
+export function defaultMatchesExpected(actualDefault, expected) {
+  const actual = parseDefaultLiteral(actualDefault);
+  if (expected.kind === "numeric") {
+    return actual.kind === "numeric" && actual.value === expected.value;
+  }
+  if (expected.kind === "text") {
+    return actual.kind === "text" && actual.value === expected.value;
+  }
+  return false;
+}
+
+function describeExpectedDefault(expected) {
+  return expected.kind === "text" ? `'${expected.value}'` : String(expected.value);
 }
 
 // Resolves `name` exactly the way an UNQUALIFIED reference in
@@ -217,10 +405,11 @@ async function verifyTable(client, name, contract) {
         `${name}.${col.name}: expected a DEFAULT, found none in schema "${relation.schema_name}"`
       );
     }
-    if (col.defaultIncludes && !String(actual.column_default ?? "").includes(col.defaultIncludes)) {
+    if (col.expectedDefault && !defaultMatchesExpected(actual.column_default, col.expectedDefault)) {
       throw new SchemaVerificationError(
-        `${name}.${col.name}: expected DEFAULT to produce '${col.defaultIncludes}', ` +
-          `found default "${actual.column_default}" in schema "${relation.schema_name}"`
+        `${name}.${col.name}: expected DEFAULT to produce ${describeExpectedDefault(col.expectedDefault)}, ` +
+          `found default "${actual.column_default}" in schema "${relation.schema_name}" — exact value match ` +
+          "required (e.g. an incompatible '10' must never be accepted as though it were '0')"
       );
     }
   }
@@ -439,6 +628,10 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
       `SELECT COALESCE(MAX(${quoteIdent(columnName)}), 0) AS max_value FROM ${qualifiedTable}`
     );
     const maxStoredRevision = BigInt(maxRows[0].max_value);
+    // SH.2.7 — the JS-safe check applies to whatever is actually STORED,
+    // independent of whether the sequence ends up ratcheted below, so it
+    // runs as soon as the stored max is known.
+    assertJsSafeRevision(sequenceName, `${tableName}.${columnName}'s stored max revision`, maxStoredRevision);
 
     const effectiveNext = await readEffectiveNext();
     if (effectiveNext === null) {
@@ -449,6 +642,7 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
           "operation — see db-schema.sql) before this database can be migrated"
       );
     }
+    assertJsSafeRevision(sequenceName, "effective next value", effectiveNext);
     if (effectiveNext > maxStoredRevision) {
       await client.query("COMMIT");
       return { ratcheted: false, effectiveNext, maxStoredRevision };
@@ -497,6 +691,7 @@ async function verifySequenceAheadOfStoredRevisions(client, schemaName, sequence
             : `nextval() would still return ${postRatchetNext}, which is not strictly greater`)
       );
     }
+    assertJsSafeRevision(sequenceName, "post-ratchet next value", postRatchetNext);
 
     await client.query("COMMIT");
     return { ratcheted: true, effectiveNext: postRatchetNext, maxStoredRevision };
@@ -632,4 +827,10 @@ async function main() {
   }
 }
 
-await main();
+// SH.2.7 — guarded so a dev-only test script can `import` this module's
+// exported pure functions (parseDefaultLiteral, defaultMatchesExpected,
+// JS_MAX_SAFE_REVISION) for validation without triggering a live
+// DATABASE_URL connection attempt as a side effect of the import.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  await main();
+}
