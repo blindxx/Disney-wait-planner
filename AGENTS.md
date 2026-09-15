@@ -32,6 +32,36 @@
 - Prefer configuration/environment variables (e.g. `NEXTAUTH_URL`) over
   hardcoding the production domain in application code.
 
+### Database schema deployment order (SH.2.5)
+
+`apps/web/src/lib/db-schema.sql` defines the Postgres schema the app
+requires (NextAuth tables, `user_plans`, `user_planner`,
+`user_planner_revision_seq`, `user_planner_writes`). It's kept safely
+rerunnable (`CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`),
+so fresh setup and migrating an existing database both go through the
+same file — never hand-write a separate migration for a production
+database that already has data in it.
+
+Required order whenever a change touches `db-schema.sql` (e.g. adding a
+column/table a sync endpoint depends on):
+
+1. Run the migration against production **first**, before deploying any
+   application code that depends on the new schema:
+   `DATABASE_URL=<production DATABASE_URL> pnpm --filter web run db:migrate`
+   (see `apps/web/scripts/migrate-db.mjs`). It applies `db-schema.sql`
+   in one transaction, then verifies the objects the sync endpoints
+   need actually exist — it exits non-zero and prints `FATAL:` on any
+   failure (including a partial/incompatible schema) rather than
+   letting a broken migration pass silently.
+2. Only deploy/promote the application code once that run has
+   succeeded. Application code must never go live against a database
+   that hasn't had the corresponding migration applied — sync endpoints
+   have no fallback for missing SH.2 schema and will fail at runtime
+   against it.
+3. Re-running `db:migrate` against an already-migrated database (or a
+   fresh one that already went through `db-schema.sql`) is safe and a
+   no-op — it's fine to run it again if in doubt before a deploy.
+
 ## Scope discipline
 
 - Prefer small, isolated, phase-scoped changes.
