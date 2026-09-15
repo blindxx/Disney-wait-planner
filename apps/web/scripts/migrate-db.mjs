@@ -2,9 +2,21 @@
 // ============================================================
 // SH.2.5 — Sync Schema Migration & Deployment Safety
 //
+// SH.2.5 (Migration Verification Hardening) — post-migration
+// verification checks actual column TYPES, nullability, defaults, and
+// primary keys — not just column names — and resolves every object
+// the same way an unqualified query in route.ts would (via
+// `to_regclass`, which follows this connection's `search_path`), so a
+// same-named object sitting in some other, non-visible schema can
+// never produce a false pass. See the Codex P1 finding this responds
+// to: a `user_planner_writes.status INTEGER` column would have
+// satisfied the old name-only check while rejecting every
+// `'accepted'`/`'rejected'` write /api/sync/planner actually issues.
+//
 // Applies apps/web/src/lib/db-schema.sql against DATABASE_URL, then
 // verifies the objects the SH.2 sync endpoints (/api/sync/planner)
-// require at runtime actually exist.
+// require at runtime actually exist AND actually match the shape
+// those endpoints' queries depend on.
 //
 // db-schema.sql is itself written to be safely rerunnable — every
 // statement uses CREATE ... IF NOT EXISTS / ADD COLUMN IF NOT EXISTS,
@@ -22,6 +34,14 @@
 // statements against production; always run this script (or the full
 // db-schema.sql it applies) so fresh-database setup and
 // existing-database migration can never drift apart.
+//
+// This script never attempts to destructively repair an incompatible
+// table (e.g. ALTER ... TYPE to coerce a wrong column type) — that
+// could silently corrupt or truncate existing production data
+// (`status INTEGER` -> `TEXT` is not a lossless conversion in
+// general). An incompatible pre-existing object is reported as a
+// FATAL verification failure for a human to resolve, never
+// auto-converted.
 //
 // Usage:
 //   DATABASE_URL=postgres://... node apps/web/scripts/migrate-db.mjs
@@ -44,47 +64,169 @@ const { Client } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA_PATH = path.join(__dirname, "..", "src", "lib", "db-schema.sql");
 
-// Objects /api/sync/planner's queries (route.ts) require to exist.
-// Verified explicitly after applying db-schema.sql so a partial
-// failure (e.g. a permissions error partway through the script, or a
-// hand-edited schema file missing something) is caught here, loudly,
-// rather than surfacing later as an opaque Postgres error under
-// production traffic.
-const REQUIRED_CHECKS = [
-  {
-    label: "user_planner_revision_seq sequence exists",
-    sql: `SELECT 1 FROM pg_class WHERE relkind = 'S' AND relname = 'user_planner_revision_seq'`,
+class SchemaVerificationError extends Error {}
+
+// The exact schema contract /api/sync/planner's queries (route.ts)
+// and db-schema.sql together establish. Every column route.ts reads,
+// writes, or relies on a DEFAULT/NOT NULL for is listed — not just
+// the columns' names, but the type, nullability, and (where the app
+// depends on it) default Postgres must actually enforce.
+//
+//   - user_planner: ON CONFLICT (user_id, profile_id) requires that
+//     exact PRIMARY KEY; `revision` is read/compared as a number and
+//     is never supplied on the legacy-migration INSERT path, so it
+//     needs its own DEFAULT 0 for that backfill to be well-defined.
+//   - user_planner_writes: ON CONFLICT (user_id, profile_id,
+//     client_op_id) requires that exact PRIMARY KEY; `status` is
+//     compared with `=== "rejected"` (route.ts) so must be TEXT, and
+//     every accepted-write INSERT omits `created_at`, so it must
+//     default (see db-schema.sql's own ALTER TABLE comments for why
+//     `status`'s DEFAULT 'accepted' is what makes a pre-SH.2.5.1 row
+//     correctly backfill as accepted).
+const TABLE_CONTRACTS = {
+  user_planner: {
+    columns: [
+      { name: "user_id", dataType: "text", notNull: true },
+      { name: "profile_id", dataType: "text", notNull: true },
+      { name: "planner_json", dataType: "text", notNull: true },
+      { name: "updated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "revision", dataType: "bigint", notNull: true, hasDefault: true, defaultIncludes: "0" },
+    ],
+    primaryKey: ["user_id", "profile_id"],
   },
-  {
-    label: "user_planner.revision column exists",
-    sql: `SELECT 1 FROM information_schema.columns
-          WHERE table_name = 'user_planner' AND column_name = 'revision'`,
+  user_planner_writes: {
+    columns: [
+      { name: "user_id", dataType: "text", notNull: true },
+      { name: "profile_id", dataType: "text", notNull: true },
+      { name: "client_op_id", dataType: "text", notNull: true },
+      { name: "revision", dataType: "bigint", notNull: true },
+      { name: "updated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "created_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "status", dataType: "text", notNull: true, hasDefault: true, defaultIncludes: "accepted" },
+    ],
+    primaryKey: ["user_id", "profile_id", "client_op_id"],
   },
-  {
-    label: "user_planner_writes table exists",
-    sql: `SELECT 1 FROM information_schema.tables WHERE table_name = 'user_planner_writes'`,
-  },
-  {
-    label: "user_planner_writes has required columns",
-    sql: `SELECT column_name FROM information_schema.columns
-          WHERE table_name = 'user_planner_writes'
-            AND column_name IN ('user_id', 'profile_id', 'client_op_id', 'revision', 'updated_at', 'created_at', 'status')`,
-    expectedRowCount: 7,
-  },
-  {
-    label: "user_planner_writes primary key is (user_id, profile_id, client_op_id)",
-    sql: `SELECT 1
-          FROM information_schema.table_constraints tc
-          JOIN information_schema.key_column_usage kcu
-            ON tc.constraint_name = kcu.constraint_name
-           AND tc.table_schema = kcu.table_schema
-          WHERE tc.table_name = 'user_planner_writes'
-            AND tc.constraint_type = 'PRIMARY KEY'
-          GROUP BY tc.constraint_name
-          HAVING array_agg(kcu.column_name::text ORDER BY kcu.ordinal_position)
-                 = ARRAY['user_id', 'profile_id', 'client_op_id']`,
-  },
-];
+};
+
+const REQUIRED_SEQUENCES = ["user_planner_revision_seq"];
+
+// Resolves `name` exactly the way an UNQUALIFIED reference in
+// route.ts (a bare `user_planner`, or `nextval('user_planner_revision_seq')`)
+// would resolve on THIS connection — i.e. via `search_path`, using
+// Postgres's own `to_regclass`. A same-named table/sequence sitting in
+// a schema that isn't on this connection's search_path is invisible
+// to `to_regclass`, exactly as it would be invisible to the
+// application's own queries, so it can never produce a false pass
+// here.
+async function resolveRelation(client, name) {
+  const { rows } = await client.query(
+    `SELECT c.oid::text AS oid, n.nspname AS schema_name, c.relkind AS relkind
+     FROM pg_class c
+     JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = to_regclass($1)::oid`,
+    [name]
+  );
+  return rows[0] ?? null;
+}
+
+async function verifySequence(client, name) {
+  const relation = await resolveRelation(client, name);
+  if (!relation) {
+    throw new SchemaVerificationError(
+      `${name}: not visible on this connection's search_path (to_regclass found nothing) — ` +
+        `nextval('${name}') as used by /api/sync/planner would fail`
+    );
+  }
+  if (relation.relkind !== "S") {
+    throw new SchemaVerificationError(
+      `${name}: resolved to a non-sequence relation (relkind='${relation.relkind}') in schema "${relation.schema_name}" — ` +
+        `nextval('${name}') as used by /api/sync/planner would target the wrong object`
+    );
+  }
+  return relation.schema_name;
+}
+
+async function verifyTable(client, name, contract) {
+  const relation = await resolveRelation(client, name);
+  if (!relation) {
+    throw new SchemaVerificationError(
+      `${name}: not visible on this connection's search_path (to_regclass found nothing) — ` +
+        `queries against "${name}" in /api/sync/planner would fail`
+    );
+  }
+  if (relation.relkind !== "r") {
+    throw new SchemaVerificationError(
+      `${name}: resolved to a non-table relation (relkind='${relation.relkind}') in schema "${relation.schema_name}"`
+    );
+  }
+
+  const { rows: columnRows } = await client.query(
+    `SELECT column_name, data_type, is_nullable, column_default
+     FROM information_schema.columns
+     WHERE table_schema = $1 AND table_name = $2`,
+    [relation.schema_name, name]
+  );
+  const columnsByName = new Map(columnRows.map((row) => [row.column_name, row]));
+
+  for (const col of contract.columns) {
+    const actual = columnsByName.get(col.name);
+    if (!actual) {
+      throw new SchemaVerificationError(
+        `${name}.${col.name}: column missing in schema "${relation.schema_name}"`
+      );
+    }
+    if (actual.data_type !== col.dataType) {
+      throw new SchemaVerificationError(
+        `${name}.${col.name}: expected type "${col.dataType}", found "${actual.data_type}" ` +
+          `in schema "${relation.schema_name}"`
+      );
+    }
+    const expectedNullable = col.notNull ? "NO" : "YES";
+    if (actual.is_nullable !== expectedNullable) {
+      throw new SchemaVerificationError(
+        `${name}.${col.name}: expected ${col.notNull ? "NOT NULL" : "nullable"}, ` +
+          `found is_nullable="${actual.is_nullable}" in schema "${relation.schema_name}"`
+      );
+    }
+    if (col.hasDefault && actual.column_default == null) {
+      throw new SchemaVerificationError(
+        `${name}.${col.name}: expected a DEFAULT, found none in schema "${relation.schema_name}"`
+      );
+    }
+    if (col.defaultIncludes && !String(actual.column_default ?? "").includes(col.defaultIncludes)) {
+      throw new SchemaVerificationError(
+        `${name}.${col.name}: expected DEFAULT to produce '${col.defaultIncludes}', ` +
+          `found default "${actual.column_default}" in schema "${relation.schema_name}"`
+      );
+    }
+  }
+
+  if (contract.primaryKey) {
+    const { rows: pkRows } = await client.query(
+      `SELECT kcu.column_name::text AS column_name
+       FROM information_schema.table_constraints tc
+       JOIN information_schema.key_column_usage kcu
+         ON tc.constraint_name = kcu.constraint_name
+        AND tc.table_schema = kcu.table_schema
+       WHERE tc.table_schema = $1 AND tc.table_name = $2 AND tc.constraint_type = 'PRIMARY KEY'
+       ORDER BY kcu.ordinal_position`,
+      [relation.schema_name, name]
+    );
+    const actualPk = pkRows.map((row) => row.column_name);
+    const expectedPk = contract.primaryKey;
+    const matches =
+      actualPk.length === expectedPk.length && actualPk.every((col, i) => col === expectedPk[i]);
+    if (!matches) {
+      throw new SchemaVerificationError(
+        `${name}: expected PRIMARY KEY (${expectedPk.join(", ")}), ` +
+          `found (${actualPk.join(", ") || "none"}) in schema "${relation.schema_name}" — ` +
+          `ON CONFLICT (${expectedPk.join(", ")}) as used by /api/sync/planner would fail`
+      );
+    }
+  }
+
+  return relation.schema_name;
+}
 
 async function main() {
   const databaseUrl = process.env.DATABASE_URL;
@@ -137,29 +279,43 @@ async function main() {
 
     console.log("Verifying schema satisfies the SH.2 sync contract...");
     try {
-      for (const check of REQUIRED_CHECKS) {
-        const { rows } = await client.query(check.sql);
-        const ok = check.expectedRowCount != null
-          ? rows.length === check.expectedRowCount
-          : rows.length > 0;
-        if (!ok) {
-          console.error(`FATAL: post-migration verification failed — ${check.label}`);
-          console.error(
-            "db-schema.sql was applied and committed, but the resulting schema still does not satisfy the SH.2 " +
-              "sync contract used by /api/sync/planner. Do NOT deploy SH.2 application code against this " +
-              "database until this is resolved — investigate db-schema.sql and this database's current schema."
-          );
-          process.exitCode = 1;
-          return;
-        }
-        console.log(`  ok — ${check.label}`);
+      const resolvedSchemas = new Map();
+
+      for (const sequenceName of REQUIRED_SEQUENCES) {
+        const schemaName = await verifySequence(client, sequenceName);
+        resolvedSchemas.set(sequenceName, schemaName);
+        console.log(`  ok — ${sequenceName} (sequence, schema "${schemaName}")`);
+      }
+
+      for (const [tableName, contract] of Object.entries(TABLE_CONTRACTS)) {
+        const schemaName = await verifyTable(client, tableName, contract);
+        resolvedSchemas.set(tableName, schemaName);
+        console.log(`  ok — ${tableName} (${contract.columns.length} columns, PRIMARY KEY (${contract.primaryKey.join(", ")}), schema "${schemaName}")`);
+      }
+
+      // Every resolved object should live in the SAME schema — if
+      // search_path somehow resolves different SH.2 objects to
+      // different schemas, that's exactly the kind of ambiguous setup
+      // this script must not silently pass.
+      const distinctSchemas = new Set(resolvedSchemas.values());
+      if (distinctSchemas.size > 1) {
+        const detail = [...resolvedSchemas.entries()].map(([n, s]) => `${n} -> "${s}"`).join(", ");
+        throw new SchemaVerificationError(
+          `SH.2 objects resolved to more than one schema via this connection's search_path (${detail}) — ` +
+            "this is ambiguous and must be resolved before deploying application code"
+        );
       }
     } catch (err) {
-      console.error("FATAL: post-migration verification query failed —", err.message);
+      if (err instanceof SchemaVerificationError) {
+        console.error(`FATAL: post-migration verification failed — ${err.message}`);
+      } else {
+        console.error("FATAL: post-migration verification query failed —", err.message);
+      }
       console.error(
-        "db-schema.sql was applied and committed, but this script could not confirm the resulting schema " +
-          "satisfies the SH.2 sync contract. Do NOT deploy SH.2 application code against this database " +
-          "until this is resolved."
+        "db-schema.sql was applied and committed, but the resulting schema still does not satisfy the SH.2 " +
+          "sync contract used by /api/sync/planner. Do NOT deploy SH.2 application code against this " +
+          "database until this is resolved — investigate db-schema.sql and this database's current schema. " +
+          "This script never destructively alters an incompatible column/constraint to \"fix\" it automatically."
       );
       process.exitCode = 1;
       return;
