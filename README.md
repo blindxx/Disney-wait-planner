@@ -103,9 +103,17 @@ pnpm --filter web start
 
 # Type-check the shared package
 pnpm --filter @disney-wait-planner/shared typecheck
+
+# Apply/migrate the Postgres schema (see apps/web/src/lib/db-schema.sql)
+DATABASE_URL=... pnpm --filter web run db:migrate
 ```
 
 Never run `dev`/`build` at the repo root without `--filter web` — the monorepo root has no app of its own to run.
+
+`db:migrate` is safe to run repeatedly against a fresh or already-migrated
+database (it's a no-op the second time) — see AGENTS.md's Deployment
+section for the required production ordering (migrate schema, then deploy
+app code) whenever `db-schema.sql` changes.
 
 ### Environment Variables
 

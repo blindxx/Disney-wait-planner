@@ -1,6 +1,23 @@
 -- ============================================================
 -- Phase 7.2 — Magic Link Sync: Required database schema
--- Run this once against your Neon / Vercel Postgres database.
+--
+-- Fresh database: run this file once against your Neon / Vercel
+-- Postgres database.
+--
+-- Existing (already-deployed) database: do NOT hand-run this file
+-- directly against production. Every statement below is written to be
+-- safely rerunnable (CREATE ... IF NOT EXISTS / ADD COLUMN IF NOT
+-- EXISTS) so it never drops or overwrites existing rows, but running
+-- it is a schema *migration* against a live database and must go
+-- through the SH.2.5 migration entrypoint instead, so fresh setup and
+-- existing-database migration can never drift apart:
+--
+--   DATABASE_URL=... pnpm --filter web run db:migrate
+--
+-- See apps/web/scripts/migrate-db.mjs for what that runs (this file,
+-- inside one transaction, followed by a verification pass) and
+-- AGENTS.md's Deployment section for the required production
+-- ordering relative to deploying application code.
 -- ============================================================
 
 -- NextAuth.js v4 tables (required by @auth/pg-adapter)
