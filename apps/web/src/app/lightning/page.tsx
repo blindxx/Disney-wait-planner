@@ -792,7 +792,8 @@ export default function LightningPage() {
    * STAGE 2 (post-fetch) — mirrors plans/page.tsx's own
    * buildPostFetchPullBaseline() exactly, see its doc there for the full
    * rationale, including the revision-bound now enforced inside
-   * resolvePostFetchDomainBaseline() itself.
+   * resolvePostFetchDomainBaseline() itself, and (SH.2.6 P1) the
+   * `contentUsable` content-usability gate.
    */
   function buildPostFetchPullBaseline(
     contentOwnershipMismatch: boolean,
@@ -802,7 +803,8 @@ export default function LightningPage() {
       items: DomainPreFetchSnapshot<LightningItem[]>;
       days: DomainPreFetchSnapshot<string[]>;
       plansRaw: DomainPreFetchSnapshot<string | null>;
-    }
+    },
+    contentUsable = true
   ): {
     items: DomainBaselineOutcome<LightningItem[]>;
     days: DomainBaselineOutcome<string[]>;
@@ -823,7 +825,8 @@ export default function LightningPage() {
       cloudRevision,
       (raw) => migrateLightningDayIds(raw.items as LightningItem[]),
       preFetch.items,
-      domainFallbackValue(itemsBaselineRef, [] as LightningItem[], contentOwnershipMismatch)
+      domainFallbackValue(itemsBaselineRef, [] as LightningItem[], contentOwnershipMismatch),
+      contentUsable
     );
     clearRefOnFallbackMismatch(itemsBaselineRef, items, [], contentOwnershipMismatch);
 
@@ -832,7 +835,8 @@ export default function LightningPage() {
       cloudRevision,
       (raw) => raw,
       preFetch.days,
-      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch)
+      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch),
+      contentUsable
     );
     clearRefOnFallbackMismatch(daysBaselineRef, days, ["day-1"], contentOwnershipMismatch);
 
@@ -841,7 +845,8 @@ export default function LightningPage() {
       cloudRevision,
       (raw) => JSON.stringify(raw),
       preFetch.plansRaw,
-      domainFallbackValue(plansRawBaselineRef, null, contentOwnershipMismatch)
+      domainFallbackValue(plansRawBaselineRef, null, contentOwnershipMismatch),
+      contentUsable
     );
     clearRefOnFallbackMismatch(plansRawBaselineRef, plansRaw, null, contentOwnershipMismatch);
 
@@ -863,6 +868,15 @@ export default function LightningPage() {
         domain: "plans" | "lightning" | "days";
         reason: "unusable-response";
         confirmedRevision: number;
+      }
+    | {
+        // SH.2.6 P1 — mirrors plans/page.tsx's own UnusableDomain arm
+        // exactly, see its own detailed doc: this pull's response carried
+        // a VALID revision but this domain's own cloud VALUE could not be
+        // interpreted. Never auto-retried.
+        domain: "plans" | "lightning" | "days";
+        reason: "unusable-content";
+        cloudRevision: number | null;
       }
     | {
         // SH.2.2 — mirrors plans/page.tsx's own UnusableDomain arm exactly,
@@ -904,7 +918,8 @@ export default function LightningPage() {
 
   /**
    * Mirrors plans/page.tsx's own collectUnusableDomains() exactly, including
-   * this round's "unusable-response" split (see that function's own doc).
+   * this round's "unusable-response" split and (SH.2.6 P1) "unusable-content"
+   * (see that function's own doc).
    */
   function collectUnusableDomains(outcomes: {
     items: DomainBaselineOutcome<unknown>;
@@ -928,6 +943,12 @@ export default function LightningPage() {
           reason: "unusable-response",
           confirmedRevision: outcome.confirmedRevision,
         });
+      } else if (outcome.kind === "unusable-content") {
+        unusable.push({
+          domain,
+          reason: "unusable-content",
+          cloudRevision: outcome.cloudRevision,
+        });
       }
     };
     check("lightning", outcomes.items);
@@ -940,7 +961,12 @@ export default function LightningPage() {
    * Mirrors plans/page.tsx's own requireResolvedValue() exactly.
    */
   function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
-    if (outcome.kind === "gated" || outcome.kind === "stale-response" || outcome.kind === "unusable-response") {
+    if (
+      outcome.kind === "gated" ||
+      outcome.kind === "stale-response" ||
+      outcome.kind === "unusable-response" ||
+      outcome.kind === "unusable-content"
+    ) {
       throw new Error("SH.2.1: requireResolvedValue() called on an unusable domain outcome");
     }
     return outcome.value;
@@ -1227,11 +1253,20 @@ export default function LightningPage() {
         // `cloudRevision` resolves to "stale-response" rather than being
         // blindly trusted as this pull's baseline. Mirrors plans/page.tsx
         // exactly — see its own detailed doc.
+        //
+        // SH.2.6 P1 (Codex) — mirrors plans/page.tsx's own
+        // `plannerContentUsable` exactly, see its own detailed doc: a 204
+        // (`planner === null`) stays exactly as fallback-eligible as
+        // before; only a 200 whose `plannerJson` was unreadable (`planner`
+        // non-null with `planner.plans` null) forces every domain to
+        // "unusable-content".
+        const plannerContentUsable = planner === null || planner.plans !== null;
         const baselineOutcomes = buildPostFetchPullBaseline(
           contentOwnershipMismatch,
           { userId: pullCtx.userId, profileId: pullCtx.profileId },
           planner?.revision ?? null,
-          preFetchBaseline
+          preFetchBaseline,
+          plannerContentUsable
         );
         // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx
         // exactly, see its own detailed doc: freeze the EXACT
@@ -1295,6 +1330,10 @@ export default function LightningPage() {
               } else if (u.reason === "unusable-response") {
                 console.error(
                   `SH.2.1: pull deferred — ${u.domain}'s confirmed state is at revision ${u.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
+                );
+              } else if (u.reason === "unusable-content") {
+                console.error(
+                  `SH.2.6: pull deferred — ${u.domain}'s response carried revision ${u.cloudRevision ?? "none"}, but the planner content itself was unreadable/unexpected-shaped; refusing to hydrate or open the push gate from unverified content. Not retrying automatically.`
                 );
               } else if (u.reason === "authority-changed") {
                 console.error(

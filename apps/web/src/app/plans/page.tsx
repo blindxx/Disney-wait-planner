@@ -1154,6 +1154,18 @@ export default function PlansPage() {
    * resolvePostFetchDomainBaseline's own doc in syncPayload.ts for both
    * that mechanic and the revision-bound that now guards its "confirmed"
    * branch the same way.
+   *
+   * SH.2.6 P1 — `contentUsable` (defaults to `true`) is threaded straight
+   * through to every domain's own resolvePostFetchDomainBaseline() call as
+   * its own new `contentUsable` gate — see that function's own doc for the
+   * full rationale. `false` means this pull's `plannerJson` was unreadable/
+   * unexpected-shaped even though the response carried a valid `revision`
+   * (see PulledPlannerEnvelope's own doc in syncHelper.ts): EVERY domain's
+   * outcome then becomes `"unusable-content"` regardless of confirmed
+   * state, so a fresh browser with NO confirmed facts (`confirmed.status
+   * === "none"`) can no longer fall straight through to `"fallback"` and
+   * hydrate "successfully" from local content this pull never actually
+   * verified against the cloud.
    */
   function buildPostFetchPullBaseline(
     contentOwnershipMismatch: boolean,
@@ -1163,7 +1175,8 @@ export default function PlansPage() {
       items: DomainPreFetchSnapshot<PlanItem[]>;
       days: DomainPreFetchSnapshot<string[]>;
       lightningRaw: DomainPreFetchSnapshot<string | null>;
-    }
+    },
+    contentUsable = true
   ): {
     items: DomainBaselineOutcome<PlanItem[]>;
     days: DomainBaselineOutcome<string[]>;
@@ -1189,7 +1202,8 @@ export default function PlansPage() {
       cloudRevision,
       (raw) => migrateDayIds((raw.items as unknown[]).map(normalizePlanItem)),
       preFetch.items,
-      domainFallbackValue(itemsBaselineRef, [] as PlanItem[], contentOwnershipMismatch)
+      domainFallbackValue(itemsBaselineRef, [] as PlanItem[], contentOwnershipMismatch),
+      contentUsable
     );
     clearRefOnFallbackMismatch(itemsBaselineRef, items, [], contentOwnershipMismatch);
 
@@ -1198,7 +1212,8 @@ export default function PlansPage() {
       cloudRevision,
       (raw) => raw,
       preFetch.days,
-      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch)
+      domainFallbackValue(daysBaselineRef, ["day-1"], contentOwnershipMismatch),
+      contentUsable
     );
     clearRefOnFallbackMismatch(daysBaselineRef, days, ["day-1"], contentOwnershipMismatch);
 
@@ -1207,7 +1222,8 @@ export default function PlansPage() {
       cloudRevision,
       (raw) => JSON.stringify(raw),
       preFetch.lightningRaw,
-      domainFallbackValue(lightningRawBaselineRef, null, contentOwnershipMismatch)
+      domainFallbackValue(lightningRawBaselineRef, null, contentOwnershipMismatch),
+      contentUsable
     );
     clearRefOnFallbackMismatch(lightningRawBaselineRef, lightningRaw, null, contentOwnershipMismatch);
 
@@ -1235,6 +1251,23 @@ export default function PlansPage() {
         domain: "plans" | "lightning" | "days";
         reason: "unusable-response";
         confirmedRevision: number;
+      }
+    | {
+        // SH.2.6 P1 (Codex) — this pull's response carried a VALID
+        // `revision` but this domain's own cloud VALUE could not be
+        // interpreted (unusable/unexpected-shaped plannerJson — see
+        // resolvePostFetchDomainBaseline's own "unusable-content" doc in
+        // syncPayload.ts). Deliberately distinct from "unusable-response"
+        // (which means no revision at all): here `cloudRevision` may be a
+        // real number, and there may not even be a confirmed fact to
+        // report (a fresh browser/no-confirmed-facts device), which is
+        // exactly why this carries `cloudRevision` rather than
+        // `confirmedRevision`. Never auto-retried (see
+        // decideStaleResponseRecovery()'s own doc in syncPayload.ts) — the
+        // next GET is exactly as likely to be unreadable again.
+        domain: "plans" | "lightning" | "days";
+        reason: "unusable-content";
+        cloudRevision: number | null;
       }
     | {
         // SH.2.2 — a commit-time CAS supersession (commitLocalDomainRaw()
@@ -1293,15 +1326,15 @@ export default function PlansPage() {
       };
 
   /**
-   * Gathers every domain whose outcome is "gated", "stale-response", or
-   * "unusable-response" — see UnusableDomain's own doc for why all three
-   * trigger the SAME whole-pull bail-out. Since this page's push always
-   * sends plans+lightning+days combined in ONE request, letting winner
-   * selection/local writes proceed normally for the OTHER, healthy domains
-   * this pull while leaving syncReady closed for the whole page would still
-   * risk that a later push bundles the unresolved domain's
-   * untouched-but-unverified local content alongside them — so ANY
-   * unusable domain defers the ENTIRE pull, never just that one domain
+   * Gathers every domain whose outcome is "gated", "stale-response",
+   * "unusable-response", or "unusable-content" — see UnusableDomain's own
+   * doc for why all four trigger the SAME whole-pull bail-out. Since this
+   * page's push always sends plans+lightning+days combined in ONE request,
+   * letting winner selection/local writes proceed normally for the OTHER,
+   * healthy domains this pull while leaving syncReady closed for the whole
+   * page would still risk that a later push bundles the unresolved
+   * domain's untouched-but-unverified local content alongside them — so
+   * ANY unusable domain defers the ENTIRE pull, never just that one domain
    * (unchanged from SH.2's own 16th-round rule). Detection itself, however,
    * IS per-domain: each domain's own confirmed revision is checked
    * independently against this pull's SAME cloudRevision, so one domain
@@ -1318,6 +1351,14 @@ export default function PlansPage() {
    * never enter the automatic replacement-pull retry chain (see
    * decideStaleResponseRecovery() below): retrying an unusable response
    * cannot help, since nothing about why it was unusable is revision-related.
+   *
+   * SH.2.6 P1 (Codex) — "unusable-content" is a FOURTH, distinct
+   * unusable-this-pull reason: this pull's response DID carry a valid
+   * `revision`, but this domain's own cloud VALUE was unreadable/
+   * unexpected-shaped (see resolvePostFetchDomainBaseline()'s own doc).
+   * Bails out identically to the other three, and — like
+   * "unusable-response" — never auto-retries, for the same reason: nothing
+   * about why the content was unusable is revision-related.
    */
   function collectUnusableDomains(outcomes: {
     items: DomainBaselineOutcome<unknown>;
@@ -1341,6 +1382,12 @@ export default function PlansPage() {
           reason: "unusable-response",
           confirmedRevision: outcome.confirmedRevision,
         });
+      } else if (outcome.kind === "unusable-content") {
+        unusable.push({
+          domain,
+          reason: "unusable-content",
+          cloudRevision: outcome.cloudRevision,
+        });
       }
     };
     check("plans", outcomes.items);
@@ -1353,16 +1400,21 @@ export default function PlansPage() {
    * Narrows a DomainBaselineOutcome to its `.value` — callers must already
    * have proven (via collectUnusableDomains(), checked BEFORE this is
    * called) that no domain in this same outcome set is "gated",
-   * "stale-response", or "unusable-response". This is what makes
-   * "conflicted/unusable state cannot accidentally be consumed as a valid
-   * baseline" (SH.2.1's own discriminated-result requirement) a
+   * "stale-response", "unusable-response", or "unusable-content". This is
+   * what makes "conflicted/unusable state cannot accidentally be consumed
+   * as a valid baseline" (SH.2.1's own discriminated-result requirement) a
    * compile-time property rather than a convention: TypeScript will not let
    * a caller read `.value` off a DomainBaselineOutcome without first
-   * narrowing away all three unusable kinds (none has a `.value` field),
+   * narrowing away all four unusable kinds (none has a `.value` field),
    * and this function is the ONE place that narrowing happens for this pull.
    */
   function requireResolvedValue<T>(outcome: DomainBaselineOutcome<T>): T {
-    if (outcome.kind === "gated" || outcome.kind === "stale-response" || outcome.kind === "unusable-response") {
+    if (
+      outcome.kind === "gated" ||
+      outcome.kind === "stale-response" ||
+      outcome.kind === "unusable-response" ||
+      outcome.kind === "unusable-content"
+    ) {
       // Unreachable in practice — the pull effect always calls
       // collectUnusableDomains() on this same outcome set and bails out
       // before ever reaching this call. Guarded rather than asserted away
@@ -2295,11 +2347,22 @@ export default function PlansPage() {
         // guards against actually USING a result attributed to the wrong
         // identity, but the identity passed into the read itself must still
         // be THIS pull's own, never whatever is live right now.
+        //
+        // SH.2.6 P1 (Codex) — `plannerContentUsable` distinguishes a
+        // genuine 204 (`planner === null` — nothing stored yet; already
+        // correctly handled by cloudRevision === null below) from a 200
+        // whose `plannerJson` could not be parsed/validated (`planner`
+        // non-null, but `planner.plans` null — see PulledPlannerEnvelope's
+        // own doc in syncHelper.ts). Only the SECOND case must force every
+        // domain to "unusable-content" via buildPostFetchPullBaseline()'s
+        // new gate — a 204 remains exactly as fallback-eligible as before.
+        const plannerContentUsable = planner === null || planner.plans !== null;
         const baselineOutcomes = buildPostFetchPullBaseline(
           contentOwnershipMismatch,
           { userId: pullCtx.userId, profileId: pullCtx.profileId },
           planner?.revision ?? null,
-          preFetchBaseline
+          preFetchBaseline,
+          plannerContentUsable
         );
         // SH.2.2 (Codex P1 third follow-up round) — freeze the EXACT
         // confirmed-authority identity winner selection is about to use,
@@ -2429,6 +2492,10 @@ export default function PlansPage() {
               } else if (u.reason === "unusable-response") {
                 console.error(
                   `SH.2.1: pull deferred — ${u.domain}'s confirmed state is at revision ${u.confirmedRevision}, but this pull's own response carried no usable revision (204/unparseable); refusing to hydrate an unusable response. Not retrying automatically.`
+                );
+              } else if (u.reason === "unusable-content") {
+                console.error(
+                  `SH.2.6: pull deferred — ${u.domain}'s response carried revision ${u.cloudRevision ?? "none"}, but the planner content itself was unreadable/unexpected-shaped; refusing to hydrate or open the push gate from unverified content. Not retrying automatically.`
                 );
               } else if (u.reason === "authority-changed") {
                 console.error(

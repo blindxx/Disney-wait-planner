@@ -4064,11 +4064,33 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
  * under the prior profile.
  * The caller is responsible for triggering a cloud pull for the new profile
  * before re-opening the sync gate.
+ *
+ * SH.2.6 P2 follow-up (Codex) — CLEAR STALE "syncing" AT THE TRANSITION
+ * BOUNDARY, never reactively from a superseded push's own completion. See
+ * clearStaleSyncingStatus's own doc for the full rationale: once ANY time
+ * has passed after a transition, a later push's completion can no longer
+ * safely tell "the profile's status key still says 'syncing' because
+ * nobody has touched it since MY write" apart from "a DIFFERENT tab, for
+ * the new/current identity, has ALSO legitimately written 'syncing' to
+ * this SAME profile-only key since" — the two are indistinguishable from
+ * that vantage point, and clearing in the second case would stomp on a
+ * genuinely active sync. This function, however, IS a safe place to
+ * clear: it runs synchronously, exactly once, at the precise instant a
+ * genuine transition happens, strictly BEFORE `currentSyncProfileId` is
+ * reassigned and before any push under the new profile could possibly
+ * have run in THIS tab — so a "syncing" value still present on
+ * `currentSyncProfileId`'s key at this exact statement can only be a
+ * leftover from whatever was happening under the OLD profile, never
+ * something the new one already wrote. Targets the OLD profileId
+ * (captured before reassignment below), and — like doPush()'s own
+ * completion gating — only ever touches a status that is STILL exactly
+ * "syncing"; any other value (idle/error/unresolved) is left alone.
  */
 export function setSyncProfileId(profileId: string): void {
   if (profileId === currentSyncProfileId) return;
   // Profile changed — cancel any pending work for the old profile.
   cancelScheduledSync();
+  clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncProfileId = profileId;
   currentPullEpoch += 1;
 }
@@ -4087,10 +4109,21 @@ export function setSyncProfileId(profileId: string): void {
  * confirmed baseline under a NEW one, or vice versa — and the pull epoch
  * (see above) advances, invalidating any PullContext captured under the
  * prior identity even if it is mid-await right now.
+ *
+ * SH.2.6 P2 follow-up (Codex) — clears a stale "syncing" left behind by a
+ * now-superseded push for `currentSyncProfileId`, at this exact
+ * transition instant — see setSyncProfileId's own doc for the full
+ * rationale (identical here: A -> B and sign-out/sign-in are both
+ * "the identity changed" transitions). Runs BEFORE `currentSyncUserId` is
+ * reassigned, targeting the profile this identity change is happening
+ * under — a "syncing" value still present at this exact statement can
+ * only be the prior identity's own leftover, never something the new one
+ * already wrote in THIS tab.
  */
 export function setSyncUserId(userId: string | null): void {
   if (userId === currentSyncUserId) return;
   cancelScheduledSync();
+  clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncUserId = userId;
   currentPullEpoch += 1;
 }
@@ -4719,144 +4752,103 @@ export const DEV_SHOULD_PUBLISH_PUSH_COMPLETION_STATUS_CASES: Array<{
 ];
 
 /**
- * SH.2.6 Codex P2 follow-up — "clear syncing status when suppressing stale
- * completion". shouldPublishPushCompletionStatus() above correctly stops a
- * superseded push (pushEpoch stale relative to currentPullEpoch) from
- * publishing ITS OWN completion, but suppressing that completion alone can
- * leave the profile's status key stuck at "syncing" forever: doPush()
- * writes "syncing" UNCONDITIONALLY before the request goes out (always
- * correct at that instant — no transition can happen between capturing
- * identity/epoch and that synchronous write), and if the identity then
- * transitions before this push's response resolves, nothing else is left
- * to move the key off "syncing" until the NEW identity happens to run its
- * own successful push/pull — which may never happen (e.g. the new identity
- * only views Settings, or signs out again immediately). Symptom: Settings
- * shows "Syncing..." indefinitely for an identity that never actually has
- * anything syncing.
+ * SH.2.6 P2 follow-up (Codex) — "do not clear an indistinguishable
+ * current-tab sync". An EARLIER version of this fix had doPush() itself
+ * clear a stale "syncing" reactively, from inside its own suppressed-
+ * completion path, whenever the profile's status key was STILL exactly
+ * "syncing" at that moment. That reasoning is sound WITHIN one tab (this
+ * module's `inFlight` flag fully serializes same-tab pushes, so nothing
+ * else in the SAME tab could have written to the key between this push's
+ * own pre-request write and its own completion check) — but it is UNSAFE
+ * across tabs: a DIFFERENT tab, for the new/current identity, can
+ * legitimately start its own push and write "syncing" to this SAME
+ * profile-only key AFTER a transition but BEFORE this now-superseded
+ * push's response resolves. At that point "the key still says syncing"
+ * no longer means "nobody has touched it since my own write" — it is
+ * indistinguishable from "another tab's genuinely active sync", and a
+ * reactive clear from the superseded push's completion could stomp on
+ * that real, in-progress sync.
  *
- * This is the full three-way decision doPush() now makes at every
- * post-fetch completion point, replacing a bare
- * shouldPublishPushCompletionStatus() boolean check:
- *   - "publish" — no transition since `pushEpoch` was captured; publish
- *     this push's own completion exactly as before this round.
- *   - "clear-stale-syncing" — a transition DID happen, but the profile's
- *     status key is STILL EXACTLY "syncing" (a fresh read taken at the
- *     same moment as this decision, never a cached value): nothing else
- *     has published a status since this push's own pre-request write, so
- *     it can only be this now-superseded push's own leftover — safe to
- *     downgrade it back to a neutral "idle", the same terminal state an
- *     ordinary completion would have left behind if nothing were wrong.
- *   - "noop" — a transition happened AND the status key is no longer
- *     "syncing" (already idle/error/unresolved). That value can only
- *     belong to something else (this module's serialized `inFlight` guard
- *     means no OTHER same-tab push could have started before this one's
- *     own completion runs — see doPush()'s own doc — so a changed value
- *     here means a different tab's independent write). This push must
- *     never touch it: neither publishing a normal completion NOR clearing
- *     "syncing" is safe once the key no longer holds what this push itself
- *     put there. This is what makes "clear stale syncing" strictly
- *     narrower than "publish a normal completion just to reset the key" —
- *     exactly the distinction Codex's finding requires.
- *
- * `currentStatus` must be a FRESH read of syncStatusKeyForProfile(profileId)
- * taken at the same call site as this decision — never a value captured
- * before an awaited boundary.
+ * The fix: clearing responsibility moves ENTIRELY to the
+ * identity/profile-TRANSITION boundary — see clearStaleSyncingStatus's
+ * own doc below and its call sites in setSyncUserId()/setSyncProfileId().
+ * That is the ONE place a "syncing" leftover can be attributed with
+ * certainty (nothing under the new identity/profile has had a chance to
+ * write anything yet, in THIS tab, at the exact synchronous instant the
+ * transition happens). doPush()'s own suppressed-completion path is now a
+ * PURE noop — see applyCompletion() below — it never attempts to touch
+ * the status key at all once shouldPublishPushCompletionStatus() says no,
+ * so it can never race with, or misidentify, a legitimately different
+ * tab's active sync.
  */
-export type PushCompletionAction = "publish" | "clear-stale-syncing" | "noop";
 
-export function resolvePushCompletionAction(
-  pushEpoch: number,
-  epochAtCompletion: number,
-  currentStatus: string | null
-): PushCompletionAction {
-  if (isPullEpochCurrent(pushEpoch, epochAtCompletion)) return "publish";
-  return currentStatus === "syncing" ? "clear-stale-syncing" : "noop";
+/**
+ * SH.2.6 P2 follow-up (Codex) — pure predicate for whether
+ * clearStaleSyncingStatus() should touch the status key at all: only ever
+ * "syncing" itself. Any other value (idle/error/unresolved), or a missing
+ * key, is left completely untouched — it can only belong to something
+ * else this device has no business overwriting. Extracted as its own pure
+ * function purely so DEV_*-style Node coverage can exercise this decision
+ * directly, mirroring shouldPublishPushCompletionStatus's own pattern.
+ */
+export function shouldClearStaleSyncingStatus(currentStatus: string | null): boolean {
+  return currentStatus === "syncing";
 }
 
 /**
- * Reference cases for resolvePushCompletionAction() — run from Node:
- *   import { DEV_RESOLVE_PUSH_COMPLETION_ACTION_CASES, resolvePushCompletionAction } from "@/lib/syncHelper";
- *   DEV_RESOLVE_PUSH_COMPLETION_ACTION_CASES.forEach(c => {
- *     const got = resolvePushCompletionAction(c.pushEpoch, c.epochAtCompletion, c.currentStatus);
+ * Reference cases for shouldClearStaleSyncingStatus() — run from Node:
+ *   import { DEV_SHOULD_CLEAR_STALE_SYNCING_STATUS_CASES, shouldClearStaleSyncingStatus } from "@/lib/syncHelper";
+ *   DEV_SHOULD_CLEAR_STALE_SYNCING_STATUS_CASES.forEach(c => {
+ *     const got = shouldClearStaleSyncingStatus(c.currentStatus);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export const DEV_RESOLVE_PUSH_COMPLETION_ACTION_CASES: Array<{
+export const DEV_SHOULD_CLEAR_STALE_SYNCING_STATUS_CASES: Array<{
   name: string;
-  pushEpoch: number;
-  epochAtCompletion: number;
   currentStatus: string | null;
-  expected: PushCompletionAction;
+  expected: boolean;
 }> = [
   {
-    name: "required — ordinary same-identity push: no transition, status still syncing at completion — publish normally, behavior unchanged from before this round",
-    pushEpoch: 4,
-    epochAtCompletion: 4,
+    name: "required — status is still exactly \"syncing\" — safe to clear (this IS what a stale leftover looks like at the transition boundary)",
     currentStatus: "syncing",
-    expected: "publish",
+    expected: true,
   },
   {
-    name: "required — A writes syncing, then an A -> B transition occurs before completion, status still exactly syncing (nothing else wrote since) — clear the stale syncing back to idle, never publish A's own completion for B",
-    pushEpoch: 1,
-    epochAtCompletion: 2,
-    currentStatus: "syncing",
-    expected: "clear-stale-syncing",
-  },
-  {
-    name: "required — sign-out during an in-flight push (setSyncUserId(null) also bumps the epoch): same clear-stale-syncing outcome as any other transition",
-    pushEpoch: 7,
-    epochAtCompletion: 8,
-    currentStatus: "syncing",
-    expected: "clear-stale-syncing",
-  },
-  {
-    name: "required — stale completion remains suppressed even when a clear is also warranted: never 'publish' once the epoch has moved, regardless of currentStatus",
-    pushEpoch: 3,
-    epochAtCompletion: 5,
-    currentStatus: "syncing",
-    expected: "clear-stale-syncing",
-  },
-  {
-    name: "transition happened, but status is no longer syncing (already idle) — noop: nothing left to clear, and this push must not touch a value it didn't leave behind",
-    pushEpoch: 1,
-    epochAtCompletion: 2,
+    name: "status already idle — never touch it; nothing to clear",
     currentStatus: "idle",
-    expected: "noop",
+    expected: false,
   },
   {
-    name: "transition happened, status shows error from something else — noop: never overwrite a value that isn't this push's own 'syncing' leftover, and never downgrade an error to idle on this push's say-so",
-    pushEpoch: 1,
-    epochAtCompletion: 2,
+    name: "status shows error — never downgrade a real error to idle on the transition's say-so",
     currentStatus: "error",
-    expected: "noop",
+    expected: false,
   },
   {
-    name: "transition happened, status shows unresolved from something else — noop, same rationale as the error case",
-    pushEpoch: 1,
-    epochAtCompletion: 2,
+    name: "status shows unresolved — never overwrite a genuinely unresolved outcome",
     currentStatus: "unresolved",
-    expected: "noop",
+    expected: false,
   },
   {
-    name: "transition happened, status key missing entirely (null) — noop: nothing to clear",
-    pushEpoch: 1,
-    epochAtCompletion: 2,
+    name: "status key missing entirely (null) — nothing to clear",
     currentStatus: null,
-    expected: "noop",
+    expected: false,
   },
 ];
 
 /**
- * SH.2.6 Codex P2 follow-up — the write side of the "clear-stale-syncing"
- * action above. Re-reads the status key itself (never trusts a value the
- * caller already had) so the ONLY thing this ever downgrades is a status
- * key still holding exactly "syncing" at the moment of the write — the
- * same freshness discipline resolvePushCompletionAction()'s own doc
- * requires of `currentStatus`. Resets to "idle" and clears any stale error
- * text, mirroring exactly what an ordinary successful completion would
- * have left behind — this is a neutral terminal state, never a fabricated
- * "success" for a push whose actual outcome this device no longer has any
- * business reporting for the current identity.
+ * SH.2.6 P2 follow-up (Codex) — clears a stale "syncing" left behind by a
+ * now-superseded operation for `profileId`. Called ONLY from the
+ * identity/profile-transition boundary (setSyncUserId()/setSyncProfileId()
+ * — see their own docs for why that call site, and only that call site, is
+ * safe: it runs synchronously at the exact instant a genuine transition
+ * happens, strictly before anything under the new identity/profile could
+ * have written anything in THIS tab). Re-reads the status key itself
+ * (never trusts a value the caller already had) and applies
+ * shouldClearStaleSyncingStatus() above to decide whether to touch it at
+ * all. Resets to "idle" and clears any stale error text, mirroring
+ * exactly what an ordinary successful completion would have left behind —
+ * a neutral terminal state, never a fabricated "success" for an operation
+ * whose actual outcome is no longer this device's to report.
  */
 function clearStaleSyncingStatus(profileId: string): void {
   let currentStatus: string | null = null;
@@ -4865,10 +4857,7 @@ function clearStaleSyncingStatus(profileId: string): void {
   } catch {
     return;
   }
-  // Same rule resolvePushCompletionAction() encodes for its own
-  // "clear-stale-syncing" branch: only ever touch the key when it is
-  // STILL exactly "syncing" right now.
-  if (currentStatus !== "syncing") return;
+  if (!shouldClearStaleSyncingStatus(currentStatus)) return;
   try {
     localStorage.setItem(syncStatusKeyForProfile(profileId), "idle");
   } catch {}
@@ -4996,32 +4985,27 @@ async function doPush(): Promise<void> {
   try {
     window.dispatchEvent(new CustomEvent(SYNC_STATE_CHANGED_EVENT));
   } catch {}
-  // SH.2.6 Codex P2 follow-up — every completion branch below (including
+  // SH.2.6 / SH.2.6 P2 follow-up — every completion branch below (including
   // the catch block, reached when the fetch itself throws before any
   // response exists) funnels its UI-facing writes through this SAME
-  // three-way decision (resolvePushCompletionAction) instead of a bare
-  // shouldPublishPushCompletionStatus() boolean, so a superseded push can
-  // downgrade its own stale "syncing" leftover back to idle instead of
-  // leaving Settings stuck on "Syncing..." forever — never by publishing a
-  // normal completion for an identity this push no longer represents.
-  // Declared here (before the try block), not inside it, specifically so
-  // the catch block below can also reach it. Reads the profile's status
-  // key FRESH at each call site (never a value cached before this await,
-  // or before an inner one), matching every other "re-check after an
-  // awaited boundary" gate in this function.
+  // shouldPublishPushCompletionStatus() gate. Declared here (before the
+  // try block), not inside it, specifically so the catch block below can
+  // also reach it. Re-checks `currentPullEpoch` FRESH at each call site
+  // (never a value cached before this await, or before an inner one),
+  // matching every other "re-check after an awaited boundary" gate in
+  // this function.
+  //
+  // When suppressed, this is a PURE noop — it never attempts to clear
+  // "syncing" or touch the status key in any way. See the module doc just
+  // above clearStaleSyncingStatus() for why: only the identity/profile-
+  // transition boundary (setSyncUserId()/setSyncProfileId()) can safely
+  // tell "this push's own untouched leftover" apart from "a different
+  // tab's legitimately active sync for the new/current identity" — a
+  // superseded push's own completion cannot, and must never guess.
   const applyCompletion = (publish: () => void): void => {
-    let currentStatus: string | null = null;
-    try {
-      currentStatus = localStorage.getItem(syncStatusKeyForProfile(profileId));
-    } catch {}
-    const action = resolvePushCompletionAction(pushEpoch, currentPullEpoch, currentStatus);
-    if (action === "publish") {
+    if (shouldPublishPushCompletionStatus(pushEpoch, currentPullEpoch)) {
       publish();
-    } else if (action === "clear-stale-syncing") {
-      clearStaleSyncingStatus(profileId);
     }
-    // action === "noop": this push must not touch a status value it did
-    // not itself leave behind — see resolvePushCompletionAction's own doc.
   };
   try {
     const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
@@ -5060,9 +5044,10 @@ async function doPush(): Promise<void> {
       // transition has happened since this push captured `pushEpoch`.
       // Suppressing them here is exactly what stops a since-superseded
       // user A's "unresolved" from overwriting a since-signed-in user B's
-      // sync-status UI for the same profile slot — and applyCompletion()
-      // still downgrades A's own stale "syncing" leftover to idle when
-      // suppressed, rather than leaving it stuck.
+      // sync-status UI for the same profile slot. A's own stale "syncing"
+      // leftover (if any) was already cleared at the transition boundary
+      // itself — see setSyncUserId()/setSyncProfileId()'s own doc — never
+      // here.
       applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), "unresolved");
@@ -5169,12 +5154,11 @@ async function doPush(): Promise<void> {
       // `await commitConfirmedBaseline()` calls inside the `if (userId)`
       // block above are ANOTHER awaited boundary this function crossed
       // since that snapshot, during which a fresh transition could have
-      // happened. applyCompletion() re-reads currentPullEpoch AND the
-      // status key itself fresh right now, so it correctly downgrades a
-      // stale "syncing" left behind by a transition that happened during
-      // THESE inner awaits, not merely the outer fetch. Status writes are
-      // best-effort; event dispatch MUST always execute when publication
-      // is allowed.
+      // happened. applyCompletion() re-checks `currentPullEpoch` fresh
+      // right now, so a transition that happened during THESE inner
+      // awaits (not merely the outer fetch) is caught too. Status writes
+      // are best-effort; event dispatch MUST always execute when
+      // publication is allowed.
       applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), userId && !confirmedDurably ? "unresolved" : "idle");
@@ -5190,9 +5174,7 @@ async function doPush(): Promise<void> {
       // Non-401 failure — record error state for the originating profile.
       // SH.2.6 — gated the same way as every other completion write above:
       // an HTTP failure for a since-superseded identity must not overwrite
-      // the currently active identity's sync-status UI for this profile
-      // (applyCompletion() still downgrades a stale "syncing" to idle when
-      // suppressed).
+      // the currently active identity's sync-status UI for this profile.
       applyCompletion(() => {
         try {
           localStorage.setItem(syncStatusKeyForProfile(profileId), "error");

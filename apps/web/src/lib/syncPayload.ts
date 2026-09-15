@@ -3066,6 +3066,7 @@ export type DomainBaselineOutcome<T> =
   | { kind: "gated"; revision: number }
   | { kind: "stale-response"; confirmedRevision: number; cloudRevision: number }
   | { kind: "unusable-response"; confirmedRevision: number }
+  | { kind: "unusable-content"; cloudRevision: number | null }
   | { kind: "fallback"; value: T };
 
 /**
@@ -3107,14 +3108,54 @@ export function capturePreFetchDomainSnapshot<T>(diskValue: T): DomainPreFetchSn
  * see plans/page.tsx's/lightning/page.tsx's own doc for why callers now
  * invoke this unconditionally, every pull, rather than only when some other
  * signal suggested it might be needed.
+ *
+ * SH.2.6 P1 (Codex) — CONTENT-USABILITY GATE. `contentUsable` (optional,
+ * defaults to `true` so every pre-existing caller/DEV case is unaffected)
+ * is a SEPARATE question from `cloudRevision`'s presence: pullPlanner() can
+ * now return a non-null envelope for an HTTP 200 whose `plannerJson` was
+ * unusable (malformed/unexpected shape — e.g. the server's `null`/`{}`
+ * no-further-validation legacy-fallback path) while STILL carrying a
+ * perfectly valid `revision` — see PulledPlannerEnvelope's own doc in
+ * syncHelper.ts. Before this gate, `confirmed.status === "none"` (a fresh
+ * browser/no-confirmed-facts device — the REQUIRED case) fell straight
+ * through to `"fallback"` below WITHOUT ever inspecting content usability
+ * at all, because that branch never looked at `cloudRevision` in the first
+ * place: a fresh device could hydrate "successfully" from local
+ * fallback/noop content against a response whose actual cloud bytes it
+ * never interpreted, open syncReady, and push that local/empty state
+ * tagged with the response's own (real, valid) revision — silently
+ * overwriting cloud data this client could not read. `contentUsable ===
+ * false` is checked FIRST, before `confirmed.status` is even inspected,
+ * and unconditionally overrides EVERY other branch ("confirmed",
+ * "conflict", "none") with `"unusable-content"`: an unusable response must
+ * never establish a baseline for hydration, regardless of what else is
+ * true about this domain's confirmed state. This is DELIBERATELY separate
+ * from `"unusable-response"` (which means "no revision at all" — a 204 or
+ * an unparseable-to-pullPlanner() response) since the two are different
+ * failure classes with a different implication for a device with NO
+ * confirmed fact yet: a null `cloudRevision` with no confirmed fact is
+ * genuinely "nothing here yet, safe to fall back" (unchanged, still
+ * "fallback" below), while `contentUsable === false` means "the server DID
+ * answer with real revision-bearing state this device simply could not
+ * interpret" — never safe to treat as an empty/fallback-eligible pull, with
+ * or without a confirmed fact already on record. `cloudRevision` is
+ * preserved on the returned outcome (not merely a confirmedRevision, which
+ * may not exist for a "none" confirmed status) so callers/logging still
+ * have it, but establishes no baseline VALUE of any kind — this outcome
+ * carries no `.value` field, exactly like "gated"/"stale-response"/
+ * "unusable-response".
  */
 export function resolvePostFetchDomainBaseline<Raw, T>(
   confirmed: ConfirmedDomainResult<Raw>,
   cloudRevision: number | null,
   mapConfirmedValue: (raw: Raw) => T,
   preFetch: DomainPreFetchSnapshot<T>,
-  fallbackValue: T
+  fallbackValue: T,
+  contentUsable = true
 ): DomainBaselineOutcome<T> {
+  if (!contentUsable) {
+    return { kind: "unusable-content", cloudRevision };
+  }
   if (confirmed.status === "confirmed") {
     // REVISION-BOUNDED AUTHORITY (SH.2.1 P2) — a confirmed fact is usable
     // as THIS pull's baseline only within this pull's own authority window:
@@ -3178,11 +3219,12 @@ export const DEV_CAPTURE_PRE_FETCH_DOMAIN_SNAPSHOT_CASES: Array<{
 
 /**
  * Reference cases for resolvePostFetchDomainBaseline() — the REQUIRED cases
- * from the SH.2.1 P1 fix (conflict/recovery) and the P2 fix (revision-bounded
- * confirmed authority). Run from Node:
+ * from the SH.2.1 P1 fix (conflict/recovery), the P2 fix (revision-bounded
+ * confirmed authority), and the SH.2.6 P1 fix (content-usability gate). Run
+ * from Node:
  *   import { DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES, resolvePostFetchDomainBaseline } from "@/lib/syncPayload";
  *   DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES.forEach(c => {
- *     const got = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, (raw) => raw, c.preFetch, c.fallbackValue);
+ *     const got = resolvePostFetchDomainBaseline(c.confirmed, c.cloudRevision, (raw) => raw, c.preFetch, c.fallbackValue, c.contentUsable ?? true);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
@@ -3192,6 +3234,7 @@ export const DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES: Array<{
   cloudRevision: number | null;
   preFetch: DomainPreFetchSnapshot<string>;
   fallbackValue: string;
+  contentUsable?: boolean;
   expected: DomainBaselineOutcome<string>;
 }> = [
   {
@@ -3281,6 +3324,50 @@ export const DEV_RESOLVE_POST_FETCH_DOMAIN_BASELINE_CASES: Array<{
     preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
     fallbackValue: "FALLBACK-REF",
     expected: { kind: "gated", revision: 6 },
+  },
+  {
+    name: "SH.2.6 P1 required — fresh browser/no confirmed facts at all + unusable content (valid revision): must NOT fall through to fallback and open the gate, even though confirmed.status is \"none\"",
+    confirmed: { status: "none" },
+    cloudRevision: 5,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    contentUsable: false,
+    expected: { kind: "unusable-content", cloudRevision: 5 },
+  },
+  {
+    name: "SH.2.6 P1 required — unusable content AND a missing/malformed revision together: still unusable-content, cloudRevision preserved as null rather than fabricated",
+    confirmed: { status: "none" },
+    cloudRevision: null,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    contentUsable: false,
+    expected: { kind: "unusable-content", cloudRevision: null },
+  },
+  {
+    name: "SH.2.6 P1 — unusable content overrides an EXISTING confirmed fact too: a device with prior confirmed state must not use it to \"successfully\" hydrate from this pull's unreadable content",
+    confirmed: { status: "confirmed", fact: { revision: 4, value: "CLOUD-V4" } },
+    cloudRevision: 5,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    contentUsable: false,
+    expected: { kind: "unusable-content", cloudRevision: 5 },
+  },
+  {
+    name: "SH.2.6 P1 — unusable content overrides a conflicted domain too: never silently resolves a genuine conflict via unreadable content",
+    confirmed: { status: "conflict", revision: 6 },
+    cloudRevision: 7,
+    preFetch: { diskValue: "FROZEN-PRE-FETCH-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    contentUsable: false,
+    expected: { kind: "unusable-content", cloudRevision: 7 },
+  },
+  {
+    name: "SH.2.6 P1 — contentUsable defaults to true when omitted: every pre-existing caller/case is unaffected by this gate",
+    confirmed: { status: "none" },
+    cloudRevision: 7,
+    preFetch: { diskValue: "DISK-BYTES" },
+    fallbackValue: "FALLBACK-REF",
+    expected: { kind: "fallback", value: "FALLBACK-REF" },
   },
 ];
 
@@ -4403,6 +4490,7 @@ export type UnusableDomainReason =
   | "conflict"
   | "stale-response"
   | "unusable-response"
+  | "unusable-content"
   | "local-edit-superseded"
   | "authority-changed"
   | "authority-unavailable"
@@ -4412,6 +4500,14 @@ export function decideStaleResponseRecovery(
   unusableDomains: Array<{ reason: UnusableDomainReason }>
 ): "retry" | "no-retry" {
   if (unusableDomains.length === 0) return "no-retry";
+  // SH.2.6 P1 — "unusable-content" (a 200 response with a valid revision
+  // but unreadable/unexpected plannerJson — see resolvePostFetchDomainBaseline's
+  // own doc) is DELIBERATELY EXCLUDED from the always-safe retry set below,
+  // for the same reason "unusable-response" already is: nothing about why
+  // the content was unusable is revision-related, so blindly retrying this
+  // same pull is not guaranteed to produce a readable response either — it
+  // falls through to the default "no-retry" (fail closed) just like
+  // "unusable-response" already does.
   // SH.2.2 — "local-edit-superseded" (a commit-time CAS supersession by a
   // genuine local edit) and "authority-changed" (a commit-time confirmed-
   // authority identity mismatch — see this section's own "CODEX P1 THIRD
@@ -4567,6 +4663,21 @@ export const DEV_DECIDE_STALE_RESPONSE_RECOVERY_CASES: Array<{
       { reason: "authority-changed" },
       { reason: "stale-response" },
       { reason: "local-edit-superseded" },
+    ],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.6 P1 required — a single unusable-content domain (200 with a valid revision but unreadable plannerJson) must NEVER auto-retry, even alone: nothing about why the content was unusable is revision-related",
+    unusableDomains: [{ reason: "unusable-content" }],
+    expected: "no-retry",
+  },
+  {
+    name: "SH.2.6 P1 — an unusable-content domain blocks retry even when every other domain is merely stale-response/local-edit-superseded/authority-changed (all otherwise-safe reasons)",
+    unusableDomains: [
+      { reason: "unusable-content" },
+      { reason: "stale-response" },
+      { reason: "local-edit-superseded" },
+      { reason: "authority-changed" },
     ],
     expected: "no-retry",
   },
