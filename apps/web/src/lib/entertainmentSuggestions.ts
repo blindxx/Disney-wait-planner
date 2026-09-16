@@ -85,6 +85,21 @@ export type EntertainmentPlace = {
 
 export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // ---- Disneyland Park / DCA ----
+  // Lifecycle audit note (limited-engagement entries below): "Magic Happens
+  // Parade", "Paint the Night", "Main Street Electrical Parade", "Royal
+  // Princess Cavalcade", and "Mickey's Mix Magic" are not running today, but
+  // are retained as current/plan-worthy — each has an official announced
+  // return (Magic Happens: summer 2027) or a well-established recurring
+  // revival pattern (Paint the Night, MSEP) with no evidence of permanent
+  // discontinuation. Royal Princess Cavalcade and Mickey's Mix Magic have
+  // uncertain current status (no confirmed recent run, but also no
+  // confirmed end) — kept per "don't guess-remove from schedule absence
+  // alone"; flag for re-verification in a future catalog pass. By contrast,
+  // "Together Forever — A Pixar Nighttime Spectacular" and "Better Together:
+  // A Pixar Pals Celebration!" were removed from this catalog (see git
+  // history) — both were one-off Pixar Fest/70th-Anniversary tie-ins with
+  // no standing calendar slot and no announced future return, unlike the
+  // recurring-anniversary pattern behind Paint the Night/MSEP.
   { name: "Fantasmic!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Frontierland", availabilityType: "regular" },
   { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "regular" },
   { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "regular" },
@@ -98,11 +113,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
   { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "limited" },
-  // Pre-existing defect fixed during this catalog's land/location audit:
-  // this is a DCA nighttime spectacular (Paradise Bay/Paradise Gardens
-  // Park) — location/parkId were previously mislabeled as Disneyland Park.
-  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "limited" },
-  { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "limited" },
   { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
   { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
   { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
@@ -138,7 +148,7 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake", availabilityType: "regular" },
   { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
   { name: "Disney Movie Magic", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
-  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
+  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
   { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   // ---- Hollywood Studios — The Magic of Disney Animation collection ----
@@ -220,10 +230,6 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "minnies fireworks": "minnies wonderful christmastime fireworks",
   "most merriest celebration": "mickeys most merriest celebration",
   "oogie boogie parade": "frightfully fun parade",
-  "together forever": "together forever a pixar nighttime spectacular",
-  "pixar nighttime spectacular": "together forever a pixar nighttime spectacular",
-  "better together": "better together a pixar pals celebration",
-  "pixar pals celebration": "better together a pixar pals celebration",
   "luminous": "luminous the symphony of us",
   "symphony of us": "luminous the symphony of us",
   "luminous symphony": "luminous the symphony of us",
