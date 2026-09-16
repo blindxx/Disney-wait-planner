@@ -41,103 +41,12 @@ import {
   getClosureTiming,
   formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
-
-// ============================================
-// SHOW TYPE
-// ============================================
-
-type Show = {
-  id: string;
-  name: string;
-  parkId: ParkId;
-  land?: string;
-  times: string[];
-};
-
-// ============================================
-// MOCK SHOWS DATA
-// ============================================
-
-const MOCK_SHOWS: Show[] = [
-  // ---- DLR: Disneyland Park ----
-  {
-    id: "fantasmic",
-    name: "Fantasmic!",
-    parkId: "disneyland",
-    land: "New Orleans Square",
-    times: ["9:00 PM"],
-  },
-  {
-    id: "magic-happens",
-    name: "Magic Happens Parade",
-    parkId: "disneyland",
-    land: "Main Street, U.S.A.",
-    times: ["11:00 AM", "3:00 PM"],
-  },
-  {
-    id: "msep",
-    name: "Main Street Electrical Parade",
-    parkId: "disneyland",
-    land: "Main Street, U.S.A.",
-    times: ["7:45 PM", "9:45 PM"],
-  },
-  {
-    id: "royal-cavalcade",
-    name: "Royal Princess Cavalcade",
-    parkId: "disneyland",
-    land: "Fantasyland",
-    times: ["10:30 AM", "1:30 PM", "4:30 PM"],
-  },
-  // ---- DLR: Disney California Adventure ----
-  {
-    id: "together-forever",
-    name: "Together Forever \u2014 A Pixar Nighttime Spectacular",
-    parkId: "dca",
-    land: "Paradise Gardens Park",
-    times: ["9:00 PM"],
-  },
-  {
-    id: "pixar-pals",
-    name: "Better Together: A Pixar Pals Celebration!",
-    parkId: "dca",
-    land: "Hollywood Land",
-    times: ["11:30 AM", "2:30 PM", "5:00 PM"],
-  },
-  // ---- WDW: Magic Kingdom ----
-  {
-    id: "mk-festival-of-fantasy",
-    name: "Festival of Fantasy Parade",
-    parkId: "mk",
-    land: "Main Street, U.S.A.",
-    times: ["3:00 PM"],
-  },
-  {
-    id: "mk-happily-ever-after",
-    name: "Happily Ever After",
-    parkId: "mk",
-    land: "Main Street, U.S.A.",
-    times: ["9:00 PM"],
-  },
-  // ---- WDW: Hollywood Studios ----
-  {
-    id: "hs-fantasmic",
-    name: "Fantasmic!",
-    parkId: "hs",
-    land: "Hollywood Hills Amphitheater",
-    times: ["9:30 PM"],
-  },
-  // ---- WDW: Animal Kingdom ----
-  {
-    id: "ak-finding-nemo",
-    name: "Finding Nemo: The Big Blue... and Beyond!",
-    parkId: "ak",
-    land: "Discovery Island",
-    times: ["11:00 AM", "1:30 PM", "4:00 PM"],
-  },
-];
+import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
+// ENTERTAINMENT_PLACES (via getEntertainmentForPark) is the single source
+// of truth for entertainment data — no local duplication.
 
 // ============================================
 // RESORT + PARK CONSTANTS
@@ -295,6 +204,24 @@ const RESPONSIVE_CSS = `
     background-color: #fff;
   }
 
+  /* ---- Entertainment grid — mobile: bordered list (same model as .wait-grid) ---- */
+  .entertainment-grid {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  /* ---- Entertainment card — mobile: stacked rows, no wait-badge column ---- */
+  .entertainment-card {
+    padding: 12px 16px;
+    min-height: 56px;
+    border-bottom: 1px solid #e5e7eb;
+    background-color: #fff;
+  }
+  .entertainment-card:last-child {
+    border-bottom: none;
+  }
+
   /* ============================================
      Tablet — 768px+  (2-column grid)
      ============================================ */
@@ -335,6 +262,23 @@ const RESPONSIVE_CSS = `
       border: 1px solid #e5e7eb;
       border-radius: 8px;
     }
+
+    .entertainment-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      border: none;
+      border-radius: 0;
+      overflow: visible;
+    }
+
+    .entertainment-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    .entertainment-card:last-child {
+      border: 1px solid #e5e7eb;
+    }
   }
 
   /* ============================================
@@ -352,6 +296,16 @@ const RESPONSIVE_CSS = `
     }
 
     .wait-card {
+      padding: 10px 14px;
+      min-height: 52px;
+    }
+
+    .entertainment-grid {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .entertainment-card {
       padding: 10px 14px;
       min-height: 52px;
     }
@@ -434,6 +388,45 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
 
       {/* Right: wait badge */}
       <WaitBadge attraction={attraction} />
+    </div>
+  );
+}
+
+/**
+ * EntertainmentCard — responsive entertainment display, modeled directly on
+ * AttractionCard: same name/land treatment, no right-side badge column
+ * (there is no wait time to show). Layout and spacing adapt via the
+ * .entertainment-card CSS class (mirrors .wait-card's grid/border rules).
+ */
+function EntertainmentCard({ entertainment }: { entertainment: EntertainmentPlace }) {
+  return (
+    <div className="entertainment-card">
+      <div
+        style={{
+          fontWeight: 600,
+          fontSize: "15px",
+          lineHeight: "1.3",
+          color: "#111827",
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical" as const,
+          overflow: "hidden",
+        }}
+      >
+        {entertainment.name}
+      </div>
+      {entertainment.land && (
+        <div
+          style={{
+            fontSize: "13px",
+            lineHeight: "1.3",
+            color: "#6b7280",
+            marginTop: "2px",
+          }}
+        >
+          {entertainment.land}
+        </div>
+      )}
     </div>
   );
 }
@@ -637,11 +630,23 @@ export default function WaitTimesPage() {
   /** Parks available for the currently selected resort */
   const resortParks = RESORT_PARKS[selectedResort];
 
-  /** Unique sorted land names for the selected park (derived from loaded data). */
+  /** Entertainment for the currently selected park, from the canonical catalog. */
+  const parkEntertainment = useMemo(
+    () => getEntertainmentForPark(selectedPark),
+    [selectedPark],
+  );
+
+  /**
+   * Unique sorted land names for the selected park — union of attraction
+   * lands (from loaded wait data) and entertainment lands (from the
+   * canonical catalog), so the filter covers both without a second land
+   * taxonomy or duplicate/inconsistent labels.
+   */
   const availableLands = useMemo(() => {
-    const lands = attractions.map((a) => a.land).filter((l): l is string => !!l);
-    return [...new Set(lands)].sort();
-  }, [attractions]);
+    const attractionLands = attractions.map((a) => a.land).filter((l): l is string => !!l);
+    const entertainmentLands = parkEntertainment.map((p) => p.land).filter((l): l is string => !!l);
+    return [...new Set([...attractionLands, ...entertainmentLands])].sort();
+  }, [attractions, parkEntertainment]);
 
   /**
    * Filter and sort attractions based on current settings.
@@ -929,14 +934,12 @@ export default function WaitTimesPage() {
           </div>
         )}
 
-        {/* ---- Entertainment (Shows) ---- */}
+        {/* ---- Entertainment ---- */}
         {(() => {
-          const shows = MOCK_SHOWS.filter(
-            (s) =>
-              s.parkId === selectedPark &&
-              (!selectedLand || s.land === selectedLand)
+          const entertainment = parkEntertainment.filter(
+            (p) => !selectedLand || p.land === selectedLand
           );
-          if (shows.length === 0) return null;
+          if (entertainment.length === 0) return null;
           return (
             <div style={{ marginTop: "20px" }}>
               <h2
@@ -944,64 +947,24 @@ export default function WaitTimesPage() {
                   fontSize: "16px",
                   fontWeight: 700,
                   color: "#111827",
-                  marginBottom: "10px",
+                  marginBottom: "2px",
                 }}
               >
                 Entertainment
               </h2>
-              <div
+              <p
                 style={{
-                  border: "1px solid #e5e7eb",
-                  borderRadius: "8px",
-                  overflow: "hidden",
+                  fontSize: "12px",
+                  color: "#9ca3af",
+                  marginTop: 0,
+                  marginBottom: "10px",
                 }}
               >
-                {shows.map((show) => (
-                  <div
-                    key={show.id}
-                    style={{
-                      padding: "12px 16px",
-                      borderBottom: "1px solid #e5e7eb",
-                      backgroundColor: "#fff",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontWeight: 600,
-                        fontSize: "15px",
-                        color: "#111827",
-                        lineHeight: "1.3",
-                      }}
-                    >
-                      {show.name}
-                    </div>
-                    {show.land && (
-                      <div
-                        style={{
-                          fontSize: "13px",
-                          color: "#6b7280",
-                          marginTop: "2px",
-                        }}
-                      >
-                        {show.land}
-                      </div>
-                    )}
-                    <div
-                      style={{
-                        marginTop: "6px",
-                        fontSize: "13px",
-                        color: "#374151",
-                        lineHeight: "1.5",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {show.times.length === 1 ? (
-                        <span>Next: {show.times[0]}</span>
-                      ) : (
-                        <span style={{ color: "#6b7280" }}>Today: {show.times.join(" \u2022 ")}</span>
-                      )}
-                    </div>
-                  </div>
+                Plan-worthy entertainment for this park. Check the official Disney app or website for current schedules and showtimes.
+              </p>
+              <div className="entertainment-grid">
+                {entertainment.map((show) => (
+                  <EntertainmentCard key={show.name} entertainment={show} />
                 ))}
               </div>
             </div>

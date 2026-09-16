@@ -29,6 +29,26 @@
  * Once Upon a Studio Theater). Olaf Draws! is a deliberate scope exception:
  * it isn't a conventional show, but is included because guests plan around
  * it the same way.
+ *
+ * Active vs. legacy identity: `ENTERTAINMENT_PLACES` is the ACTIVE/current
+ * catalog — the only one enumerated by Wait Times (getEntertainmentForPark)
+ * and Smart Entry suggestions (getEntertainmentSuggestions). Retired/
+ * replaced entertainment that old saved/imported/cloud-restored plans
+ * should keep recognizing lives instead in the separate
+ * `LEGACY_ENTERTAINMENT_PLACES` list below, which is deliberately NOT
+ * exported for enumeration — only `resolveEntertainmentKey` and the
+ * name/location/canonical-name/availabilityType/parkId lookups consult it,
+ * as a fallback after the active catalog fails to match. This keeps exactly
+ * one enumerable "current" catalog while still letting old plan text
+ * resolve to its correct historical identity (type, canonical name, and
+ * park/location) rather than falling back to "custom/attraction" — this
+ * includes park/day inference (crossDayChecks.ts's inferDayPark,
+ * plansContextInference.ts's tryResolve), which must use
+ * `getEntertainmentParkId` for entertainment items rather than building
+ * their own name→parkId map from ENTERTAINMENT_PLACES alone, or a
+ * legacy-only Auto day (e.g. one whose only recognizable item is "Together
+ * Forever") would fail to recover its historical park despite the name
+ * itself resolving correctly.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -64,6 +84,19 @@ export type EntertainmentPlace = {
    * with no single-park identity (none currently in this dataset).
    */
   parkId?: ParkId;
+  /**
+   * Themed land/area within the park where this entertainment is
+   * presented (e.g. "Main Street, U.S.A.", "Frontierland") — distinct from
+   * `location`, which is the park-level display label used elsewhere (My
+   * Plans Smart Entry, etc.). Uses the same land vocabulary as attraction
+   * wait data (packages/shared/src/waitTimes/mock.ts) so Wait Times can
+   * filter entertainment and attractions under one shared Land selector
+   * without a second land taxonomy. Verified against current show/venue
+   * locations as of this catalog revision — not copied from any legacy
+   * mock. Omitted only for offerings with no single in-park land (none
+   * currently in this dataset).
+   */
+  land?: string;
   /** Optional recurrence metadata — see EntertainmentAvailabilityType. */
   availabilityType?: EntertainmentAvailabilityType;
   /** Optional seasonal/holiday theme — see EntertainmentTheme. */
@@ -72,74 +105,111 @@ export type EntertainmentPlace = {
 
 export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // ---- Disneyland Park / DCA ----
-  { name: "Fantasmic!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
-  { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
-  { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
-  { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
+  // Lifecycle audit note (limited-engagement entries below): "Magic Happens
+  // Parade", "Paint the Night", "Main Street Electrical Parade", "Royal
+  // Princess Cavalcade", and "Mickey's Mix Magic" are not running today, but
+  // are retained as current/plan-worthy — each has an official announced
+  // return (Magic Happens: summer 2027) or a well-established recurring
+  // revival pattern (Paint the Night, MSEP) with no evidence of permanent
+  // discontinuation. Royal Princess Cavalcade and Mickey's Mix Magic have
+  // uncertain current status (no confirmed recent run, but also no
+  // confirmed end) — kept per "don't guess-remove from schedule absence
+  // alone"; flag for re-verification in a future catalog pass. By contrast,
+  // "Together Forever — A Pixar Nighttime Spectacular" (Disneyland Park) and
+  // "Better Together: A Pixar Pals Celebration!" (DCA) are LEGACY-only (see
+  // LEGACY_ENTERTAINMENT_PLACES below) — both were one-off Pixar
+  // Fest/70th-Anniversary tie-ins with no standing calendar slot and no
+  // announced future return, unlike the recurring-anniversary pattern
+  // behind Paint the Night/MSEP.
+  { name: "Fantasmic!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Frontierland", availabilityType: "regular" },
+  { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "regular" },
+  { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Adventureland", availabilityType: "regular" },
+  { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
+  { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "limited" },
+  { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
+  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
+  // Confirmed current for the 2026 Halloween Time season (general park
+  // hours, not party-exclusive); has recurred annually since its 2021 debut.
+  { name: "Mickey & Friends Halloween Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  // Debuted Aug 18, 2026 as the marquee processional entertainment for
+  // Oogie Boogie Bash (separately-ticketed after-hours Halloween party),
+  // replacing Frightfully Fun Parade for the 2026 season. Confirmed at
+  // Hollywood Land via official/press coverage.
+  { name: "Madame Leota's Swinging Wake – A Haunted Mansion Street Party", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "seasonal", availabilityTheme: "halloween" },
 
   // ---- Magic Kingdom ----
-  { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Disney Starlight: Dream the Night Away", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Festival of Fantasy Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Mickey's PhilharMagic", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Enchanted Tiki Room", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Country Bear Musical Jamboree", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "Disney's Not-So-Spooky Spectacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Hocus Pocus Villain Spelltacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Minnie's Wonderful Christmastime Fireworks", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Hocus Pocus Villain Spelltacular and Mickey's Most Merriest Celebration
+  // perform on the Cinderella Castle forecourt stage — grouped under Main
+  // Street, U.S.A. (the same land used for the park's other castle-facing
+  // hub shows/fireworks) since the castle forecourt/hub isn't a distinct
+  // land in the existing land vocabulary.
+  { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Disney Starlight: Dream the Night Away", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Festival of Fantasy Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Mickey's PhilharMagic", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland", availabilityType: "regular" },
+  { name: "Enchanted Tiki Room", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Adventureland", availabilityType: "regular" },
+  { name: "Country Bear Musical Jamboree", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Frontierland", availabilityType: "regular" },
+  { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Disney's Not-So-Spooky Spectacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Hocus Pocus Villain Spelltacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Minnie's Wonderful Christmastime Fireworks", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- EPCOT ----
-  { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
-  { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
+  { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Nature", availabilityType: "regular" },
+  { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "regular" },
 
   // ---- Hollywood Studios ----
-  { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Beauty and the Beast Live on Stage", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Disney Movie Magic", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
+  { name: "Beauty and the Beast Live on Stage", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
+  { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake", availabilityType: "regular" },
+  { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake", availabilityType: "regular" },
+  { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
+  { name: "Disney Movie Magic", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
+  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
+  { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
+  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   // ---- Hollywood Studios — The Magic of Disney Animation collection ----
   // The Magic of Disney Animation itself is an umbrella location, not an
   // individual plan-worthy entry. Only its individually plan-worthy pieces
   // are catalogued: Olaf Draws! and Once Upon a Studio Theater. Off the
   // Page! (character meets) and Drawn to Wonderland (play area) are
   // deliberately excluded — out of catalog scope.
-  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Once Upon a Studio Theater", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
+  { name: "Once Upon a Studio Theater", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
 
   // ---- Animal Kingdom ----
-  { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
-  { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
-  { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
+  { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Africa", availabilityType: "regular" },
+  { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Asia", availabilityType: "regular" },
+  { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "regular" },
 
   // ---- Galaxy's Edge experiences (DLR + WDW) ----
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
 ];
+
+/**
+ * All canonical entertainment offerings presented at a given park, in
+ * catalog order. Single source of truth for park-scoped entertainment —
+ * consumers (e.g. Wait Times) derive their Entertainment section from this
+ * rather than maintaining a page-local list.
+ */
+export function getEntertainmentForPark(parkId: ParkId): EntertainmentPlace[] {
+  return ENTERTAINMENT_PLACES.filter((p) => p.parkId === parkId);
+}
 
 const ENTERTAINMENT_KEYS: Set<string> = new Set(
   ENTERTAINMENT_PLACES.map((p) => normalizeKey(p.name)),
@@ -152,6 +222,63 @@ const ENTERTAINMENT_KEYS: Set<string> = new Set(
 const ENTERTAINMENT_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
   DLR: new Set(ENTERTAINMENT_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
   WDW: new Set(ENTERTAINMENT_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
+};
+
+/**
+ * Retired/replaced entertainment identities kept ONLY so that saved,
+ * imported, or cloud-restored plan items naming them still resolve to the
+ * correct type (entertainment, not "attraction"/custom) and correct
+ * historical canonical name/park/location — never for current planning.
+ *
+ * Deliberately NOT exported and NOT read by getEntertainmentForPark or
+ * getEntertainmentSuggestions, so this list structurally cannot reach Wait
+ * Times or current Smart Entry suggestions. Only resolveEntertainmentKey
+ * (and the lookups built on it — getEntertainmentLocation/
+ * getEntertainmentCanonicalName/getEntertainmentAvailabilityType/
+ * getEntertainmentParkId) consult it, as a fallback after the active
+ * catalog above fails to match. Park/day-inference consumers
+ * (crossDayChecks.ts's inferDayPark, plansContextInference.ts's
+ * tryResolve) must go through getEntertainmentParkId — not build their own
+ * name→parkId map from ENTERTAINMENT_PLACES alone — so a legacy-only Auto
+ * day (e.g. its only recognizable item is "Together Forever") still
+ * recovers the correct historical park instead of silently losing all
+ * park signal despite the name resolving.
+ *
+ * Add an entry here (never re-add it to ENTERTAINMENT_PLACES) when a
+ * current offering is confirmed permanently ended/replaced with no
+ * announced recurring return.
+ */
+const LEGACY_ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
+  // Ran at Disneyland Park (Sleeping Beauty Castle / Rivers of America /
+  // Main Street, U.S.A.) for Pixar Fest 2018 and again Apr–Aug 2024 —
+  // never at DCA. No announced return; Pixar Fest itself has no announced
+  // future edition as of this catalog revision.
+  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  // Ran at Disney California Adventure for Pixar Fest 2024 and the
+  // Disneyland Resort 70th Anniversary 2025; ended Aug 3, 2025. Confirmed
+  // not returning in 2026, no 2027 announcement.
+  { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "limited" },
+];
+
+const LEGACY_ENTERTAINMENT_KEYS: Set<string> = new Set(
+  LEGACY_ENTERTAINMENT_PLACES.map((p) => normalizeKey(p.name)),
+);
+
+const LEGACY_ENTERTAINMENT_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
+  DLR: new Set(LEGACY_ENTERTAINMENT_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
+  WDW: new Set(LEGACY_ENTERTAINMENT_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
+};
+
+/**
+ * Aliases for legacy-only identities — same shape/rules as
+ * ENTERTAINMENT_ALIASES, only ever consulted after the active catalog and
+ * its aliases fail to match (see resolveEntertainmentKey).
+ */
+const LEGACY_ENTERTAINMENT_ALIASES: Record<string, string> = {
+  "together forever": "together forever a pixar nighttime spectacular",
+  "pixar nighttime spectacular": "together forever a pixar nighttime spectacular",
+  "better together": "better together a pixar pals celebration",
+  "pixar pals celebration": "better together a pixar pals celebration",
 };
 
 /**
@@ -189,10 +316,6 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "minnies fireworks": "minnies wonderful christmastime fireworks",
   "most merriest celebration": "mickeys most merriest celebration",
   "oogie boogie parade": "frightfully fun parade",
-  "together forever": "together forever a pixar nighttime spectacular",
-  "pixar nighttime spectacular": "together forever a pixar nighttime spectacular",
-  "better together": "better together a pixar pals celebration",
-  "pixar pals celebration": "better together a pixar pals celebration",
   "luminous": "luminous the symphony of us",
   "symphony of us": "luminous the symphony of us",
   "luminous symphony": "luminous the symphony of us",
@@ -229,6 +352,13 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   // name and still land on the same canonical identity.
   "world of color happiness": "world of color",
   "world of color one": "world of color",
+  "mickey and friends halloween cavalcade": "mickey friends halloween cavalcade",
+  "halloween cavalcade": "mickey friends halloween cavalcade",
+  "madame leota's swinging wake": "madame leotas swinging wake a haunted mansion street party",
+  "madame leotas swinging wake": "madame leotas swinging wake a haunted mansion street party",
+  "leota's swinging wake": "madame leotas swinging wake a haunted mansion street party",
+  "swinging wake": "madame leotas swinging wake a haunted mansion street party",
+  "haunted mansion street party": "madame leotas swinging wake a haunted mansion street party",
 };
 
 /**
@@ -282,7 +412,17 @@ function stripEntertainmentSuffix(str: string): string {
  * Deliberately no whole-word containment stage (unlike resolveDiningKey) —
  * see the module doc comment for why: it would let attraction shorthand
  * like "Indiana Jones" or "Finding Nemo" resolve as entertainment.
- * Returns null when nothing resolves.
+ *
+ * Legacy fallback: when nothing in the active catalog matches, the same
+ * stage-1/stage-3 lookup runs against LEGACY_ENTERTAINMENT_PLACES/
+ * LEGACY_ENTERTAINMENT_ALIASES so old saved/imported plan text (e.g.
+ * "Together Forever") still resolves — this is the ONLY path legacy
+ * identities can be reached through; the active catalog is always tried
+ * first and exclusively for anything reachable from Wait Times/current
+ * suggestions/park inference (those consumers never call this fallback
+ * path with an already-active-resolved key, since active always wins).
+ *
+ * Returns null when nothing resolves in either catalog.
  */
 export function resolveEntertainmentKey(name: string, resort?: ResortId): string | null {
   const key = normalizeKey(stripAnnotations(stripEntertainmentSuffix(name)));
@@ -300,9 +440,37 @@ export function resolveEntertainmentKey(name: string, resort?: ResortId): string
     }
   }
 
-  if (!candidate) return null;
-  if (resort && !ENTERTAINMENT_KEYS_BY_RESORT[resort].has(candidate)) return null;
-  return candidate;
+  if (candidate) {
+    if (resort && !ENTERTAINMENT_KEYS_BY_RESORT[resort].has(candidate)) return null;
+    return candidate;
+  }
+
+  // Legacy fallback — only reached when the active catalog found nothing.
+  let legacyCandidate: string | null = null;
+  if (LEGACY_ENTERTAINMENT_KEYS.has(key)) {
+    legacyCandidate = key;
+  } else {
+    const legacyAliasTarget = LEGACY_ENTERTAINMENT_ALIASES[key];
+    if (legacyAliasTarget && LEGACY_ENTERTAINMENT_KEYS.has(legacyAliasTarget)) {
+      legacyCandidate = legacyAliasTarget;
+    }
+  }
+  if (!legacyCandidate) return null;
+  if (resort && !LEGACY_ENTERTAINMENT_KEYS_BY_RESORT[resort].has(legacyCandidate)) return null;
+  return legacyCandidate;
+}
+
+/**
+ * Find catalog entries by a key already resolved via resolveEntertainmentKey
+ * — active catalog first, legacy as fallback (a key can only ever exist in
+ * one or the other, never both, so this is unambiguous). Shared by the
+ * name/location/canonical-name/availabilityType lookups below so each one
+ * doesn't need to duplicate the active-then-legacy search.
+ */
+function findEntertainmentPlacesByKey(key: string): EntertainmentPlace[] {
+  const active = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
+  if (active.length > 0) return active;
+  return LEGACY_ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
 }
 
 /**
@@ -352,9 +520,32 @@ export function getEntertainmentSuggestions(resort: ResortId): string[] {
 export function getEntertainmentLocation(name: string, resort: ResortId): string | undefined {
   const key = resolveEntertainmentKey(name, resort);
   if (!key) return undefined;
-  const matches = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
+  const matches = findEntertainmentPlacesByKey(key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
+}
+
+/**
+ * Resolve the parkId for an entertainment item's current name, preferring a
+ * match within the active resort, falling back to any resort — active
+ * catalog first, legacy as fallback (see findEntertainmentPlacesByKey).
+ *
+ * For park/day-inference consumers (crossDayChecks.ts's inferDayPark,
+ * plansContextInference.ts's buildInferenceMap/tryResolve) that need
+ * historical park context for recognized-but-retired entertainment (e.g. an
+ * imported/cloud-restored Auto day whose only recognizable item is
+ * "Together Forever") without enumerating the legacy catalog wholesale —
+ * this is the narrow lookup those consumers should use instead of building
+ * their own name→parkId map from ENTERTAINMENT_PLACES alone. Returns
+ * undefined for unknown/custom names or entries with no single-park
+ * identity.
+ */
+export function getEntertainmentParkId(name: string, resort: ResortId): ParkId | undefined {
+  const key = resolveEntertainmentKey(name, resort);
+  if (!key) return undefined;
+  const matches = findEntertainmentPlacesByKey(key);
+  if (matches.length === 0) return undefined;
+  return (matches.find((p) => p.resort === resort) ?? matches[0]).parkId;
 }
 
 /**
@@ -365,7 +556,7 @@ export function getEntertainmentLocation(name: string, resort: ResortId): string
 export function getEntertainmentCanonicalName(name: string, resort: ResortId): string | undefined {
   const key = resolveEntertainmentKey(name, resort);
   if (!key) return undefined;
-  const matches = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
+  const matches = findEntertainmentPlacesByKey(key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).name;
 }
@@ -382,7 +573,7 @@ export function getEntertainmentAvailabilityType(
 ): EntertainmentAvailabilityType | undefined {
   const key = resolveEntertainmentKey(name, resort);
   if (!key) return undefined;
-  const matches = ENTERTAINMENT_PLACES.filter((p) => normalizeKey(p.name) === key);
+  const matches = findEntertainmentPlacesByKey(key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).availabilityType;
 }

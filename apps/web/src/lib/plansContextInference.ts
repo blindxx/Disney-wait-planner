@@ -50,7 +50,7 @@ import {
   stripAnnotations,
 } from "@/lib/plansMatching";
 import { DINING_PLACES, resolveDiningKey } from "@/lib/diningSuggestions";
-import { ENTERTAINMENT_PLACES, resolveEntertainmentKey } from "@/lib/entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
 // parkId is null for dining locations with no single-park identity (resort
@@ -125,6 +125,15 @@ function tryResolve(
   if (entertainmentKey) {
     const entertainmentResult = map.get(entertainmentKey);
     if (entertainmentResult) return entertainmentResult;
+    // Codex P2 fix: entertainmentKey may be a legacy-only identity (e.g.
+    // "Together Forever") that resolveEntertainmentKey recognizes but which
+    // `map` never contains (built only from active ENTERTAINMENT_PLACES —
+    // see entertainmentSuggestions.ts's active/legacy doc comment).
+    // getEntertainmentParkId falls back to the legacy catalog so a
+    // legacy-only plan/day still recovers its correct historical park
+    // instead of silently losing all context signal.
+    const legacyParkId = getEntertainmentParkId(name, resortId);
+    if (legacyParkId !== undefined) return { parkId: legacyParkId, resortId };
   }
 
   return null;

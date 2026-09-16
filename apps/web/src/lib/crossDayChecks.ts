@@ -15,7 +15,7 @@ import {
 } from "@/lib/plansMatching";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveDiningKey, DINING_PLACES } from "@/lib/diningSuggestions";
-import { resolveEntertainmentKey, ENTERTAINMENT_PLACES } from "@/lib/entertainmentSuggestions";
+import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
@@ -937,13 +937,12 @@ for (const _d of DINING_PLACES) {
   else if (_d.resort === "WDW") DINING_PARK_WDW.set(normalizeKey(_d.name), _d.parkId);
 }
 
-const ENTERTAINMENT_PARK_DLR = new Map<string, string>();
-const ENTERTAINMENT_PARK_WDW = new Map<string, string>();
-for (const _e of ENTERTAINMENT_PLACES) {
-  if (!_e.parkId) continue;
-  if (_e.resort === "DLR") ENTERTAINMENT_PARK_DLR.set(normalizeKey(_e.name), _e.parkId);
-  else if (_e.resort === "WDW") ENTERTAINMENT_PARK_WDW.set(normalizeKey(_e.name), _e.parkId);
-}
+// Entertainment park lookup does NOT get its own active-only map here (the
+// way dining/attractions do above) — it goes through getEntertainmentParkId
+// in parkLabelFromCompositeKey below, which resolves active catalog first,
+// legacy fallback, so a legacy-only identity (e.g. "Together Forever")
+// still labels with its correct historical park instead of an active-only
+// map missing it and falling back to the raw resort code.
 
 /**
  * Infer the most-frequented park for a set of plan items within a resort.
@@ -967,7 +966,6 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
   if (dayItems.length === 0) return null;
   const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
   const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
-  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
   const parkCount = new Map<string, number>();
   for (const item of dayItems) {
@@ -984,9 +982,11 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       if (diningKey) parkId = diningMap.get(diningKey) ?? null;
     }
     if (!parkId) {
-      // Entertainment lookup uses its own isolated map, mirroring dining.
-      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
-      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
+      // getEntertainmentParkId resolves active catalog first, legacy as
+      // fallback (Codex P2 fix) — a day whose only recognizable item is
+      // retired entertainment (e.g. "Together Forever") still recovers its
+      // correct historical park instead of contributing no signal here.
+      parkId = getEntertainmentParkId(item.name, resort) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
@@ -1115,15 +1115,28 @@ export function computeCrossDayChecks(
     };
   }
 
+  // Resolves a composite key's parkId for one resort. Dining/attraction
+  // keys use their existing active-only maps (unchanged — those catalogs
+  // have no legacy/retired-identity concept). Entertainment keys go
+  // through getEntertainmentParkId, which resolves active catalog first,
+  // legacy fallback — canonicalKey here is already the
+  // resolveEntertainmentKey()-normalized key (see resolveAttractionKey /
+  // tryResolveByType above), so getEntertainmentParkId's own
+  // resolveEntertainmentKey call matches it via Stage-1 exact match
+  // whether it's an active or legacy identity.
+  function parkIdFromCanonicalKey(type: PlannerItemType, resort: ResortId, canonicalKey: string): ParkId | undefined {
+    if (type === "entertainment") return getEntertainmentParkId(canonicalKey, resort);
+    const map = type === "dining" ? (resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW) : (resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW);
+    return map.get(canonicalKey) as ParkId | undefined;
+  }
+
   function parkLabelFromCompositeKey(compositeKey: string): string {
     const parts = splitCompositeKey(compositeKey);
     if (!parts) return compositeKey;
     const { type, resort, canonicalKey } = parts;
-    const dlrMap = type === "dining" ? DINING_PARK_DLR : type === "entertainment" ? ENTERTAINMENT_PARK_DLR : RIDE_TO_PARK_DLR;
-    const wdwMap = type === "dining" ? DINING_PARK_WDW : type === "entertainment" ? ENTERTAINMENT_PARK_WDW : RIDE_TO_PARK_WDW;
     if (resort === "ANY") {
-      const dlrParkId = dlrMap.get(canonicalKey) as ParkId | undefined;
-      const wdwParkId = wdwMap.get(canonicalKey) as ParkId | undefined;
+      const dlrParkId = parkIdFromCanonicalKey(type, "DLR", canonicalKey);
+      const wdwParkId = parkIdFromCanonicalKey(type, "WDW", canonicalKey);
       if (dlrParkId && wdwParkId) {
         const dlrLabel = PARK_LABELS[dlrParkId] ?? dlrParkId;
         const wdwLabel = PARK_LABELS[wdwParkId] ?? wdwParkId;
@@ -1132,8 +1145,7 @@ export function computeCrossDayChecks(
       const parkId = dlrParkId ?? wdwParkId;
       return parkId ? (PARK_LABELS[parkId] ?? canonicalKey) : canonicalKey;
     }
-    const map = resort === "DLR" ? dlrMap : wdwMap;
-    const parkId = map.get(canonicalKey) as ParkId | undefined;
+    const parkId = parkIdFromCanonicalKey(type, resort, canonicalKey);
     return parkId ? (PARK_LABELS[parkId] ?? resort) : resort;
   }
 
