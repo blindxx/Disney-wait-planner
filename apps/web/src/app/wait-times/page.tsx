@@ -41,7 +41,7 @@ import {
   getClosureTiming,
   formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
-import { getEntertainmentForPark } from "../../lib/entertainmentSuggestions";
+import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -204,6 +204,24 @@ const RESPONSIVE_CSS = `
     background-color: #fff;
   }
 
+  /* ---- Entertainment grid — mobile: bordered list (same model as .wait-grid) ---- */
+  .entertainment-grid {
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  /* ---- Entertainment card — mobile: stacked rows, no wait-badge column ---- */
+  .entertainment-card {
+    padding: 12px 16px;
+    min-height: 56px;
+    border-bottom: 1px solid #e5e7eb;
+    background-color: #fff;
+  }
+  .entertainment-card:last-child {
+    border-bottom: none;
+  }
+
   /* ============================================
      Tablet — 768px+  (2-column grid)
      ============================================ */
@@ -244,6 +262,23 @@ const RESPONSIVE_CSS = `
       border: 1px solid #e5e7eb;
       border-radius: 8px;
     }
+
+    .entertainment-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      border: none;
+      border-radius: 0;
+      overflow: visible;
+    }
+
+    .entertainment-card {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    .entertainment-card:last-child {
+      border: 1px solid #e5e7eb;
+    }
   }
 
   /* ============================================
@@ -261,6 +296,16 @@ const RESPONSIVE_CSS = `
     }
 
     .wait-card {
+      padding: 10px 14px;
+      min-height: 52px;
+    }
+
+    .entertainment-grid {
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .entertainment-card {
       padding: 10px 14px;
       min-height: 52px;
     }
@@ -343,6 +388,45 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
 
       {/* Right: wait badge */}
       <WaitBadge attraction={attraction} />
+    </div>
+  );
+}
+
+/**
+ * EntertainmentCard — responsive entertainment display, modeled directly on
+ * AttractionCard: same name/land treatment, no right-side badge column
+ * (there is no wait time to show). Layout and spacing adapt via the
+ * .entertainment-card CSS class (mirrors .wait-card's grid/border rules).
+ */
+function EntertainmentCard({ entertainment }: { entertainment: EntertainmentPlace }) {
+  return (
+    <div className="entertainment-card">
+      <div
+        style={{
+          fontWeight: 600,
+          fontSize: "15px",
+          lineHeight: "1.3",
+          color: "#111827",
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical" as const,
+          overflow: "hidden",
+        }}
+      >
+        {entertainment.name}
+      </div>
+      {entertainment.land && (
+        <div
+          style={{
+            fontSize: "13px",
+            lineHeight: "1.3",
+            color: "#6b7280",
+            marginTop: "2px",
+          }}
+        >
+          {entertainment.land}
+        </div>
+      )}
     </div>
   );
 }
@@ -878,44 +962,9 @@ export default function WaitTimesPage() {
               >
                 Plan-worthy entertainment for this park. Check the official Disney app or website for current schedules and showtimes.
               </p>
-              <div
-                style={{
-                  border: "1px solid #e5e7eb",
-                  borderRadius: "8px",
-                  overflow: "hidden",
-                }}
-              >
+              <div className="entertainment-grid">
                 {entertainment.map((show) => (
-                  <div
-                    key={show.name}
-                    style={{
-                      padding: "12px 16px",
-                      borderBottom: "1px solid #e5e7eb",
-                      backgroundColor: "#fff",
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontWeight: 600,
-                        fontSize: "15px",
-                        color: "#111827",
-                        lineHeight: "1.3",
-                      }}
-                    >
-                      {show.name}
-                    </div>
-                    {show.land && (
-                      <div
-                        style={{
-                          fontSize: "13px",
-                          color: "#6b7280",
-                          marginTop: "2px",
-                        }}
-                      >
-                        {show.land}
-                      </div>
-                    )}
-                  </div>
+                  <EntertainmentCard key={show.name} entertainment={show} />
                 ))}
               </div>
             </div>
