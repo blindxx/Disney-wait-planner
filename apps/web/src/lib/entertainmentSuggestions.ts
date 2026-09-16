@@ -22,6 +22,13 @@
  * match would misclassify common attraction shorthand as entertainment.
  * Recognition is therefore deliberately conservative: only an exact title
  * or an explicit alias counts.
+ *
+ * Catalog refresh note: "The Magic of Disney Animation" (Hollywood
+ * Studios) is an umbrella location/collection, not itself an entry here —
+ * only its individually plan-worthy pieces are catalogued (Olaf Draws! and
+ * Once Upon a Studio Theater). Olaf Draws! is a deliberate scope exception:
+ * it isn't a conventional show, but is included because guests plan around
+ * it the same way.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -80,6 +87,9 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
   { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
+  { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
+  { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
+  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
 
   // ---- Magic Kingdom ----
   { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
@@ -106,10 +116,23 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
   { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Disney Movie Magic", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  // ---- Hollywood Studios — The Magic of Disney Animation collection ----
+  // The Magic of Disney Animation itself is an umbrella location, not an
+  // individual plan-worthy entry. Only its individually plan-worthy pieces
+  // are catalogued: Olaf Draws! and Once Upon a Studio Theater. Off the
+  // Page! (character meets) and Drawn to Wonderland (play area) are
+  // deliberately excluded — out of catalog scope.
+  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Once Upon a Studio Theater", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
 
   // ---- Animal Kingdom ----
   { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
   { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
+  { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
 
   // ---- Galaxy's Edge experiences (DLR + WDW) ----
   { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
@@ -192,6 +215,20 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "build droid": "droid depot",
   "custom droid": "droid depot",
   "astromech droid": "droid depot",
+  "villains unfairly ever after": "disney villains unfairly ever after",
+  "unfairly ever after": "disney villains unfairly ever after",
+  "little mermaid musical adventure": "the little mermaid a musical adventure",
+  "mickey mouse clubhouse live": "disney jr mickey mouse clubhouse live",
+  "mickey mouse clubhouse": "disney jr mickey mouse clubhouse live",
+  "once upon a studio": "once upon a studio theater",
+  "better zoogether": "zootopia better zoogether",
+  // World of Color's specific edition (e.g. "– ONE", "Happiness!") rotates
+  // over time; the canonical entry stays the durable "World of Color"
+  // umbrella name so saved/imported plans keep resolving as editions
+  // change, while these aliases let guests enter either current edition
+  // name and still land on the same canonical identity.
+  "world of color happiness": "world of color",
+  "world of color one": "world of color",
 };
 
 /**
