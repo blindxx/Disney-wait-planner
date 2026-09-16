@@ -15,7 +15,7 @@ import {
 } from "@/lib/plansMatching";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveDiningKey, DINING_PLACES } from "@/lib/diningSuggestions";
-import { resolveEntertainmentKey, ENTERTAINMENT_PLACES } from "@/lib/entertainmentSuggestions";
+import { resolveEntertainmentKey, getEntertainmentParkId, ENTERTAINMENT_PLACES } from "@/lib/entertainmentSuggestions";
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
@@ -967,7 +967,6 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
   if (dayItems.length === 0) return null;
   const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
   const diningMap = resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW;
-  const entertainmentMap = resort === "DLR" ? ENTERTAINMENT_PARK_DLR : ENTERTAINMENT_PARK_WDW;
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
   const parkCount = new Map<string, number>();
   for (const item of dayItems) {
@@ -984,9 +983,11 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       if (diningKey) parkId = diningMap.get(diningKey) ?? null;
     }
     if (!parkId) {
-      // Entertainment lookup uses its own isolated map, mirroring dining.
-      const entertainmentKey = resolveEntertainmentKey(item.name, resort);
-      if (entertainmentKey) parkId = entertainmentMap.get(entertainmentKey) ?? null;
+      // getEntertainmentParkId resolves active catalog first, legacy as
+      // fallback (Codex P2 fix) — a day whose only recognizable item is
+      // retired entertainment (e.g. "Together Forever") still recovers its
+      // correct historical park instead of contributing no signal here.
+      parkId = getEntertainmentParkId(item.name, resort) ?? null;
     }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }

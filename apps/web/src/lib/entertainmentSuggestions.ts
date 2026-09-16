@@ -31,18 +31,24 @@
  * it the same way.
  *
  * Active vs. legacy identity: `ENTERTAINMENT_PLACES` is the ACTIVE/current
- * catalog — the only one enumerated by Wait Times (getEntertainmentForPark),
- * Smart Entry suggestions (getEntertainmentSuggestions), and park/day
- * inference (crossDayChecks.ts, plansContextInference.ts, which import
- * ENTERTAINMENT_PLACES directly). Retired/replaced entertainment that no
- * saved/imported plan should stop recognizing lives instead in the separate
+ * catalog — the only one enumerated by Wait Times (getEntertainmentForPark)
+ * and Smart Entry suggestions (getEntertainmentSuggestions). Retired/
+ * replaced entertainment that old saved/imported/cloud-restored plans
+ * should keep recognizing lives instead in the separate
  * `LEGACY_ENTERTAINMENT_PLACES` list below, which is deliberately NOT
  * exported for enumeration — only `resolveEntertainmentKey` and the
- * name/location/canonical-name/availabilityType lookups consult it, as a
- * fallback after the active catalog fails to match. This keeps exactly one
- * enumerable "current" catalog while still letting old plan text resolve to
- * its correct historical identity (type, canonical name, and park/location)
- * rather than falling back to "custom/attraction".
+ * name/location/canonical-name/availabilityType/parkId lookups consult it,
+ * as a fallback after the active catalog fails to match. This keeps exactly
+ * one enumerable "current" catalog while still letting old plan text
+ * resolve to its correct historical identity (type, canonical name, and
+ * park/location) rather than falling back to "custom/attraction" — this
+ * includes park/day inference (crossDayChecks.ts's inferDayPark,
+ * plansContextInference.ts's tryResolve), which must use
+ * `getEntertainmentParkId` for entertainment items rather than building
+ * their own name→parkId map from ENTERTAINMENT_PLACES alone, or a
+ * legacy-only Auto day (e.g. one whose only recognizable item is "Together
+ * Forever") would fail to recover its historical park despite the name
+ * itself resolving correctly.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -224,15 +230,19 @@ const ENTERTAINMENT_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
  * correct type (entertainment, not "attraction"/custom) and correct
  * historical canonical name/park/location — never for current planning.
  *
- * Deliberately NOT exported and NOT read by getEntertainmentForPark,
- * getEntertainmentSuggestions, or any park/day-inference consumer
- * (crossDayChecks.ts, plansContextInference.ts import ENTERTAINMENT_PLACES
- * directly, so this list structurally cannot reach Wait Times, current
- * Smart Entry suggestions, or day-park inference). Only
- * resolveEntertainmentKey (and the lookups built on it —
- * getEntertainmentLocation/getEntertainmentCanonicalName/
- * getEntertainmentAvailabilityType) consult it, as a fallback after the
- * active catalog above fails to match.
+ * Deliberately NOT exported and NOT read by getEntertainmentForPark or
+ * getEntertainmentSuggestions, so this list structurally cannot reach Wait
+ * Times or current Smart Entry suggestions. Only resolveEntertainmentKey
+ * (and the lookups built on it — getEntertainmentLocation/
+ * getEntertainmentCanonicalName/getEntertainmentAvailabilityType/
+ * getEntertainmentParkId) consult it, as a fallback after the active
+ * catalog above fails to match. Park/day-inference consumers
+ * (crossDayChecks.ts's inferDayPark, plansContextInference.ts's
+ * tryResolve) must go through getEntertainmentParkId — not build their own
+ * name→parkId map from ENTERTAINMENT_PLACES alone — so a legacy-only Auto
+ * day (e.g. its only recognizable item is "Together Forever") still
+ * recovers the correct historical park instead of silently losing all
+ * park signal despite the name resolving.
  *
  * Add an entry here (never re-add it to ENTERTAINMENT_PLACES) when a
  * current offering is confirmed permanently ended/replaced with no
@@ -513,6 +523,29 @@ export function getEntertainmentLocation(name: string, resort: ResortId): string
   const matches = findEntertainmentPlacesByKey(key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
+}
+
+/**
+ * Resolve the parkId for an entertainment item's current name, preferring a
+ * match within the active resort, falling back to any resort — active
+ * catalog first, legacy as fallback (see findEntertainmentPlacesByKey).
+ *
+ * For park/day-inference consumers (crossDayChecks.ts's inferDayPark,
+ * plansContextInference.ts's buildInferenceMap/tryResolve) that need
+ * historical park context for recognized-but-retired entertainment (e.g. an
+ * imported/cloud-restored Auto day whose only recognizable item is
+ * "Together Forever") without enumerating the legacy catalog wholesale —
+ * this is the narrow lookup those consumers should use instead of building
+ * their own name→parkId map from ENTERTAINMENT_PLACES alone. Returns
+ * undefined for unknown/custom names or entries with no single-park
+ * identity.
+ */
+export function getEntertainmentParkId(name: string, resort: ResortId): ParkId | undefined {
+  const key = resolveEntertainmentKey(name, resort);
+  if (!key) return undefined;
+  const matches = findEntertainmentPlacesByKey(key);
+  if (matches.length === 0) return undefined;
+  return (matches.find((p) => p.resort === resort) ?? matches[0]).parkId;
 }
 
 /**
