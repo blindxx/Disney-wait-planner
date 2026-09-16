@@ -41,103 +41,12 @@ import {
   getClosureTiming,
   formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
-
-// ============================================
-// SHOW TYPE
-// ============================================
-
-type Show = {
-  id: string;
-  name: string;
-  parkId: ParkId;
-  land?: string;
-  times: string[];
-};
-
-// ============================================
-// MOCK SHOWS DATA
-// ============================================
-
-const MOCK_SHOWS: Show[] = [
-  // ---- DLR: Disneyland Park ----
-  {
-    id: "fantasmic",
-    name: "Fantasmic!",
-    parkId: "disneyland",
-    land: "New Orleans Square",
-    times: ["9:00 PM"],
-  },
-  {
-    id: "magic-happens",
-    name: "Magic Happens Parade",
-    parkId: "disneyland",
-    land: "Main Street, U.S.A.",
-    times: ["11:00 AM", "3:00 PM"],
-  },
-  {
-    id: "msep",
-    name: "Main Street Electrical Parade",
-    parkId: "disneyland",
-    land: "Main Street, U.S.A.",
-    times: ["7:45 PM", "9:45 PM"],
-  },
-  {
-    id: "royal-cavalcade",
-    name: "Royal Princess Cavalcade",
-    parkId: "disneyland",
-    land: "Fantasyland",
-    times: ["10:30 AM", "1:30 PM", "4:30 PM"],
-  },
-  // ---- DLR: Disney California Adventure ----
-  {
-    id: "together-forever",
-    name: "Together Forever \u2014 A Pixar Nighttime Spectacular",
-    parkId: "dca",
-    land: "Paradise Gardens Park",
-    times: ["9:00 PM"],
-  },
-  {
-    id: "pixar-pals",
-    name: "Better Together: A Pixar Pals Celebration!",
-    parkId: "dca",
-    land: "Hollywood Land",
-    times: ["11:30 AM", "2:30 PM", "5:00 PM"],
-  },
-  // ---- WDW: Magic Kingdom ----
-  {
-    id: "mk-festival-of-fantasy",
-    name: "Festival of Fantasy Parade",
-    parkId: "mk",
-    land: "Main Street, U.S.A.",
-    times: ["3:00 PM"],
-  },
-  {
-    id: "mk-happily-ever-after",
-    name: "Happily Ever After",
-    parkId: "mk",
-    land: "Main Street, U.S.A.",
-    times: ["9:00 PM"],
-  },
-  // ---- WDW: Hollywood Studios ----
-  {
-    id: "hs-fantasmic",
-    name: "Fantasmic!",
-    parkId: "hs",
-    land: "Hollywood Hills Amphitheater",
-    times: ["9:30 PM"],
-  },
-  // ---- WDW: Animal Kingdom ----
-  {
-    id: "ak-finding-nemo",
-    name: "Finding Nemo: The Big Blue... and Beyond!",
-    parkId: "ak",
-    land: "Discovery Island",
-    times: ["11:00 AM", "1:30 PM", "4:00 PM"],
-  },
-];
+import { getEntertainmentForPark } from "../../lib/entertainmentSuggestions";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
+// ENTERTAINMENT_PLACES (via getEntertainmentForPark) is the single source
+// of truth for entertainment data — no local duplication.
 
 // ============================================
 // RESORT + PARK CONSTANTS
@@ -637,11 +546,23 @@ export default function WaitTimesPage() {
   /** Parks available for the currently selected resort */
   const resortParks = RESORT_PARKS[selectedResort];
 
-  /** Unique sorted land names for the selected park (derived from loaded data). */
+  /** Entertainment for the currently selected park, from the canonical catalog. */
+  const parkEntertainment = useMemo(
+    () => getEntertainmentForPark(selectedPark),
+    [selectedPark],
+  );
+
+  /**
+   * Unique sorted land names for the selected park — union of attraction
+   * lands (from loaded wait data) and entertainment lands (from the
+   * canonical catalog), so the filter covers both without a second land
+   * taxonomy or duplicate/inconsistent labels.
+   */
   const availableLands = useMemo(() => {
-    const lands = attractions.map((a) => a.land).filter((l): l is string => !!l);
-    return [...new Set(lands)].sort();
-  }, [attractions]);
+    const attractionLands = attractions.map((a) => a.land).filter((l): l is string => !!l);
+    const entertainmentLands = parkEntertainment.map((p) => p.land).filter((l): l is string => !!l);
+    return [...new Set([...attractionLands, ...entertainmentLands])].sort();
+  }, [attractions, parkEntertainment]);
 
   /**
    * Filter and sort attractions based on current settings.
@@ -929,14 +850,12 @@ export default function WaitTimesPage() {
           </div>
         )}
 
-        {/* ---- Entertainment (Shows) ---- */}
+        {/* ---- Entertainment ---- */}
         {(() => {
-          const shows = MOCK_SHOWS.filter(
-            (s) =>
-              s.parkId === selectedPark &&
-              (!selectedLand || s.land === selectedLand)
+          const entertainment = parkEntertainment.filter(
+            (p) => !selectedLand || p.land === selectedLand
           );
-          if (shows.length === 0) return null;
+          if (entertainment.length === 0) return null;
           return (
             <div style={{ marginTop: "20px" }}>
               <h2
@@ -944,11 +863,21 @@ export default function WaitTimesPage() {
                   fontSize: "16px",
                   fontWeight: 700,
                   color: "#111827",
-                  marginBottom: "10px",
+                  marginBottom: "2px",
                 }}
               >
                 Entertainment
               </h2>
+              <p
+                style={{
+                  fontSize: "12px",
+                  color: "#9ca3af",
+                  marginTop: 0,
+                  marginBottom: "10px",
+                }}
+              >
+                Plan-worthy entertainment for this park. Check the official Disney app or website for current schedules and showtimes.
+              </p>
               <div
                 style={{
                   border: "1px solid #e5e7eb",
@@ -956,9 +885,9 @@ export default function WaitTimesPage() {
                   overflow: "hidden",
                 }}
               >
-                {shows.map((show) => (
+                {entertainment.map((show) => (
                   <div
-                    key={show.id}
+                    key={show.name}
                     style={{
                       padding: "12px 16px",
                       borderBottom: "1px solid #e5e7eb",
@@ -986,21 +915,6 @@ export default function WaitTimesPage() {
                         {show.land}
                       </div>
                     )}
-                    <div
-                      style={{
-                        marginTop: "6px",
-                        fontSize: "13px",
-                        color: "#374151",
-                        lineHeight: "1.5",
-                        wordBreak: "break-word",
-                      }}
-                    >
-                      {show.times.length === 1 ? (
-                        <span>Next: {show.times[0]}</span>
-                      ) : (
-                        <span style={{ color: "#6b7280" }}>Today: {show.times.join(" \u2022 ")}</span>
-                      )}
-                    </div>
                   </div>
                 ))}
               </div>

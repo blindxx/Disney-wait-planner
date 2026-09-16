@@ -64,6 +64,19 @@ export type EntertainmentPlace = {
    * with no single-park identity (none currently in this dataset).
    */
   parkId?: ParkId;
+  /**
+   * Themed land/area within the park where this entertainment is
+   * presented (e.g. "Main Street, U.S.A.", "Frontierland") — distinct from
+   * `location`, which is the park-level display label used elsewhere (My
+   * Plans Smart Entry, etc.). Uses the same land vocabulary as attraction
+   * wait data (packages/shared/src/waitTimes/mock.ts) so Wait Times can
+   * filter entertainment and attractions under one shared Land selector
+   * without a second land taxonomy. Verified against current show/venue
+   * locations as of this catalog revision — not copied from any legacy
+   * mock. Omitted only for offerings with no single in-park land (none
+   * currently in this dataset).
+   */
+  land?: string;
   /** Optional recurrence metadata — see EntertainmentAvailabilityType. */
   availabilityType?: EntertainmentAvailabilityType;
   /** Optional seasonal/holiday theme — see EntertainmentTheme. */
@@ -72,74 +85,92 @@ export type EntertainmentPlace = {
 
 export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // ---- Disneyland Park / DCA ----
-  { name: "Fantasmic!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
-  { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
-  { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "limited" },
-  { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "limited" },
-  { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", availabilityType: "regular" },
+  { name: "Fantasmic!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Frontierland", availabilityType: "regular" },
+  { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "regular" },
+  { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Adventureland", availabilityType: "regular" },
+  { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
+  { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "limited" },
+  // Pre-existing defect fixed during this catalog's land/location audit:
+  // this is a DCA nighttime spectacular (Paradise Bay/Paradise Gardens
+  // Park) — location/parkId were previously mislabeled as Disneyland Park.
+  { name: "Together Forever — A Pixar Nighttime Spectacular", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "limited" },
+  { name: "Better Together: A Pixar Pals Celebration!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "limited" },
+  { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
+  { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
+  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
 
   // ---- Magic Kingdom ----
-  { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Disney Starlight: Dream the Night Away", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Festival of Fantasy Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Mickey's PhilharMagic", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Enchanted Tiki Room", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Country Bear Musical Jamboree", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "regular" },
-  { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "Disney's Not-So-Spooky Spectacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Hocus Pocus Villain Spelltacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "halloween" },
-  { name: "Minnie's Wonderful Christmastime Fireworks", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
-  { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Hocus Pocus Villain Spelltacular and Mickey's Most Merriest Celebration
+  // perform on the Cinderella Castle forecourt stage — grouped under Main
+  // Street, U.S.A. (the same land used for the park's other castle-facing
+  // hub shows/fireworks) since the castle forecourt/hub isn't a distinct
+  // land in the existing land vocabulary.
+  { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Disney Starlight: Dream the Night Away", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Festival of Fantasy Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Mickey's PhilharMagic", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland", availabilityType: "regular" },
+  { name: "Enchanted Tiki Room", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Adventureland", availabilityType: "regular" },
+  { name: "Country Bear Musical Jamboree", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Frontierland", availabilityType: "regular" },
+  { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Disney's Not-So-Spooky Spectacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Hocus Pocus Villain Spelltacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  { name: "Minnie's Wonderful Christmastime Fireworks", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- EPCOT ----
-  { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
-  { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", availabilityType: "regular" },
+  { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Nature", availabilityType: "regular" },
+  { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "regular" },
 
   // ---- Hollywood Studios ----
-  { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Beauty and the Beast Live on Stage", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Disney Movie Magic", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
+  { name: "Beauty and the Beast Live on Stage", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
+  { name: "For the First Time in Forever: A Frozen Sing-Along Celebration", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake", availabilityType: "regular" },
+  { name: "Indiana Jones Epic Stunt Spectacular", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake", availabilityType: "regular" },
+  { name: "Wonderful World of Animation", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
+  { name: "Disney Movie Magic", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
+  { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "regular" },
+  { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
+  { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   // ---- Hollywood Studios — The Magic of Disney Animation collection ----
   // The Magic of Disney Animation itself is an umbrella location, not an
   // individual plan-worthy entry. Only its individually plan-worthy pieces
   // are catalogued: Olaf Draws! and Once Upon a Studio Theater. Off the
   // Page! (character meets) and Drawn to Wonderland (play area) are
   // deliberately excluded — out of catalog scope.
-  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Once Upon a Studio Theater", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
+  { name: "Once Upon a Studio Theater", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
 
   // ---- Animal Kingdom ----
-  { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
-  { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
-  { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", availabilityType: "regular" },
+  { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Africa", availabilityType: "regular" },
+  { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Asia", availabilityType: "regular" },
+  { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "regular" },
 
   // ---- Galaxy's Edge experiences (DLR + WDW) ----
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
-  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", availabilityType: "regular" },
-  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", availabilityType: "regular" },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
 ];
+
+/**
+ * All canonical entertainment offerings presented at a given park, in
+ * catalog order. Single source of truth for park-scoped entertainment —
+ * consumers (e.g. Wait Times) derive their Entertainment section from this
+ * rather than maintaining a page-local list.
+ */
+export function getEntertainmentForPark(parkId: ParkId): EntertainmentPlace[] {
+  return ENTERTAINMENT_PLACES.filter((p) => p.parkId === parkId);
+}
 
 const ENTERTAINMENT_KEYS: Set<string> = new Set(
   ENTERTAINMENT_PLACES.map((p) => normalizeKey(p.name)),
