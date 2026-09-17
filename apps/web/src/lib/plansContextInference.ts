@@ -49,7 +49,7 @@ import {
   ALIASES_WDW,
   stripAnnotations,
 } from "@/lib/plansMatching";
-import { DINING_PLACES, resolveDiningKey } from "@/lib/diningSuggestions";
+import { DINING_PLACES, resolveDiningKey, getDiningParkId } from "@/lib/diningSuggestions";
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
@@ -115,6 +115,15 @@ function tryResolve(
   if (diningKey) {
     const diningResult = map.get(diningKey);
     if (diningResult) return diningResult;
+    // diningKey may be a legacy-only identity (e.g. "Tokyo Dining") that
+    // resolveDiningKey recognizes but which `map` never contains (built
+    // only from active DINING_PLACES — see diningSuggestions.ts's
+    // active/legacy doc comment). getDiningParkId falls back to the legacy
+    // catalog so a legacy-only plan/day still recovers its correct
+    // historical park instead of silently losing all context signal
+    // (mirrors the Codex P2 entertainment fix below).
+    const legacyParkId = getDiningParkId(name, resortId);
+    if (legacyParkId !== undefined) return { parkId: legacyParkId, resortId };
   }
 
   // Stage 3c: entertainment alias lookup, via entertainmentSuggestions.ts's

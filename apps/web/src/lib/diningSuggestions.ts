@@ -16,6 +16,20 @@
  * isDiningName() mirrors the stage-1 (exact) + stage-2 (whole-word
  * containment) logic used by lookupWait() in plansMatching.ts, so a known
  * dining name is recognized the same way attraction names already are.
+ *
+ * Active vs. legacy identity: `DINING_PLACES` is the ACTIVE/current catalog
+ * — the only one enumerated by Smart Entry suggestions
+ * (getDiningSuggestions). Permanently closed/replaced dining that old
+ * saved/imported/cloud-restored plans should keep recognizing lives instead
+ * in the separate `LEGACY_DINING_PLACES` list further down, which is
+ * deliberately NOT exported for enumeration — only `resolveDiningKey` and
+ * the location/canonical-name/parkId lookups consult it, as a fallback
+ * after the active catalog fails to match. Mirrors
+ * ENTERTAINMENT_PLACES/LEGACY_ENTERTAINMENT_PLACES in
+ * entertainmentSuggestions.ts exactly — see that file's doc comment for the
+ * full rationale, including why park/day-inference consumers must go
+ * through getDiningParkId rather than building their own name→parkId map
+ * from DINING_PLACES alone.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -66,7 +80,6 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Carthay Circle Restaurant", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Buena Vista Street" },
   { name: "Napa Rose", resort: "DLR", location: "Disney's Grand Californian Hotel" },
   { name: "Storytellers Cafe", resort: "DLR", location: "Disney's Grand Californian Hotel" },
-  { name: "Steakhouse 55", resort: "DLR", location: "Disneyland Hotel" },
   { name: "Cafe Orleans", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "New Orleans Square" },
   { name: "Plaza Inn", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A." },
   { name: "Lamplight Lounge", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Pixar Pier" },
@@ -112,7 +125,7 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Pecos Bill Tall Tale Inn and Cafe", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Frontierland" },
   { name: "Columbia Harbour House", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Liberty Square" },
   { name: "Pinocchio Village Haus", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland" },
-  { name: "Beak and Barrel", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Adventureland" },
+  { name: "The Beak and Barrel", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Adventureland" },
 
   // ---- EPCOT — World Showcase + Future World/World Celebration ----
   { name: "Topolino's Terrace", resort: "WDW", location: "Disney's Riviera Resort" },
@@ -123,7 +136,6 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Sunshine Seasons", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Nature" },
   { name: "Rose & Crown Dining Room", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Teppan Edo", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
-  { name: "Tokyo Dining", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Via Napoli", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Tutto Italia", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Biergarten", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
@@ -203,6 +215,49 @@ const DINING_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
 };
 
 /**
+ * Permanently closed/replaced dining identities kept ONLY so that saved,
+ * imported, or cloud-restored plan items naming them still resolve to the
+ * correct type (dining, not "attraction"/custom) and correct historical
+ * canonical name/location/park — never for current planning. Mirrors
+ * LEGACY_ENTERTAINMENT_PLACES in entertainmentSuggestions.ts exactly.
+ *
+ * Deliberately NOT exported and NOT read by getDiningSuggestions, so this
+ * list structurally cannot reach My Plans' Smart Entry suggestions. Only
+ * resolveDiningKey (and the lookups built on it — getDiningLocation/
+ * getDiningCanonicalName/getDiningParkId) consult it, as a fallback after
+ * the active catalog above fails to match. Park/day-inference consumers
+ * (crossDayChecks.ts's inferDayPark, plansContextInference.ts's tryResolve)
+ * must go through getDiningParkId — not build their own name→parkId map
+ * from DINING_PLACES alone — so a legacy-only Auto day (e.g. its only
+ * recognizable item is "Tokyo Dining") still recovers the correct
+ * historical park instead of silently losing all park signal despite the
+ * name resolving (the Entertainment bug this maintenance phase was told
+ * not to repeat).
+ *
+ * Add an entry here (never re-add it to DINING_PLACES) when a current
+ * location is confirmed permanently closed/replaced.
+ */
+const LEGACY_DINING_PLACES: DiningPlace[] = [
+  // Closed July 2021 (confirmed permanent — Disney stated no plans to
+  // reopen); the space was later converted to lounge use, with a new
+  // signature restaurant targeted for 2027. Never at WDW.
+  { name: "Steakhouse 55", resort: "DLR", location: "Disneyland Hotel" },
+  // Closed November 2022, replaced in the same Japan pavilion space by
+  // Shiki-Sai: Sushi Izakaya (active catalog, opened August 2023). Never
+  // at DLR.
+  { name: "Tokyo Dining", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
+];
+
+const LEGACY_DINING_KEYS: Set<string> = new Set(
+  LEGACY_DINING_PLACES.map((p) => normalizeKey(p.name)),
+);
+
+const LEGACY_DINING_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
+  DLR: new Set(LEGACY_DINING_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
+  WDW: new Set(LEGACY_DINING_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
+};
+
+/**
  * Manual alias map for common guest-entered dining shorthand — mirrors the
  * ALIASES_DLR / ALIASES_WDW philosophy in plansMatching.ts (no fuzzy
  * matching, just an explicit lookup table).
@@ -227,6 +282,10 @@ const DINING_ALIASES: Record<string, string> = {
   "crt":              "cinderellas royal table",
   // "Ohana" needs no alias: normalizeKey() already strips the apostrophe
   // from "'Ohana", so "Ohana" hits the exact-match stage directly.
+  // Maintenance audit — Beak and Barrel's official name is "The Beak and
+  // Barrel"; this alias keeps the pre-rename form (and any saved/imported
+  // plans using it) resolving to the renamed canonical entry.
+  "beak and barrel":  "the beak and barrel",
 };
 
 /**
@@ -260,7 +319,17 @@ function stripDiningSuffix(str: string): string {
  * locations). Without a resort, validation is skipped, preserving existing
  * unscoped/ambiguous lookup behavior.
  *
- * Returns null when nothing resolves.
+ * Legacy fallback: when nothing in the active catalog matches, the same
+ * stage-1 (exact) lookup runs against LEGACY_DINING_PLACES so old
+ * saved/imported plan text (e.g. "Steakhouse 55", "Tokyo Dining") still
+ * resolves instead of falling back to "custom/attraction" — mirrors
+ * resolveEntertainmentKey's active-then-legacy fallback exactly. This is
+ * the ONLY path legacy dining identities can be reached through; the active
+ * catalog is always tried first and exclusively for anything reachable from
+ * current Smart Entry suggestions (getDiningSuggestions never enumerates
+ * legacy entries).
+ *
+ * Returns null when nothing resolves in either catalog.
  */
 export function resolveDiningKey(name: string, resort?: ResortId): string | null {
   const key = normalizeKey(stripAnnotations(stripDiningSuffix(name)));
@@ -292,14 +361,40 @@ export function resolveDiningKey(name: string, resort?: ResortId): string | null
     }
   }
 
-  if (!candidate) return null;
-  if (resort && !DINING_KEYS_BY_RESORT[resort].has(candidate)) return null;
-  return candidate;
+  if (candidate) {
+    if (resort && !DINING_KEYS_BY_RESORT[resort].has(candidate)) return null;
+    return candidate;
+  }
+
+  // Legacy fallback — only reached when the active catalog found nothing.
+  // Exact match only (no containment stage): the legacy catalog is small
+  // and deliberately conservative, mirroring resolveEntertainmentKey.
+  if (!LEGACY_DINING_KEYS.has(key)) return null;
+  if (resort && !LEGACY_DINING_KEYS_BY_RESORT[resort].has(key)) return null;
+  return key;
+}
+
+/**
+ * Find catalog entries by a key already resolved via resolveDiningKey —
+ * active catalog first, legacy as fallback (a key can only ever exist in
+ * one or the other, never both, so this is unambiguous). Shared by the
+ * location/canonical-name/parkId lookups below so each one doesn't need to
+ * duplicate the active-then-legacy search. Mirrors
+ * findEntertainmentPlacesByKey in entertainmentSuggestions.ts.
+ */
+function findDiningPlacesByKey(key: string): DiningPlace[] {
+  const active = DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
+  if (active.length > 0) return active;
+  return LEGACY_DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
 }
 
 /**
  * True when the given activity name matches a known dining location
- * (exact, alias, or containment — see resolveDiningKey).
+ * (exact, alias, or containment — see resolveDiningKey). This also returns
+ * true for a legacy-only (permanently closed/replaced) identity, since
+ * "dining" is still the correct type for it — resolveDiningKey's legacy
+ * fallback exists precisely so retired dining is labeled correctly rather
+ * than falling back to "attraction"/custom.
  */
 export function isDiningName(name: string, resort?: ResortId): boolean {
   return resolveDiningKey(name, resort) !== null;
@@ -351,27 +446,53 @@ export function getDiningSuggestions(resort: ResortId): string[] {
 
 /**
  * Resolve the display location label for a dining item's current name,
- * preferring a match within the active resort, falling back to any resort.
+ * preferring a match within the active resort, falling back to any resort —
+ * active catalog first, legacy as fallback (see findDiningPlacesByKey).
  * Returns undefined for unknown/custom names.
  */
 export function getDiningLocation(name: string, resort: ResortId): string | undefined {
   const key = resolveDiningKey(name);
   if (!key) return undefined;
-  const matches = DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
+  const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
 }
 
 /**
  * Resolve the canonical display name for a dining item's current name,
- * preferring a match within the active resort, falling back to any resort.
+ * preferring a match within the active resort, falling back to any resort —
+ * active catalog first, legacy as fallback (see findDiningPlacesByKey).
  * Returns undefined for unknown/custom names. Mirrors how lookupWait()
  * exposes a canonical attraction name for alias-entered ride titles.
  */
 export function getDiningCanonicalName(name: string, resort: ResortId): string | undefined {
   const key = resolveDiningKey(name);
   if (!key) return undefined;
-  const matches = DINING_PLACES.filter((p) => normalizeKey(p.name) === key);
+  const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).name;
+}
+
+/**
+ * Resolve the parkId for a dining item's current name, preferring a match
+ * within the active resort, falling back to any resort — active catalog
+ * first, legacy as fallback (see findDiningPlacesByKey).
+ *
+ * For park/day-inference consumers (crossDayChecks.ts's inferDayPark,
+ * plansContextInference.ts's buildInferenceMap/tryResolve) that need
+ * historical park context for recognized-but-permanently-closed dining
+ * (e.g. an imported/cloud-restored Auto day whose only recognizable item is
+ * "Tokyo Dining") without enumerating the legacy catalog wholesale — this is
+ * the narrow lookup those consumers should use instead of building their own
+ * name→parkId map from DINING_PLACES alone. Mirrors getEntertainmentParkId
+ * in entertainmentSuggestions.ts. Returns undefined for unknown/custom names
+ * or entries with no single-park identity (resort hotels, Downtown Disney,
+ * Disney Springs).
+ */
+export function getDiningParkId(name: string, resort: ResortId): ParkId | undefined {
+  const key = resolveDiningKey(name, resort);
+  if (!key) return undefined;
+  const matches = findDiningPlacesByKey(key);
+  if (matches.length === 0) return undefined;
+  return (matches.find((p) => p.resort === resort) ?? matches[0]).parkId;
 }

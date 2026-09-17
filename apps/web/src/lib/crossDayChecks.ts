@@ -14,7 +14,7 @@ import {
   containsWholeWordSequence,
 } from "@/lib/plansMatching";
 import { inferPlansContext } from "@/lib/plansContextInference";
-import { resolveDiningKey, DINING_PLACES } from "@/lib/diningSuggestions";
+import { resolveDiningKey, getDiningParkId, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 import {
   capturePreFetchDomainSnapshot,
@@ -979,7 +979,21 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
       // which feeds attraction duplicate/identity matching elsewhere.
       const diningKey = resolveDiningKey(item.name, resort);
-      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
+      if (diningKey) {
+        parkId = diningMap.get(diningKey) ?? null;
+        if (!parkId) {
+          // getDiningParkId resolves active catalog first, legacy as
+          // fallback — diningKey may be a legacy-only identity (e.g.
+          // "Tokyo Dining") that resolveDiningKey recognizes but which
+          // diningMap never contains (built only from active
+          // DINING_PLACES — see diningSuggestions.ts's active/legacy doc
+          // comment). Without this, a day whose only recognizable item is
+          // permanently-closed dining would silently lose all park signal
+          // despite the name resolving (the Entertainment bug this
+          // maintenance phase was told not to repeat).
+          parkId = getDiningParkId(item.name, resort) ?? null;
+        }
+      }
     }
     if (!parkId) {
       // getEntertainmentParkId resolves active catalog first, legacy as
