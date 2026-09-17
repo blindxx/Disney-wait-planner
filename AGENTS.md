@@ -70,6 +70,22 @@ column/table a sync endpoint depends on):
 - No unrelated cleanup, refactors, or dependency upgrades bundled into a
   feature/fix change.
 
+## Single maintained source of truth
+
+When DWP already has an authoritative internal dataset/helper for a piece
+of information, every feature needing that information must consume that
+maintained source rather than recreate or independently maintain it.
+
+Before adding new metadata, mappings, aliases, or status data, first
+search the repo for an existing maintained source. Extend that source if
+necessary rather than creating a parallel one.
+
+This applies repo-wide, including canonical identity/aliases,
+resort/park/land metadata, Attractions, Dining, Entertainment, planned
+closures, lifecycle/status, and future Experiences/seasonal data.
+Consumers may decide presentation, but must not fork the underlying
+maintained truth.
+
 ### Sync Hardening & Architecture Fix — temporary exception
 
 During the **Sync Hardening & Architecture Fix** phase (SH.0 through
