@@ -28,8 +28,9 @@
  * ENTERTAINMENT_PLACES/LEGACY_ENTERTAINMENT_PLACES in
  * entertainmentSuggestions.ts exactly — see that file's doc comment for the
  * full rationale, including why park/day-inference consumers must go
- * through getDiningParkId rather than building their own name→parkId map
- * from DINING_PLACES alone.
+ * through getDiningContext (resort + optional parkId — see its doc comment
+ * for why a parkId-only lookup isn't enough) rather than building their own
+ * name→parkId map from DINING_PLACES alone.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -224,14 +225,18 @@ const DINING_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
  * Deliberately NOT exported and NOT read by getDiningSuggestions, so this
  * list structurally cannot reach My Plans' Smart Entry suggestions. Only
  * resolveDiningKey (and the lookups built on it — getDiningLocation/
- * getDiningCanonicalName/getDiningParkId) consult it, as a fallback after
- * the active catalog above fails to match. Park/day-inference consumers
- * (crossDayChecks.ts's inferDayPark, plansContextInference.ts's tryResolve)
- * must go through getDiningParkId — not build their own name→parkId map
- * from DINING_PLACES alone — so a legacy-only Auto day (e.g. its only
- * recognizable item is "Tokyo Dining") still recovers the correct
- * historical park instead of silently losing all park signal despite the
- * name resolving (the Entertainment bug this maintenance phase was told
+ * getDiningCanonicalName/getDiningContext/getDiningParkId) consult it, as a
+ * fallback after the active catalog above fails to match. Park/day-inference
+ * consumers (crossDayChecks.ts's inferDayPark, plansContextInference.ts's
+ * tryResolve) must go through getDiningContext — not build their own
+ * name→parkId map from DINING_PLACES alone, and not a parkId-only lookup —
+ * so a legacy-only Auto day (e.g. its only recognizable item is "Tokyo
+ * Dining") still recovers the correct historical park instead of silently
+ * losing all park signal despite the name resolving, AND a legacy-only
+ * Auto day whose only recognizable item has no park of its own (e.g.
+ * "Steakhouse 55", a Disneyland Hotel restaurant) still recovers its
+ * correct historical resort instead of losing all signal (the Entertainment
+ * bug this maintenance phase was told
  * not to repeat).
  *
  * Add an entry here (never re-add it to DINING_PLACES) when a current
@@ -473,26 +478,52 @@ export function getDiningCanonicalName(name: string, resort: ResortId): string |
   return (matches.find((p) => p.resort === resort) ?? matches[0]).name;
 }
 
+/** Resort + optional park context for a recognized dining identity. */
+export type DiningContext = { resortId: ResortId; parkId: ParkId | null };
+
 /**
- * Resolve the parkId for a dining item's current name, preferring a match
- * within the active resort, falling back to any resort — active catalog
- * first, legacy as fallback (see findDiningPlacesByKey).
+ * Resolve the resort + parkId context for a dining item's current name,
+ * preferring a match within the active resort, falling back to any resort —
+ * active catalog first, legacy as fallback (see findDiningPlacesByKey).
  *
- * For park/day-inference consumers (crossDayChecks.ts's inferDayPark,
- * plansContextInference.ts's buildInferenceMap/tryResolve) that need
- * historical park context for recognized-but-permanently-closed dining
- * (e.g. an imported/cloud-restored Auto day whose only recognizable item is
- * "Tokyo Dining") without enumerating the legacy catalog wholesale — this is
- * the narrow lookup those consumers should use instead of building their own
- * name→parkId map from DINING_PLACES alone. Mirrors getEntertainmentParkId
- * in entertainmentSuggestions.ts. Returns undefined for unknown/custom names
- * or entries with no single-park identity (resort hotels, Downtown Disney,
- * Disney Springs).
+ * This is the lookup park/day/resort-inference consumers (crossDayChecks.ts's
+ * inferDayPark, plansContextInference.ts's buildInferenceMap/tryResolve)
+ * should use instead of building their own name→parkId map from
+ * DINING_PLACES alone, and instead of a parkId-only lookup: a name that
+ * resolves to a dining identity with no single-park identity (resort
+ * hotels, Downtown Disney, Disney Springs — and legacy identities in the
+ * same position, e.g. "Steakhouse 55") must still be distinguishable from a
+ * name that doesn't resolve to any dining identity at all, so a
+ * recognized-but-permanently-closed, resort-only location (Steakhouse 55)
+ * keeps contributing its resort as inference signal exactly like active
+ * non-park dining already does via buildInferenceMap's
+ * `parkId: d.parkId ?? null`, rather than silently losing all signal
+ * because it has no park of its own. A parkId-only lookup can't make that
+ * distinction (both cases would read as "no parkId"); returning the whole
+ * `{ resortId, parkId }` pair (parkId: null, not undefined, for the
+ * no-single-park case) can.
+ *
+ * Returns undefined only when the name itself doesn't resolve to any known
+ * dining identity (active or legacy).
  */
-export function getDiningParkId(name: string, resort: ResortId): ParkId | undefined {
+export function getDiningContext(name: string, resort: ResortId): DiningContext | undefined {
   const key = resolveDiningKey(name, resort);
   if (!key) return undefined;
   const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
-  return (matches.find((p) => p.resort === resort) ?? matches[0]).parkId;
+  const match = matches.find((p) => p.resort === resort) ?? matches[0];
+  return { resortId: match.resort, parkId: match.parkId ?? null };
+}
+
+/**
+ * Resolve just the parkId for a dining item's current name — a thin
+ * convenience wrapper over getDiningContext for callers that only care
+ * about the park (e.g. display), not the resort/no-park distinction.
+ * Mirrors getEntertainmentParkId in entertainmentSuggestions.ts. Returns
+ * undefined for unknown/custom names or entries with no single-park
+ * identity — inference consumers that need to tell those two cases apart
+ * should use getDiningContext instead.
+ */
+export function getDiningParkId(name: string, resort: ResortId): ParkId | undefined {
+  return getDiningContext(name, resort)?.parkId ?? undefined;
 }

@@ -14,7 +14,7 @@ import {
   containsWholeWordSequence,
 } from "@/lib/plansMatching";
 import { inferPlansContext } from "@/lib/plansContextInference";
-import { resolveDiningKey, getDiningParkId, DINING_PLACES } from "@/lib/diningSuggestions";
+import { resolveDiningKey, getDiningContext, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 import {
   capturePreFetchDomainSnapshot,
@@ -982,16 +982,22 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       if (diningKey) {
         parkId = diningMap.get(diningKey) ?? null;
         if (!parkId) {
-          // getDiningParkId resolves active catalog first, legacy as
+          // getDiningContext resolves active catalog first, legacy as
           // fallback — diningKey may be a legacy-only identity (e.g.
-          // "Tokyo Dining") that resolveDiningKey recognizes but which
-          // diningMap never contains (built only from active
-          // DINING_PLACES — see diningSuggestions.ts's active/legacy doc
-          // comment). Without this, a day whose only recognizable item is
-          // permanently-closed dining would silently lose all park signal
-          // despite the name resolving (the Entertainment bug this
-          // maintenance phase was told not to repeat).
-          parkId = getDiningParkId(item.name, resort) ?? null;
+          // "Tokyo Dining", "Steakhouse 55") that resolveDiningKey
+          // recognizes but which diningMap never contains (built only from
+          // active DINING_PLACES — see diningSuggestions.ts's active/legacy
+          // doc comment). For a park-scoped legacy identity (Tokyo Dining)
+          // this recovers its historical park; for a parkless legacy
+          // identity (Steakhouse 55) it correctly yields parkId: null
+          // rather than inventing one — this function only ever counts a
+          // non-null parkId below, so that never fabricates park signal for
+          // resort-only dining. Without this fallback at all, a day whose
+          // only recognizable item is permanently-closed dining would
+          // silently lose all park signal despite the name resolving (the
+          // Entertainment bug this maintenance phase was told not to
+          // repeat).
+          parkId = getDiningContext(item.name, resort)?.parkId ?? null;
         }
       }
     }

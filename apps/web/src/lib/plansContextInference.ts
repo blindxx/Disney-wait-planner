@@ -49,7 +49,7 @@ import {
   ALIASES_WDW,
   stripAnnotations,
 } from "@/lib/plansMatching";
-import { DINING_PLACES, resolveDiningKey, getDiningParkId } from "@/lib/diningSuggestions";
+import { DINING_PLACES, resolveDiningKey, getDiningContext } from "@/lib/diningSuggestions";
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
@@ -115,15 +115,23 @@ function tryResolve(
   if (diningKey) {
     const diningResult = map.get(diningKey);
     if (diningResult) return diningResult;
-    // diningKey may be a legacy-only identity (e.g. "Tokyo Dining") that
-    // resolveDiningKey recognizes but which `map` never contains (built
-    // only from active DINING_PLACES — see diningSuggestions.ts's
-    // active/legacy doc comment). getDiningParkId falls back to the legacy
-    // catalog so a legacy-only plan/day still recovers its correct
-    // historical park instead of silently losing all context signal
-    // (mirrors the Codex P2 entertainment fix below).
-    const legacyParkId = getDiningParkId(name, resortId);
-    if (legacyParkId !== undefined) return { parkId: legacyParkId, resortId };
+    // diningKey may be a legacy-only identity (e.g. "Tokyo Dining",
+    // "Steakhouse 55") that resolveDiningKey recognizes but which `map`
+    // never contains (built only from active DINING_PLACES — see
+    // diningSuggestions.ts's active/legacy doc comment). getDiningContext
+    // falls back to the legacy catalog and returns the resort alongside
+    // the (possibly null) parkId, so a legacy-only plan/day still recovers
+    // context even when the identity has no park of its own — e.g.
+    // Steakhouse 55, a Disneyland Hotel restaurant, must still establish
+    // DLR resort context with a null park, exactly like active non-park
+    // dining already does via buildInferenceMap's `parkId: d.parkId ??
+    // null` above. A parkId-only lookup (getDiningParkId) can't make that
+    // distinction — it returns undefined for both "unknown name" and
+    // "known name with no park", which silently dropped this case
+    // (mirrors the Codex P2 entertainment fix below, generalized to also
+    // cover resort-only identities).
+    const legacyContext = getDiningContext(name, resortId);
+    if (legacyContext) return legacyContext;
   }
 
   // Stage 3c: entertainment alias lookup, via entertainmentSuggestions.ts's
