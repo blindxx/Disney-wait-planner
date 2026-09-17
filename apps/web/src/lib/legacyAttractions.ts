@@ -142,13 +142,22 @@ export function resolveAttractionIdentityKey(name: string, resort: ResortId): st
   return null;
 }
 
-export type AttractionContext = { resortId: ResortId; parkId: ParkId | null };
+export type AttractionContext = {
+  resortId: ResortId;
+  parkId: ParkId | null;
+  /** Canonical display name for this identity (active or legacy). */
+  name: string;
+  /** Themed land/area, when known (see LegacyAttraction/AttractionWait's own `land`). */
+  land?: string;
+  /** Whether this identity resolved via the active catalog or the legacy fallback. */
+  lifecycle: "active" | "legacy";
+};
 
 /**
- * Resolve the resort + parkId context for an attraction plan item's current
- * name — active catalog first, legacy as fallback (see
- * resolveAttractionIdentityKey). Mirrors getDiningContext/
- * getEntertainmentParkId. Returns undefined only when the name itself
+ * Resolve the resort + parkId + canonical name/land/lifecycle context for an
+ * attraction plan item's current name — active catalog first, legacy as
+ * fallback (see resolveAttractionIdentityKey). Mirrors getDiningContext/
+ * getEntertainmentContext. Returns undefined only when the name itself
  * doesn't resolve to any known attraction identity (active or legacy).
  */
 export function getAttractionContext(name: string, resort: ResortId): AttractionContext | undefined {
@@ -157,10 +166,26 @@ export function getAttractionContext(name: string, resort: ResortId): Attraction
   const activeMatch = mockAttractionWaits.find(
     (a) => a.resortId === resort && normalizeKey(a.name) === key,
   );
-  if (activeMatch) return { resortId: resort, parkId: activeMatch.parkId };
+  if (activeMatch) {
+    return {
+      resortId: resort,
+      parkId: activeMatch.parkId,
+      name: activeMatch.name,
+      land: activeMatch.land,
+      lifecycle: "active",
+    };
+  }
   const legacyMatch = LEGACY_ATTRACTIONS.find(
     (a) => a.resort === resort && normalizeKey(a.name) === key,
   );
-  if (legacyMatch) return { resortId: resort, parkId: legacyMatch.parkId ?? null };
+  if (legacyMatch) {
+    return {
+      resortId: resort,
+      parkId: legacyMatch.parkId ?? null,
+      name: legacyMatch.name,
+      land: legacyMatch.land,
+      lifecycle: "legacy",
+    };
+  }
   return undefined;
 }
