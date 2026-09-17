@@ -51,6 +51,7 @@ import {
 } from "@/lib/plansMatching";
 import { DINING_PLACES, resolveDiningKey, getDiningContext } from "@/lib/diningSuggestions";
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
+import { resolveAttractionIdentityKey, getAttractionContext } from "@/lib/legacyAttractions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
 // parkId is null for dining locations with no single-park identity (resort
@@ -106,6 +107,20 @@ function tryResolve(
   if (aliasTarget) {
     const aliasResult = map.get(aliasTarget);
     if (aliasResult) return aliasResult;
+  }
+
+  // Stage 3a-legacy: attraction legacy fallback, via legacyAttractions.ts's
+  // single source of truth. resolveAttractionIdentityKey resolves
+  // active-first (so reaching this point with a resolved key means the
+  // active catalog — already tried via `map`/alias above — missed and this
+  // is a legacy-only identity, e.g. "Splash Mountain"). getAttractionContext
+  // then recovers its historical resort/park the same way getDiningContext/
+  // getEntertainmentParkId already do below, so a legacy-only Auto day
+  // still resolves park/resort context instead of losing all signal.
+  const attractionKey = resolveAttractionIdentityKey(name, resortId);
+  if (attractionKey) {
+    const legacyContext = getAttractionContext(name, resortId);
+    if (legacyContext) return legacyContext;
   }
 
   // Stage 3b: dining alias lookup, via diningSuggestions.ts's single source

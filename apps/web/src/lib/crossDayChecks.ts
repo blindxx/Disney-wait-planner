@@ -16,6 +16,7 @@ import {
 import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveDiningKey, getDiningContext, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
+import { resolveAttractionIdentityKey, getAttractionContext } from "@/lib/legacyAttractions";
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
@@ -976,6 +977,17 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       if (aliasTarget) parkId = map.get(aliasTarget) ?? null;
     }
     if (!parkId) {
+      // Attraction identity may be legacy-only (e.g. permanently-closed
+      // "Splash Mountain") — getAttractionContext resolves active-first,
+      // legacy-fallback (see legacyAttractions.ts), so a day whose only
+      // recognizable item is a permanently-ended attraction still recovers
+      // its correct historical park instead of silently losing all park
+      // signal. RIDE_TO_PARK_* above already covers every active identity
+      // (exact + alias), so this is only ever reached for a genuine
+      // legacy-only miss — mirrors the dining/entertainment fallback below.
+      parkId = getAttractionContext(item.name, resort)?.parkId ?? null;
+    }
+    if (!parkId) {
       // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
       // which feeds attraction duplicate/identity matching elsewhere.
       const diningKey = resolveDiningKey(item.name, resort);
@@ -1054,15 +1066,25 @@ export function computeCrossDayChecks(
     const key = resolveIdentityKey(name, aliases);
     if (rideMap.has(key)) return key;
     const tokens = tokenize(key);
-    if (tokens.length < 2) return null;
-    let hit: string | null = null;
-    for (const attrKey of rideMap.keys()) {
-      if (containsWholeWordSequence(attrKey, tokens)) {
-        if (hit !== null) return null;
-        hit = attrKey;
+    if (tokens.length >= 2) {
+      let hit: string | null = null;
+      for (const attrKey of rideMap.keys()) {
+        if (containsWholeWordSequence(attrKey, tokens)) {
+          if (hit !== null) return null; // ambiguous active match — unchanged, no legacy fallback attempted
+          hit = attrKey;
+        }
       }
+      if (hit) return hit;
     }
-    return hit;
+    // Legacy fallback — reached only when the active catalog found no
+    // match at all (exact, alias, containment); an ambiguous active
+    // containment match stays a hard "unresolved" above, preserving
+    // existing duplicate-detection behavior exactly. Mirrors
+    // resolveDiningKey/resolveEntertainmentKey's active-then-legacy
+    // pattern (see legacyAttractions.ts) so a permanently-ended attraction
+    // (e.g. "Splash Mountain") still resolves to a stable identity key for
+    // cross-day duplicate detection and resort/park inference.
+    return resolveAttractionIdentityKey(name, resort);
   }
 
   function tryResolveByType(name: string, resort: ResortId, type: PlannerItemType): string | null {
@@ -1135,24 +1157,26 @@ export function computeCrossDayChecks(
     };
   }
 
-  // Resolves a composite key's parkId for one resort. Attraction keys use
-  // their existing active-only map (unchanged — that catalog has no
-  // legacy/retired-identity concept). Dining and entertainment keys go
-  // through getDiningContext / getEntertainmentParkId, which resolve
-  // active catalog first, legacy fallback — canonicalKey here is already
-  // the resolveDiningKey()/resolveEntertainmentKey()-normalized key (see
-  // resolveAttractionKey / tryResolveByType above), so their own
-  // resolveDiningKey/resolveEntertainmentKey calls match it via Stage-1
-  // exact match whether it's an active or legacy identity. Using
-  // getDiningContext (rather than the active-only DINING_PARK_DLR/WDW maps
-  // below, which are used only by inferDayPark's fast path) is what lets a
-  // legacy park-scoped identity like "Tokyo Dining" label its cross-day
-  // duplicate as EPCOT instead of falling back to the bare resort code.
+  // Resolves a composite key's parkId for one resort. Dining and
+  // entertainment keys go through getDiningContext / getEntertainmentParkId,
+  // and attraction keys go through the active RIDE_TO_PARK_* map first, then
+  // getAttractionContext — all three resolve active catalog first, legacy
+  // fallback. canonicalKey here is already the resolveDiningKey()/
+  // resolveEntertainmentKey()/resolveAttractionIdentityKey()-normalized key
+  // (see resolveAttractionKey / tryResolveByType above), so each one matches
+  // it via Stage-1 exact match whether it's an active or legacy identity.
+  // Using getDiningContext/getAttractionContext (rather than the active-only
+  // DINING_PARK_DLR/WDW/RIDE_TO_PARK_* maps, used only by inferDayPark's
+  // fast path) is what lets a legacy park-scoped identity like "Tokyo
+  // Dining" or "Splash Mountain" label its cross-day duplicate with its
+  // correct historical park instead of falling back to the bare resort code.
   function parkIdFromCanonicalKey(type: PlannerItemType, resort: ResortId, canonicalKey: string): ParkId | undefined {
     if (type === "entertainment") return getEntertainmentParkId(canonicalKey, resort);
     if (type === "dining") return getDiningContext(canonicalKey, resort)?.parkId ?? undefined;
     const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
-    return map.get(canonicalKey) as ParkId | undefined;
+    const parkId = map.get(canonicalKey) as ParkId | undefined;
+    if (parkId) return parkId;
+    return getAttractionContext(canonicalKey, resort)?.parkId ?? undefined;
   }
 
   function parkLabelFromCompositeKey(compositeKey: string): string {
