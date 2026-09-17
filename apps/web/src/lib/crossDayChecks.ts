@@ -14,7 +14,7 @@ import {
   containsWholeWordSequence,
 } from "@/lib/plansMatching";
 import { inferPlansContext } from "@/lib/plansContextInference";
-import { resolveDiningKey, DINING_PLACES } from "@/lib/diningSuggestions";
+import { resolveDiningKey, getDiningContext, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 import {
   capturePreFetchDomainSnapshot,
@@ -979,7 +979,27 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       // Dining lookup uses its own isolated map — never RIDE_TO_PARK_*,
       // which feeds attraction duplicate/identity matching elsewhere.
       const diningKey = resolveDiningKey(item.name, resort);
-      if (diningKey) parkId = diningMap.get(diningKey) ?? null;
+      if (diningKey) {
+        parkId = diningMap.get(diningKey) ?? null;
+        if (!parkId) {
+          // getDiningContext resolves active catalog first, legacy as
+          // fallback — diningKey may be a legacy-only identity (e.g.
+          // "Tokyo Dining", "Steakhouse 55") that resolveDiningKey
+          // recognizes but which diningMap never contains (built only from
+          // active DINING_PLACES — see diningSuggestions.ts's active/legacy
+          // doc comment). For a park-scoped legacy identity (Tokyo Dining)
+          // this recovers its historical park; for a parkless legacy
+          // identity (Steakhouse 55) it correctly yields parkId: null
+          // rather than inventing one — this function only ever counts a
+          // non-null parkId below, so that never fabricates park signal for
+          // resort-only dining. Without this fallback at all, a day whose
+          // only recognizable item is permanently-closed dining would
+          // silently lose all park signal despite the name resolving (the
+          // Entertainment bug this maintenance phase was told not to
+          // repeat).
+          parkId = getDiningContext(item.name, resort)?.parkId ?? null;
+        }
+      }
     }
     if (!parkId) {
       // getEntertainmentParkId resolves active catalog first, legacy as
@@ -1115,18 +1135,23 @@ export function computeCrossDayChecks(
     };
   }
 
-  // Resolves a composite key's parkId for one resort. Dining/attraction
-  // keys use their existing active-only maps (unchanged — those catalogs
-  // have no legacy/retired-identity concept). Entertainment keys go
-  // through getEntertainmentParkId, which resolves active catalog first,
-  // legacy fallback — canonicalKey here is already the
-  // resolveEntertainmentKey()-normalized key (see resolveAttractionKey /
-  // tryResolveByType above), so getEntertainmentParkId's own
-  // resolveEntertainmentKey call matches it via Stage-1 exact match
-  // whether it's an active or legacy identity.
+  // Resolves a composite key's parkId for one resort. Attraction keys use
+  // their existing active-only map (unchanged — that catalog has no
+  // legacy/retired-identity concept). Dining and entertainment keys go
+  // through getDiningContext / getEntertainmentParkId, which resolve
+  // active catalog first, legacy fallback — canonicalKey here is already
+  // the resolveDiningKey()/resolveEntertainmentKey()-normalized key (see
+  // resolveAttractionKey / tryResolveByType above), so their own
+  // resolveDiningKey/resolveEntertainmentKey calls match it via Stage-1
+  // exact match whether it's an active or legacy identity. Using
+  // getDiningContext (rather than the active-only DINING_PARK_DLR/WDW maps
+  // below, which are used only by inferDayPark's fast path) is what lets a
+  // legacy park-scoped identity like "Tokyo Dining" label its cross-day
+  // duplicate as EPCOT instead of falling back to the bare resort code.
   function parkIdFromCanonicalKey(type: PlannerItemType, resort: ResortId, canonicalKey: string): ParkId | undefined {
     if (type === "entertainment") return getEntertainmentParkId(canonicalKey, resort);
-    const map = type === "dining" ? (resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW) : (resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW);
+    if (type === "dining") return getDiningContext(canonicalKey, resort)?.parkId ?? undefined;
+    const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
     return map.get(canonicalKey) as ParkId | undefined;
   }
 
