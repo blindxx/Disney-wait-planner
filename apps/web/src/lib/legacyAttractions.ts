@@ -79,6 +79,12 @@ const LEGACY_ATTRACTIONS: LegacyAttraction[] = [
   // Guardians of the Galaxy: Cosmic Rewind (active catalog, parkId
   // "epcot", opened May 27, 2022). Never at DLR. No announced return.
   { name: "Universe of Energy", resort: "WDW", parkId: "epcot", land: "World Discovery" },
+  // DinoLand U.S.A. dark ride, opened 1998; confirmed permanently closed
+  // (see plannedClosures.ts's PERMANENT "ak:dinosaur" entry, dateRange
+  // start 2026-02-02). Never at DLR. No announced return/replacement as of
+  // this entry — canonical lifecycle here is the sole "legacy" signal;
+  // plannedClosures.ts's closureType stays a separate, independent record.
+  { name: "DINOSAUR", resort: "WDW", parkId: "ak", land: "DinoLand U.S.A." },
 ];
 
 const ACTIVE_ATTRACTION_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {

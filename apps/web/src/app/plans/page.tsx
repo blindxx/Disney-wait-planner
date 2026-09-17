@@ -75,6 +75,7 @@ import {
 import {
   getClosureWindowForAttraction,
   formatClosureDateRangeForDisplay,
+  normalizeToDayKeyLocal,
   type ClosureWindow,
 } from "@/lib/plannedClosures";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
@@ -969,11 +970,20 @@ function closureDateRangeLabel(window: ClosureWindow): string {
   return formatClosureDateRangeForDisplay(undefined, undefined, window.closureType);
 }
 
-/** Whether an ISO "YYYY-MM-DD" plan date falls within a closure's maintained window. */
-function planDateOverlapsClosureWindow(planDate: string, window: ClosureWindow): boolean {
-  if (window.startDate && planDate < window.startDate) return false;
-  if (window.endDate && planDate > window.endDate) return false;
-  return true;
+/**
+ * Where an ISO "YYYY-MM-DD" date falls relative to a closure's maintained
+ * window: "before" a future start, "inside" the window, or "after" a
+ * bounded window's end. An undated start never counts as "before" (an
+ * indefinite closure has already begun); an open-ended (null) end never
+ * counts as "after" — it has no end to have passed.
+ */
+function classifyDateAgainstClosureWindow(
+  date: string,
+  window: ClosureWindow
+): "before" | "inside" | "after" {
+  if (window.startDate && date < window.startDate) return "before";
+  if (window.endDate && date > window.endDate) return "after";
+  return "inside";
 }
 
 /**
@@ -983,6 +993,13 @@ function planDateOverlapsClosureWindow(planDate: string, window: ClosureWindow):
  * here (never rendered as "refurbishment"): canonical lifecycle (recognized
  * legacy identity) stays the sole "No longer operating" signal, and this
  * slice doesn't invent a distinct permanent-closure wording of its own.
+ *
+ * A bounded (non-open-ended) window that has already ended never shows a
+ * notice — neither "warning" (the plan date, if any, already had its visit
+ * pass by the window's end) nor "scheduled" (there's nothing left to
+ * schedule). With no usable plan date, "ended" is judged against today's
+ * date via the same local-day-key convention plannedClosures.ts uses
+ * internally (normalizeToDayKeyLocal) — never inventing a plan date.
  */
 function resolveRefurbishmentLine(
   canonicalName: string | undefined,
@@ -992,11 +1009,18 @@ function resolveRefurbishmentLine(
   if (!canonicalName || !parkId) return undefined;
   const window = getClosureWindowForAttraction(canonicalName, parkId);
   if (!window || window.closureType === "PERMANENT") return undefined;
-  const rangeLabel = closureDateRangeLabel(window);
+
   const usablePlanDate = planDate && isValidIsoCalendarDate(planDate) ? planDate : undefined;
-  if (usablePlanDate && planDateOverlapsClosureWindow(usablePlanDate, window)) {
+  const referenceDate = usablePlanDate ?? normalizeToDayKeyLocal(new Date());
+  const position = classifyDateAgainstClosureWindow(referenceDate, window);
+  if (position === "after") return undefined;
+
+  const rangeLabel = closureDateRangeLabel(window);
+  if (usablePlanDate && position === "inside") {
     return { text: `⚠ Closed for refurbishment • ${rangeLabel}`, variant: "warning" };
   }
+  // Either a dated plan before a future window, or no usable plan date and
+  // the window isn't over yet (still upcoming, active, or open-ended).
   return { text: `ⓘ Refurbishment scheduled • ${rangeLabel}`, variant: "info" };
 }
 
