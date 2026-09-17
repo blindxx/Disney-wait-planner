@@ -589,6 +589,27 @@ export function getDiningCanonicalName(name: string, resort: ResortId): string |
   return pickDiningMatch(matches, resort, name).name;
 }
 
+/**
+ * Resolve the maintained land/area label for a dining item's current name,
+ * preferring a match within the active resort, falling back to any resort —
+ * active catalog first, legacy as fallback (see findDiningPlacesByKey).
+ * Mirrors getDiningLocation/getDiningCanonicalName exactly.
+ *
+ * Returns undefined for unknown/custom names, and for a recognized
+ * location that has no single in-park land of its own (resort hotels,
+ * Downtown Disney, Disney Springs) — never an invented land. A legacy
+ * (permanently closed/replaced) identity returns its historical land when
+ * the LEGACY_DINING_PLACES entry carries one (e.g. "Tokyo Dining" →
+ * "World Showcase"), same as any active identity.
+ */
+export function getDiningLand(name: string, resort: ResortId): string | undefined {
+  const key = resolveDiningKey(name);
+  if (!key) return undefined;
+  const matches = findDiningPlacesByKey(key);
+  if (matches.length === 0) return undefined;
+  return pickDiningMatch(matches, resort, name).land;
+}
+
 /** Resort + optional park context for a recognized dining identity. */
 export type DiningContext = { resortId: ResortId; parkId: ParkId | null };
 

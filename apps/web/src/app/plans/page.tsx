@@ -43,7 +43,17 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
-import { computeCrossDayChecks, inferDayPark, pickWinningDays, pickWinningItems, reconcilePlannerSnapshot } from "@/lib/crossDayChecks";
+import {
+  computeCrossDayChecks,
+  inferDayPark,
+  pickWinningDays,
+  pickWinningItems,
+  reconcilePlannerSnapshot,
+  resolveIdentityKey,
+  PARK_TO_RESORT,
+  RIDE_TO_PARK_DLR,
+  RIDE_TO_PARK_WDW,
+} from "@/lib/crossDayChecks";
 import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
@@ -739,15 +749,9 @@ const RESORT_PARKS: Record<ResortId, ParkId[]> = {
 const STORAGE_RESORT_KEY = "dwp.selectedResort";
 const STORAGE_PARK_KEY = "dwp.selectedPark";
 
-/** Parks that belong to each resort — used to derive resort from a stored park. */
-const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
-  disneyland: "DLR",
-  dca: "DLR",
-  mk: "WDW",
-  epcot: "WDW",
-  hs: "WDW",
-  ak: "WDW",
-};
+// Parks that belong to each resort — used to derive resort from a stored
+// park. Single maintained source: PARK_TO_RESORT is imported from
+// crossDayChecks.ts rather than kept as a second copy here.
 
 // ===== PHASE 8.4 — PER-DAY PARK CONTEXT =====
 
@@ -761,20 +765,10 @@ const DAY_PARK_SHORT: Record<string, string> = {
   ak: "AK",
 };
 
-/**
- * Normalized attraction name → parkId lookup maps, built once at module load
- * from mock data. Used by crossDayChecks (duplicate detection, identity
- * matching, park labels). Attraction-only — deliberately NOT seeded with
- * dining data, so dining never participates in attraction duplicate/identity
- * matching (crossDayChecks.ts's inferDayPark keeps its own isolated
- * dining/entertainment park maps for park inference).
- */
-const RIDE_TO_PARK_DLR = new Map<string, string>();
-const RIDE_TO_PARK_WDW = new Map<string, string>();
-for (const _inf of mockAttractionWaits) {
-  if (_inf.resortId === "DLR") RIDE_TO_PARK_DLR.set(normalizeKey(_inf.name), _inf.parkId);
-  else if (_inf.resortId === "WDW") RIDE_TO_PARK_WDW.set(normalizeKey(_inf.name), _inf.parkId);
-}
+// Normalized attraction name → parkId lookup maps (RIDE_TO_PARK_DLR/WDW) and
+// resolveIdentityKey are imported from crossDayChecks.ts — the single
+// maintained source for this attraction identity/park data — rather than
+// rebuilt here as a second copy.
 
 /**
  * Phase 9.6 — true when name resolves to a known attraction in the given
@@ -927,19 +921,8 @@ function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): v
 
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
 
-/**
- * Resolve a raw plan/lightning item name to its canonical identity key for
- * cross-day duplicate detection. Mirrors Stage 1 + Stage 3 of lookupWait
- * without requiring a populated waitMap — alias-only resolution is sufficient
- * to identify the same attraction across name variants.
- */
-function resolveIdentityKey(name: string, aliases: Record<string, string>): string {
-  const key = normalizeKey(stripAnnotations(name));
-  const aliasTarget =
-    aliases[key] ??
-    (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
-  return aliasTarget ?? key;
-}
+// resolveIdentityKey is imported from crossDayChecks.ts (same single
+// maintained source as RIDE_TO_PARK_DLR/WDW above).
 
 // ===== COMPONENT =====
 
