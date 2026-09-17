@@ -1135,18 +1135,23 @@ export function computeCrossDayChecks(
     };
   }
 
-  // Resolves a composite key's parkId for one resort. Dining/attraction
-  // keys use their existing active-only maps (unchanged — those catalogs
-  // have no legacy/retired-identity concept). Entertainment keys go
-  // through getEntertainmentParkId, which resolves active catalog first,
-  // legacy fallback — canonicalKey here is already the
-  // resolveEntertainmentKey()-normalized key (see resolveAttractionKey /
-  // tryResolveByType above), so getEntertainmentParkId's own
-  // resolveEntertainmentKey call matches it via Stage-1 exact match
-  // whether it's an active or legacy identity.
+  // Resolves a composite key's parkId for one resort. Attraction keys use
+  // their existing active-only map (unchanged — that catalog has no
+  // legacy/retired-identity concept). Dining and entertainment keys go
+  // through getDiningContext / getEntertainmentParkId, which resolve
+  // active catalog first, legacy fallback — canonicalKey here is already
+  // the resolveDiningKey()/resolveEntertainmentKey()-normalized key (see
+  // resolveAttractionKey / tryResolveByType above), so their own
+  // resolveDiningKey/resolveEntertainmentKey calls match it via Stage-1
+  // exact match whether it's an active or legacy identity. Using
+  // getDiningContext (rather than the active-only DINING_PARK_DLR/WDW maps
+  // below, which are used only by inferDayPark's fast path) is what lets a
+  // legacy park-scoped identity like "Tokyo Dining" label its cross-day
+  // duplicate as EPCOT instead of falling back to the bare resort code.
   function parkIdFromCanonicalKey(type: PlannerItemType, resort: ResortId, canonicalKey: string): ParkId | undefined {
     if (type === "entertainment") return getEntertainmentParkId(canonicalKey, resort);
-    const map = type === "dining" ? (resort === "DLR" ? DINING_PARK_DLR : DINING_PARK_WDW) : (resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW);
+    if (type === "dining") return getDiningContext(canonicalKey, resort)?.parkId ?? undefined;
+    const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
     return map.get(canonicalKey) as ParkId | undefined;
   }
 
