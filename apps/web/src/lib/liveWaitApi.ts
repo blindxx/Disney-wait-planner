@@ -27,7 +27,11 @@ import {
   type ResortId,
   type WaitStatus,
 } from "@disney-wait-planner/shared";
-import { PLANNED_CLOSURES, isClosureStatusEnforced } from "./plannedClosures";
+import {
+  PLANNED_CLOSURES,
+  isClosureStatusEnforced,
+  normalizeAttractionName,
+} from "./plannedClosures";
 
 // ============================================
 // CONFIG
@@ -261,27 +265,9 @@ type QTResponse = {
   rides?: QTRide[];
 };
 
-/**
- * Normalize an attraction name for comparison.
- * Queue-Times uses straight punctuation; mock data uses smart/typographic variants.
- * Without this, names like "Tiana's …" vs "Tiana's …" or
- * "Star Tours – …" vs "Star Tours - …" fail to match.
- */
-function normalizeAttractionName(name: string): string {
-  return name
-    .toLowerCase()
-    .trim()
-    .replace(/\u00a0/g, " ")         // NBSP → space
-    .replace(/\s+/g, " ")            // collapse whitespace
-    .replace(/[\u2018\u2019]/g, "'") // curly apostrophes → straight
-    .replace(/[\u201c\u201d]/g, '"') // curly quotes → straight
-    .replace(/[\u2013\u2014]/g, "-") // en-dash / em-dash → hyphen
-    .replace(/~/g, "-")             // tilde separator → hyphen (e.g. "~ Ariel's")
-    .replace(/\u2122/g, "")        // ™ — e.g. "Indiana Jones™ Adventure"
-    .replace(/\u00ae/g, "")        // ®
-    .replace(/\u00a9/g, "")        // ©
-    ;
-}
+// normalizeAttractionName is defined in and exported from ./plannedClosures
+// (imported above) — it anchors that module's closure-key format, so it
+// lives there rather than being duplicated here.
 
 /**
  * WDW-only alias map: normalized-alias → canonical-normalized-mock-name.
