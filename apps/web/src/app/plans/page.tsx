@@ -84,6 +84,7 @@ import {
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
+import { resolveAttractionIdentityKey } from "@/lib/legacyAttractions";
 import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
@@ -776,6 +777,16 @@ const DAY_PARK_SHORT: Record<string, string> = {
  * crossDayChecks.ts. Used (alongside isDiningName/isEntertainmentName) to
  * detect whether a manually-entered activity is "known" — i.e. whether the
  * custom type selector should be hidden in favor of automatic inference.
+ *
+ * Active-first, legacy-fallback: the active RIDE_TO_PARK_* checks below are
+ * unchanged; only when they find no match at all (exact, alias, or
+ * containment) does this fall back to resolveAttractionIdentityKey
+ * (legacyAttractions.ts) — the same authoritative active-then-legacy
+ * resolver crossDayChecks.ts uses — so a recognized legacy attraction (e.g.
+ * "Splash Mountain", "Ellen's Energy Adventure") is treated as known here
+ * too, instead of showing the unknown-activity/type-override state. An
+ * ambiguous active containment match stays a hard "not known" (unchanged),
+ * mirroring crossDayChecks.ts's own tryResolve fallback rule exactly.
  */
 function isKnownAttractionName(name: string, resort: ResortId): boolean {
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
@@ -783,17 +794,19 @@ function isKnownAttractionName(name: string, resort: ResortId): boolean {
   const key = resolveIdentityKey(name, aliases);
   if (rideMap.has(key)) return true;
   const tokens = tokenize(key);
-  if (tokens.length < 2) return false;
-  let hit = false;
-  let matchCount = 0;
-  for (const attrKey of rideMap.keys()) {
-    if (containsWholeWordSequence(attrKey, tokens)) {
-      matchCount++;
-      if (matchCount > 1) return false;
-      hit = true;
+  if (tokens.length >= 2) {
+    let hit = false;
+    let matchCount = 0;
+    for (const attrKey of rideMap.keys()) {
+      if (containsWholeWordSequence(attrKey, tokens)) {
+        matchCount++;
+        if (matchCount > 1) return false;
+        hit = true;
+      }
     }
+    if (hit) return true;
   }
-  return hit;
+  return resolveAttractionIdentityKey(name, resort) !== null;
 }
 
 /**

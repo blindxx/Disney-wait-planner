@@ -101,6 +101,9 @@ const LEGACY_ATTRACTION_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
  */
 const LEGACY_ATTRACTION_ALIASES: Record<string, string> = {
   "great movie ride": "the great movie ride",
+  // Universe of Energy's own former name (1996–2017 overlay era) — see the
+  // LEGACY_ATTRACTIONS entry's doc comment.
+  "ellens energy adventure": "universe of energy",
 };
 
 /**
