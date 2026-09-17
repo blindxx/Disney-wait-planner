@@ -79,7 +79,7 @@ export const DINING_PLACES: DiningPlace[] = [
   // ---- Disneyland Park / DCA — destination-style quick service ----
   { name: "Bengal Barbecue", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Adventureland" },
   { name: "Galactic Grill", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Tomorrowland" },
-  { name: "Award Wieners", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Pixar Pier" },
+  { name: "Award Wieners", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land" },
   { name: "Pym Test Kitchen", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Avengers Campus" },
   { name: "Smokejumpers Grill", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Grizzly Peak" },
   { name: "Tropical Hideaway", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Adventureland" },
