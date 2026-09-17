@@ -88,7 +88,7 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Carnation Cafe", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A." },
   { name: "River Belle Terrace", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Frontierland" },
   { name: "Rancho del Zocalo Restaurante", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Frontierland" },
-  { name: "Wine Country Trattoria", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Pacific Wharf" },
+  { name: "Wine Country Trattoria", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Performance Corridor" },
 
   // ---- Disneyland Park / DCA — destination-style quick service ----
   { name: "Bengal Barbecue", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Adventureland" },
@@ -110,6 +110,11 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Paseo", resort: "DLR", location: "Downtown Disney" },
   { name: "Centrico", resort: "DLR", location: "Downtown Disney" },
   { name: "Tiendita", resort: "DLR", location: "Downtown Disney" },
+  // Maintenance audit addition — ground-up-built standalone location,
+  // opened July 1, 2024, distinct from the existing WDW/Disney Springs
+  // Din Tai Fung entry below (same name-at-both-resorts pattern already
+  // established by "Earl of Sandwich" above).
+  { name: "Din Tai Fung", resort: "DLR", location: "Downtown Disney" },
 
   // ---- Magic Kingdom — table service ----
   { name: "Be Our Guest Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland" },
@@ -141,6 +146,13 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Tutto Italia", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Biergarten", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Chefs de France", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
+  // Maintenance audit addition — table-service galette/crepe restaurant in
+  // the France pavilion (distinct from its own walk-up quick-service
+  // counter, Crêpes à Emporter, which is out of scope per the existing
+  // ordinary-quick-service exclusion). Spelled without the accent to match
+  // the catalog's existing ASCII-name convention (e.g. "Cafe Orleans") and
+  // avoid normalizeKey() turning "ê" into a key-splitting space.
+  { name: "La Creperie de Paris", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "San Angel Inn", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "La Hacienda de San Angel", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Nine Dragons", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
@@ -185,12 +197,39 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "D-Luxe Burger", resort: "WDW", location: "Disney Springs" },
   { name: "Chicken Guy!", resort: "WDW", location: "Disney Springs" },
   { name: "Din Tai Fung", resort: "WDW", location: "Disney Springs" },
+  // Maintenance audit additions below — all confirmed current, table
+  // service or destination-tier quick service commonly planned around.
+  // Rainforest Cafe also operates at Animal Kingdom's entrance plaza, but
+  // that location is deliberately NOT added here: it would be the
+  // catalog's only same-name/same-resort multi-location entry, and
+  // crossDayChecks.ts's cross-day duplicate composite-key generation
+  // (resolveAttractionKey/identityKeyFrom) is resort-scoped, not
+  // location-scoped, so it would wrongly treat the two distinct physical
+  // restaurants as duplicates of each other (and mislabel one with the
+  // other's park). Fixing that needs a location-aware identity key
+  // generalized across all dining/attraction/entertainment composite keys
+  // — real scope beyond this maintenance phase. Only the unambiguous
+  // Disney Springs location is added.
+  { name: "Rainforest Cafe", resort: "WDW", location: "Disney Springs" },
+  // The Polite Pig: quick service, but Michelin Guide-recognized and one of
+  // Disney Springs' most notable destination dining spots (largest bourbon
+  // bar on Disney property) — fits "destination-style quick service
+  // commonly planned around", not ordinary quick service.
+  { name: "The Polite Pig", resort: "WDW", location: "Disney Springs" },
+  { name: "Maria & Enzo's Ristorante", resort: "WDW", location: "Disney Springs" },
+  // Six Ravens: savory counter-service concept from the same team as the
+  // already-cataloged Gideon's Bakehouse, open since Aug 3, 2026 with
+  // demonstrated destination-level demand (uses a virtual queue).
+  { name: "Six Ravens", resort: "WDW", location: "Disney Springs" },
 
   // ---- Major WDW resorts — character / signature / dinner-show dining ----
   { name: "Chef Mickey's", resort: "WDW", location: "Disney's Contemporary Resort" },
   { name: "California Grill", resort: "WDW", location: "Disney's Contemporary Resort" },
   { name: "Steakhouse 71", resort: "WDW", location: "Disney's Contemporary Resort" },
   { name: "Narcoossee's", resort: "WDW", location: "Disney's Grand Floridian Resort" },
+  // Maintenance audit addition — active signature dining at Grand
+  // Floridian (reopened 2021 after remodel; not closed/replaced).
+  { name: "Citricos", resort: "WDW", location: "Disney's Grand Floridian Resort" },
   { name: "'Ohana", resort: "WDW", location: "Disney's Polynesian Resort" },
   { name: "Boma", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
   { name: "Jiko", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
@@ -200,6 +239,11 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Whispering Canyon Cafe", resort: "WDW", location: "Disney's Wilderness Lodge" },
   { name: "Story Book Dining at Artist Point", resort: "WDW", location: "Disney's Wilderness Lodge" },
   { name: "Sebastian's Bistro", resort: "WDW", location: "Disney's Caribbean Beach Resort" },
+  // Maintenance audit additions — extend supported resort dining to two
+  // Disney-owned/operated resorts not previously represented in the
+  // catalog (both confirmed current, active signature dining).
+  { name: "Yachtsman Steakhouse", resort: "WDW", location: "Disney's Yacht Club Resort" },
+  { name: "The Cake Bake Shop Restaurant by Gwendolyn Rogers", resort: "WDW", location: "Disney's BoardWalk Resort" },
 ];
 
 const DINING_KEYS: Set<string> = new Set(
@@ -291,6 +335,8 @@ const DINING_ALIASES: Record<string, string> = {
   // Barrel"; this alias keeps the pre-rename form (and any saved/imported
   // plans using it) resolving to the renamed canonical entry.
   "beak and barrel":  "the beak and barrel",
+  // Maintenance audit — common shorthand for the long official name.
+  "cake bake shop":   "the cake bake shop restaurant by gwendolyn rogers",
 };
 
 /**
@@ -302,6 +348,41 @@ const DINING_ALIASES: Record<string, string> = {
 function stripDiningSuffix(str: string): string {
   const idx = str.indexOf(" — ");
   return idx === -1 ? str : str.slice(0, idx);
+}
+
+/**
+ * Extract the disambiguation suffix's location half, e.g. "Oga's Cantina —
+ * Hollywood Studios" → "Hollywood Studios". Returns null when absent. The
+ * counterpart to stripDiningSuffix (which discards this half) — used by
+ * pickDiningMatch below to disambiguate a name that resolves to more than
+ * one entry within the same resort, where resort alone isn't enough to
+ * pick the right record. No current DINING_PLACES entry shares a name
+ * within one resort (getDiningSuggestions() already anticipates that case
+ * via its own " — <location>" suffix generation — see its distinctLocations
+ * check below — so this keeps the location-aware getters correct if/when a
+ * future entry needs it, rather than leaving a latent bug for that day).
+ */
+function extractDiningSuffixLocation(str: string): string | null {
+  const idx = str.indexOf(" — ");
+  return idx === -1 ? null : str.slice(idx + 3).trim();
+}
+
+/**
+ * Pick the single DiningPlace record a resolved key's matches should use.
+ * Prefers an exact (resort, location) match against a disambiguation
+ * suffix in the original name when present (needed if the same name ever
+ * has more than one location within one resort), otherwise falls back to
+ * the existing resort-only preference used throughout this file. No-op for
+ * every name without a suffix — i.e. every existing caller's behavior is
+ * unchanged.
+ */
+function pickDiningMatch(matches: DiningPlace[], resort: ResortId, name: string): DiningPlace {
+  const suffixLocation = extractDiningSuffixLocation(name);
+  if (suffixLocation) {
+    const exact = matches.find((p) => p.resort === resort && p.location === suffixLocation);
+    if (exact) return exact;
+  }
+  return matches.find((p) => p.resort === resort) ?? matches[0];
 }
 
 /**
@@ -460,7 +541,7 @@ export function getDiningLocation(name: string, resort: ResortId): string | unde
   if (!key) return undefined;
   const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
-  return (matches.find((p) => p.resort === resort) ?? matches[0]).location;
+  return pickDiningMatch(matches, resort, name).location;
 }
 
 /**
@@ -475,7 +556,7 @@ export function getDiningCanonicalName(name: string, resort: ResortId): string |
   if (!key) return undefined;
   const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
-  return (matches.find((p) => p.resort === resort) ?? matches[0]).name;
+  return pickDiningMatch(matches, resort, name).name;
 }
 
 /** Resort + optional park context for a recognized dining identity. */
@@ -511,7 +592,7 @@ export function getDiningContext(name: string, resort: ResortId): DiningContext 
   if (!key) return undefined;
   const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
-  const match = matches.find((p) => p.resort === resort) ?? matches[0];
+  const match = pickDiningMatch(matches, resort, name);
   return { resortId: match.resort, parkId: match.parkId ?? null };
 }
 
