@@ -199,18 +199,22 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Din Tai Fung", resort: "WDW", location: "Disney Springs" },
   // Maintenance audit additions below — all confirmed current, table
   // service or destination-tier quick service commonly planned around.
-  // Rainforest Cafe also operates at Animal Kingdom's entrance plaza, but
-  // that location is deliberately NOT added here: it would be the
-  // catalog's only same-name/same-resort multi-location entry, and
-  // crossDayChecks.ts's cross-day duplicate composite-key generation
-  // (resolveAttractionKey/identityKeyFrom) is resort-scoped, not
-  // location-scoped, so it would wrongly treat the two distinct physical
-  // restaurants as duplicates of each other (and mislabel one with the
-  // other's park). Fixing that needs a location-aware identity key
-  // generalized across all dining/attraction/entertainment composite keys
-  // — real scope beyond this maintenance phase. Only the unambiguous
-  // Disney Springs location is added.
-  { name: "Rainforest Cafe", resort: "WDW", location: "Disney Springs" },
+  // Rainforest Cafe (Disney Springs AND Animal Kingdom's entrance plaza) is
+  // deliberately NOT catalogued at all: it's the only current WDW dining
+  // name with two distinct current locations within the same resort, and
+  // this catalog has no location-aware identity — every lookup
+  // (resolveDiningKey/getDiningLocation/getDiningCanonicalName/
+  // getDiningContext) and crossDayChecks.ts's cross-day duplicate
+  // composite-key generation resolve a name by resort only. Adding just one
+  // location (as a prior revision of this catalog briefly did) is worse
+  // than adding neither: an unsuffixed "Rainforest Cafe" typed for the
+  // OTHER location would silently resolve to the cataloged one's
+  // metadata/park instead of failing to resolve at all. Catalog it properly
+  // only once same-name + same-resort + different-location identity is
+  // supported (a real architecture change, out of scope for this
+  // maintenance phase) — until then it falls back to custom/unrecognized
+  // like any other name DWP doesn't know, which is the correct behavior
+  // here, not a gap to paper over.
   // The Polite Pig: quick service, but Michelin Guide-recognized and one of
   // Disney Springs' most notable destination dining spots (largest bourbon
   // bar on Disney property) — fits "destination-style quick service
