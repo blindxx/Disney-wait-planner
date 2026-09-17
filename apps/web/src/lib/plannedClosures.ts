@@ -5,8 +5,17 @@
  *   PLANNED_CLOSURES                  — Map<key, ClosureEntry>
  *   getClosureTiming                  — "UPCOMING" | "ACTIVE" | "ENDED" (PRESENTATION only)
  *   isClosureStatusEnforced           — boolean (STATUS ENFORCEMENT only)
+ *   getClosureWindowForAttraction     — raw maintained window (start/end/type)
+ *                                        for a future planner-item presentation
+ *                                        consumer (e.g. My Plans); a third,
+ *                                        independent read — see its own doc
+ *                                        comment. Never used by, and never
+ *                                        changes, getClosureTiming() or
+ *                                        isClosureStatusEnforced().
  *   formatClosureDateRangeForDisplay  — ISO dateRange → human-readable label
- *   ClosureTiming, ClosureType        — types
+ *   normalizeAttractionName           — the closure-key identity normalizer
+ *                                        (also used by liveWaitApi.ts)
+ *   ClosureTiming, ClosureType, ClosureWindow — types
  *   PERMANENT_RETENTION_DAYS          — days a PERMANENT closure stays in the
  *                                        active Planned Closures presentation
  *                                        after its closure date before aging out
@@ -30,12 +39,18 @@
  *                 isClosureStatusEnforced() (status enforcement) — do not
  *                 use one in place of the other.
  *
- * Key format: `${parkId}:${normalizedAttractionName}` (lowercase, straight punctuation).
- * This matches the output of normalizeAttractionName() in liveWaitApi.ts.
+ * Key format: `${parkId}:${normalizedAttractionName}` (lowercase, straight punctuation),
+ * built with normalizeAttractionName() (defined in this module — see below).
  *
  * Consumed by:
- *   liveWaitApi.ts        — live status enforcement, via isClosureStatusEnforced().
+ *   liveWaitApi.ts        — live status enforcement, via isClosureStatusEnforced()
+ *                            and normalizeAttractionName() for its own closure-key
+ *                            lookups (this module is the shared definition).
  *   wait-times/page.tsx   — Planned Closures UI section, via getClosureTiming().
+ *   (future) planner-item presentation (e.g. My Plans) — via
+ *                            getClosureWindowForAttraction(), for source data
+ *                            only; presentation wording stays that consumer's
+ *                            own concern.
  */
 
 import type { ParkId } from "@disney-wait-planner/shared";
@@ -118,6 +133,38 @@ export function parseClosureDateRange(
   const end =
     !endStr || endStr.toUpperCase() === "TBD" ? null : endStr;
   return { start, end };
+}
+
+// ============================================
+// ATTRACTION NAME NORMALIZATION (closure identity)
+// ============================================
+
+/**
+ * Normalize an attraction name for closure-key comparison.
+ * Queue-Times uses straight punctuation; mock data uses smart/typographic variants.
+ * Without this, names like "Tiana's …" vs "Tiana's …" or
+ * "Star Tours – …" vs "Star Tours - …" fail to match.
+ *
+ * Owns the normalization half of this module's `${parkId}:${normalizedName}`
+ * closure-key format (see PLANNED_CLOSURES below). Also imported by
+ * liveWaitApi.ts, which builds the identical key from a mock ride's own
+ * canonical name to look up live-status enforcement — kept here as the
+ * single definition so both stay in lockstep.
+ */
+export function normalizeAttractionName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/ /g, " ")         // NBSP → space
+    .replace(/\s+/g, " ")            // collapse whitespace
+    .replace(/[‘’]/g, "'") // curly apostrophes → straight
+    .replace(/[“”]/g, '"') // curly quotes → straight
+    .replace(/[–—]/g, "-") // en-dash / em-dash → hyphen
+    .replace(/~/g, "-")             // tilde separator → hyphen (e.g. "~ Ariel's")
+    .replace(/™/g, "")        // ™ — e.g. "Indiana Jones™ Adventure"
+    .replace(/®/g, "")        // ®
+    .replace(/©/g, "")        // ©
+    ;
 }
 
 /**
@@ -377,6 +424,64 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
 ]);
 
 // ============================================
+// READ CONTRACT (for future planner-item presentation)
+// ============================================
+
+/**
+ * Raw maintained closure/refurbishment window for a single attraction —
+ * source data only, no presentation decisions. Consumed by future planner
+ * item presentation (e.g. My Plans) to derive its own warning/info wording;
+ * this module intentionally does not compute that wording itself.
+ */
+export type ClosureWindow = {
+  /** ISO "YYYY-MM-DD" closure start date, or null when entirely undated
+   * (an indefinite closure with no maintained start). */
+  startDate: string | null;
+  /**
+   * ISO "YYYY-MM-DD" end date, or null when open-ended/unknown. Never
+   * invented — a null end means "no confirmed reopening date," not "today."
+   */
+  endDate: string | null;
+  /** Closure lifecycle type, defaulted exactly as getClosureTiming()/
+   * isClosureStatusEnforced() default it ("TEMPORARY" when omitted). */
+  closureType: ClosureType;
+};
+
+/**
+ * Look up the maintained closure/refurbishment window for an attraction, by
+ * its current display name and park. Resolves through the same identity
+ * used to key PLANNED_CLOSURES itself — `${parkId}:${normalizeAttractionName(name)}`
+ * (see normalizeAttractionName above) — the identical path liveWaitApi.ts
+ * uses for live-status enforcement, so a name/park pair either matches here
+ * exactly as it would there, or not at all.
+ *
+ * Returns undefined when there is no maintained entry for that identity —
+ * including once an entry is removed from PLANNED_CLOSURES, since this reads
+ * the map directly rather than caching anything.
+ *
+ * Deliberately independent of getClosureTiming() (presentation) and
+ * isClosureStatusEnforced() (live-status enforcement) — this is a third,
+ * narrower read for consumers that need the raw window itself (e.g. to
+ * compare against a planned visit date), and calling it never affects
+ * either of those two behaviors.
+ */
+export function getClosureWindowForAttraction(
+  attractionName: string,
+  parkId: ParkId,
+): ClosureWindow | undefined {
+  const key = `${parkId}:${normalizeAttractionName(attractionName)}`;
+  const entry = PLANNED_CLOSURES.get(key);
+  if (!entry) return undefined;
+
+  const closureType = entry.closureType ?? "TEMPORARY";
+  if (!entry.dateRange) {
+    return { startDate: null, endDate: null, closureType };
+  }
+  const { start, end } = parseClosureDateRange(entry.dateRange);
+  return { startDate: start, endDate: end, closureType };
+}
+
+// ============================================
 // DEV-ONLY VALIDATION
 // ============================================
 
@@ -532,5 +637,61 @@ export const DEV_CLOSURE_TIMING_CASES: Array<{
     now: "2025-06-01",
     expectedTiming: "ACTIVE",
     expectedLabel: "Jan 1, 2025 – May 1, 2026",
+  },
+];
+
+/**
+ * Reference test cases for getClosureWindowForAttraction() — the read-only
+ * window contract for future planner-item presentation. Not wired into CI
+ * (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_CLOSURE_WINDOW_CASES, getClosureWindowForAttraction } from "@/lib/plannedClosures";
+ *   for (const c of DEV_CLOSURE_WINDOW_CASES) {
+ *     const got = getClosureWindowForAttraction(c.name, c.parkId);
+ *     const ok = JSON.stringify(got) === JSON.stringify(c.expected);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, got);
+ *   }
+ */
+export const DEV_CLOSURE_WINDOW_CASES: Array<{
+  description: string;
+  name: string;
+  parkId: ParkId;
+  expected: ClosureWindow | undefined;
+}> = [
+  {
+    description: "bounded refurbishment window (Rock 'n' Roller Coaster, HS)",
+    name: "Rock 'n' Roller Coaster Starring The Muppets",
+    parkId: "hs",
+    expected: { startDate: "2026-03-02", endDate: "2026-05-25", closureType: "TEMPORARY" },
+  },
+  {
+    description: "open-ended/unknown-end closure exposes start only, never invents an end (Carousel of Progress, MK)",
+    name: "Walt Disney's Carousel of Progress",
+    parkId: "mk",
+    expected: { startDate: "2026-07-06", endDate: null, closureType: "TEMPORARY" },
+  },
+  {
+    description: "PERMANENT closure returns its window like any other — closureType carries the distinction, not a different shape (DINOSAUR, AK)",
+    name: "DINOSAUR",
+    parkId: "ak",
+    expected: { startDate: "2026-02-02", endDate: null, closureType: "PERMANENT" },
+  },
+  {
+    description: "typographic-apostrophe input still resolves through normalizeAttractionName (matches PLANNED_CLOSURES' own display name)",
+    name: "Rock ’n’ Roller Coaster Starring The Muppets",
+    parkId: "hs",
+    expected: { startDate: "2026-03-02", endDate: "2026-05-25", closureType: "TEMPORARY" },
+  },
+  {
+    description: "attraction with no maintained closure entry (Space Mountain, MK)",
+    name: "Space Mountain",
+    parkId: "mk",
+    expected: undefined,
+  },
+  {
+    description: "DLR park with no maintained closures currently — same path, no special-casing needed (Space Mountain, Disneyland)",
+    name: "Space Mountain",
+    parkId: "disneyland",
+    expected: undefined,
   },
 ];
