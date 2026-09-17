@@ -577,3 +577,48 @@ export function getEntertainmentAvailabilityType(
   if (matches.length === 0) return undefined;
   return (matches.find((p) => p.resort === resort) ?? matches[0]).availabilityType;
 }
+
+/** Resort + optional park context for a recognized entertainment identity. */
+export type EntertainmentContext = {
+  resortId: ResortId;
+  parkId: ParkId | null;
+  /** Canonical display name for this identity (active or legacy). */
+  name: string;
+  /** Themed land/area within the park, when maintained — see EntertainmentPlace's own `land`. */
+  land?: string;
+  /**
+   * Maintained display area — see EntertainmentPlace's own `location`.
+   * Always present: the park's display label for a park-based offering, or
+   * the canonical non-park area otherwise (none currently in this dataset).
+   */
+  location: string;
+  /** Whether this identity resolved via the active catalog or the legacy fallback. */
+  lifecycle: "active" | "legacy";
+};
+
+/**
+ * Resolve the resort + parkId + canonical name/land/lifecycle context for an
+ * entertainment item's current name, preferring a match within the active
+ * resort, falling back to any resort — active catalog first, legacy as
+ * fallback (see findEntertainmentPlacesByKey). Mirrors getDiningContext/
+ * getAttractionContext, giving entertainment the same single context lookup
+ * dining/attractions already have instead of a parkId-only accessor.
+ *
+ * Returns undefined only when the name itself doesn't resolve to any known
+ * entertainment identity (active or legacy).
+ */
+export function getEntertainmentContext(name: string, resort: ResortId): EntertainmentContext | undefined {
+  const key = resolveEntertainmentKey(name, resort);
+  if (!key) return undefined;
+  const matches = findEntertainmentPlacesByKey(key);
+  if (matches.length === 0) return undefined;
+  const match = matches.find((p) => p.resort === resort) ?? matches[0];
+  return {
+    resortId: match.resort,
+    parkId: match.parkId ?? null,
+    name: match.name,
+    land: match.land,
+    location: match.location,
+    lifecycle: ENTERTAINMENT_KEYS.has(key) ? "active" : "legacy",
+  };
+}

@@ -611,12 +611,29 @@ export function getDiningLand(name: string, resort: ResortId): string | undefine
 }
 
 /** Resort + optional park context for a recognized dining identity. */
-export type DiningContext = { resortId: ResortId; parkId: ParkId | null };
+export type DiningContext = {
+  resortId: ResortId;
+  parkId: ParkId | null;
+  /** Canonical display name for this identity (active or legacy). */
+  name: string;
+  /** Themed land/area within the park, when maintained — see DiningPlace's own `land`. */
+  land?: string;
+  /**
+   * Maintained display area — see DiningPlace's own `location`. Always
+   * present: the park's display label for a park-based location, or the
+   * canonical non-park area (resort hotel, Downtown Disney, Disney Springs)
+   * otherwise.
+   */
+  location: string;
+  /** Whether this identity resolved via the active catalog or the legacy fallback. */
+  lifecycle: "active" | "legacy";
+};
 
 /**
- * Resolve the resort + parkId context for a dining item's current name,
- * preferring a match within the active resort, falling back to any resort —
- * active catalog first, legacy as fallback (see findDiningPlacesByKey).
+ * Resolve the resort + parkId + canonical name/land/lifecycle context for a
+ * dining item's current name, preferring a match within the active resort,
+ * falling back to any resort — active catalog first, legacy as fallback
+ * (see findDiningPlacesByKey).
  *
  * This is the lookup park/day/resort-inference consumers (crossDayChecks.ts's
  * inferDayPark, plansContextInference.ts's buildInferenceMap/tryResolve)
@@ -644,7 +661,14 @@ export function getDiningContext(name: string, resort: ResortId): DiningContext 
   const matches = findDiningPlacesByKey(key);
   if (matches.length === 0) return undefined;
   const match = pickDiningMatch(matches, resort, name);
-  return { resortId: match.resort, parkId: match.parkId ?? null };
+  return {
+    resortId: match.resort,
+    parkId: match.parkId ?? null,
+    name: match.name,
+    land: match.land,
+    location: match.location,
+    lifecycle: DINING_KEYS.has(key) ? "active" : "legacy",
+  };
 }
 
 /**
