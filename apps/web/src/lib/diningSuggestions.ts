@@ -111,9 +111,11 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Centrico", resort: "DLR", location: "Downtown Disney" },
   { name: "Tiendita", resort: "DLR", location: "Downtown Disney" },
   // Maintenance audit addition — ground-up-built standalone location,
-  // opened July 1, 2024, distinct from the existing WDW/Disney Springs
-  // Din Tai Fung entry below (same name-at-both-resorts pattern already
-  // established by "Earl of Sandwich" above).
+  // opened July 1, 2024. Din Tai Fung's only Disney destination location
+  // is here at DLR; WDW/Disney Springs has none. (A prior revision of this
+  // catalog incorrectly also listed a WDW/Disney Springs entry, describing
+  // it as a parallel same-name-at-both-resorts case like "Earl of
+  // Sandwich" — that was bad catalog data, since removed.)
   { name: "Din Tai Fung", resort: "DLR", location: "Downtown Disney" },
 
   // ---- Magic Kingdom — table service ----
@@ -149,10 +151,14 @@ export const DINING_PLACES: DiningPlace[] = [
   // Maintenance audit addition — table-service galette/crepe restaurant in
   // the France pavilion (distinct from its own walk-up quick-service
   // counter, Crêpes à Emporter, which is out of scope per the existing
-  // ordinary-quick-service exclusion). Spelled without the accent to match
-  // the catalog's existing ASCII-name convention (e.g. "Cafe Orleans") and
-  // avoid normalizeKey() turning "ê" into a key-splitting space.
-  { name: "La Creperie de Paris", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
+  // ordinary-quick-service exclusion). Canonical name uses Disney's
+  // official accented spelling; normalizeKey() turns "ê" into a
+  // key-splitting space (canonical key becomes "la cr perie de paris"), so
+  // the unaccented "La Creperie de Paris" is handled the same way every
+  // other alternate-spelling shorthand is in this catalog — via
+  // DINING_ALIASES, not a parallel normalization/mapping mechanism (see
+  // the alias below).
+  { name: "La Crêperie de Paris", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "San Angel Inn", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "La Hacienda de San Angel", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Nine Dragons", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
@@ -196,7 +202,6 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Earl of Sandwich", resort: "WDW", location: "Disney Springs" },
   { name: "D-Luxe Burger", resort: "WDW", location: "Disney Springs" },
   { name: "Chicken Guy!", resort: "WDW", location: "Disney Springs" },
-  { name: "Din Tai Fung", resort: "WDW", location: "Disney Springs" },
   // Maintenance audit additions below — all confirmed current, table
   // service or destination-tier quick service commonly planned around.
   // Rainforest Cafe (Disney Springs AND Animal Kingdom's entrance plaza) is
@@ -341,6 +346,12 @@ const DINING_ALIASES: Record<string, string> = {
   "beak and barrel":  "the beak and barrel",
   // Maintenance audit — common shorthand for the long official name.
   "cake bake shop":   "the cake bake shop restaurant by gwendolyn rogers",
+  // Maintenance audit — the canonical name's accented "ê" makes
+  // normalizeKey() split "crêperie" into "cr" + "perie" (turning the
+  // accent into a space, like every other non-alphanumeric character),
+  // so the plain-ASCII spelling needs an explicit alias to resolve to the
+  // same identity rather than a parallel normalization mechanism.
+  "la creperie de paris": "la cr perie de paris",
 };
 
 /**
