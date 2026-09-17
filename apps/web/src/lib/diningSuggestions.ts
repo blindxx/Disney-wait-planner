@@ -159,6 +159,10 @@ export const DINING_PLACES: DiningPlace[] = [
   // DINING_ALIASES, not a parallel normalization/mapping mechanism (see
   // the alias below).
   { name: "La Crêperie de Paris", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
+  // World Showcase audit addition — exclusive upstairs signature dining
+  // above Chefs de France, separately bookable with its own dinner
+  // service (Tue-Sat). Confirmed currently operating.
+  { name: "Monsieur Paul", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "San Angel Inn", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "La Hacienda de San Angel", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Nine Dragons", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
@@ -167,11 +171,15 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Katsura Grill", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "GEO-82", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Celebration" },
   { name: "Shiki-Sai: Sushi Izakaya", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
+  // World Showcase audit addition — upscale omakase-style signature dining
+  // in the Japan pavilion (opened 2019), separate from Teppan Edo/Katsura
+  // Grill/Shiki-Sai. Confirmed currently operating.
+  { name: "Takumi-Tei", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase" },
   { name: "Coral Reef Restaurant", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Nature" },
 
   // ---- Hollywood Studios ----
   { name: "Sci-Fi Dine-In Theater Restaurant", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Commissary Lane" },
-  { name: "50's Prime Time Cafe", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Commissary Lane" },
+  { name: "50's Prime Time Cafe", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake" },
   { name: "Hollywood Brown Derby", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard" },
   { name: "Roundup Rodeo BBQ", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Toy Story Land" },
   { name: "Backlot Express", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake" },
