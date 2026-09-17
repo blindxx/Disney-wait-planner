@@ -237,8 +237,11 @@ export const DINING_PLACES: DiningPlace[] = [
   { name: "Steakhouse 71", resort: "WDW", location: "Disney's Contemporary Resort" },
   { name: "Narcoossee's", resort: "WDW", location: "Disney's Grand Floridian Resort" },
   // Maintenance audit addition — active signature dining at Grand
-  // Floridian (reopened 2021 after remodel; not closed/replaced).
-  { name: "Citricos", resort: "WDW", location: "Disney's Grand Floridian Resort" },
+  // Floridian (reopened 2021 after remodel; not closed/replaced). Canonical
+  // name uses Disney's official accented spelling ("Cítricos"); the
+  // unaccented "Citricos" resolves via the DINING_ALIASES entry below,
+  // following the same pattern established for "La Crêperie de Paris".
+  { name: "Cítricos", resort: "WDW", location: "Disney's Grand Floridian Resort" },
   { name: "'Ohana", resort: "WDW", location: "Disney's Polynesian Resort" },
   { name: "Boma", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
   { name: "Jiko", resort: "WDW", location: "Disney's Animal Kingdom Lodge" },
@@ -252,7 +255,7 @@ export const DINING_PLACES: DiningPlace[] = [
   // Disney-owned/operated resorts not previously represented in the
   // catalog (both confirmed current, active signature dining).
   { name: "Yachtsman Steakhouse", resort: "WDW", location: "Disney's Yacht Club Resort" },
-  { name: "The Cake Bake Shop Restaurant by Gwendolyn Rogers", resort: "WDW", location: "Disney's BoardWalk Resort" },
+  { name: "The Cake Bake Shop Restaurant by Gwendolyn Rogers", resort: "WDW", location: "Disney's BoardWalk" },
 ];
 
 const DINING_KEYS: Set<string> = new Set(
@@ -352,6 +355,10 @@ const DINING_ALIASES: Record<string, string> = {
   // so the plain-ASCII spelling needs an explicit alias to resolve to the
   // same identity rather than a parallel normalization mechanism.
   "la creperie de paris": "la cr perie de paris",
+  // Maintenance audit — same pattern for "Cítricos": normalizeKey() turns
+  // the accented "í" into a key-splitting space ("c tricos"), so the
+  // common unaccented "Citricos" spelling needs this explicit alias.
+  "citricos": "c tricos",
 };
 
 /**
