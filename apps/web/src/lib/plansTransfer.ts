@@ -12,7 +12,10 @@ const MAX_IMPORT_BYTES = 1_048_576;
 // ===== SHARED PRIMITIVE TYPES =====
 
 // Phase 9.0 — content type for planner items
-export type PlannerItemType = "attraction" | "dining" | "entertainment";
+// EXP.0 — added "experience" as a fourth type. This is the single
+// authoritative definition; every other module must import PlannerItemType
+// from here rather than redeclaring the union locally.
+export type PlannerItemType = "attraction" | "dining" | "entertainment" | "experience";
 
 export type PlanItem = {
   id: string;

@@ -45,6 +45,7 @@ import type { PlannerItemType } from "./plansTransfer";
 import { getAttractionContext } from "./legacyAttractions";
 import { getDiningContext } from "./diningSuggestions";
 import { getEntertainmentContext } from "./entertainmentSuggestions";
+import { getExperienceContext } from "./experienceSuggestions";
 
 /** Lifecycle status of a resolved canonical identity. */
 export type PlannerItemLifecycle = "active" | "legacy";
@@ -122,9 +123,23 @@ export function getPlannerItemMetadata(
         lifecycle: ctx.lifecycle,
       };
     }
+    case "experience": {
+      const ctx = getExperienceContext(name, resort);
+      if (!ctx) return { type, resortId: resort };
+      return {
+        type,
+        resortId: ctx.resortId,
+        canonicalName: ctx.name,
+        parkId: ctx.parkId ?? undefined,
+        land: ctx.land,
+        nonParkLocation: ctx.parkId ? undefined : ctx.location,
+        lifecycle: ctx.lifecycle,
+      };
+    }
     default:
-      // Structural placeholder for a future Experience/seasonal type — no
-      // domain resolver exists yet, so resolve as unknown rather than guess.
+      // No domain resolver for this type — resolve as unknown rather than
+      // guess. Structurally unreachable today (PlannerItemType is exhaustively
+      // handled above), kept as a safety net for a future added type.
       return { type, resortId: resort };
   }
 }
@@ -311,6 +326,27 @@ export const DEV_PLANNER_ITEM_METADATA_CASES: Array<{
       parkId: "disneyland", land: "Main Street, U.S.A.", lifecycle: "legacy",
     },
   },
+  // ---- Active Experience, WDW + DLR (EXP.0) ----
+  {
+    description: "active experience, DLR (Bibbidi Bobbidi Boutique, Disneyland/Fantasyland)",
+    name: "Bibbidi Bobbidi Boutique",
+    type: "experience",
+    resort: "DLR",
+    expected: {
+      type: "experience", resortId: "DLR", canonicalName: "Bibbidi Bobbidi Boutique",
+      parkId: "disneyland", land: "Fantasyland", lifecycle: "active",
+    },
+  },
+  {
+    description: "active experience, WDW (Bibbidi Bobbidi Boutique, Magic Kingdom/Fantasyland)",
+    name: "Bibbidi Bobbidi Boutique",
+    type: "experience",
+    resort: "WDW",
+    expected: {
+      type: "experience", resortId: "WDW", canonicalName: "Bibbidi Bobbidi Boutique",
+      parkId: "mk", land: "Fantasyland", lifecycle: "active",
+    },
+  },
   // ---- Unknown/custom — no invented metadata ----
   {
     description: "unknown/custom attraction name",
@@ -325,5 +361,12 @@ export const DEV_PLANNER_ITEM_METADATA_CASES: Array<{
     type: "dining",
     resort: "DLR",
     expected: { type: "dining", resortId: "DLR" },
+  },
+  {
+    description: "unknown/custom experience name",
+    name: "Made Up Experience Nobody Has Heard Of",
+    type: "experience",
+    resort: "WDW",
+    expected: { type: "experience", resortId: "WDW" },
   },
 ];

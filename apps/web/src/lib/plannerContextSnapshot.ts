@@ -22,6 +22,7 @@
  */
 
 import type { ResortId } from "@disney-wait-planner/shared";
+import type { PlannerItemType } from "./plansTransfer";
 import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profileStorage";
 import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
@@ -43,12 +44,10 @@ const MAX_NAME_LEN = 120;
  */
 const MAX_SNAPSHOT_BYTES = 29_000;
 
-type SnapshotItemType = "attraction" | "dining" | "entertainment";
-
 export type PlannerContextSnapshotItem = {
   dayId: string;
   name: string;
-  type: SnapshotItemType;
+  type: PlannerItemType;
   time: string;
 };
 
@@ -260,9 +259,16 @@ function stripTrailingTimeForInference(name: string): string {
  * "attraction" type (e.g. from a pre-Phase-9 backup) is re-classified using
  * the same dining/entertainment name resolvers, so legacy/restored items are
  * still reported to Tom under their real type instead of defaulting wrong.
+ *
+ * EXP.0 fix — an explicit "experience" type is trusted as-is too, for the
+ * same contract/persistence-parity reason: My Plans hydration/import already
+ * preserves it, so Tom's snapshot must not silently downgrade it back to
+ * "attraction". No Experience name inference, catalog lookup, or canonical
+ * identity resolution is added here — a missing/stale type still only ever
+ * resolves to entertainment/dining/attraction below, exactly as before.
  */
-function resolveItemType(raw: unknown, name: string): SnapshotItemType {
-  if (raw === "dining" || raw === "entertainment") return raw;
+function resolveItemType(raw: unknown, name: string): PlannerItemType {
+  if (raw === "dining" || raw === "entertainment" || raw === "experience") return raw;
   const cleaned = stripTrailingTimeForInference(name);
   if (
     resolveEntertainmentKey(cleaned) !== null ||
@@ -322,7 +328,7 @@ function tryResolveAttraction(name: string, resort: ResortId): string | null {
  */
 function resolveCanonicalIdentity(
   name: string,
-  type: SnapshotItemType,
+  type: PlannerItemType,
   resortHint: ResortId | undefined,
   dayId: string
 ): string {

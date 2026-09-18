@@ -29,6 +29,7 @@ import {
   type DayPlanImportResult,
   type LightningBackupItem,
   type PlannerBackupPayload,
+  type PlannerItemType,
 } from "@/lib/plansTransfer";
 import {
   mockAttractionWaits,
@@ -126,9 +127,6 @@ import {
   type ConfirmedPlannerState,
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
-
-// Phase 9.0 — content type foundation
-type PlannerItemType = "attraction" | "dining" | "entertainment";
 
 type PlanItem = {
   id: string;
@@ -256,8 +254,12 @@ function stripTrailingTimeForInference(name: string): string {
 // item as type="attraction" (or omitted type entirely); this re-runs the
 // same inference used for newly-added items so old data gets recognized
 // correctly without ever overwriting an explicit dining/entertainment type.
+// EXP.0 fix — an explicit "experience" type is preserved the same way, with
+// no name-based Experience inference: unlike dining/entertainment, a
+// missing/stale type is never upgraded to "experience" here, only an
+// already-explicit one is kept as-is.
 function resolveImportedPlannerItemType(raw: unknown, name: string, resort: ResortId): PlannerItemType {
-  if (raw === "dining" || raw === "entertainment") return raw;
+  if (raw === "dining" || raw === "entertainment" || raw === "experience") return raw;
   return inferPlannerItemType(stripTrailingTimeForInference(name), resort);
 }
 
@@ -267,8 +269,12 @@ function resolveImportedPlannerItemType(raw: unknown, name: string, resort: Reso
 // matches only, no resort-scoped disambiguation needed for hydration).
 // Preserves an explicit dining/entertainment type; unknown custom names
 // that don't resolve stay "attraction".
+// EXP.0 fix — preserves an explicit "experience" type the same way. No
+// name-based Experience inference is added: a missing/stale type still only
+// ever resolves to dining/entertainment/attraction below, never upgraded to
+// "experience".
 function resolveHydratedPlannerItemType(raw: unknown, name: string): PlannerItemType {
-  if (raw === "dining" || raw === "entertainment") return raw;
+  if (raw === "dining" || raw === "entertainment" || raw === "experience") return raw;
   const cleanedName = stripTrailingTimeForInference(name);
   // Try resort-scoped entertainment aliases (e.g. "Halloween Parade") too —
   // resolveEntertainmentKey(name) alone only checks the resort-unambiguous
