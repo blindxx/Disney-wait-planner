@@ -29,6 +29,7 @@ import {
   type DayPlanImportResult,
   type LightningBackupItem,
   type PlannerBackupPayload,
+  type PlannerItemType,
 } from "@/lib/plansTransfer";
 import {
   mockAttractionWaits,
@@ -126,9 +127,6 @@ import {
   type ConfirmedPlannerState,
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
-
-// Phase 9.0 — content type foundation
-type PlannerItemType = "attraction" | "dining" | "entertainment";
 
 type PlanItem = {
   id: string;

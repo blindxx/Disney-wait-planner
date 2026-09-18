@@ -24,8 +24,9 @@ import {
   decideLocalDomainCommit,
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
+import type { PlannerItemType } from "@/lib/plansTransfer";
 
-export type PlannerItemType = "attraction" | "dining" | "entertainment";
+export type { PlannerItemType };
 
 export type ParkSection = { parkLabel: string; dayIds: string[] };
 export type CrossDayDuplicate = {
