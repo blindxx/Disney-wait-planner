@@ -347,6 +347,13 @@ const ALIASES_WDW = new Map<string, string>([
   // kept as alias so Queue-Times entries with the old name still resolve.
   ["soarin' around the world",                   "soarin' across america"],
   ["soarin around the world",                    "soarin' across america"],
+  // Living with the Land (EPCOT, World Nature) — Queue-Times renames this to
+  // "Living with the Land – Glimmering Greenhouses" during the EPCOT
+  // International Festival of the Holidays (confirmed via Queue-Times-derived
+  // tracker wdwstats.com's "livingwiththelandglimmeringgreenhouses" page).
+  // normalizeAttractionName() folds en/em dash to "-", covering both the
+  // en-dash and hyphen forms Disney/Queue-Times may use.
+  ["living with the land - glimmering greenhouses", "living with the land"],
 ]);
 
 /**
@@ -360,6 +367,23 @@ const ALIASES_DLR = new Map<string, string>([
   // Not inferred/time-based: either provider name is recognized whenever
   // Queue-Times actually returns it.
   ["haunted mansion holiday",                    "haunted mansion"],
+  // "it's a small world" (Disneyland Park) — Queue-Times renames this to
+  // "it's a small world" Holiday during the Nov–Jan seasonal overlay.
+  // Confirmed via Queue-Times-derived trackers (dlstats.com/dlpstats.com
+  // "itsasmallworldholiday"); DLR-only, MK's small world has no overlay.
+  // Both a quoted and unquoted key are covered since it's uncertain which
+  // exact punctuation Queue-Times' feed uses.
+  ["\"it's a small world\" holiday",             "\"it's a small world\""],
+  ["it's a small world holiday",                 "\"it's a small world\""],
+  // Luigi's Rollickin' Roadsters (DCA, Cars Land) — Queue-Times renames this
+  // for the Halloween and Christmas seasonal overlays (confirmed distinct
+  // Queue-Times ride IDs; same physical ride, same canonical identity).
+  ["luigi's honkin' haul-o-ween",                "luigi's rollickin' roadsters"],
+  ["luigi's joy to the whirl",                   "luigi's rollickin' roadsters"],
+  // Mater's Junkyard Jamboree (DCA, Cars Land) — same seasonal-overlay
+  // pattern as Luigi's above (confirmed distinct Queue-Times ride IDs).
+  ["mater's graveyard jambooree",                "mater's junkyard jamboree"],
+  ["mater's jingle jamboree",                    "mater's junkyard jamboree"],
   // The Many Adventures of Winnie the Pooh (Disneyland Park)
   ["winnie the pooh",                            "the many adventures of winnie the pooh"],
   ["pooh",                                       "the many adventures of winnie the pooh"],
