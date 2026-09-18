@@ -73,11 +73,9 @@ import {
   type PlannerItemLifecycle,
 } from "@/lib/plannerItemMetadata";
 import {
-  getClosureWindowForAttraction,
-  formatClosureDateRangeForDisplay,
-  normalizeToDayKeyLocal,
-  type ClosureWindow,
-} from "@/lib/plannedClosures";
+  resolveRefurbishmentLine,
+  LEGACY_ATTRACTION_WARNING,
+} from "@/lib/plannerWarnings";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -933,95 +931,6 @@ function resolvePlannerCardMetadata(
     // Ambiguous cross-resort match — no single park to key a closure lookup on.
     parkId: undefined,
   };
-}
-
-const CLOSURE_DATE_MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-/** "Mon D, YYYY" — mirrors plannedClosures.ts's own (private) date formatting. */
-function formatClosureIsoDate(iso: string): string {
-  const parts = iso.split("-");
-  if (parts.length !== 3) return iso;
-  const y = parseInt(parts[0], 10);
-  const m = parseInt(parts[1], 10);
-  const d = parseInt(parts[2], 10);
-  if (isNaN(y) || isNaN(m) || isNaN(d) || m < 1 || m > 12) return iso;
-  return `${CLOSURE_DATE_MONTHS[m - 1]} ${d}, ${y}`;
-}
-
-/**
- * "<date range>" portion of the refurbishment line. An open-ended closure
- * (no maintained end date) never invents a reopening date — it renders
- * "Starting <date>" instead of a range.
- */
-function closureDateRangeLabel(window: ClosureWindow): string {
-  if (window.startDate && window.endDate) {
-    return formatClosureDateRangeForDisplay(
-      `${window.startDate} - ${window.endDate}`,
-      undefined,
-      window.closureType
-    );
-  }
-  if (window.startDate) {
-    return `Starting ${formatClosureIsoDate(window.startDate)}`;
-  }
-  return formatClosureDateRangeForDisplay(undefined, undefined, window.closureType);
-}
-
-/**
- * Where an ISO "YYYY-MM-DD" date falls relative to a closure's maintained
- * window: "before" a future start, "inside" the window, or "after" a
- * bounded window's end. An undated start never counts as "before" (an
- * indefinite closure has already begun); an open-ended (null) end never
- * counts as "after" — it has no end to have passed.
- */
-function classifyDateAgainstClosureWindow(
-  date: string,
-  window: ClosureWindow
-): "before" | "inside" | "after" {
-  if (window.startDate && date < window.startDate) return "before";
-  if (window.endDate && date > window.endDate) return "after";
-  return "inside";
-}
-
-/**
- * Attraction-only refurbishment indicator, sourced entirely from the
- * maintained getClosureWindowForAttraction() read contract — never from
- * canonical lifecycle. A PERMANENT closure window is deliberately skipped
- * here (never rendered as "refurbishment"): canonical lifecycle (recognized
- * legacy identity) stays the sole "No longer operating" signal, and this
- * slice doesn't invent a distinct permanent-closure wording of its own.
- *
- * A bounded (non-open-ended) window that has already ended never shows a
- * notice — neither "warning" (the plan date, if any, already had its visit
- * pass by the window's end) nor "scheduled" (there's nothing left to
- * schedule). With no usable plan date, "ended" is judged against today's
- * date via the same local-day-key convention plannedClosures.ts uses
- * internally (normalizeToDayKeyLocal) — never inventing a plan date.
- */
-function resolveRefurbishmentLine(
-  canonicalName: string | undefined,
-  parkId: ParkId | undefined,
-  planDate: string | undefined
-): { text: string; variant: "warning" | "info" } | undefined {
-  if (!canonicalName || !parkId) return undefined;
-  const window = getClosureWindowForAttraction(canonicalName, parkId);
-  if (!window || window.closureType === "PERMANENT") return undefined;
-
-  const usablePlanDate = planDate && isValidIsoCalendarDate(planDate) ? planDate : undefined;
-  const referenceDate = usablePlanDate ?? normalizeToDayKeyLocal(new Date());
-  const position = classifyDateAgainstClosureWindow(referenceDate, window);
-  if (position === "after") return undefined;
-
-  const rangeLabel = closureDateRangeLabel(window);
-  if (usablePlanDate && position === "inside") {
-    return { text: `⚠ Closed for refurbishment • ${rangeLabel}`, variant: "warning" };
-  }
-  // Either a dated plan before a future window, or no usable plan date and
-  // the window isn't over yet (still upcoming, active, or open-ended).
-  return { text: `ⓘ Refurbishment scheduled • ${rangeLabel}`, variant: "info" };
 }
 
 // ===== PHASE 8.4 — HELPERS =====
@@ -6250,7 +6159,7 @@ export default function PlansPage() {
                             )}
                             {locationLine && <div className="item-park">{locationLine}</div>}
                             {lifecycle === "legacy" && (
-                              <div className="item-legacy">⚠ No longer operating</div>
+                              <div className="item-legacy">{LEGACY_ATTRACTION_WARNING}</div>
                             )}
                             {refurbishment && (
                               <div

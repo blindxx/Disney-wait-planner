@@ -18,6 +18,12 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import { getPlannerItemMetadata } from "@/lib/plannerItemMetadata";
+import {
+  resolveRefurbishmentLine,
+  LEGACY_ATTRACTION_WARNING,
+  type RefurbishmentLine,
+} from "@/lib/plannerWarnings";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
@@ -2826,6 +2832,17 @@ export default function LightningPage() {
             const parkLabel = waitEntry
               ? (parkMap.get(normalizeKey(waitEntry.canonicalName)) ?? null)
               : null;
+            // Canonical lifecycle/refurbishment — same shared contracts and
+            // presentation logic as My Plans (plannerWarnings.ts), resolved
+            // against mismatchResort (the day's actual resort context, same
+            // precedence as the park-mismatch warning above) rather than the
+            // selectedResort wait-overlay toggle.
+            const attractionMeta = getPlannerItemMetadata(item.name, "attraction", mismatchResort);
+            const refurbishment = resolveRefurbishmentLine(
+              attractionMeta.canonicalName,
+              attractionMeta.parkId,
+              dayMeta[item.dayId]?.date
+            );
             return (
               <ReservationCard
                 key={item.id}
@@ -2835,6 +2852,8 @@ export default function LightningPage() {
                 onRemove={() => handleRemove(item.id)}
                 waitEntry={waitEntry}
                 parkLabel={parkLabel}
+                isLegacy={attractionMeta.lifecycle === "legacy"}
+                refurbishment={refurbishment}
                 isEditing={editingId === item.id}
                 editingName={editingName}
                 editingStart={editingStart}
@@ -2869,6 +2888,8 @@ function ReservationCard({
   onRemove,
   waitEntry,
   parkLabel,
+  isLegacy,
+  refurbishment,
   isEditing,
   editingName,
   editingStart,
@@ -2892,6 +2913,8 @@ function ReservationCard({
   onRemove: () => void;
   waitEntry: WaitEntry | null;
   parkLabel: string | null;
+  isLegacy: boolean;
+  refurbishment: RefurbishmentLine | undefined;
   isEditing: boolean;
   editingName: string;
   editingStart: string;
@@ -3145,6 +3168,39 @@ function ReservationCard({
                 </div>
               )}
             </>
+          )}
+
+          {/* Canonical legacy/refurbishment notice — same shared contracts
+              and wording as My Plans (plannerWarnings.ts). Reservation is
+              never blocked or removed; this is informational only. */}
+          {isLegacy && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: "#d97706",
+                fontWeight: 600,
+                lineHeight: 1.3,
+                marginTop: "0.1rem",
+                marginBottom: "0.15rem",
+                wordBreak: "break-word",
+              }}
+            >
+              {LEGACY_ATTRACTION_WARNING}
+            </div>
+          )}
+          {refurbishment && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: refurbishment.variant === "warning" ? "#d97706" : "#9ca3af",
+                lineHeight: 1.3,
+                marginTop: "0.1rem",
+                marginBottom: "0.15rem",
+                wordBreak: "break-word",
+              }}
+            >
+              {refurbishment.text}
+            </div>
           )}
 
           {/* Time window */}
