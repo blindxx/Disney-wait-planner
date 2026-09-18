@@ -117,6 +117,22 @@ export const ALIASES_DLR: Record<string, string> = {
   // "Haunted Mansion" identity, not a separate attraction. ----
   "haunted mansion holiday":     "haunted mansion",
 
+  // ---- "it's a small world" Holiday (Disneyland Park) — seasonal overlay
+  // name parity with liveWaitApi.ts's ALIASES_DLR (DLR-only; MK's small
+  // world has no overlay). normalizeKey strips quotes/apostrophes, so a
+  // single key covers the provider name regardless of quote placement. ----
+  "its a small world holiday":   "its a small world",
+
+  // ---- Luigi's Rollickin' Roadsters (DCA, Cars Land) — Halloween/Christmas
+  // seasonal overlay names, parity with liveWaitApi.ts's ALIASES_DLR. ----
+  "luigis honkin haul o ween":   "luigis rollickin roadsters",
+  "luigis joy to the whirl":     "luigis rollickin roadsters",
+
+  // ---- Mater's Junkyard Jamboree (DCA, Cars Land) — Halloween/Christmas
+  // seasonal overlay names, parity with liveWaitApi.ts's ALIASES_DLR. ----
+  "maters graveyard jambooree":  "maters junkyard jamboree",
+  "maters jingle jamboree":      "maters junkyard jamboree",
+
   // ---- Common shorthands (Disneyland Park) ----
   "pirates":                     "pirates of the caribbean",
   "guardians":                   "guardians of the galaxy mission breakout",
@@ -296,6 +312,13 @@ export const ALIASES_WDW: Record<string, string> = {
   // ---- EPCOT World Showcase ----
   "gran fiesta":                 "gran fiesta tour starring the three caballeros",
   "three caballeros":            "gran fiesta tour starring the three caballeros",
+
+  // ---- Living with the Land (EPCOT World Nature) — seasonal overlay name
+  // parity with liveWaitApi.ts's ALIASES_WDW: Queue-Times renames this to
+  // "Living with the Land – Glimmering Greenhouses" during the EPCOT
+  // International Festival of the Holidays; same ride, same canonical
+  // identity. ----
+  "living with the land glimmering greenhouses": "living with the land",
 
   // ---- MK Fantasyland ----
   // "mermaid" alone is a single token → needs alias
@@ -495,6 +518,12 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "buzz",                  resort: "DLR", expectedKey: "buzz lightyear astro blasters" },
   // --- Haunted Mansion Holiday (DLR seasonal overlay name — parity with liveWaitApi.ts) ---
   { input: "Haunted Mansion Holiday", resort: "DLR", expectedKey: "haunted mansion" },
+  // --- Queue-Times seasonal/overlay names (DLR/DCA) — parity with liveWaitApi.ts ---
+  { input: "\"it's a small world\" Holiday", resort: "DLR", expectedKey: "its a small world" },
+  { input: "Luigi's Honkin' Haul-O-Ween",    resort: "DLR", expectedKey: "luigis rollickin roadsters" },
+  { input: "Luigi's Joy to the Whirl",       resort: "DLR", expectedKey: "luigis rollickin roadsters" },
+  { input: "Mater's Graveyard JamBOOree",    resort: "DLR", expectedKey: "maters junkyard jamboree" },
+  { input: "Mater's Jingle Jamboree",        resort: "DLR", expectedKey: "maters junkyard jamboree" },
   // --- Targeted patch: WDW ---
   { input: "mickey and minnie",     resort: "WDW", expectedKey: "mickey minnies runaway railway" },
   { input: "dumbo",                 resort: "WDW", expectedKey: "dumbo the flying elephant" },
@@ -510,4 +539,6 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "cop",                          resort: "WDW", expectedKey: "walt disneys carousel of progress" },
   { input: "Carousel of Progress",         resort: "WDW", expectedKey: "walt disneys carousel of progress" },
   { input: "Walt Disney's Carousel of Progress", resort: "WDW", expectedKey: "walt disneys carousel of progress" },
+  // --- Living with the Land – Glimmering Greenhouses (EPCOT seasonal overlay name — parity with liveWaitApi.ts) ---
+  { input: "Living with the Land – Glimmering Greenhouses", resort: "WDW", expectedKey: "living with the land" },
 ];
