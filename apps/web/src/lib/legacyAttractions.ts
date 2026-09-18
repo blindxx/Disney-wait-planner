@@ -39,7 +39,14 @@
  */
 
 import { mockAttractionWaits, type ParkId, type ResortId } from "@disney-wait-planner/shared";
-import { normalizeKey, stripAnnotations, ALIASES_DLR, ALIASES_WDW } from "./plansMatching";
+import {
+  normalizeKey,
+  stripAnnotations,
+  ALIASES_DLR,
+  ALIASES_WDW,
+  tokenize,
+  containsWholeWordSequence,
+} from "./plansMatching";
 
 export type LegacyAttraction = {
   name: string;
@@ -79,6 +86,12 @@ const LEGACY_ATTRACTIONS: LegacyAttraction[] = [
   // Guardians of the Galaxy: Cosmic Rewind (active catalog, parkId
   // "epcot", opened May 27, 2022). Never at DLR. No announced return.
   { name: "Universe of Energy", resort: "WDW", parkId: "epcot", land: "World Discovery" },
+  // DinoLand U.S.A. dark ride, opened 1998; confirmed permanently closed
+  // (see plannedClosures.ts's PERMANENT "ak:dinosaur" entry, dateRange
+  // start 2026-02-02). Never at DLR. No announced return/replacement as of
+  // this entry — canonical lifecycle here is the sole "legacy" signal;
+  // plannedClosures.ts's closureType stays a separate, independent record.
+  { name: "DINOSAUR", resort: "WDW", parkId: "ak", land: "DinoLand U.S.A." },
 ];
 
 const ACTIVE_ATTRACTION_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
@@ -115,23 +128,53 @@ const LEGACY_ATTRACTION_ALIASES: Record<string, string> = {
  *   Stage 3: alias lookup (ALIASES_DLR/ALIASES_WDW), incl. "the "-prefix
  *            fallback, matching plansMatching.ts's lookupWait()/
  *            crossDayChecks.ts's resolveIdentityKey conventions.
+ *   Stage 2: whole-word containment against the active catalog only —
+ *            opt-in via `options.allowContainment`, off by default. Mirrors
+ *            plansMatching.ts's lookupWait() Stage 2 exactly (same
+ *            tokenize()/containsWholeWordSequence() primitives, same
+ *            >=2-meaningful-token / single-match ambiguity-safety rule), so
+ *            a name lookupWait() recognizes only via containment (e.g. "Big
+ *            Thunder Mountain" -> mock catalog's "Big Thunder Mountain
+ *            Railroad") resolves the same canonical identity here too.
  *   Legacy fallback: only reached when the active catalog found nothing —
  *            same exact + alias stages against LEGACY_ATTRACTIONS/
  *            LEGACY_ATTRACTION_ALIASES.
  *
- * Returns null when nothing resolves in either catalog. Does not perform
- * whole-word containment matching (unlike lookupWait()'s Stage 2 / the
- * duplicate-detection containment fallback in crossDayChecks.ts) — those
- * remain each caller's own concern; this function is deliberately the same
- * narrow exact+alias primitive resolveDiningKey/resolveEntertainmentKey are.
+ * Returns null when nothing resolves in either catalog.
+ *
+ * Containment defaults to off because two existing callers rely on this
+ * function's narrower exact+alias-only contract and must not change
+ * behavior: plansContextInference.ts's day-park inference documents
+ * containment as "intentionally excluded... to avoid false positives", and
+ * crossDayChecks.ts/plans/page.tsx's isKnownAttractionName already run their
+ * own separate active-catalog containment stage before ever reaching this
+ * function's legacy-only fallback. Only getAttractionContext() (below) opts
+ * in, since it backs My Plans/Lightning card metadata (location/lifecycle/
+ * refurbishment), which must resolve the same identity lookupWait() already
+ * grants a wait badge to.
  */
-export function resolveAttractionIdentityKey(name: string, resort: ResortId): string | null {
+export function resolveAttractionIdentityKey(
+  name: string,
+  resort: ResortId,
+  options?: { allowContainment?: boolean },
+): string | null {
   const key = normalizeKey(stripAnnotations(name));
   const aliases = resort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
 
   if (ACTIVE_ATTRACTION_KEYS_BY_RESORT[resort].has(key)) return key;
   const aliasTarget = aliases[key] ?? (key.startsWith("the ") ? aliases[key.slice(4)] : undefined);
   if (aliasTarget && ACTIVE_ATTRACTION_KEYS_BY_RESORT[resort].has(aliasTarget)) return aliasTarget;
+
+  if (options?.allowContainment) {
+    const planTokens = tokenize(key);
+    if (planTokens.length >= 2) {
+      const matches: string[] = [];
+      for (const attrKey of ACTIVE_ATTRACTION_KEYS_BY_RESORT[resort]) {
+        if (containsWholeWordSequence(attrKey, planTokens)) matches.push(attrKey);
+      }
+      if (matches.length === 1) return matches[0];
+    }
+  }
 
   // Legacy fallback — only reached when the active catalog found nothing.
   if (LEGACY_ATTRACTION_KEYS_BY_RESORT[resort].has(key)) return key;
@@ -159,9 +202,16 @@ export type AttractionContext = {
  * fallback (see resolveAttractionIdentityKey). Mirrors getDiningContext/
  * getEntertainmentContext. Returns undefined only when the name itself
  * doesn't resolve to any known attraction identity (active or legacy).
+ *
+ * Opts into resolveAttractionIdentityKey's containment stage (see its own
+ * doc comment) so a name recognized only via lookupWait()'s Stage-2
+ * containment (e.g. "Big Thunder Mountain" for the mock catalog's "Big
+ * Thunder Mountain Railroad") resolves the same canonical card metadata
+ * (location/lifecycle) that getPlannerItemMetadata() surfaces to My Plans
+ * and Lightning, instead of silently losing it.
  */
 export function getAttractionContext(name: string, resort: ResortId): AttractionContext | undefined {
-  const key = resolveAttractionIdentityKey(name, resort);
+  const key = resolveAttractionIdentityKey(name, resort, { allowContainment: true });
   if (!key) return undefined;
   const activeMatch = mockAttractionWaits.find(
     (a) => a.resortId === resort && normalizeKey(a.name) === key,

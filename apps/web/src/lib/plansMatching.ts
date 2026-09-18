@@ -112,6 +112,11 @@ export const ALIASES_DLR: Record<string, string> = {
   web:   "web slingers a spider man adventure",
   grr:   "grizzly river run",
 
+  // ---- Haunted Mansion Holiday (Disneyland Park) — seasonal overlay name
+  // parity with liveWaitApi.ts's ALIASES_DLR: same ride, same canonical
+  // "Haunted Mansion" identity, not a separate attraction. ----
+  "haunted mansion holiday":     "haunted mansion",
+
   // ---- Common shorthands (Disneyland Park) ----
   "pirates":                     "pirates of the caribbean",
   "guardians":                   "guardians of the galaxy mission breakout",
@@ -488,6 +493,8 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "dumbo",                 resort: "DLR", expectedKey: "dumbo the flying elephant" },
   { input: "space",                 resort: "DLR", expectedKey: "space mountain" },
   { input: "buzz",                  resort: "DLR", expectedKey: "buzz lightyear astro blasters" },
+  // --- Haunted Mansion Holiday (DLR seasonal overlay name — parity with liveWaitApi.ts) ---
+  { input: "Haunted Mansion Holiday", resort: "DLR", expectedKey: "haunted mansion" },
   // --- Targeted patch: WDW ---
   { input: "mickey and minnie",     resort: "WDW", expectedKey: "mickey minnies runaway railway" },
   { input: "dumbo",                 resort: "WDW", expectedKey: "dumbo the flying elephant" },

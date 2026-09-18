@@ -58,19 +58,24 @@ import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
   getDiningSuggestions,
-  getDiningLocation,
-  getDiningCanonicalName,
   resolveDiningKey,
   isDiningName,
 } from "@/lib/diningSuggestions";
 import {
   getEntertainmentSuggestions,
-  getEntertainmentLocation,
-  getEntertainmentCanonicalName,
   getEntertainmentAvailabilityType,
   resolveEntertainmentKey,
   isEntertainmentName,
 } from "@/lib/entertainmentSuggestions";
+import {
+  getPlannerItemMetadata,
+  type PlannerItemMetadata,
+  type PlannerItemLifecycle,
+} from "@/lib/plannerItemMetadata";
+import {
+  resolveRefurbishmentLine,
+  LEGACY_ATTRACTION_WARNING,
+} from "@/lib/plannerWarnings";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import {
   normalizeKey,
@@ -874,6 +879,60 @@ function readSessionContext(
  */
 const DISPLAY_CANONICAL_RIDE_NAME = true;
 
+// ===== PLANNER LOCATION & LIFECYCLE INDICATORS (My Plans cards) =====
+// Wires the shared getPlannerItemMetadata()/getClosureWindowForAttraction()
+// read contracts into card display. This module owns no location/closure
+// data of its own — it only formats what those contracts already resolve.
+
+/** "Park • Land/Area" (or the maintained non-park location) for a resolved identity. */
+function plannerLocationLine(meta: PlannerItemMetadata): string | undefined {
+  if (meta.parkId) {
+    const parkLabel = PARK_LABELS[meta.parkId] ?? meta.parkId;
+    return meta.land ? `${parkLabel} • ${meta.land}` : parkLabel;
+  }
+  return meta.nonParkLocation;
+}
+
+/**
+ * Resolve canonical name/location/lifecycle for a card via the shared
+ * metadata contract, honoring the same dayResort precedence (override >
+ * inferred from day items > combined cross-resort match) already used for
+ * dining/entertainment display below. `parkId` is only ever returned when a
+ * single resort context is known — never guessed across resorts — since it
+ * feeds the attraction closure-window lookup, which is keyed by an exact park.
+ */
+function resolvePlannerCardMetadata(
+  lookupName: string,
+  type: PlannerItemType,
+  dayResort: ResortId | undefined
+): {
+  canonicalName?: string;
+  locationLine?: string;
+  lifecycle?: PlannerItemLifecycle;
+  parkId?: ParkId;
+} {
+  if (dayResort) {
+    const meta = getPlannerItemMetadata(lookupName, type, dayResort);
+    return {
+      canonicalName: meta.canonicalName,
+      locationLine: plannerLocationLine(meta),
+      lifecycle: meta.lifecycle,
+      parkId: meta.parkId,
+    };
+  }
+  const dlrMeta = getPlannerItemMetadata(lookupName, type, "DLR");
+  const wdwMeta = getPlannerItemMetadata(lookupName, type, "WDW");
+  const dlrLoc = plannerLocationLine(dlrMeta);
+  const wdwLoc = plannerLocationLine(wdwMeta);
+  return {
+    canonicalName: dlrMeta.canonicalName ?? wdwMeta.canonicalName,
+    locationLine: dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc,
+    lifecycle: dlrMeta.lifecycle ?? wdwMeta.lifecycle,
+    // Ambiguous cross-resort match — no single park to key a closure lookup on.
+    parkId: undefined,
+  };
+}
+
 // ===== PHASE 8.4 — HELPERS =====
 // inferDayPark moved to lib/crossDayChecks.ts (Phase 10.4.1) so it has a
 // single, shared implementation instead of a page-local duplicate.
@@ -1604,19 +1663,6 @@ export default function PlansPage() {
         waitMins: a.waitMins,
         canonicalName: a.name,
       });
-    }
-    return map;
-  }, [selectedResort, liveAttractions]);
-
-  // Park name lookup: canonical normalized name → friendly park label.
-  // Built from the same source data as waitMap — no extra fetch.
-  const parkMap = useMemo(() => {
-    const source =
-      LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
-    const map = new Map<string, string>();
-    for (const a of source) {
-      if (a.resortId !== selectedResort) continue;
-      map.set(normalizeKey(a.name), PARK_LABELS[a.parkId] ?? a.parkId);
     }
     return map;
   }, [selectedResort, liveAttractions]);
@@ -4765,6 +4811,12 @@ export default function PlansPage() {
           font-weight: 700;
           color: #1a1a2e;
         }
+        .plans-disclaimer {
+          font-size: 0.75rem;
+          color: #9ca3af;
+          line-height: 1.4;
+          margin: -0.75rem 0 1.25rem;
+        }
         .plans-header-actions {
           display: flex;
           gap: 0.5rem;
@@ -4981,6 +5033,28 @@ export default function PlansPage() {
           font-size: 0.7rem;
           color: #9ca3af;
           font-style: italic;
+          line-height: 1.3;
+          margin-top: 0.1rem;
+          word-break: break-word;
+        }
+        .item-legacy {
+          font-size: 0.7rem;
+          color: #d97706;
+          font-weight: 600;
+          line-height: 1.3;
+          margin-top: 0.1rem;
+          word-break: break-word;
+        }
+        .item-refurb-warning {
+          font-size: 0.7rem;
+          color: #d97706;
+          line-height: 1.3;
+          margin-top: 0.1rem;
+          word-break: break-word;
+        }
+        .item-refurb-info {
+          font-size: 0.7rem;
+          color: #9ca3af;
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
@@ -5676,6 +5750,10 @@ export default function PlansPage() {
           </div>
         </div>
 
+        <p className="plans-disclaimer">
+          Planning information may change. Check the official Disney app or website for the latest attraction, dining, entertainment, refurbishment, and schedule information.
+        </p>
+
         {/* Resort Toggle — scopes the wait overlay to the selected resort.
             Gated by ready to prevent a DLR→WDW flip when WDW is stored. */}
         {ready ? (
@@ -6046,87 +6124,28 @@ export default function PlansPage() {
                           );
                         })()}
                       </div>
-                      {DISPLAY_CANONICAL_RIDE_NAME && (() => {
-                        const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
-                        if (!w) return null;
-                        const hasLabel =
-                          w.status === "DOWN" || w.status === "CLOSED" || w.waitMins != null;
-                        if (!hasLabel) return null;
-                        const parkLabel = parkMap.get(normalizeKey(w.canonicalName));
-                        return (
-                          <>
-                            {w.canonicalName !== item.name && (
-                              <div className="item-canonical">{w.canonicalName}</div>
-                            )}
-                            {parkLabel && (
-                              <div className="item-park">{parkLabel}</div>
-                            )}
-                          </>
-                        );
-                      })()}
-                      {item.type === "dining" && (() => {
-                        // Phase 9.3 follow-up — only resolve against selectedResort
-                        // once a day has real context (override or inferred). On a
-                        // genuinely Auto, contextless day, check both resorts and
-                        // show a combined location when the name exists in both
-                        // (e.g. Oga's Cantina) instead of pinning to whichever
-                        // resort the selector happens to be on.
+                      {(() => {
+                        // Single shared-metadata read per card: canonical
+                        // name/location/lifecycle from getPlannerItemMetadata(),
+                        // plus (attractions only) the refurbishment window from
+                        // getClosureWindowForAttraction(). Same dayResort
+                        // precedence as before (override > inferred from day
+                        // items > combined cross-resort match when the day has
+                        // no established context yet), and the same cleaned-name
+                        // lookup used for type inference so a stored name like
+                        // "fantasmic 10pm" still resolves.
                         const dayResort = resolveDayContextResort(item.dayId);
-                        // Same cleaned-name lookup used for type inference, so a
-                        // stored name like "fantasmic 10pm" still resolves a
-                        // canonical/location display instead of falling through
-                        // as unknown.
-                        const diningLookupName = stripTrailingTimeForInference(item.name);
-                        let diningCanonicalName: string | undefined;
-                        let diningLocation: string | undefined;
-                        if (dayResort) {
-                          diningCanonicalName = getDiningCanonicalName(diningLookupName, dayResort);
-                          diningLocation = getDiningLocation(diningLookupName, dayResort);
-                        } else {
-                          const dlrLoc = getDiningLocation(diningLookupName, "DLR");
-                          const wdwLoc = getDiningLocation(diningLookupName, "WDW");
-                          diningCanonicalName =
-                            getDiningCanonicalName(diningLookupName, "DLR") ?? getDiningCanonicalName(diningLookupName, "WDW");
-                          diningLocation =
-                            dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
-                        }
-                        if (!diningLocation) return null;
-                        return (
-                          <>
-                            {diningCanonicalName && diningCanonicalName !== item.name && (
-                              <div className="item-canonical">{diningCanonicalName}</div>
-                            )}
-                            <div className="item-park">{diningLocation}</div>
-                          </>
-                        );
-                      })()}
-                      {item.type === "entertainment" && (() => {
-                        // Same combined/ambiguous-location handling as dining above.
-                        const dayResort = resolveDayContextResort(item.dayId);
-                        // Same cleaned-name lookup used for type inference, so a
-                        // stored name like "fantasmic 10pm" still resolves a
-                        // canonical/location display instead of falling through
-                        // as unknown.
-                        const entertainmentLookupName = stripTrailingTimeForInference(item.name);
-                        let entertainmentCanonicalName: string | undefined;
-                        let entertainmentLocation: string | undefined;
-                        if (dayResort) {
-                          entertainmentCanonicalName = getEntertainmentCanonicalName(entertainmentLookupName, dayResort);
-                          entertainmentLocation = getEntertainmentLocation(entertainmentLookupName, dayResort);
-                        } else {
-                          const dlrLoc = getEntertainmentLocation(entertainmentLookupName, "DLR");
-                          const wdwLoc = getEntertainmentLocation(entertainmentLookupName, "WDW");
-                          entertainmentCanonicalName =
-                            getEntertainmentCanonicalName(entertainmentLookupName, "DLR") ??
-                            getEntertainmentCanonicalName(entertainmentLookupName, "WDW");
-                          entertainmentLocation =
-                            dlrLoc && wdwLoc && dlrLoc !== wdwLoc ? `${dlrLoc} / ${wdwLoc}` : dlrLoc ?? wdwLoc;
-                        }
-                        if (!entertainmentLocation) return null;
-                        const availabilityType = getEntertainmentAvailabilityType(
-                          entertainmentLookupName,
-                          dayResort ?? "DLR"
-                        );
+                        const lookupName = stripTrailingTimeForInference(item.name);
+                        const { canonicalName, locationLine, lifecycle, parkId } =
+                          resolvePlannerCardMetadata(lookupName, item.type, dayResort);
+                        const refurbishment =
+                          item.type === "attraction"
+                            ? resolveRefurbishmentLine(canonicalName, parkId, dayMeta[item.dayId]?.date)
+                            : undefined;
+                        const availabilityType =
+                          item.type === "entertainment"
+                            ? getEntertainmentAvailabilityType(lookupName, dayResort ?? "DLR")
+                            : undefined;
                         const availabilityLabel =
                           availabilityType === "seasonal"
                             ? "Seasonal Event"
@@ -6135,10 +6154,24 @@ export default function PlansPage() {
                               : null;
                         return (
                           <>
-                            {entertainmentCanonicalName && entertainmentCanonicalName !== item.name && (
-                              <div className="item-canonical">{entertainmentCanonicalName}</div>
+                            {DISPLAY_CANONICAL_RIDE_NAME && canonicalName && canonicalName !== item.name && (
+                              <div className="item-canonical">{canonicalName}</div>
                             )}
-                            <div className="item-park">{entertainmentLocation}</div>
+                            {locationLine && <div className="item-park">{locationLine}</div>}
+                            {lifecycle === "legacy" && (
+                              <div className="item-legacy">{LEGACY_ATTRACTION_WARNING}</div>
+                            )}
+                            {refurbishment && (
+                              <div
+                                className={
+                                  refurbishment.variant === "warning"
+                                    ? "item-refurb-warning"
+                                    : "item-refurb-info"
+                                }
+                              >
+                                {refurbishment.text}
+                              </div>
+                            )}
                             {availabilityLabel && (
                               <div className="item-availability">{availabilityLabel}</div>
                             )}

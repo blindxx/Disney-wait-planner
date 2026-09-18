@@ -354,6 +354,12 @@ const ALIASES_WDW = new Map<string, string>([
  * Same contract as ALIASES_WDW — keys and values in normalizeAttractionName() form.
  */
 const ALIASES_DLR = new Map<string, string>([
+  // Haunted Mansion (Disneyland Park) — Queue-Times renames this to "Haunted
+  // Mansion Holiday" during the seasonal Nightmare Before Christmas overlay
+  // (same ride, same canonical DWP identity — never a separate attraction).
+  // Not inferred/time-based: either provider name is recognized whenever
+  // Queue-Times actually returns it.
+  ["haunted mansion holiday",                    "haunted mansion"],
   // The Many Adventures of Winnie the Pooh (Disneyland Park)
   ["winnie the pooh",                            "the many adventures of winnie the pooh"],
   ["pooh",                                       "the many adventures of winnie the pooh"],

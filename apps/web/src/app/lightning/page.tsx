@@ -18,6 +18,12 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import { getPlannerItemMetadata } from "@/lib/plannerItemMetadata";
+import {
+  resolveRefurbishmentLine,
+  LEGACY_ATTRACTION_WARNING,
+  type RefurbishmentLine,
+} from "@/lib/plannerWarnings";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
@@ -233,7 +239,35 @@ function loadDayParks(key: string): Record<string, string> {
   }
 }
 
-/** Load day metadata from profile-scoped localStorage (read-only on Lightning page). */
+/**
+ * Strict calendar-date validator for YYYY-MM-DD strings — mirrors
+ * plans/page.tsx's own isValidIsoCalendarDate() exactly (Phase 8.8 read-only
+ * mirror; My Plans owns writes and does the same validation on save, but a
+ * reader must not trust the raw stored string as-is).
+ */
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parts = value.split("-");
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  if (y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const date = new Date(y, m - 1, d);
+  return (
+    date.getFullYear() === y &&
+    date.getMonth() === m - 1 &&
+    date.getDate() === d
+  );
+}
+
+/**
+ * Load day metadata from profile-scoped localStorage (read-only on Lightning
+ * page). Reads both `label` and `date` — mirrors plans/page.tsx's own
+ * loadDayMeta() exactly, since this page's refurbishment-warning resolution
+ * needs the same day date My Plans uses (previously this only read `label`,
+ * silently dropping `date` and starving resolveRefurbishmentLine() of the
+ * day's actual plan date).
+ */
 function loadDayMeta(key: string): Record<string, DayMeta> {
   try {
     const raw = localStorage.getItem(key);
@@ -246,7 +280,14 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
       if (typeof rawMeta !== "object" || rawMeta === null) continue;
       const entry = rawMeta as Record<string, unknown>;
       const label = typeof entry.label === "string" ? entry.label.trim() : "";
-      if (label) result[dayId] = { label };
+      const rawDate = typeof entry.date === "string" ? entry.date.trim() : "";
+      const date = isValidIsoCalendarDate(rawDate) ? rawDate : "";
+      if (label || date) {
+        result[dayId] = {
+          ...(label ? { label } : {}),
+          ...(date ? { date } : {}),
+        };
+      }
     }
     return result;
   } catch {
@@ -2151,6 +2192,52 @@ export default function LightningPage() {
   const mismatchResort: ResortId =
     (resolvedDayPark ? (PARK_TO_RESORT[resolvedDayPark] ?? null) : null) ?? selectedResort;
 
+  // Codex P2 — the day's ACTUAL resort context for canonical identity/
+  // lifecycle/refurbishment metadata, independent of the selectedResort
+  // wait-overlay toggle. Same precedence as My Plans's own
+  // resolveDayContextResort() (plans/page.tsx), extended with a Lightning-
+  // reservation inference step for a Lightning-only day:
+  //   1. explicit manual park override (whatever resort it belongs to) —
+  //      authoritative.
+  //   2. resort inferred from the day's My Plans items (via
+  //      inferPlansContext) — authoritative whenever it yields a signal.
+  //   3. resort inferred from the day's own Lightning reservations (same
+  //      inferPlansContext helper) — only reached when the day has no
+  //      manual override AND no My Plans items/signal, so a Lightning-only
+  //      day (e.g. a lone WDW-only DINOSAUR reservation, no My Plans items
+  //      for that day at all) still establishes its real resort instead of
+  //      falling through to whatever the wait-overlay toggle happens to be
+  //      set to.
+  //   4. selectedResort — final no-signal fallback only (same "no park set
+  //      yet" case mismatchResort already used, unchanged).
+  //
+  // Deliberately NOT mismatchResort: that value's manual-override branch
+  // requires `PARK_TO_RESORT[override] === selectedResort` (see its own
+  // comment above) because mismatchResort exists only to drive the add/
+  // edit-form park-mismatch warning against whichever resort's attractions
+  // are currently on screen. Reusing it for identity meant a day manually
+  // set to a WDW park silently lost that override — and fell back to
+  // whatever selectedResort was — the instant the wait-overlay toggle was
+  // switched to DLR.
+  const identityResort: ResortId = useMemo(() => {
+    const override = dayParks[safeActiveDayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return overrideResort;
+
+    const plansInferred = inferPlansContext(
+      planDayItems.map((it, i) => ({ id: String(i), name: it.name, timeLabel: "" }))
+    );
+    if (plansInferred.resort) return plansInferred.resort;
+
+    const dayLightningItems = items.filter((it) => it.dayId === safeActiveDayId);
+    const lightningInferred = inferPlansContext(
+      dayLightningItems.map((it, i) => ({ id: String(i), name: it.name, timeLabel: "" }))
+    );
+    if (lightningInferred.resort) return lightningInferred.resort;
+
+    return selectedResort;
+  }, [dayParks, safeActiveDayId, planDayItems, items, selectedResort]);
+
   // Phase 8.8 — Build wait and park-id maps scoped to mismatchResort.
   // Scoping to one resort eliminates same-name cross-resort collisions (e.g. Space Mountain
   // exists in both DLR and WDW with different parks) and ensures lookupWait receives entries
@@ -2826,6 +2913,18 @@ export default function LightningPage() {
             const parkLabel = waitEntry
               ? (parkMap.get(normalizeKey(waitEntry.canonicalName)) ?? null)
               : null;
+            // Canonical lifecycle/refurbishment — same shared contracts and
+            // presentation logic as My Plans (plannerWarnings.ts), resolved
+            // against identityResort (the day's actual resort context,
+            // independent of the selectedResort wait-overlay toggle — see
+            // identityResort's own comment for why this must not be
+            // mismatchResort).
+            const attractionMeta = getPlannerItemMetadata(item.name, "attraction", identityResort);
+            const refurbishment = resolveRefurbishmentLine(
+              attractionMeta.canonicalName,
+              attractionMeta.parkId,
+              dayMeta[item.dayId]?.date
+            );
             return (
               <ReservationCard
                 key={item.id}
@@ -2835,6 +2934,8 @@ export default function LightningPage() {
                 onRemove={() => handleRemove(item.id)}
                 waitEntry={waitEntry}
                 parkLabel={parkLabel}
+                isLegacy={attractionMeta.lifecycle === "legacy"}
+                refurbishment={refurbishment}
                 isEditing={editingId === item.id}
                 editingName={editingName}
                 editingStart={editingStart}
@@ -2869,6 +2970,8 @@ function ReservationCard({
   onRemove,
   waitEntry,
   parkLabel,
+  isLegacy,
+  refurbishment,
   isEditing,
   editingName,
   editingStart,
@@ -2892,6 +2995,8 @@ function ReservationCard({
   onRemove: () => void;
   waitEntry: WaitEntry | null;
   parkLabel: string | null;
+  isLegacy: boolean;
+  refurbishment: RefurbishmentLine | undefined;
   isEditing: boolean;
   editingName: string;
   editingStart: string;
@@ -3145,6 +3250,39 @@ function ReservationCard({
                 </div>
               )}
             </>
+          )}
+
+          {/* Canonical legacy/refurbishment notice — same shared contracts
+              and wording as My Plans (plannerWarnings.ts). Reservation is
+              never blocked or removed; this is informational only. */}
+          {isLegacy && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: "#d97706",
+                fontWeight: 600,
+                lineHeight: 1.3,
+                marginTop: "0.1rem",
+                marginBottom: "0.15rem",
+                wordBreak: "break-word",
+              }}
+            >
+              {LEGACY_ATTRACTION_WARNING}
+            </div>
+          )}
+          {refurbishment && (
+            <div
+              style={{
+                fontSize: "0.7rem",
+                color: refurbishment.variant === "warning" ? "#d97706" : "#9ca3af",
+                lineHeight: 1.3,
+                marginTop: "0.1rem",
+                marginBottom: "0.15rem",
+                wordBreak: "break-word",
+              }}
+            >
+              {refurbishment.text}
+            </div>
           )}
 
           {/* Time window */}
