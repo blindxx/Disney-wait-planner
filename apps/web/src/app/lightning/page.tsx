@@ -239,7 +239,35 @@ function loadDayParks(key: string): Record<string, string> {
   }
 }
 
-/** Load day metadata from profile-scoped localStorage (read-only on Lightning page). */
+/**
+ * Strict calendar-date validator for YYYY-MM-DD strings — mirrors
+ * plans/page.tsx's own isValidIsoCalendarDate() exactly (Phase 8.8 read-only
+ * mirror; My Plans owns writes and does the same validation on save, but a
+ * reader must not trust the raw stored string as-is).
+ */
+function isValidIsoCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parts = value.split("-");
+  const y = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  const d = parseInt(parts[2], 10);
+  if (y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const date = new Date(y, m - 1, d);
+  return (
+    date.getFullYear() === y &&
+    date.getMonth() === m - 1 &&
+    date.getDate() === d
+  );
+}
+
+/**
+ * Load day metadata from profile-scoped localStorage (read-only on Lightning
+ * page). Reads both `label` and `date` — mirrors plans/page.tsx's own
+ * loadDayMeta() exactly, since this page's refurbishment-warning resolution
+ * needs the same day date My Plans uses (previously this only read `label`,
+ * silently dropping `date` and starving resolveRefurbishmentLine() of the
+ * day's actual plan date).
+ */
 function loadDayMeta(key: string): Record<string, DayMeta> {
   try {
     const raw = localStorage.getItem(key);
@@ -252,7 +280,14 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
       if (typeof rawMeta !== "object" || rawMeta === null) continue;
       const entry = rawMeta as Record<string, unknown>;
       const label = typeof entry.label === "string" ? entry.label.trim() : "";
-      if (label) result[dayId] = { label };
+      const rawDate = typeof entry.date === "string" ? entry.date.trim() : "";
+      const date = isValidIsoCalendarDate(rawDate) ? rawDate : "";
+      if (label || date) {
+        result[dayId] = {
+          ...(label ? { label } : {}),
+          ...(date ? { date } : {}),
+        };
+      }
     }
     return result;
   } catch {
