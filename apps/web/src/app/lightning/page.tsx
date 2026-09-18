@@ -2192,6 +2192,33 @@ export default function LightningPage() {
   const mismatchResort: ResortId =
     (resolvedDayPark ? (PARK_TO_RESORT[resolvedDayPark] ?? null) : null) ?? selectedResort;
 
+  // Codex P2 — the day's ACTUAL resort context for canonical identity/
+  // lifecycle/refurbishment metadata, independent of the selectedResort
+  // wait-overlay toggle. Same precedence as My Plans's own
+  // resolveDayContextResort() (plans/page.tsx): explicit manual park
+  // override (whatever resort it belongs to) → inferred from the day's
+  // actual plan items → selectedResort only as a last resort, when the day
+  // truly has no resort signal of its own yet (same "no park set yet"
+  // fallback mismatchResort already used, so that case is unchanged).
+  //
+  // Deliberately NOT mismatchResort: that value's manual-override branch
+  // requires `PARK_TO_RESORT[override] === selectedResort` (see its own
+  // comment above) because mismatchResort exists only to drive the add/
+  // edit-form park-mismatch warning against whichever resort's attractions
+  // are currently on screen. Reusing it for identity meant a day manually
+  // set to a WDW park silently lost that override — and fell back to
+  // whatever selectedResort was — the instant the wait-overlay toggle was
+  // switched to DLR.
+  const identityResort: ResortId = useMemo(() => {
+    const override = dayParks[safeActiveDayId];
+    const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
+    if (overrideResort) return overrideResort;
+    const inferred = inferPlansContext(
+      planDayItems.map((it, i) => ({ id: String(i), name: it.name, timeLabel: "" }))
+    );
+    return inferred.resort ?? selectedResort;
+  }, [dayParks, safeActiveDayId, planDayItems, selectedResort]);
+
   // Phase 8.8 — Build wait and park-id maps scoped to mismatchResort.
   // Scoping to one resort eliminates same-name cross-resort collisions (e.g. Space Mountain
   // exists in both DLR and WDW with different parks) and ensures lookupWait receives entries
@@ -2869,10 +2896,11 @@ export default function LightningPage() {
               : null;
             // Canonical lifecycle/refurbishment — same shared contracts and
             // presentation logic as My Plans (plannerWarnings.ts), resolved
-            // against mismatchResort (the day's actual resort context, same
-            // precedence as the park-mismatch warning above) rather than the
-            // selectedResort wait-overlay toggle.
-            const attractionMeta = getPlannerItemMetadata(item.name, "attraction", mismatchResort);
+            // against identityResort (the day's actual resort context,
+            // independent of the selectedResort wait-overlay toggle — see
+            // identityResort's own comment for why this must not be
+            // mismatchResort).
+            const attractionMeta = getPlannerItemMetadata(item.name, "attraction", identityResort);
             const refurbishment = resolveRefurbishmentLine(
               attractionMeta.canonicalName,
               attractionMeta.parkId,
