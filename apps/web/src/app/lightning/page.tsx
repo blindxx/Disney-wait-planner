@@ -2195,11 +2195,21 @@ export default function LightningPage() {
   // Codex P2 — the day's ACTUAL resort context for canonical identity/
   // lifecycle/refurbishment metadata, independent of the selectedResort
   // wait-overlay toggle. Same precedence as My Plans's own
-  // resolveDayContextResort() (plans/page.tsx): explicit manual park
-  // override (whatever resort it belongs to) → inferred from the day's
-  // actual plan items → selectedResort only as a last resort, when the day
-  // truly has no resort signal of its own yet (same "no park set yet"
-  // fallback mismatchResort already used, so that case is unchanged).
+  // resolveDayContextResort() (plans/page.tsx), extended with a Lightning-
+  // reservation inference step for a Lightning-only day:
+  //   1. explicit manual park override (whatever resort it belongs to) —
+  //      authoritative.
+  //   2. resort inferred from the day's My Plans items (via
+  //      inferPlansContext) — authoritative whenever it yields a signal.
+  //   3. resort inferred from the day's own Lightning reservations (same
+  //      inferPlansContext helper) — only reached when the day has no
+  //      manual override AND no My Plans items/signal, so a Lightning-only
+  //      day (e.g. a lone WDW-only DINOSAUR reservation, no My Plans items
+  //      for that day at all) still establishes its real resort instead of
+  //      falling through to whatever the wait-overlay toggle happens to be
+  //      set to.
+  //   4. selectedResort — final no-signal fallback only (same "no park set
+  //      yet" case mismatchResort already used, unchanged).
   //
   // Deliberately NOT mismatchResort: that value's manual-override branch
   // requires `PARK_TO_RESORT[override] === selectedResort` (see its own
@@ -2213,11 +2223,20 @@ export default function LightningPage() {
     const override = dayParks[safeActiveDayId];
     const overrideResort = override ? PARK_TO_RESORT[override] : undefined;
     if (overrideResort) return overrideResort;
-    const inferred = inferPlansContext(
+
+    const plansInferred = inferPlansContext(
       planDayItems.map((it, i) => ({ id: String(i), name: it.name, timeLabel: "" }))
     );
-    return inferred.resort ?? selectedResort;
-  }, [dayParks, safeActiveDayId, planDayItems, selectedResort]);
+    if (plansInferred.resort) return plansInferred.resort;
+
+    const dayLightningItems = items.filter((it) => it.dayId === safeActiveDayId);
+    const lightningInferred = inferPlansContext(
+      dayLightningItems.map((it, i) => ({ id: String(i), name: it.name, timeLabel: "" }))
+    );
+    if (lightningInferred.resort) return lightningInferred.resort;
+
+    return selectedResort;
+  }, [dayParks, safeActiveDayId, planDayItems, items, selectedResort]);
 
   // Phase 8.8 — Build wait and park-id maps scoped to mismatchResort.
   // Scoping to one resort eliminates same-name cross-resort collisions (e.g. Space Mountain
