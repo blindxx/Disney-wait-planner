@@ -55,8 +55,7 @@ import type { PlannerItemType } from "./plansTransfer";
 import { getAttractionContext } from "./legacyAttractions";
 import { getDiningContext, inferPlannerItemType } from "./diningSuggestions";
 import { getEntertainmentContext } from "./entertainmentSuggestions";
-import { getExperienceContext, resolveExperienceKey } from "./experienceSuggestions";
-import { normalizeKey } from "./plansMatching";
+import { getExperienceContext, resolveExperienceKey, isReclassifiedFromEntertainmentKey } from "./experienceSuggestions";
 
 /** Lifecycle status of a resolved canonical identity. */
 export type PlannerItemLifecycle = "active" | "legacy";
@@ -105,33 +104,6 @@ function stripTrailingTimeForInference(name: string): string {
 }
 
 /**
- * Canonical identities EXP.1 catalogued as Entertainment that EXP.2's
- * content review determined are more accurately Experience-typed
- * plan-worthy activities (a lightsaber-building workshop, a droid-building
- * workshop, a character meet-and-draw). Their active catalog ownership
- * moved from ENTERTAINMENT_PLACES to EXPERIENCE_PLACES accordingly (see
- * entertainmentSuggestions.ts / experienceSuggestions.ts) — exact canonical
- * names/punctuation, matching EXPERIENCE_PLACES exactly.
- *
- * This set exists ONLY so resolvePlannerItemEffectiveType() below can
- * recognize a historical/imported/cloud-restored plan item that still
- * carries an explicit `type: "entertainment"` for one of these three
- * identities and resolve it as Experience going forward. It is deliberately
- * narrow: membership is checked only after resolveExperienceKey() has
- * already resolved the name through the existing canonical alias/
- * containment resolution (never broad string matching), so an unrelated
- * custom entry that merely sounds similar can never match, and it is never
- * consulted for any name outside these three approved identities.
- */
-const RECLASSIFIED_EXPERIENCE_KEYS: ReadonlySet<string> = new Set(
-  [
-    "Savi's Workshop – Handbuilt Lightsabers",
-    "Droid Depot",
-    "Olaf Draws!",
-  ].map((name) => normalizeKey(name)),
-);
-
-/**
  * Resolves a planner item's effective PlannerItemType from its stored/
  * imported raw type value, current name, and (when known) resort. The
  * single authoritative resolver for "what type should this item actually be
@@ -143,13 +115,20 @@ const RECLASSIFIED_EXPERIENCE_KEYS: ReadonlySet<string> = new Set(
  * re-deriving the type locally.
  *
  * Precedence:
- *   1. Approved reclassified identity (RECLASSIFIED_EXPERIENCE_KEYS, resolved
- *      via resolveExperienceKey — never broad string matching) → "experience",
- *      regardless of rawType. This is the narrow historical-compatibility
- *      override described above: only Savi's Workshop, Droid Depot, and
- *      Olaf Draws! are affected; no other name can be reclassified through
- *      this path, so a similarly-named custom entry is never accidentally
- *      converted.
+ *   1. Approved reclassified identity → "experience", regardless of
+ *      rawType. Eligibility is resolved via resolveExperienceKey() (the
+ *      authoritative Experience canonical/alias/containment resolver —
+ *      never broad string matching) and then checked against
+ *      isReclassifiedFromEntertainmentKey() (experienceSuggestions.ts),
+ *      which reads the reclassifiedFromEntertainment flag carried on the
+ *      catalog entries themselves (CODEX P1 fix — no duplicated canonical-
+ *      name list is maintained here or anywhere else). This is the narrow
+ *      historical-compatibility override: only the identities the catalog
+ *      itself marks (Savi's Workshop, Droid Depot, Olaf Draws!) are
+ *      affected — a maintained alias for one of them (e.g. "build a droid")
+ *      resolves the same way its canonical name does, since both flow
+ *      through the same resolveExperienceKey() call, while a similarly-
+ *      named but unrelated custom entry is never accidentally converted.
  *   2. An explicit, already-trusted stored type — "dining", "entertainment",
  *      or "experience" — is preserved as-is. ("attraction" is deliberately
  *      NOT trusted here: it has always been the universal pre-Phase-9
@@ -168,7 +147,7 @@ export function resolvePlannerItemEffectiveType(
   const cleanedName = stripTrailingTimeForInference(name);
 
   const experienceKey = resolveExperienceKey(cleanedName, resort);
-  if (experienceKey && RECLASSIFIED_EXPERIENCE_KEYS.has(experienceKey)) {
+  if (experienceKey && isReclassifiedFromEntertainmentKey(experienceKey)) {
     return "experience";
   }
 
@@ -634,6 +613,16 @@ export const DEV_RESOLVE_PLANNER_ITEM_EFFECTIVE_TYPE_CASES: Array<{
     description: "unrelated name merely containing \"droid\" is not reclassified",
     rawType: "entertainment",
     name: "Droid Racing Simulator Meetup",
+    resort: "WDW",
+    expected: "entertainment",
+  },
+  // ---- CODEX P1 fix — the override is scoped to the catalog's own marker,
+  // not "any Experience identity"; Bibbidi Bobbidi Boutique must never
+  // receive it even under a contrived stale/explicit "entertainment" type ----
+  {
+    description: "Bibbidi Bobbidi Boutique + contrived explicit entertainment is NOT overridden to experience (never catalog-marked)",
+    rawType: "entertainment",
+    name: "Bibbidi Bobbidi Boutique",
     resort: "WDW",
     expected: "entertainment",
   },

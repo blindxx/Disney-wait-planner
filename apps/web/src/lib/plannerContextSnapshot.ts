@@ -30,6 +30,7 @@ import { detectTimeConflicts } from "./timeConflicts";
 import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, daySort, inferDayPark } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
+import { resolveExperienceKey } from "./experienceSuggestions";
 import { resolvePlannerItemEffectiveType } from "./plannerItemMetadata";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
@@ -295,22 +296,41 @@ function tryResolveAttraction(name: string, resort: ResortId): string | null {
 /**
  * Canonical alias-resolved identity key for a planner item, mirroring the
  * identity resolution crossDayChecks.ts uses for cross-day duplicate
- * detection (tryResolveAttraction / resolveDiningKey / resolveEntertainmentKey)
- * so aliases like "ROTR" and "Rise of the Resistance" are treated as the same
- * item rather than only matching on exact normalized name, and containment
- * matches (e.g. "Millennium Falcon" inside "Millennium Falcon: Smugglers
- * Run") are recognized too. resortHint should be the specific day's resort
- * when known (see buildDayResortMap) — attraction aliases can resolve
- * differently per resort, so a day-specific hint is tried before falling
- * back to the ambiguous dual-resort check below. Falls back to a plain
- * normalized name when no alias/canonical match is found, which behaves the
- * same as a normalizeKey-only match for unrecognized/custom names.
+ * detection (tryResolveAttraction / resolveDiningKey / resolveEntertainmentKey /
+ * resolveExperienceKey) so aliases like "ROTR" and "Rise of the Resistance"
+ * are treated as the same item rather than only matching on exact normalized
+ * name, and containment matches (e.g. "Millennium Falcon" inside "Millennium
+ * Falcon: Smugglers Run") are recognized too. resortHint should be the
+ * specific day's resort when known (see buildDayResortMap) — attraction
+ * aliases can resolve differently per resort, so a day-specific hint is
+ * tried before falling back to the ambiguous dual-resort check below. Falls
+ * back to a plain normalized name when no alias/canonical match is found,
+ * which behaves the same as a normalizeKey-only match for unrecognized/
+ * custom names.
+ *
+ * CODEX P2 fix — type === "experience" now resolves through
+ * resolveExperienceKey() (experienceSuggestions.ts's authoritative resolver
+ * — the same one resolvePlannerItemEffectiveType uses), mirroring the
+ * dining/entertainment branches exactly. Previously "experience" fell
+ * through to the attraction branches below (wrong domain — RIDE_TO_PARK_DLR/
+ * WDW never contain Experience identities) and, finding no match there,
+ * landed on the bare normalizeKey() fallback with no alias resolution at
+ * all: a canonical name (e.g. "Droid Depot") and a maintained alias for the
+ * same identity (e.g. "build a droid") produced two different repeat keys.
+ * Adding this branch makes them resolve identically, exactly like dining/
+ * entertainment aliases already do — no new identity/alias data, just this
+ * module reaching the existing Experience resolver.
  *
  * dayId is only used to scope the "ambiguous, no resort hint" attraction
- * case below — it never affects dining/entertainment or resort-known
- * attraction resolution.
+ * case below — it never affects dining/entertainment/experience or
+ * resort-known attraction resolution.
  */
-function resolveCanonicalIdentity(
+// Exported (CODEX P2 fix) solely so DEV_RESOLVE_CANONICAL_IDENTITY_CASES
+// below can exercise it directly, mirroring how resolvePlannerItemEffectiveType/
+// getPlannerItemMetadata (plannerItemMetadata.ts) are exported for their own
+// DEV_* regression arrays — no change to Tom's /api/tom/ask request/response
+// contract or to what data this module ever collects/transmits.
+export function resolveCanonicalIdentity(
   name: string,
   type: PlannerItemType,
   resortHint: ResortId | undefined,
@@ -324,6 +344,9 @@ function resolveCanonicalIdentity(
   } else if (type === "entertainment") {
     const key = resolveEntertainmentKey(cleaned, resortHint);
     if (key) return `entertainment:${key}`;
+  } else if (type === "experience") {
+    const key = resolveExperienceKey(cleaned, resortHint);
+    if (key) return `experience:${key}`;
   } else if (resortHint) {
     const key = tryResolveAttraction(cleaned, resortHint);
     if (key) return `attraction:${key}`;
@@ -345,6 +368,101 @@ function resolveCanonicalIdentity(
   }
   return `${type}:${normalizeKey(cleaned)}`;
 }
+
+/**
+ * Reference test cases for resolveCanonicalIdentity() — CODEX P2 fix.
+ * Mirrors the DEV_PLAN_ALIAS_CASES convention in plansMatching.ts — not
+ * wired into CI (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_RESOLVE_CANONICAL_IDENTITY_CASES, resolveCanonicalIdentity } from "@/lib/plannerContextSnapshot";
+ *   for (const c of DEV_RESOLVE_CANONICAL_IDENTITY_CASES) {
+ *     const got = resolveCanonicalIdentity(c.name, c.type, c.resortHint, c.dayId);
+ *     const ok = got === c.expected;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, got);
+ *   }
+ *
+ * Proves: (1) Experience now resolves through resolveExperienceKey() the
+ * same way dining/entertainment resolve through their own resolvers, so a
+ * maintained alias and its canonical name collapse to the identical Tom
+ * repeat key; (2) an unresolved custom "experience" name still gets a
+ * stable, correctly-namespaced fallback key rather than accidentally
+ * falling into attraction resolution; (3) existing dining/entertainment/
+ * attraction canonical-identity behavior is unchanged by adding the
+ * experience branch.
+ */
+export const DEV_RESOLVE_CANONICAL_IDENTITY_CASES: Array<{
+  description: string;
+  name: string;
+  type: PlannerItemType;
+  resortHint: ResortId | undefined;
+  dayId: string;
+  expected: string;
+}> = [
+  {
+    description: "Experience canonical name (Droid Depot, WDW)",
+    name: "Droid Depot",
+    type: "experience",
+    resortHint: "WDW",
+    dayId: "day-1",
+    expected: "experience:droid depot",
+  },
+  {
+    description: "Experience alias ('build a droid') resolves to the SAME key as the canonical name above",
+    name: "build a droid",
+    type: "experience",
+    resortHint: "WDW",
+    dayId: "day-2",
+    expected: "experience:droid depot",
+  },
+  {
+    description: "Experience alias ('savis') resolves to Savi's Workshop's canonical key",
+    name: "savis",
+    type: "experience",
+    resortHint: "DLR",
+    dayId: "day-1",
+    expected: "experience:savis workshop handbuilt lightsabers",
+  },
+  {
+    description: "Unresolved custom experience name gets a stable, experience-namespaced fallback key (not attraction:)",
+    name: "Some Made Up Experience",
+    type: "experience",
+    resortHint: "WDW",
+    dayId: "day-1",
+    expected: "experience:some made up experience",
+  },
+  {
+    description: "Dining canonical vs alias still collapse to the same key (unchanged regression check)",
+    name: "CRT",
+    type: "dining",
+    resortHint: "WDW",
+    dayId: "day-1",
+    expected: "dining:cinderellas royal table",
+  },
+  {
+    description: "Entertainment canonical vs alias still collapse to the same key (unchanged regression check)",
+    name: "HEA",
+    type: "entertainment",
+    resortHint: "WDW",
+    dayId: "day-1",
+    expected: "entertainment:happily ever after",
+  },
+  {
+    description: "Attraction alias with a resort hint still resolves as before (unchanged regression check)",
+    name: "ROTR",
+    type: "attraction",
+    resortHint: "WDW",
+    dayId: "day-1",
+    expected: "attraction:star wars rise of the resistance",
+  },
+  {
+    description: "Ambiguous no-resort-hint attraction still falls back to its day-scoped ambiguous key (unchanged regression check)",
+    name: "Space Mountain",
+    type: "attraction",
+    resortHint: undefined,
+    dayId: "day-5",
+    expected: "attraction:ambiguous:day-5:space mountain",
+  },
+];
 
 /**
  * Infers a resort from a set of item names alone (no day context) — mirrors

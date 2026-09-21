@@ -78,17 +78,34 @@ export type ExperiencePlace = {
    * taxonomy.
    */
   land?: string;
+  /**
+   * CODEX P1 fix — the authoritative marker for the EXP.2 historical
+   * Entertainment→Experience reclassification override, carried on the
+   * catalog entry itself rather than duplicated as a separate hard-coded
+   * name list elsewhere. True ONLY for the three identities EXP.2 moved
+   * here from ENTERTAINMENT_PLACES (Savi's Workshop – Handbuilt
+   * Lightsabers, Droid Depot, Olaf Draws!) — set on every resort variant of
+   * each. Omitted (falsy) for every other entry, including Bibbidi Bobbidi
+   * Boutique, which must never receive the override. Consult this only via
+   * isReclassifiedFromEntertainmentKey() below, on a key already resolved
+   * through resolveExperienceKey() — never by matching this field against
+   * a raw/unresolved name.
+   */
+  reclassifiedFromEntertainment?: true;
 };
 
 export const EXPERIENCE_PLACES: ExperiencePlace[] = [
   { name: "Bibbidi Bobbidi Boutique", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland" },
   { name: "Bibbidi Bobbidi Boutique", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland" },
   // ---- EXP.2 catalog cutover — moved from ENTERTAINMENT_PLACES ----
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge" },
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge" },
-  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge" },
-  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge" },
-  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard" },
+  // reclassifiedFromEntertainment: true marks these as the approved
+  // historical Entertainment→Experience override identities — see the
+  // field's own doc comment on ExperiencePlace above.
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", reclassifiedFromEntertainment: true },
 ];
 
 const EXPERIENCE_KEYS: Set<string> = new Set(
@@ -102,6 +119,34 @@ const EXPERIENCE_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
   DLR: new Set(EXPERIENCE_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
   WDW: new Set(EXPERIENCE_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
 };
+
+// CODEX P1 fix — derived directly from EXPERIENCE_PLACES's own
+// reclassifiedFromEntertainment flag (see that field's doc comment above),
+// so the set of identities eligible for the EXP.2 historical Entertainment→
+// Experience override lives in exactly one place: this catalog. No separate
+// canonical-name list is maintained anywhere else.
+const RECLASSIFIED_FROM_ENTERTAINMENT_KEYS: ReadonlySet<string> = new Set(
+  EXPERIENCE_PLACES.filter((p) => p.reclassifiedFromEntertainment).map((p) => normalizeKey(p.name)),
+);
+
+/**
+ * True when `key` — a canonical Experience key already resolved via
+ * resolveExperienceKey() (never a raw/unresolved name) — identifies one of
+ * the approved historical Entertainment→Experience reclassification
+ * identities (currently Savi's Workshop – Handbuilt Lightsabers, Droid
+ * Depot, and Olaf Draws!). Because resolveExperienceKey() already routes a
+ * maintained alias (e.g. "build a droid") to its canonical key through the
+ * same authoritative alias/containment resolution used everywhere else in
+ * this module, an alias for one of these three identities receives the same
+ * answer as its canonical name — there is no second alias table here.
+ * Bibbidi Bobbidi Boutique's key is never in this set, so it is never
+ * eligible for the override. CODEX P1 fix — see
+ * RECLASSIFIED_FROM_ENTERTAINMENT_KEYS above for where this is sourced from
+ * (the catalog's own metadata, not a duplicated name list).
+ */
+export function isReclassifiedFromEntertainmentKey(key: string): boolean {
+  return RECLASSIFIED_FROM_ENTERTAINMENT_KEYS.has(key);
+}
 
 /**
  * Permanently closed/replaced Experience identities kept ONLY so that
@@ -322,3 +367,76 @@ export function getExperienceContext(name: string, resort: ResortId): Experience
     lifecycle: EXPERIENCE_KEYS.has(key) ? "active" : "legacy",
   };
 }
+
+/**
+ * Reference test cases for isReclassifiedFromEntertainmentKey() — CODEX P1
+ * fix. Mirrors the DEV_PLAN_ALIAS_CASES convention in plansMatching.ts — not
+ * wired into CI (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES, resolveExperienceKey, isReclassifiedFromEntertainmentKey } from "@/lib/experienceSuggestions";
+ *   for (const c of DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES) {
+ *     const got = isReclassifiedFromEntertainmentKey(resolveExperienceKey(c.name, c.resort) ?? "");
+ *     const ok = got === c.expected;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, got);
+ *   }
+ *
+ * Proves the reclassification-eligibility marker lives ONLY on
+ * EXPERIENCE_PLACES itself (this catalog), that a maintained alias resolves
+ * to the same answer as its canonical name (both flow through
+ * resolveExperienceKey first), and that Bibbidi Bobbidi Boutique is
+ * permanently excluded.
+ */
+export const DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES: Array<{
+  description: string;
+  name: string;
+  resort?: ResortId;
+  expected: boolean;
+}> = [
+  {
+    description: "Savi's Workshop canonical name (DLR) is marked reclassified",
+    name: "Savi's Workshop – Handbuilt Lightsabers",
+    resort: "DLR",
+    expected: true,
+  },
+  {
+    description: "Savi's Workshop canonical name (WDW) is marked reclassified",
+    name: "Savi's Workshop – Handbuilt Lightsabers",
+    resort: "WDW",
+    expected: true,
+  },
+  {
+    description: "Savi's Workshop alias ('savis') resolves to the same marked identity",
+    name: "savis",
+    expected: true,
+  },
+  {
+    description: "Droid Depot canonical name is marked reclassified",
+    name: "Droid Depot",
+    resort: "WDW",
+    expected: true,
+  },
+  {
+    description: "Droid Depot alias ('build a droid') resolves to the same marked identity",
+    name: "build a droid",
+    resort: "DLR",
+    expected: true,
+  },
+  {
+    description: "Olaf Draws! canonical name is marked reclassified",
+    name: "Olaf Draws!",
+    resort: "WDW",
+    expected: true,
+  },
+  {
+    description: "Bibbidi Bobbidi Boutique is NEVER marked reclassified",
+    name: "Bibbidi Bobbidi Boutique",
+    resort: "WDW",
+    expected: false,
+  },
+  {
+    description: "Bibbidi Bobbidi Boutique (DLR) is NEVER marked reclassified",
+    name: "Bibbidi Bobbidi Boutique",
+    resort: "DLR",
+    expected: false,
+  },
+];
