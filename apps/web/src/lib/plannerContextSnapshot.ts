@@ -27,11 +27,11 @@ import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profi
 import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
-import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, daySort, inferDayPark } from "./crossDayChecks";
+import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, PARK_LABELS, daySort, inferDayPark } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { resolveExperienceKey } from "./experienceSuggestions";
-import { resolvePlannerItemEffectiveType } from "./plannerItemMetadata";
+import { resolvePlannerItemEffectiveType, getPlannerItemMetadata } from "./plannerItemMetadata";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
 const MAX_ITEMS = 200;
@@ -51,6 +51,23 @@ export type PlannerContextSnapshotItem = {
   name: string;
   type: PlannerItemType;
   time: string;
+  /**
+   * Phase Tom-Catalog-Contract.1 — authoritative human-readable park/land
+   * for this item, resolved through the same canonical metadata
+   * infrastructure My Plans itself uses (getPlannerItemMetadata, keyed off
+   * the item's effective type — see `type` above, which already carries the
+   * EXP.2 Experience reclassification) rather than a separate inference
+   * table. Additive/optional: only present when the item's name resolves to
+   * a known active-or-legacy catalog identity AND a resort hint (day-level
+   * or profile-wide — see buildDayResortMap/profileResortHint) is available
+   * to resolve it against. A custom/unknown name, or a recognized name with
+   * no resolvable resort context, simply omits both fields rather than
+   * guessing. Existing Tom versions that don't read these fields remain
+   * unaffected (unread optional properties).
+   */
+  park?: string;
+  /** See `park` above — themed land/area, when maintained for this identity. */
+  land?: string;
 };
 
 export type PlannerContextSnapshotLightningItem = {
@@ -567,6 +584,115 @@ function buildDayAutoFallbacks(
   return result;
 }
 
+/**
+ * Adds authoritative park/land to a plan item, per-item, using the same
+ * resort hint each item's identity resolution already used (its own day's
+ * resort when known, falling back to the profile-wide hint — see
+ * dayResortMap/profileResortHint in buildPlannerContextSnapshot). Called
+ * after dayResortMap exists (post-parse), since toPlanItem() itself has no
+ * resort context to resolve against. Mirrors getPlannerItemMetadata's own
+ * "omit rather than guess" contract exactly: no resort hint, or no matching
+ * catalog identity (active or legacy — legacy lifecycle still resolves a
+ * historical park/land, exactly as My Plans itself would show), simply
+ * leaves park/land unset rather than inventing them.
+ */
+// Exported solely so DEV_ENRICH_PLAN_ITEM_LOCATION_CASES below can exercise
+// it directly (mirrors DEV_RESOLVE_CANONICAL_IDENTITY_CASES/
+// resolveCanonicalIdentity's own export above) — no change to what
+// buildPlannerContextSnapshot() itself reads/returns.
+export function enrichPlanItemWithLocation(
+  item: PlannerContextSnapshotItem,
+  resortHint: ResortId | undefined,
+): PlannerContextSnapshotItem {
+  if (!resortHint) return item;
+  const meta = getPlannerItemMetadata(item.name, item.type, resortHint);
+  const park = meta.parkId ? PARK_LABELS[meta.parkId] : undefined;
+  if (!park && !meta.land) return item;
+  return {
+    ...item,
+    ...(park ? { park } : {}),
+    ...(meta.land ? { land: meta.land } : {}),
+  };
+}
+
+/**
+ * Reference test cases for enrichPlanItemWithLocation() — Tom-Catalog-
+ * Contract.1. Mirrors the DEV_PLAN_ALIAS_CASES convention in
+ * plansMatching.ts — not wired into CI (no test runner in this repo), run
+ * manually from Node:
+ *
+ *   import { DEV_ENRICH_PLAN_ITEM_LOCATION_CASES, enrichPlanItemWithLocation } from "@/lib/plannerContextSnapshot";
+ *   for (const c of DEV_ENRICH_PLAN_ITEM_LOCATION_CASES) {
+ *     const got = enrichPlanItemWithLocation(c.item, c.resortHint);
+ *     const ok = JSON.stringify(got) === JSON.stringify(c.expected);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, got);
+ *   }
+ *
+ * Covers: a recognized attraction/dining/entertainment gaining park+land; the
+ * EXP.2 Experience reclassification (Savi's/Droid Depot/Olaf Draws!) already
+ * carrying `type: "experience"` on the input item (set upstream by
+ * resolvePlannerItemEffectiveType — see toPlanItem) so it resolves through
+ * getExperienceContext rather than entertainment; a shared DLR/WDW identity
+ * using its day's own resort hint; a custom/unknown name and a missing
+ * resort hint both leaving the item unchanged (no fabricated location); and
+ * that all of the item's original fields survive untouched.
+ */
+export const DEV_ENRICH_PLAN_ITEM_LOCATION_CASES: Array<{
+  description: string;
+  item: PlannerContextSnapshotItem;
+  resortHint: ResortId | undefined;
+  expected: PlannerContextSnapshotItem;
+}> = [
+  {
+    description: "recognized attraction (TRON, WDW) gains canonical park + land",
+    item: { dayId: "day-1", name: "TRON", type: "attraction", time: "9:00" },
+    resortHint: "WDW",
+    expected: { dayId: "day-1", name: "TRON", type: "attraction", time: "9:00", park: "Magic Kingdom", land: "Tomorrowland" },
+  },
+  {
+    description: "recognized dining alias (CRT, WDW) gains canonical park + land",
+    item: { dayId: "day-2", name: "CRT", type: "dining", time: "12:30" },
+    resortHint: "WDW",
+    expected: { dayId: "day-2", name: "CRT", type: "dining", time: "12:30", park: "Magic Kingdom", land: "Fantasyland" },
+  },
+  {
+    description: "recognized entertainment (Fantasmic!, DLR) gains canonical park + land",
+    item: { dayId: "day-1", name: "Fantasmic!", type: "entertainment", time: "21:00" },
+    resortHint: "DLR",
+    expected: { dayId: "day-1", name: "Fantasmic!", type: "entertainment", time: "21:00", park: "Disneyland", land: "Frontierland" },
+  },
+  {
+    description: "EXP.2 reclassified Experience (Droid Depot, WDW) with type already resolved to experience resolves via Experience metadata, not entertainment",
+    item: { dayId: "day-1", name: "Droid Depot", type: "experience", time: "" },
+    resortHint: "WDW",
+    expected: { dayId: "day-1", name: "Droid Depot", type: "experience", time: "", park: "Hollywood Studios", land: "Star Wars: Galaxy’s Edge" },
+  },
+  {
+    description: "shared DLR/WDW identity (Oga's Cantina) resolves against its own day's DLR resort hint, not a guess",
+    item: { dayId: "day-3", name: "Oga's Cantina", type: "dining", time: "" },
+    resortHint: "DLR",
+    expected: { dayId: "day-3", name: "Oga's Cantina", type: "dining", time: "", park: "Disneyland", land: "Star Wars: Galaxy’s Edge" },
+  },
+  {
+    description: "intentional non-park dining (Napa Rose) never gains a fabricated park/land",
+    item: { dayId: "day-1", name: "Napa Rose", type: "dining", time: "" },
+    resortHint: "DLR",
+    expected: { dayId: "day-1", name: "Napa Rose", type: "dining", time: "" },
+  },
+  {
+    description: "custom/unknown item name stays completely unchanged, no fabricated location",
+    item: { dayId: "day-1", name: "My Custom Backyard BBQ", type: "attraction", time: "18:00" },
+    resortHint: "WDW",
+    expected: { dayId: "day-1", name: "My Custom Backyard BBQ", type: "attraction", time: "18:00" },
+  },
+  {
+    description: "no resort hint available (no day or profile signal) -> item returned unchanged rather than guessing a resort",
+    item: { dayId: "day-1", name: "TRON", type: "attraction", time: "9:00" },
+    resortHint: undefined,
+    expected: { dayId: "day-1", name: "TRON", type: "attraction", time: "9:00" },
+  },
+];
+
 function toPlanItem(raw: unknown): PlannerContextSnapshotItem | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -832,6 +958,16 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     // inference too, not just the profile-wide hint.
     const dayResortMap = buildDayResortMap(plans, lightning, mergedDayIds, dayParks);
 
+    // Additive park/land enrichment (Tom-Catalog-Contract.1) — run after
+    // dayResortMap exists so each item resolves against the same resort hint
+    // (its own day's, falling back to profile-wide) its identity/repeat/
+    // conflict resolution above already used. repeats/conflicts/
+    // dayAutoFallbacks below intentionally keep reading the unenriched
+    // `plans` — they only ever read name/type/dayId/time, so the extra
+    // fields are irrelevant to them; only the snapshot's own `plans` output
+    // needs the enriched version.
+    const enrichedPlans = plans.map((p) => enrichPlanItemWithLocation(p, dayResortMap.get(p.dayId) ?? profileResortHint));
+
     const days_: PlannerContextSnapshotDay[] = mergedDayIds.map((id) => ({
       id,
       label: dayMeta[id]?.label || dayLabelFromId(id, mergedDayIds),
@@ -843,7 +979,7 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
       resort: storedResort ?? inferred.resort,
       park: storedPark ?? inferred.park,
       days: days_,
-      plans,
+      plans: enrichedPlans,
       lightning,
       repeats: findRepeats(plans, dayResortMap, profileResortHint),
       conflicts: findConflicts(plans, lightning, dayResortMap, profileResortHint),
