@@ -116,19 +116,38 @@ function stripTrailingTimeForInference(name: string): string {
  *
  * Precedence:
  *   1. Approved reclassified identity → "experience", regardless of
- *      rawType. Eligibility is resolved via resolveExperienceKey() (the
- *      authoritative Experience canonical/alias/containment resolver —
- *      never broad string matching) and then checked against
- *      isReclassifiedFromEntertainmentKey() (experienceSuggestions.ts),
- *      which reads the reclassifiedFromEntertainment flag carried on the
- *      catalog entries themselves (CODEX P1 fix — no duplicated canonical-
- *      name list is maintained here or anywhere else). This is the narrow
- *      historical-compatibility override: only the identities the catalog
- *      itself marks (Savi's Workshop, Droid Depot, Olaf Draws!) are
- *      affected — a maintained alias for one of them (e.g. "build a droid")
- *      resolves the same way its canonical name does, since both flow
- *      through the same resolveExperienceKey() call, while a similarly-
- *      named but unrelated custom entry is never accidentally converted.
+ *      rawType and regardless of the (optional) resort hint. Eligibility is
+ *      resolved via resolveExperienceKey() (the authoritative Experience
+ *      canonical/alias/containment resolver — never broad string matching)
+ *      and then checked against isReclassifiedFromEntertainmentKey()
+ *      (experienceSuggestions.ts), which reads the reclassifiedFromEntertainment
+ *      flag carried on the catalog entries themselves (CODEX P1 fix — no
+ *      duplicated canonical-name list is maintained here or anywhere else).
+ *      This is the narrow historical-compatibility override: only the
+ *      identities the catalog itself marks (Savi's Workshop, Droid Depot,
+ *      Olaf Draws!) are affected — a maintained alias for one of them (e.g.
+ *      "build a droid") resolves the same way its canonical name does,
+ *      since both flow through the same resolveExperienceKey() call, while
+ *      a similarly-named but unrelated custom entry is never accidentally
+ *      converted.
+ *
+ *      CODEX P2 fix — this lookup deliberately resolves WITHOUT the resort
+ *      hint (resolveExperienceKey(cleanedName), no resort argument). The
+ *      migration is a permanent, identity-wide reclassification of these
+ *      three names, not a resort-scoped fact — an item can be imported into
+ *      a day currently scoped to a different resort than the one the
+ *      activity is offered at (e.g. a historical "Olaf Draws!" entertainment
+ *      item imported into a DLR-scoped day, even though Olaf Draws! is a
+ *      WDW-only offering), and the override must still apply. Resolving with
+ *      a resort would incorrectly gate a permanent identity fact behind
+ *      transient destination context, letting a stale explicit
+ *      "entertainment" type survive. Savi's Workshop and Droid Depot exist
+ *      identically-named at both resorts, so this introduces no ambiguity:
+ *      EXPERIENCE_PLACES normalizes both resorts' entries to the same
+ *      canonical key, and resolveExperienceKey() without a resort simply
+ *      skips the (irrelevant, for this check) per-resort validation step —
+ *      it still requires an exact/alias/containment match against the real
+ *      catalog, so unrelated names are never swept in.
  *   2. An explicit, already-trusted stored type — "dining", "entertainment",
  *      or "experience" — is preserved as-is. ("attraction" is deliberately
  *      NOT trusted here: it has always been the universal pre-Phase-9
@@ -137,7 +156,10 @@ function stripTrailingTimeForInference(name: string): string {
  *      superseded implementation already had.)
  *   3. Otherwise, name-based inference via inferPlannerItemType()
  *      (diningSuggestions.ts) — the same existing authoritative resolver
- *      Add/Edit and manual entry already use.
+ *      Add/Edit and manual entry already use. This tier legitimately uses
+ *      the resort hint (e.g. to disambiguate a resort-scoped entertainment
+ *      alias like "Halloween Parade") — only the permanent-identity check in
+ *      step 1 above is resort-independent.
  */
 export function resolvePlannerItemEffectiveType(
   rawType: unknown,
@@ -146,8 +168,9 @@ export function resolvePlannerItemEffectiveType(
 ): PlannerItemType {
   const cleanedName = stripTrailingTimeForInference(name);
 
-  const experienceKey = resolveExperienceKey(cleanedName, resort);
-  if (experienceKey && isReclassifiedFromEntertainmentKey(experienceKey)) {
+  // Identity-wide: never scoped to `resort` — see step 1's doc comment above.
+  const reclassificationKey = resolveExperienceKey(cleanedName);
+  if (reclassificationKey && isReclassifiedFromEntertainmentKey(reclassificationKey)) {
     return "experience";
   }
 
@@ -625,5 +648,113 @@ export const DEV_RESOLVE_PLANNER_ITEM_EFFECTIVE_TYPE_CASES: Array<{
     name: "Bibbidi Bobbidi Boutique",
     resort: "WDW",
     expected: "entertainment",
+  },
+  // ---- CODEX P2 fix — the reclassification override is identity-wide and
+  // must NOT depend on the (possibly mismatched) destination resort hint.
+  // Olaf Draws! is WDW-only, so a DLR resort hint is exactly the scenario
+  // that previously made resolveExperienceKey's per-resort validation return
+  // null and let the stale "entertainment" type survive. ----
+  {
+    description: "historical Olaf Draws! + explicit entertainment + DLR resort hint (Olaf is WDW-only) -> experience regardless",
+    rawType: "entertainment",
+    name: "Olaf Draws!",
+    resort: "DLR",
+    expected: "experience",
+  },
+  {
+    description: "historical Olaf Draws! + explicit entertainment + WDW resort hint -> experience",
+    rawType: "entertainment",
+    name: "Olaf Draws!",
+    resort: "WDW",
+    expected: "experience",
+  },
+  {
+    description: "historical Olaf Draws! + explicit entertainment + no resort hint at all -> experience",
+    rawType: "entertainment",
+    name: "Olaf Draws!",
+    expected: "experience",
+  },
+  // Savi's Workshop and Droid Depot exist identically-named at BOTH resorts,
+  // so every resort hint (including a "wrong" one, since there is none) must
+  // still resolve the override for canonical name and maintained alias alike.
+  {
+    description: "Savi's Workshop canonical name + entertainment + DLR resort hint -> experience",
+    rawType: "entertainment",
+    name: "Savi's Workshop – Handbuilt Lightsabers",
+    resort: "DLR",
+    expected: "experience",
+  },
+  {
+    description: "Savi's Workshop canonical name + entertainment + WDW resort hint -> experience",
+    rawType: "entertainment",
+    name: "Savi's Workshop – Handbuilt Lightsabers",
+    resort: "WDW",
+    expected: "experience",
+  },
+  {
+    description: "Savi's Workshop maintained alias (\"handbuilt lightsabers\") + entertainment + DLR resort hint -> experience",
+    rawType: "entertainment",
+    name: "handbuilt lightsabers",
+    resort: "DLR",
+    expected: "experience",
+  },
+  {
+    description: "Savi's Workshop maintained alias (\"handbuilt lightsabers\") + entertainment + WDW resort hint -> experience",
+    rawType: "entertainment",
+    name: "handbuilt lightsabers",
+    resort: "WDW",
+    expected: "experience",
+  },
+  {
+    description: "Droid Depot canonical name + entertainment + DLR resort hint -> experience",
+    rawType: "entertainment",
+    name: "Droid Depot",
+    resort: "DLR",
+    expected: "experience",
+  },
+  {
+    description: "Droid Depot canonical name + entertainment + WDW resort hint -> experience",
+    rawType: "entertainment",
+    name: "Droid Depot",
+    resort: "WDW",
+    expected: "experience",
+  },
+  {
+    description: "Droid Depot maintained alias (\"build a droid\") + entertainment + DLR resort hint -> experience",
+    rawType: "entertainment",
+    name: "build a droid",
+    resort: "DLR",
+    expected: "experience",
+  },
+  {
+    description: "Droid Depot maintained alias (\"build a droid\") + entertainment + WDW resort hint -> experience",
+    rawType: "entertainment",
+    name: "build a droid",
+    resort: "WDW",
+    expected: "experience",
+  },
+  // ---- Ordinary (non-reclassified) inference must still legitimately use
+  // the resort hint — only the identity-wide override in precedence tier 1
+  // became resort-independent; tier 3 name inference did not change. ----
+  {
+    description: "ordinary inference: resort-scoped entertainment alias (\"Halloween Parade\") resolves per DLR resort context, unaffected by the P2 fix",
+    rawType: undefined,
+    name: "Halloween Parade",
+    resort: "DLR",
+    expected: "entertainment",
+  },
+  {
+    description: "ordinary inference: resort-scoped entertainment alias (\"Halloween Parade\") resolves per WDW resort context, unaffected by the P2 fix",
+    rawType: undefined,
+    name: "Halloween Parade",
+    resort: "WDW",
+    expected: "entertainment",
+  },
+  {
+    description: "ordinary inference: dining name still resort-scoped as before (Blue Bayou Restaurant is DLR-only)",
+    rawType: undefined,
+    name: "Blue Bayou Restaurant",
+    resort: "WDW",
+    expected: "attraction",
   },
 ];
