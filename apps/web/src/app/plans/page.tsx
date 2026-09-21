@@ -149,7 +149,7 @@ type CrossDayDuplicate = {
   parkSections: ParkSection[];
   totalDays: number;         // distinct days across all park sections
   hasTimeConflict: boolean;  // same time appears on multiple days for this attraction
-  itemType: PlannerItemType; // Phase 9.3.3 — for grouped display (Attractions/Dining/Entertainment)
+  itemType: PlannerItemType; // Phase 9.3.3 — for grouped display (Attractions/Dining/Entertainment/Experience)
 };
 // Phase 8.7 — lightning vs plan conflict
 type LightningPlanConflict = {
@@ -6096,7 +6096,7 @@ export default function PlansPage() {
                   <div className="item-top">
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div className="item-name-row">
-                        {item.type === "dining" ? <span aria-label="Dining" style={{ marginRight: "0.25rem" }}>🍽️</span> : item.type === "entertainment" ? <span aria-label="Entertainment" style={{ marginRight: "0.25rem" }}>🎆</span> : null}
+                        {item.type === "dining" ? <span aria-label="Dining" style={{ marginRight: "0.25rem" }}>🍽️</span> : item.type === "entertainment" ? <span aria-label="Entertainment" style={{ marginRight: "0.25rem" }}>🎆</span> : item.type === "experience" ? <span aria-label="Experience" style={{ marginRight: "0.25rem" }}>🎟️</span> : null}
                         <span className="item-name">{item.name}</span>
                         {(() => {
                           const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
