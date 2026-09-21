@@ -22,12 +22,21 @@
  * follow the same stage-1 (exact) + stage-3 (alias) + stage-2 (whole-word
  * containment) + legacy-fallback resolution used by resolveDiningKey.
  *
- * Foundation-only (EXP.0): this module is not yet consumed by Smart Entry
- * suggestions, type inference (inferPlannerItemType), cross-day identity,
- * park/day inference, or the manual type selector — those integrations are
- * explicitly deferred to a later slice. Only plannerItemMetadata.ts's
- * Experience dispatch consults getExperienceContext, for My Plans metadata
- * resolution.
+ * EXP.0 wired only plannerItemMetadata.ts's Experience dispatch (My Plans
+ * metadata resolution). EXP.1 wires this module into the rest of normal
+ * planner recognition: Smart Entry suggestions (getExperienceSuggestions,
+ * added to plans/page.tsx's autocomplete list), type inference
+ * (inferPlannerItemType in diningSuggestions.ts, via isExperienceName),
+ * resort/park/day inference (plansContextInference.ts's inference map +
+ * Stage 3d fallback, and crossDayChecks.ts's inferDayPark fallback), the
+ * type-aware cross-day canonical identity/duplicate-resolution path
+ * (crossDayChecks.ts's tryResolveByType/parkIdFromCanonicalKey), and the
+ * manual custom-type selector (plans/page.tsx — Experience is both a
+ * selectable option for unmatched entries and included in
+ * isKnownPlannerName so a known maintained Experience name keeps using
+ * automatic inference). Still deferred: Tom integration, the Wait Times
+ * page, and the EXP.2 effective-type/reclassification override table — see
+ * the EXP.1 brief's critical boundary.
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -190,8 +199,9 @@ function findExperiencePlacesByKey(key: string): ExperiencePlace[] {
 
 /**
  * True when the given activity name matches a known Experience (exact,
- * alias, or containment — see resolveExperienceKey). Not yet consulted by
- * type inference/Smart Entry in EXP.0 — see module doc comment.
+ * alias, or containment — see resolveExperienceKey). EXP.1 — consulted by
+ * inferPlannerItemType (diningSuggestions.ts) and isKnownPlannerName
+ * (plans/page.tsx) — see module doc comment.
  */
 export function isExperienceName(name: string, resort?: ResortId): boolean {
   return resolveExperienceKey(name, resort) !== null;
@@ -199,8 +209,9 @@ export function isExperienceName(name: string, resort?: ResortId): boolean {
 
 /**
  * Autocomplete suggestion list, scoped to the active resort — mirrors
- * getDiningSuggestions/getEntertainmentSuggestions. Not yet wired into any
- * Smart Entry aggregation in EXP.0 — see module doc comment.
+ * getDiningSuggestions/getEntertainmentSuggestions. EXP.1 — wired into
+ * plans/page.tsx's Smart Entry suggestions aggregation — see module doc
+ * comment.
  */
 export function getExperienceSuggestions(resort: ResortId): string[] {
   const scoped = EXPERIENCE_PLACES.filter((p) => p.resort === resort);

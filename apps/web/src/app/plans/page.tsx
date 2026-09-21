@@ -69,6 +69,10 @@ import {
   isEntertainmentName,
 } from "@/lib/entertainmentSuggestions";
 import {
+  getExperienceSuggestions,
+  isExperienceName,
+} from "@/lib/experienceSuggestions";
+import {
   getPlannerItemMetadata,
   type PlannerItemMetadata,
   type PlannerItemLifecycle,
@@ -821,14 +825,21 @@ function isKnownAttractionName(name: string, resort: ResortId): boolean {
 }
 
 /**
- * Phase 9.6 — true when name matches any known attraction, dining, or
- * entertainment item in the given resort. False means the activity is a
- * custom/unknown entry, eligible for the manual type selector.
+ * Phase 9.6 — true when name matches any known attraction, dining,
+ * entertainment, or (EXP.1) Experience item in the given resort. False
+ * means the activity is a custom/unknown entry, eligible for the manual
+ * type selector. Experience is checked alongside the others so a known
+ * maintained Experience name (currently only Bibbidi Bobbidi Boutique)
+ * keeps using automatic inference and never shows the custom-type
+ * selector, while an unrecognized name explicitly selected as "Experience"
+ * still falls through to the selector without gaining an invented
+ * canonical identity.
  */
 function isKnownPlannerName(name: string, resort: ResortId): boolean {
   return (
     isEntertainmentName(name, resort) ||
     isDiningName(name, resort) ||
+    isExperienceName(name, resort) ||
     isKnownAttractionName(name, resort)
   );
 }
@@ -1682,6 +1693,7 @@ export default function PlansPage() {
       ...Array.from(waitMap.values()).map((v) => v.canonicalName),
       ...getDiningSuggestions(selectedResort),
       ...getEntertainmentSuggestions(selectedResort),
+      ...getExperienceSuggestions(selectedResort),
     ],
     [waitMap, selectedResort]
   );
@@ -3965,9 +3977,9 @@ export default function PlansPage() {
   }
 
   // Phase 9.6 — true when the manually-entered name matches a known
-  // attraction/dining/entertainment item, using the same resort-resolution
-  // precedence as inferManualAddType. Unknown names are eligible for the
-  // manual custom-type selector.
+  // attraction/dining/entertainment/(EXP.1) experience item, using the same
+  // resort-resolution precedence as inferManualAddType. Unknown names are
+  // eligible for the manual custom-type selector.
   function isManualEntryKnown(name: string, dayId: string, excludeItemId?: string): boolean {
     const lookupName = stripTrailingTimeForInference(name);
     const resort = resolveManualEntryResort(dayId, excludeItemId);
@@ -6289,6 +6301,7 @@ export default function PlansPage() {
             { label: "Attractions", dups: activePlanDups.filter((d) => d.itemType === "attraction") },
             { label: "Dining", dups: activePlanDups.filter((d) => d.itemType === "dining") },
             { label: "Entertainment", dups: activePlanDups.filter((d) => d.itemType === "entertainment") },
+            { label: "Experience", dups: activePlanDups.filter((d) => d.itemType === "experience") },
           ].filter((g) => g.dups.length > 0);
           return (
             <div className="cross-day-checks">
@@ -6692,8 +6705,8 @@ export default function PlansPage() {
                   {(() => {
                     // Phase 9.6 — show the manual type selector only for
                     // names that don't match a known attraction/dining/
-                    // entertainment item. Known items keep automatic
-                    // inference and never show the selector.
+                    // entertainment/(EXP.1) experience item. Known items
+                    // keep automatic inference and never show the selector.
                     const trimmedName = stripEnDashSuffix(formName.trim());
                     if (!trimmedName) return null;
                     const formDayId = mode === "edit" && editTarget ? editTarget.dayId : activeDayId;
@@ -6716,6 +6729,7 @@ export default function PlansPage() {
                           <option value="attraction">Attraction</option>
                           <option value="dining">Dining</option>
                           <option value="entertainment">Entertainment</option>
+                          <option value="experience">Experience</option>
                         </select>
                         <p className="form-hint">
                           We didn&rsquo;t recognize this activity. Choose a type for icons and conflict checks.

@@ -16,6 +16,7 @@ import {
 import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveDiningKey, getDiningContext, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
+import { resolveExperienceKey, getExperienceContext } from "@/lib/experienceSuggestions";
 import { resolveAttractionIdentityKey, getAttractionContext } from "@/lib/legacyAttractions";
 import {
   capturePreFetchDomainSnapshot,
@@ -1021,6 +1022,14 @@ export function inferDayPark(dayItems: { name: string }[], resort: ResortId): Pa
       // correct historical park instead of contributing no signal here.
       parkId = getEntertainmentParkId(item.name, resort) ?? null;
     }
+    if (!parkId) {
+      // EXP.1 — getExperienceContext resolves active catalog first, legacy
+      // as fallback, mirroring the dining/entertainment fallbacks above, so
+      // a day whose only recognizable item is a known Experience (e.g.
+      // Bibbidi Bobbidi Boutique) still contributes its correct DLR/WDW
+      // park signal here instead of being silently dropped.
+      parkId = getExperienceContext(item.name, resort)?.parkId ?? null;
+    }
     if (parkId) parkCount.set(parkId, (parkCount.get(parkId) ?? 0) + 1);
   }
   if (parkCount.size === 0) return null;
@@ -1091,6 +1100,11 @@ export function computeCrossDayChecks(
   function tryResolveByType(name: string, resort: ResortId, type: PlannerItemType): string | null {
     if (type === "dining") return resolveDiningKey(name, resort);
     if (type === "entertainment") return resolveEntertainmentKey(name, resort);
+    // EXP.1 — an explicit/inferred "experience" item resolves through the
+    // authoritative Experience resolver, mirroring dining/entertainment
+    // above, instead of falling through to tryResolve()'s attraction-only
+    // identity resolution below.
+    if (type === "experience") return resolveExperienceKey(name, resort);
     return tryResolve(name, resort);
   }
 
@@ -1174,6 +1188,7 @@ export function computeCrossDayChecks(
   function parkIdFromCanonicalKey(type: PlannerItemType, resort: ResortId, canonicalKey: string): ParkId | undefined {
     if (type === "entertainment") return getEntertainmentParkId(canonicalKey, resort);
     if (type === "dining") return getDiningContext(canonicalKey, resort)?.parkId ?? undefined;
+    if (type === "experience") return getExperienceContext(canonicalKey, resort)?.parkId ?? undefined;
     const map = resort === "DLR" ? RIDE_TO_PARK_DLR : RIDE_TO_PARK_WDW;
     const parkId = map.get(canonicalKey) as ParkId | undefined;
     if (parkId) return parkId;
