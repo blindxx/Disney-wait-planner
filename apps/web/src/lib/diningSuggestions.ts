@@ -42,6 +42,7 @@ import {
 } from "./plansMatching";
 import type { PlannerItemType } from "./plansTransfer";
 import { isEntertainmentName } from "./entertainmentSuggestions";
+import { isExperienceName } from "./experienceSuggestions";
 
 export type DiningPlace = {
   name: string;
@@ -520,13 +521,21 @@ export function isDiningName(name: string, resort?: ResortId): boolean {
  * Infer a planner item's type from its current activity name.
  * Single source of truth for Add/Edit/import — keeps name-based type
  * inference consistent everywhere a name is entered or changed.
- * resort is passed through to isEntertainmentName so resort-scoped
- * entertainment aliases (e.g. "Halloween Parade") resolve to the correct
- * resort's show instead of guessing; entertainment is checked first since
- * it never overlaps with known dining names.
+ * resort is passed through to isEntertainmentName/isExperienceName so
+ * resort-scoped aliases (e.g. "Halloween Parade") resolve to the correct
+ * resort's offering instead of guessing; entertainment is checked first
+ * since it never overlaps with known dining names. EXP.1 — Experience is
+ * checked next, via the same authoritative experienceSuggestions.ts
+ * catalog EXP.0 established; its active catalog (currently only Bibbidi
+ * Bobbidi Boutique) never overlaps with dining/entertainment/attraction
+ * names, so adding this check cannot reclassify any existing recognized
+ * name — see the EXP.1 brief's critical boundary (Savi's Workshop, Droid
+ * Depot, Olaf Draws! must remain Entertainment; they are not, and must
+ * never be, added to the Experience catalog).
  */
 export function inferPlannerItemType(name: string, resort: ResortId): PlannerItemType {
   if (isEntertainmentName(name, resort)) return "entertainment";
+  if (isExperienceName(name, resort)) return "experience";
   return isDiningName(name, resort) ? "dining" : "attraction";
 }
 

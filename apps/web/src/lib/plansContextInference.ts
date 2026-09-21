@@ -51,6 +51,7 @@ import {
 } from "@/lib/plansMatching";
 import { DINING_PLACES, resolveDiningKey, getDiningContext } from "@/lib/diningSuggestions";
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
+import { EXPERIENCE_PLACES, resolveExperienceKey, getExperienceContext } from "@/lib/experienceSuggestions";
 import { resolveAttractionIdentityKey, getAttractionContext } from "@/lib/legacyAttractions";
 
 type PlanItem = { id: string; name: string; timeLabel: string };
@@ -79,6 +80,10 @@ function buildInferenceMap(resortId: ResortId): Map<string, ResolvedContext> {
   for (const e of ENTERTAINMENT_PLACES) {
     if (e.resort !== resortId) continue;
     map.set(normalizeKey(e.name), { parkId: e.parkId ?? null, resortId });
+  }
+  for (const ex of EXPERIENCE_PLACES) {
+    if (ex.resort !== resortId) continue;
+    map.set(normalizeKey(ex.name), { parkId: ex.parkId ?? null, resortId });
   }
   return map;
 }
@@ -166,6 +171,18 @@ function tryResolve(
     // instead of silently losing all context signal.
     const legacyParkId = getEntertainmentParkId(name, resortId);
     if (legacyParkId !== undefined) return { parkId: legacyParkId, resortId };
+  }
+
+  // Stage 3d (EXP.1): experience alias/containment lookup, via
+  // experienceSuggestions.ts's single source of truth, so an Experience
+  // identity (currently only Bibbidi Bobbidi Boutique) participates in
+  // inference exactly like dining/entertainment already do.
+  const experienceKey = resolveExperienceKey(name, resortId);
+  if (experienceKey) {
+    const experienceResult = map.get(experienceKey);
+    if (experienceResult) return experienceResult;
+    const legacyContext = getExperienceContext(name, resortId);
+    if (legacyContext) return legacyContext;
   }
 
   return null;
