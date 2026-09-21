@@ -907,7 +907,7 @@ function stripTrailingTimeForInference(name: string): string {
     .trim();
 }
 
-const PARK_LABELS: Record<ParkId, string> = {
+export const PARK_LABELS: Record<ParkId, string> = {
   disneyland: "Disneyland",
   dca: "Disney California Adventure",
   mk: "Magic Kingdom",

@@ -134,6 +134,9 @@ app code) whenever `db-schema.sql` changes.
 - `TOM_API_URL` — Tom Railway API base URL
 - `TOM_API_KEY` — Tom Railway API key
 - `DWP_TOM_PROXY_KEY` — shared secret used by the server-side Tom proxy
+- `DWP_CATALOG_API_KEY` — shared secret Tom presents (via the
+  `x-dwp-catalog-api-key` header) to call the read-only
+  `GET /api/catalog/query` catalog lookup endpoint
 
 ---
 

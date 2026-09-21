@@ -224,6 +224,7 @@ The following must remain server-only:
 - `TOM_API_URL`
 - `TOM_API_KEY`
 - `DWP_TOM_PROXY_KEY`
+- `DWP_CATALOG_API_KEY`
 
 Never expose these through `NEXT_PUBLIC_*`.
 
@@ -231,6 +232,35 @@ Never expose these through `NEXT_PUBLIC_*`.
 
 Unless a phase explicitly changes it, preserve the existing `/api/tom/ask`
 request and response contract.
+
+### Catalog query API
+
+`GET /api/catalog/query` is the read-only, server-to-server catalog query
+contract DWP exposes for Tom (see `apps/web/src/lib/catalogQuery.ts` for the
+full contract and `apps/web/src/app/api/catalog/query/route.ts` for
+auth/transport). DWP is the authoritative source for stable canonical
+planner/catalog metadata (canonical identity/name, type, resort, park, land,
+active vs. legacy lifecycle); Tom owns natural-language question
+understanding and must translate a question into structured filters
+(`name`/`type`/`resort`/`park`/`land`) before calling this route — DWP must
+never inspect/parse Tom's natural-language question itself.
+
+Preserve:
+
+- Auth via the `x-dwp-catalog-api-key` header, checked against
+  `DWP_CATALOG_API_KEY` with a timing-safe comparison — always required
+  (unlike `/api/tom/ask`'s optional admin-only key), since this route has no
+  legitimate unauthenticated/browser caller.
+- Active-only results. Legacy (permanently closed/replaced) identities
+  remain recognition/history-only for old saved plans and must never appear
+  in normal catalog query results.
+- Single-source-of-truth reuse: every result is read from the existing
+  per-domain active catalogs and their existing alias/canonical resolvers
+  (`mockAttractionWaits`/`legacyAttractions.ts`, `diningSuggestions.ts`,
+  `entertainmentSuggestions.ts`, `experienceSuggestions.ts`). Extend those
+  sources when metadata is missing — never fork a parallel catalog/alias/
+  location table into this module.
+- No free-text search, no writes, no natural-language parsing.
 
 ### Chat state
 
@@ -260,6 +290,15 @@ Planner-aware context passed to Tom (`planner_context` /
 supplied by Disney Wait Planner but must not modify planner data unless a
 future phase explicitly introduces planner write capabilities. Preserve
 planner privacy and minimize transmitted data.
+
+Recognized plan items in `planner_context.plans` carry optional
+`park`/`land` fields (see `PlannerContextSnapshotItem` in
+`plannerContextSnapshot.ts`), resolved through the same canonical
+`getPlannerItemMetadata` infrastructure My Plans itself uses — never a
+separate inference table. Both are additive/optional: an item with no
+resolvable catalog identity or resort context simply omits them rather than
+guessing, and existing Tom versions that don't read these fields are
+unaffected.
 
 ## Review guidance
 
