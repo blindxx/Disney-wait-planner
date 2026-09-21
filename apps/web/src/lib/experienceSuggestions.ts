@@ -7,11 +7,23 @@
  * neither a ride, a meal, nor scheduled entertainment (character boutiques,
  * workshops, and similar bookable/plannable experiences).
  *
- * EXP.0 scope is deliberately narrow: the active catalog contains ONLY
+ * EXP.0 scope was deliberately narrow: the active catalog contained ONLY
  * Bibbidi Bobbidi Boutique, at both Disneyland Resort and Walt Disney World.
  * "BBB" is common guest planning shorthand but is NOT catalogued as an alias
- * here — see the EXP.0 brief; adding it is out of scope for this foundation
- * slice.
+ * here — see the EXP.0 brief; adding it was out of scope for that foundation
+ * slice and remains out of scope for EXP.2.
+ *
+ * EXP.2 catalog cutover: Savi's Workshop – Handbuilt Lightsabers, Droid
+ * Depot, and Olaf Draws! moved into this active catalog from the
+ * Entertainment catalog (entertainmentSuggestions.ts's ENTERTAINMENT_PLACES)
+ * — a category migration, not a new addition or a lifecycle retirement.
+ * Their resort/park/land metadata and legitimate aliases (see
+ * EXPERIENCE_ALIASES below) are carried over unchanged from that catalog.
+ * A historical/imported plan item naming one of these three identities with
+ * an explicit `type: "entertainment"` must still resolve as Experience —
+ * see resolvePlannerItemEffectiveType() in plannerItemMetadata.ts, the
+ * single shared resolver responsible for that narrow, explicit historical-
+ * compatibility override (never broad string matching).
  *
  * Mirrors the active+legacy/resolver/context pattern established by
  * diningSuggestions.ts/entertainmentSuggestions.ts exactly: `EXPERIENCE_PLACES`
@@ -23,7 +35,7 @@
  * containment) + legacy-fallback resolution used by resolveDiningKey.
  *
  * EXP.0 wired only plannerItemMetadata.ts's Experience dispatch (My Plans
- * metadata resolution). EXP.1 wires this module into the rest of normal
+ * metadata resolution). EXP.1 wired this module into the rest of normal
  * planner recognition: Smart Entry suggestions (getExperienceSuggestions,
  * added to plans/page.tsx's autocomplete list), type inference
  * (inferPlannerItemType in diningSuggestions.ts, via isExperienceName),
@@ -34,9 +46,14 @@
  * manual custom-type selector (plans/page.tsx — Experience is both a
  * selectable option for unmatched entries and included in
  * isKnownPlannerName so a known maintained Experience name keeps using
- * automatic inference). Still deferred: Tom integration, the Wait Times
- * page, and the EXP.2 effective-type/reclassification override table — see
- * the EXP.1 brief's critical boundary.
+ * automatic inference). EXP.2 added the effective-type/reclassification
+ * override (resolvePlannerItemEffectiveType in plannerItemMetadata.ts) and
+ * wired it into My Plans hydration/import/restore and Tom's read-only
+ * planner-context resolution (plannerContextSnapshot.ts) — see that
+ * function's own doc comment for the full precedence. Tom integration
+ * itself remains read-only, per AGENTS.md; no planner-context Wait Times
+ * "Experience" section was added (Wait Times naturally stops showing these
+ * three identities once they're removed from ENTERTAINMENT_PLACES).
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -66,6 +83,12 @@ export type ExperiencePlace = {
 export const EXPERIENCE_PLACES: ExperiencePlace[] = [
   { name: "Bibbidi Bobbidi Boutique", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland" },
   { name: "Bibbidi Bobbidi Boutique", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland" },
+  // ---- EXP.2 catalog cutover — moved from ENTERTAINMENT_PLACES ----
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge" },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge" },
+  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge" },
+  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge" },
+  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard" },
 ];
 
 const EXPERIENCE_KEYS: Set<string> = new Set(
@@ -105,11 +128,34 @@ const LEGACY_EXPERIENCE_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
 /**
  * Manual alias map for legitimate Experience name variants only — mirrors
  * DINING_ALIASES/ENTERTAINMENT_ALIASES (no fuzzy matching, just an explicit
- * lookup table). Empty for EXP.0: Bibbidi Bobbidi Boutique's official name
- * needs no alias, and "BBB" is deliberately excluded — it is planning
- * shorthand, not a catalog alias (see this file's module doc comment).
+ * lookup table). Bibbidi Bobbidi Boutique's official name needs no alias,
+ * and "BBB" is deliberately excluded — it is planning shorthand, not a
+ * catalog alias (see this file's module doc comment).
+ *
+ * EXP.2 catalog cutover: the Savi's Workshop / Droid Depot entries below are
+ * carried over unchanged from ENTERTAINMENT_ALIASES (entertainmentSuggestions.ts)
+ * — same keys/values, preserving guest-entered shorthand recognition across
+ * the category migration. Olaf Draws! never had an entertainment alias, so
+ * none is added here.
  */
-const EXPERIENCE_ALIASES: Record<string, string> = {};
+const EXPERIENCE_ALIASES: Record<string, string> = {
+  "savis": "savis workshop handbuilt lightsabers",
+  "savi's": "savis workshop handbuilt lightsabers",
+  "savi workshop": "savis workshop handbuilt lightsabers",
+  "savis workshop": "savis workshop handbuilt lightsabers",
+  "savi's workshop": "savis workshop handbuilt lightsabers",
+  "savi lightsaber": "savis workshop handbuilt lightsabers",
+  "lightsaber build": "savis workshop handbuilt lightsabers",
+  "build lightsaber": "savis workshop handbuilt lightsabers",
+  "handbuilt lightsabers": "savis workshop handbuilt lightsabers",
+  "lightsaber experience": "savis workshop handbuilt lightsabers",
+  "savi experience": "savis workshop handbuilt lightsabers",
+  "build a droid": "droid depot",
+  "droid build": "droid depot",
+  "build droid": "droid depot",
+  "custom droid": "droid depot",
+  "astromech droid": "droid depot",
+};
 
 /**
  * Strip a disambiguation suffix appended by getExperienceSuggestions(), e.g.

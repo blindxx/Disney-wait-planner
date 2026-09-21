@@ -25,10 +25,24 @@
  *
  * Catalog refresh note: "The Magic of Disney Animation" (Hollywood
  * Studios) is an umbrella location/collection, not itself an entry here —
- * only its individually plan-worthy pieces are catalogued (Olaf Draws! and
- * Once Upon a Studio Theater). Olaf Draws! is a deliberate scope exception:
- * it isn't a conventional show, but is included because guests plan around
- * it the same way.
+ * of its individually plan-worthy pieces, only Once Upon a Studio Theater
+ * remains catalogued here. Olaf Draws! was cataloged here through EXP.1 as
+ * a deliberate scope exception (not a conventional show, but guests plan
+ * around it the same way) — EXP.2 moved it to the Experience catalog
+ * (experienceSuggestions.ts) instead, alongside Savi's Workshop and Droid
+ * Depot below; see that module for the current entries.
+ *
+ * EXP.2 catalog cutover: Savi's Workshop – Handbuilt Lightsabers, Droid
+ * Depot, and Olaf Draws! moved from this active catalog to the Experience
+ * catalog (experienceSuggestions.ts's EXPERIENCE_PLACES) — they are still
+ * active, plan-worthy offerings, just no longer typed/ownered as
+ * Entertainment. They are deliberately NOT added to
+ * LEGACY_ENTERTAINMENT_PLACES below (that list is for retired/replaced
+ * identities, not ones that simply changed type). Historical/imported plan
+ * items naming them with an explicit `type: "entertainment"` still resolve
+ * as Experience — see resolvePlannerItemEffectiveType() in
+ * plannerItemMetadata.ts, the shared resolver responsible for that
+ * historical-compatibility override.
  *
  * Active vs. legacy identity: `ENTERTAINMENT_PLACES` is the ACTIVE/current
  * catalog — the only one enumerated by Wait Times (getEntertainmentForPark)
@@ -182,11 +196,11 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   // ---- Hollywood Studios — The Magic of Disney Animation collection ----
   // The Magic of Disney Animation itself is an umbrella location, not an
-  // individual plan-worthy entry. Only its individually plan-worthy pieces
-  // are catalogued: Olaf Draws! and Once Upon a Studio Theater. Off the
-  // Page! (character meets) and Drawn to Wonderland (play area) are
+  // individual plan-worthy entry. Of its individually plan-worthy pieces,
+  // only Once Upon a Studio Theater is catalogued here — Olaf Draws! moved
+  // to the Experience catalog in EXP.2 (see module doc comment above). Off
+  // the Page! (character meets) and Drawn to Wonderland (play area) are
   // deliberately excluded — out of catalog scope.
-  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   { name: "Once Upon a Studio Theater", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
 
   // ---- Animal Kingdom ----
@@ -194,11 +208,9 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Asia", availabilityType: "regular" },
   { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "regular" },
 
-  // ---- Galaxy's Edge experiences (DLR + WDW) ----
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
-  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
-  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
-  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  // Galaxy's Edge's Savi's Workshop – Handbuilt Lightsabers and Droid Depot
+  // moved to the Experience catalog in EXP.2 (see module doc comment above
+  // and experienceSuggestions.ts) — no longer catalogued here.
 ];
 
 /**
@@ -322,22 +334,8 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "wwoa": "wonderful world of animation",
   "hollywood studios projection show": "wonderful world of animation",
   "dhs projection show": "wonderful world of animation",
-  "savis": "savis workshop handbuilt lightsabers",
-  "savi's": "savis workshop handbuilt lightsabers",
-  "savi workshop": "savis workshop handbuilt lightsabers",
-  "savis workshop": "savis workshop handbuilt lightsabers",
-  "savi's workshop": "savis workshop handbuilt lightsabers",
-  "savi lightsaber": "savis workshop handbuilt lightsabers",
-  "lightsaber build": "savis workshop handbuilt lightsabers",
-  "build lightsaber": "savis workshop handbuilt lightsabers",
-  "handbuilt lightsabers": "savis workshop handbuilt lightsabers",
-  "lightsaber experience": "savis workshop handbuilt lightsabers",
-  "savi experience": "savis workshop handbuilt lightsabers",
-  "build a droid": "droid depot",
-  "droid build": "droid depot",
-  "build droid": "droid depot",
-  "custom droid": "droid depot",
-  "astromech droid": "droid depot",
+  // Savi's Workshop / Droid Depot aliases moved to EXPERIENCE_ALIASES in
+  // experienceSuggestions.ts (EXP.2 catalog cutover) — no longer entertainment.
   "villains unfairly ever after": "disney villains unfairly ever after",
   "unfairly ever after": "disney villains unfairly ever after",
   "little mermaid musical adventure": "the little mermaid a musical adventure",

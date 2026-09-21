@@ -30,6 +30,7 @@ import { detectTimeConflicts } from "./timeConflicts";
 import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, daySort, inferDayPark } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
+import { resolvePlannerItemEffectiveType } from "./plannerItemMetadata";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
 const MAX_ITEMS = 200;
@@ -252,34 +253,17 @@ function stripTrailingTimeForInference(name: string): string {
     .trim();
 }
 
-/**
- * Resolves the effective item type the same way My Plans hydration does
- * (resolveHydratedPlannerItemType in plans/page.tsx): an explicit
- * dining/entertainment type is trusted as-is, but a missing or stale
- * "attraction" type (e.g. from a pre-Phase-9 backup) is re-classified using
- * the same dining/entertainment name resolvers, so legacy/restored items are
- * still reported to Tom under their real type instead of defaulting wrong.
- *
- * EXP.0 fix — an explicit "experience" type is trusted as-is too, for the
- * same contract/persistence-parity reason: My Plans hydration/import already
- * preserves it, so Tom's snapshot must not silently downgrade it back to
- * "attraction". No Experience name inference, catalog lookup, or canonical
- * identity resolution is added here — a missing/stale type still only ever
- * resolves to entertainment/dining/attraction below, exactly as before.
- */
-function resolveItemType(raw: unknown, name: string): PlannerItemType {
-  if (raw === "dining" || raw === "entertainment" || raw === "experience") return raw;
-  const cleaned = stripTrailingTimeForInference(name);
-  if (
-    resolveEntertainmentKey(cleaned) !== null ||
-    resolveEntertainmentKey(cleaned, "DLR") !== null ||
-    resolveEntertainmentKey(cleaned, "WDW") !== null
-  ) {
-    return "entertainment";
-  }
-  if (resolveDiningKey(cleaned) !== null) return "dining";
-  return "attraction";
-}
+// EXP.2 — Tom's planner-context effective-type resolution (previously the
+// near-identical local resolveItemType(), which independently reimplemented
+// the same explicit-type-trusted / name-inferred precedence My Plans
+// hydration used) now goes through the single shared
+// resolvePlannerItemEffectiveType() in plannerItemMetadata.ts — the same
+// resolver My Plans hydration/import/restore use — so a historical/restored
+// item naming Savi's Workshop, Droid Depot, or Olaf Draws! with an explicit
+// `type: "entertainment"` is reported to Tom as Experience too, exactly as
+// My Plans itself now reports it. See that function's own doc comment for
+// the full precedence. This remains read-only planner context for Tom, per
+// AGENTS.md — no write capability is added or implied.
 
 /**
  * Attraction-only alias + containment resolution, mirroring crossDayChecks.ts's
@@ -472,7 +456,7 @@ function toPlanItem(raw: unknown): PlannerContextSnapshotItem | null {
   return {
     dayId: typeof r.dayId === "string" && r.dayId ? r.dayId : "day-1",
     name: truncate(r.name, MAX_NAME_LEN),
-    type: resolveItemType(r.type, r.name),
+    type: resolvePlannerItemEffectiveType(r.type, r.name),
     time: typeof r.timeLabel === "string" ? r.timeLabel : "",
   };
 }

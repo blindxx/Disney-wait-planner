@@ -59,13 +59,11 @@ import { getWaitBadgeProps } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
   getDiningSuggestions,
-  resolveDiningKey,
   isDiningName,
 } from "@/lib/diningSuggestions";
 import {
   getEntertainmentSuggestions,
   getEntertainmentAvailabilityType,
-  resolveEntertainmentKey,
   isEntertainmentName,
 } from "@/lib/entertainmentSuggestions";
 import {
@@ -74,6 +72,7 @@ import {
 } from "@/lib/experienceSuggestions";
 import {
   getPlannerItemMetadata,
+  resolvePlannerItemEffectiveType,
   type PlannerItemMetadata,
   type PlannerItemLifecycle,
 } from "@/lib/plannerItemMetadata";
@@ -252,47 +251,14 @@ function stripTrailingTimeForInference(name: string): string {
     .trim();
 }
 
-// Phase 9.3.1 — resolve the imported/restored type for an item, upgrading
-// stale or missing types to dining/entertainment via name-based inference.
-// Backups/exports created before dining/entertainment support stored every
-// item as type="attraction" (or omitted type entirely); this re-runs the
-// same inference used for newly-added items so old data gets recognized
-// correctly without ever overwriting an explicit dining/entertainment type.
-// EXP.0 fix — an explicit "experience" type is preserved the same way, with
-// no name-based Experience inference: unlike dining/entertainment, a
-// missing/stale type is never upgraded to "experience" here, only an
-// already-explicit one is kept as-is.
-function resolveImportedPlannerItemType(raw: unknown, name: string, resort: ResortId): PlannerItemType {
-  if (raw === "dining" || raw === "entertainment" || raw === "experience") return raw;
-  return inferPlannerItemType(stripTrailingTimeForInference(name), resort);
-}
-
-// Phase 9.3.2 — resolve the hydrated (local/cloud load) type for an item,
-// upgrading stale or missing types to dining/entertainment via the same
-// confident resolvers used elsewhere (resort-agnostic: exact/global alias
-// matches only, no resort-scoped disambiguation needed for hydration).
-// Preserves an explicit dining/entertainment type; unknown custom names
-// that don't resolve stay "attraction".
-// EXP.0 fix — preserves an explicit "experience" type the same way. No
-// name-based Experience inference is added: a missing/stale type still only
-// ever resolves to dining/entertainment/attraction below, never upgraded to
-// "experience".
-function resolveHydratedPlannerItemType(raw: unknown, name: string): PlannerItemType {
-  if (raw === "dining" || raw === "entertainment" || raw === "experience") return raw;
-  const cleanedName = stripTrailingTimeForInference(name);
-  // Try resort-scoped entertainment aliases (e.g. "Halloween Parade") too —
-  // resolveEntertainmentKey(name) alone only checks the resort-unambiguous
-  // alias table and misses entries in ENTERTAINMENT_ALIASES_BY_RESORT.
-  if (
-    resolveEntertainmentKey(cleanedName) !== null ||
-    resolveEntertainmentKey(cleanedName, "DLR") !== null ||
-    resolveEntertainmentKey(cleanedName, "WDW") !== null
-  ) {
-    return "entertainment";
-  }
-  if (resolveDiningKey(cleanedName) !== null) return "dining";
-  return "attraction";
-}
+// EXP.2 — resolving the imported/restored/hydrated type for an item (upgrading
+// stale/missing types via name-based inference, trusting an explicit stored
+// type, and applying the narrow historical Entertainment→Experience
+// reclassification override for Savi's Workshop/Droid Depot/Olaf Draws!) is
+// now the single shared resolvePlannerItemEffectiveType() in
+// plannerItemMetadata.ts — see its own doc comment for the full precedence.
+// The two near-identical local resolvers formerly here (resolveImportedPlannerItemType,
+// resolveHydratedPlannerItemType) were removed in favor of that shared resolver.
 
 // Phase 9.0 — ensure every loaded item has a valid type field.
 function normalizePlanItem(raw: unknown): PlanItem {
@@ -302,7 +268,9 @@ function normalizePlanItem(raw: unknown): PlanItem {
     name: r.name as string,
     timeLabel: r.timeLabel as string,
     dayId: r.dayId as string,
-    type: resolveHydratedPlannerItemType(r.type, r.name as string),
+    // No resort available at hydration time — mirrors the previous
+    // resolveHydratedPlannerItemType's resort-agnostic behavior.
+    type: resolvePlannerItemEffectiveType(r.type, r.name as string),
   };
 }
 
@@ -4449,11 +4417,14 @@ export default function PlansPage() {
 
     // Assign fresh IDs — do not preserve imported IDs (collision prevention, fix E).
     // TXT/CSV day-plan files never carry a `type` field, so fall back to
-    // name-based inference there (keeps dining recognition consistent across
-    // every import method). An explicit dining/entertainment `type` from a
-    // JSON day-plan export is preserved as-is; a missing/unknown/"attraction"
-    // type is re-inferred from the name (Phase 9.3.1) so exports created
-    // before dining/entertainment support get upgraded automatically.
+    // name-based inference there (keeps dining/entertainment/experience
+    // recognition consistent across every import method). An explicit
+    // dining/entertainment/experience `type` from a JSON day-plan export is
+    // preserved as-is (unless the EXP.2 reclassification override applies);
+    // a missing/unknown/"attraction" type is re-inferred from the name so
+    // exports created before dining/entertainment support get upgraded
+    // automatically. See resolvePlannerItemEffectiveType() for the full
+    // precedence.
     const newItems: PlanItem[] = importedItems.map((it) => {
       const rawType = (it as { type?: unknown }).type;
       return {
@@ -4461,7 +4432,7 @@ export default function PlansPage() {
         name: it.name,
         timeLabel: it.timeLabel,
         dayId: targetDayId,
-        type: resolveImportedPlannerItemType(rawType, it.name, typeResort),
+        type: resolvePlannerItemEffectiveType(rawType, it.name, typeResort),
       };
     });
     setItems((prev) => {
@@ -4736,7 +4707,7 @@ export default function PlansPage() {
         name: r.name as string,
         timeLabel: r.timeLabel as string,
         dayId,
-        type: resolveImportedPlannerItemType(r.type, r.name as string, typeResort),
+        type: resolvePlannerItemEffectiveType(r.type, r.name as string, typeResort),
       };
     });
     const restoredDayMeta: Record<string, DayMeta> =

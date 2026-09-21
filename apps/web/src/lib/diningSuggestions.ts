@@ -519,22 +519,41 @@ export function isDiningName(name: string, resort?: ResortId): boolean {
 
 /**
  * Infer a planner item's type from its current activity name.
- * Single source of truth for Add/Edit/import — keeps name-based type
- * inference consistent everywhere a name is entered or changed.
- * resort is passed through to isEntertainmentName/isExperienceName so
- * resort-scoped aliases (e.g. "Halloween Parade") resolve to the correct
- * resort's offering instead of guessing; entertainment is checked first
- * since it never overlaps with known dining names. EXP.1 — Experience is
- * checked next, via the same authoritative experienceSuggestions.ts
- * catalog EXP.0 established; its active catalog (currently only Bibbidi
- * Bobbidi Boutique) never overlaps with dining/entertainment/attraction
- * names, so adding this check cannot reclassify any existing recognized
- * name — see the EXP.1 brief's critical boundary (Savi's Workshop, Droid
- * Depot, Olaf Draws! must remain Entertainment; they are not, and must
- * never be, added to the Experience catalog).
+ * Single source of truth for Add/Edit/import, and (as of EXP.2) the final
+ * name-based fallback tier of resolvePlannerItemEffectiveType()
+ * (plannerItemMetadata.ts) — keeps name-based type inference consistent
+ * everywhere a name is entered, changed, or has no trusted stored type.
+ *
+ * resort is passed through to isEntertainmentName/isExperienceName/
+ * isDiningName so resort-scoped aliases (e.g. "Halloween Parade") resolve to
+ * the correct resort's offering instead of guessing; entertainment is
+ * checked first since it never overlaps with known dining names, then
+ * Experience (EXP.1), via the same authoritative experienceSuggestions.ts
+ * catalog EXP.0 established.
+ *
+ * EXP.2 catalog cutover: Savi's Workshop – Handbuilt Lightsabers, Droid
+ * Depot, and Olaf Draws! moved from the Entertainment catalog to the
+ * Experience catalog (see entertainmentSuggestions.ts/
+ * experienceSuggestions.ts), so this function now correctly infers
+ * "experience" for those three names — they are no longer inferred as
+ * "entertainment".
+ *
+ * resort is optional (EXP.2): callers with no single resort to scope to
+ * (e.g. hydration/Tom context resolution, previously duplicating this
+ * fallback inline) may omit it. When omitted, entertainment is additionally
+ * checked against both DLR's and WDW's resort-scoped alias tables (mirrors
+ * the resort-scoped fallback those callers had to duplicate) so a resort-
+ * ambiguous entertainment alias still resolves; dining and experience
+ * lookups already tolerate an omitted resort on their own (neither has a
+ * resort-scoped alias table).
  */
-export function inferPlannerItemType(name: string, resort: ResortId): PlannerItemType {
-  if (isEntertainmentName(name, resort)) return "entertainment";
+export function inferPlannerItemType(name: string, resort?: ResortId): PlannerItemType {
+  if (
+    isEntertainmentName(name, resort) ||
+    (resort === undefined && (isEntertainmentName(name, "DLR") || isEntertainmentName(name, "WDW")))
+  ) {
+    return "entertainment";
+  }
   if (isExperienceName(name, resort)) return "experience";
   return isDiningName(name, resort) ? "dining" : "attraction";
 }
