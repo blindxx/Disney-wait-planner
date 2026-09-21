@@ -355,6 +355,11 @@ export const ALIASES_WDW: Record<string, string> = {
   "cop":                              "walt disneys carousel of progress",
   "carousel of progress":             "walt disneys carousel of progress",
   "walt disneys carousel of progress": "walt disneys carousel of progress",
+
+  // ---- Planner-wide common alias maintenance — acronyms ----
+  "sdd":                         "slinky dog dash",              // Slinky Dog Dash (HS)
+  "ksr":                         "kilimanjaro safaris",           // Kilimanjaro Safaris (AK)
+  "7dmt":                        "seven dwarfs mine train",       // Seven Dwarfs Mine Train (MK)
 };
 
 // ---------------------------------------------------------------------------
@@ -541,4 +546,9 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "Walt Disney's Carousel of Progress", resort: "WDW", expectedKey: "walt disneys carousel of progress" },
   // --- Living with the Land – Glimmering Greenhouses (EPCOT seasonal overlay name — parity with liveWaitApi.ts) ---
   { input: "Living with the Land – Glimmering Greenhouses", resort: "WDW", expectedKey: "living with the land" },
+  // --- Planner-wide common alias maintenance — acronyms ---
+  { input: "sdd",                   resort: "WDW", expectedKey: "slinky dog dash" },
+  { input: "SDD",                   resort: "WDW", expectedKey: "slinky dog dash" }, // case-insensitive
+  { input: "ksr",                   resort: "WDW", expectedKey: "kilimanjaro safaris" },
+  { input: "7dmt",                  resort: "WDW", expectedKey: "seven dwarfs mine train" },
 ];

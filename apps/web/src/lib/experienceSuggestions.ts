@@ -9,9 +9,9 @@
  *
  * EXP.0 scope was deliberately narrow: the active catalog contained ONLY
  * Bibbidi Bobbidi Boutique, at both Disneyland Resort and Walt Disney World.
- * "BBB" is common guest planning shorthand but is NOT catalogued as an alias
- * here — see the EXP.0 brief; adding it was out of scope for that foundation
- * slice and remains out of scope for EXP.2.
+ * "BBB" was common guest planning shorthand deliberately left uncatalogued
+ * at EXP.0/EXP.2 — see the planner-wide common alias maintenance slice that
+ * added "bbb"/"bibbidi bobbidi"/"bibbidi" to EXPERIENCE_ALIASES below.
  *
  * EXP.2 catalog cutover: Savi's Workshop – Handbuilt Lightsabers, Droid
  * Depot, and Olaf Draws! moved into this active catalog from the
@@ -173,17 +173,24 @@ const LEGACY_EXPERIENCE_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
 /**
  * Manual alias map for legitimate Experience name variants only — mirrors
  * DINING_ALIASES/ENTERTAINMENT_ALIASES (no fuzzy matching, just an explicit
- * lookup table). Bibbidi Bobbidi Boutique's official name needs no alias,
- * and "BBB" is deliberately excluded — it is planning shorthand, not a
- * catalog alias (see this file's module doc comment).
+ * lookup table). Bibbidi Bobbidi Boutique's official name needs no alias.
  *
  * EXP.2 catalog cutover: the Savi's Workshop / Droid Depot entries below are
  * carried over unchanged from ENTERTAINMENT_ALIASES (entertainmentSuggestions.ts)
  * — same keys/values, preserving guest-entered shorthand recognition across
  * the category migration. Olaf Draws! never had an entertainment alias, so
  * none is added here.
+ *
+ * Planner-wide common alias maintenance: "bbb"/"bibbidi bobbidi"/"bibbidi"
+ * (Bibbidi Bobbidi Boutique, previously deliberately excluded — see this
+ * file's module doc comment) and "savi" (Savi's Workshop — "savis"/"savi's"
+ * already existed) added below.
  */
 const EXPERIENCE_ALIASES: Record<string, string> = {
+  "bbb": "bibbidi bobbidi boutique",
+  "bibbidi bobbidi": "bibbidi bobbidi boutique",
+  "bibbidi": "bibbidi bobbidi boutique",
+  "savi": "savis workshop handbuilt lightsabers",
   "savis": "savis workshop handbuilt lightsabers",
   "savi's": "savis workshop handbuilt lightsabers",
   "savi workshop": "savis workshop handbuilt lightsabers",
@@ -439,4 +446,44 @@ export const DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES: Array<{
     resort: "DLR",
     expected: false,
   },
+  {
+    description: "Bibbidi Bobbidi Boutique's new 'bbb' alias is NEVER marked reclassified",
+    name: "bbb",
+    resort: "WDW",
+    expected: false,
+  },
+  {
+    description: "Savi's Workshop's new 'savi' alias resolves to the same marked identity",
+    name: "savi",
+    resort: "WDW",
+    expected: true,
+  },
+];
+
+/**
+ * Reference test cases for the planner-wide common alias maintenance
+ * additions to EXPERIENCE_ALIASES ("bbb"/"bibbidi bobbidi"/"bibbidi"/"savi").
+ * Mirrors the DEV_PLAN_ALIAS_CASES convention in plansMatching.ts — not
+ * wired into CI (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_EXPERIENCE_ALIAS_CASES, resolveExperienceKey } from "@/lib/experienceSuggestions";
+ *   for (const c of DEV_EXPERIENCE_ALIAS_CASES) {
+ *     const got = resolveExperienceKey(c.input, c.resort);
+ *     console.log(got === c.expectedKey ? "✓" : "✗ FAIL", c.input, "→", got);
+ *   }
+ */
+export const DEV_EXPERIENCE_ALIAS_CASES: Array<{
+  input: string;
+  resort?: ResortId;
+  expectedKey: string | null;
+}> = [
+  { input: "bbb",              resort: "WDW", expectedKey: "bibbidi bobbidi boutique" },
+  { input: "BBB",              resort: "DLR", expectedKey: "bibbidi bobbidi boutique" }, // case-insensitive
+  { input: "bibbidi bobbidi",  resort: "WDW", expectedKey: "bibbidi bobbidi boutique" },
+  { input: "bibbidi",          resort: "DLR", expectedKey: "bibbidi bobbidi boutique" },
+  { input: "savi",             resort: "WDW", expectedKey: "savis workshop handbuilt lightsabers" },
+  { input: "savi",             resort: "DLR", expectedKey: "savis workshop handbuilt lightsabers" },
+  // Regression: pre-existing "savis"/"savi's" aliases resolve unchanged.
+  { input: "savis",            resort: "WDW", expectedKey: "savis workshop handbuilt lightsabers" },
+  { input: "savi's",           resort: "WDW", expectedKey: "savis workshop handbuilt lightsabers" },
 ];
