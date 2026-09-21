@@ -7,11 +7,23 @@
  * neither a ride, a meal, nor scheduled entertainment (character boutiques,
  * workshops, and similar bookable/plannable experiences).
  *
- * EXP.0 scope is deliberately narrow: the active catalog contains ONLY
+ * EXP.0 scope was deliberately narrow: the active catalog contained ONLY
  * Bibbidi Bobbidi Boutique, at both Disneyland Resort and Walt Disney World.
  * "BBB" is common guest planning shorthand but is NOT catalogued as an alias
- * here — see the EXP.0 brief; adding it is out of scope for this foundation
- * slice.
+ * here — see the EXP.0 brief; adding it was out of scope for that foundation
+ * slice and remains out of scope for EXP.2.
+ *
+ * EXP.2 catalog cutover: Savi's Workshop – Handbuilt Lightsabers, Droid
+ * Depot, and Olaf Draws! moved into this active catalog from the
+ * Entertainment catalog (entertainmentSuggestions.ts's ENTERTAINMENT_PLACES)
+ * — a category migration, not a new addition or a lifecycle retirement.
+ * Their resort/park/land metadata and legitimate aliases (see
+ * EXPERIENCE_ALIASES below) are carried over unchanged from that catalog.
+ * A historical/imported plan item naming one of these three identities with
+ * an explicit `type: "entertainment"` must still resolve as Experience —
+ * see resolvePlannerItemEffectiveType() in plannerItemMetadata.ts, the
+ * single shared resolver responsible for that narrow, explicit historical-
+ * compatibility override (never broad string matching).
  *
  * Mirrors the active+legacy/resolver/context pattern established by
  * diningSuggestions.ts/entertainmentSuggestions.ts exactly: `EXPERIENCE_PLACES`
@@ -23,7 +35,7 @@
  * containment) + legacy-fallback resolution used by resolveDiningKey.
  *
  * EXP.0 wired only plannerItemMetadata.ts's Experience dispatch (My Plans
- * metadata resolution). EXP.1 wires this module into the rest of normal
+ * metadata resolution). EXP.1 wired this module into the rest of normal
  * planner recognition: Smart Entry suggestions (getExperienceSuggestions,
  * added to plans/page.tsx's autocomplete list), type inference
  * (inferPlannerItemType in diningSuggestions.ts, via isExperienceName),
@@ -34,9 +46,14 @@
  * manual custom-type selector (plans/page.tsx — Experience is both a
  * selectable option for unmatched entries and included in
  * isKnownPlannerName so a known maintained Experience name keeps using
- * automatic inference). Still deferred: Tom integration, the Wait Times
- * page, and the EXP.2 effective-type/reclassification override table — see
- * the EXP.1 brief's critical boundary.
+ * automatic inference). EXP.2 added the effective-type/reclassification
+ * override (resolvePlannerItemEffectiveType in plannerItemMetadata.ts) and
+ * wired it into My Plans hydration/import/restore and Tom's read-only
+ * planner-context resolution (plannerContextSnapshot.ts) — see that
+ * function's own doc comment for the full precedence. Tom integration
+ * itself remains read-only, per AGENTS.md; no planner-context Wait Times
+ * "Experience" section was added (Wait Times naturally stops showing these
+ * three identities once they're removed from ENTERTAINMENT_PLACES).
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
@@ -61,11 +78,34 @@ export type ExperiencePlace = {
    * taxonomy.
    */
   land?: string;
+  /**
+   * CODEX P1 fix — the authoritative marker for the EXP.2 historical
+   * Entertainment→Experience reclassification override, carried on the
+   * catalog entry itself rather than duplicated as a separate hard-coded
+   * name list elsewhere. True ONLY for the three identities EXP.2 moved
+   * here from ENTERTAINMENT_PLACES (Savi's Workshop – Handbuilt
+   * Lightsabers, Droid Depot, Olaf Draws!) — set on every resort variant of
+   * each. Omitted (falsy) for every other entry, including Bibbidi Bobbidi
+   * Boutique, which must never receive the override. Consult this only via
+   * isReclassifiedFromEntertainmentKey() below, on a key already resolved
+   * through resolveExperienceKey() — never by matching this field against
+   * a raw/unresolved name.
+   */
+  reclassifiedFromEntertainment?: true;
 };
 
 export const EXPERIENCE_PLACES: ExperiencePlace[] = [
   { name: "Bibbidi Bobbidi Boutique", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland" },
   { name: "Bibbidi Bobbidi Boutique", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland" },
+  // ---- EXP.2 catalog cutover — moved from ENTERTAINMENT_PLACES ----
+  // reclassifiedFromEntertainment: true marks these as the approved
+  // historical Entertainment→Experience override identities — see the
+  // field's own doc comment on ExperiencePlace above.
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Savi's Workshop – Handbuilt Lightsabers", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Droid Depot", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Droid Depot", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Star Wars: Galaxy’s Edge", reclassifiedFromEntertainment: true },
+  { name: "Olaf Draws!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", reclassifiedFromEntertainment: true },
 ];
 
 const EXPERIENCE_KEYS: Set<string> = new Set(
@@ -79,6 +119,34 @@ const EXPERIENCE_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
   DLR: new Set(EXPERIENCE_PLACES.filter((p) => p.resort === "DLR").map((p) => normalizeKey(p.name))),
   WDW: new Set(EXPERIENCE_PLACES.filter((p) => p.resort === "WDW").map((p) => normalizeKey(p.name))),
 };
+
+// CODEX P1 fix — derived directly from EXPERIENCE_PLACES's own
+// reclassifiedFromEntertainment flag (see that field's doc comment above),
+// so the set of identities eligible for the EXP.2 historical Entertainment→
+// Experience override lives in exactly one place: this catalog. No separate
+// canonical-name list is maintained anywhere else.
+const RECLASSIFIED_FROM_ENTERTAINMENT_KEYS: ReadonlySet<string> = new Set(
+  EXPERIENCE_PLACES.filter((p) => p.reclassifiedFromEntertainment).map((p) => normalizeKey(p.name)),
+);
+
+/**
+ * True when `key` — a canonical Experience key already resolved via
+ * resolveExperienceKey() (never a raw/unresolved name) — identifies one of
+ * the approved historical Entertainment→Experience reclassification
+ * identities (currently Savi's Workshop – Handbuilt Lightsabers, Droid
+ * Depot, and Olaf Draws!). Because resolveExperienceKey() already routes a
+ * maintained alias (e.g. "build a droid") to its canonical key through the
+ * same authoritative alias/containment resolution used everywhere else in
+ * this module, an alias for one of these three identities receives the same
+ * answer as its canonical name — there is no second alias table here.
+ * Bibbidi Bobbidi Boutique's key is never in this set, so it is never
+ * eligible for the override. CODEX P1 fix — see
+ * RECLASSIFIED_FROM_ENTERTAINMENT_KEYS above for where this is sourced from
+ * (the catalog's own metadata, not a duplicated name list).
+ */
+export function isReclassifiedFromEntertainmentKey(key: string): boolean {
+  return RECLASSIFIED_FROM_ENTERTAINMENT_KEYS.has(key);
+}
 
 /**
  * Permanently closed/replaced Experience identities kept ONLY so that
@@ -105,11 +173,34 @@ const LEGACY_EXPERIENCE_KEYS_BY_RESORT: Record<ResortId, Set<string>> = {
 /**
  * Manual alias map for legitimate Experience name variants only — mirrors
  * DINING_ALIASES/ENTERTAINMENT_ALIASES (no fuzzy matching, just an explicit
- * lookup table). Empty for EXP.0: Bibbidi Bobbidi Boutique's official name
- * needs no alias, and "BBB" is deliberately excluded — it is planning
- * shorthand, not a catalog alias (see this file's module doc comment).
+ * lookup table). Bibbidi Bobbidi Boutique's official name needs no alias,
+ * and "BBB" is deliberately excluded — it is planning shorthand, not a
+ * catalog alias (see this file's module doc comment).
+ *
+ * EXP.2 catalog cutover: the Savi's Workshop / Droid Depot entries below are
+ * carried over unchanged from ENTERTAINMENT_ALIASES (entertainmentSuggestions.ts)
+ * — same keys/values, preserving guest-entered shorthand recognition across
+ * the category migration. Olaf Draws! never had an entertainment alias, so
+ * none is added here.
  */
-const EXPERIENCE_ALIASES: Record<string, string> = {};
+const EXPERIENCE_ALIASES: Record<string, string> = {
+  "savis": "savis workshop handbuilt lightsabers",
+  "savi's": "savis workshop handbuilt lightsabers",
+  "savi workshop": "savis workshop handbuilt lightsabers",
+  "savis workshop": "savis workshop handbuilt lightsabers",
+  "savi's workshop": "savis workshop handbuilt lightsabers",
+  "savi lightsaber": "savis workshop handbuilt lightsabers",
+  "lightsaber build": "savis workshop handbuilt lightsabers",
+  "build lightsaber": "savis workshop handbuilt lightsabers",
+  "handbuilt lightsabers": "savis workshop handbuilt lightsabers",
+  "lightsaber experience": "savis workshop handbuilt lightsabers",
+  "savi experience": "savis workshop handbuilt lightsabers",
+  "build a droid": "droid depot",
+  "droid build": "droid depot",
+  "build droid": "droid depot",
+  "custom droid": "droid depot",
+  "astromech droid": "droid depot",
+};
 
 /**
  * Strip a disambiguation suffix appended by getExperienceSuggestions(), e.g.
@@ -276,3 +367,76 @@ export function getExperienceContext(name: string, resort: ResortId): Experience
     lifecycle: EXPERIENCE_KEYS.has(key) ? "active" : "legacy",
   };
 }
+
+/**
+ * Reference test cases for isReclassifiedFromEntertainmentKey() — CODEX P1
+ * fix. Mirrors the DEV_PLAN_ALIAS_CASES convention in plansMatching.ts — not
+ * wired into CI (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES, resolveExperienceKey, isReclassifiedFromEntertainmentKey } from "@/lib/experienceSuggestions";
+ *   for (const c of DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES) {
+ *     const got = isReclassifiedFromEntertainmentKey(resolveExperienceKey(c.name, c.resort) ?? "");
+ *     const ok = got === c.expected;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, got);
+ *   }
+ *
+ * Proves the reclassification-eligibility marker lives ONLY on
+ * EXPERIENCE_PLACES itself (this catalog), that a maintained alias resolves
+ * to the same answer as its canonical name (both flow through
+ * resolveExperienceKey first), and that Bibbidi Bobbidi Boutique is
+ * permanently excluded.
+ */
+export const DEV_RECLASSIFIED_FROM_ENTERTAINMENT_CASES: Array<{
+  description: string;
+  name: string;
+  resort?: ResortId;
+  expected: boolean;
+}> = [
+  {
+    description: "Savi's Workshop canonical name (DLR) is marked reclassified",
+    name: "Savi's Workshop – Handbuilt Lightsabers",
+    resort: "DLR",
+    expected: true,
+  },
+  {
+    description: "Savi's Workshop canonical name (WDW) is marked reclassified",
+    name: "Savi's Workshop – Handbuilt Lightsabers",
+    resort: "WDW",
+    expected: true,
+  },
+  {
+    description: "Savi's Workshop alias ('savis') resolves to the same marked identity",
+    name: "savis",
+    expected: true,
+  },
+  {
+    description: "Droid Depot canonical name is marked reclassified",
+    name: "Droid Depot",
+    resort: "WDW",
+    expected: true,
+  },
+  {
+    description: "Droid Depot alias ('build a droid') resolves to the same marked identity",
+    name: "build a droid",
+    resort: "DLR",
+    expected: true,
+  },
+  {
+    description: "Olaf Draws! canonical name is marked reclassified",
+    name: "Olaf Draws!",
+    resort: "WDW",
+    expected: true,
+  },
+  {
+    description: "Bibbidi Bobbidi Boutique is NEVER marked reclassified",
+    name: "Bibbidi Bobbidi Boutique",
+    resort: "WDW",
+    expected: false,
+  },
+  {
+    description: "Bibbidi Bobbidi Boutique (DLR) is NEVER marked reclassified",
+    name: "Bibbidi Bobbidi Boutique",
+    resort: "DLR",
+    expected: false,
+  },
+];
