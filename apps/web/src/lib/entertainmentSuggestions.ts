@@ -357,6 +357,9 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "leota's swinging wake": "madame leotas swinging wake a haunted mansion street party",
   "swinging wake": "madame leotas swinging wake a haunted mansion street party",
   "haunted mansion street party": "madame leotas swinging wake a haunted mansion street party",
+  // Planner-wide common alias maintenance — acronyms.
+  "woc": "world of color",               // World of Color (DCA)
+  "folk": "festival of the lion king",   // Festival of the Lion King (AK) — "fotlk" already existed above
 };
 
 /**
@@ -620,3 +623,30 @@ export function getEntertainmentContext(name: string, resort: ResortId): Enterta
     lifecycle: ENTERTAINMENT_KEYS.has(key) ? "active" : "legacy",
   };
 }
+
+/**
+ * Reference test cases for the "woc"/"folk" acronym aliases (planner-wide
+ * common alias maintenance), including resort-scope negatives (World of
+ * Color is DLR-only; Festival of the Lion King is WDW-only). Mirrors the
+ * DEV_PLAN_ALIAS_CASES convention in plansMatching.ts — not wired into CI
+ * (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_ENTERTAINMENT_ALIAS_CASES, resolveEntertainmentKey } from "@/lib/entertainmentSuggestions";
+ *   for (const c of DEV_ENTERTAINMENT_ALIAS_CASES) {
+ *     const got = resolveEntertainmentKey(c.input, c.resort);
+ *     console.log(got === c.expectedKey ? "✓" : "✗ FAIL", c.input, "→", got);
+ *   }
+ */
+export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
+  input: string;
+  resort?: ResortId;
+  expectedKey: string | null;
+}> = [
+  { input: "woc",  resort: "DLR", expectedKey: "world of color" },
+  { input: "WOC",  resort: "DLR", expectedKey: "world of color" }, // case-insensitive
+  { input: "woc",  resort: "WDW", expectedKey: null },              // resort-scope: DLR-only
+  { input: "folk", resort: "WDW", expectedKey: "festival of the lion king" },
+  { input: "folk", resort: "DLR", expectedKey: null },              // resort-scope: WDW-only
+  // "fotlk" already existed — regression check it still resolves unchanged.
+  { input: "fotlk", resort: "WDW", expectedKey: "festival of the lion king" },
+];

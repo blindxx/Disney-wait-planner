@@ -368,6 +368,11 @@ const DINING_ALIASES: Record<string, string> = {
   // the accented "í" into a key-splitting space ("c tricos"), so the
   // common unaccented "Citricos" spelling needs this explicit alias.
   "citricos": "c tricos",
+  // Planner-wide common alias maintenance — "ogas" is a single token, so it
+  // can't reach the stage-2 containment check; normalizeKey() already
+  // strips apostrophes/case/punctuation, so this one key resolves "Oga's",
+  // "ogas", and any case variant without a separate alias per variant.
+  "ogas": "ogas cantina",
 };
 
 /**
@@ -711,3 +716,29 @@ export function getDiningContext(name: string, resort: ResortId): DiningContext 
 export function getDiningParkId(name: string, resort: ResortId): ParkId | undefined {
   return getDiningContext(name, resort)?.parkId ?? undefined;
 }
+
+/**
+ * Reference test cases for the "ogas" alias (planner-wide common alias
+ * maintenance) plus a Brown Derby regression check, confirming that alias
+ * remains unchanged. Mirrors the DEV_PLAN_ALIAS_CASES convention in
+ * plansMatching.ts — not wired into CI (no test runner in this repo), run
+ * manually from Node:
+ *
+ *   import { DEV_DINING_ALIAS_CASES, resolveDiningKey } from "@/lib/diningSuggestions";
+ *   for (const c of DEV_DINING_ALIAS_CASES) {
+ *     const got = resolveDiningKey(c.input, c.resort);
+ *     console.log(got === c.expectedKey ? "✓" : "✗ FAIL", c.input, "→", got);
+ *   }
+ */
+export const DEV_DINING_ALIAS_CASES: Array<{
+  input: string;
+  resort?: ResortId;
+  expectedKey: string | null;
+}> = [
+  { input: "ogas",         resort: "WDW", expectedKey: "ogas cantina" },
+  { input: "Oga's",        resort: "DLR", expectedKey: "ogas cantina" }, // punctuation stripped by normalizeKey
+  { input: "OGAS",         resort: "WDW", expectedKey: "ogas cantina" }, // case-insensitive
+  { input: "Oga's Cantina", resort: "DLR", expectedKey: "ogas cantina" }, // stage-1 exact, unaffected by new alias
+  // Regression: Brown Derby's existing alias must resolve unchanged.
+  { input: "brown derby",  resort: "WDW", expectedKey: "hollywood brown derby" },
+];
