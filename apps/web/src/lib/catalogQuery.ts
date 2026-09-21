@@ -124,6 +124,28 @@ type ParsedFilters = {
   land?: string;
 };
 
+/**
+ * CODEX P2 fix — the resort hint used to resolve a `name` (e.g. so a
+ * resort-scoped alias like entertainment's "Halloween Parade"/"projection
+ * show" can resolve at all — see ENTERTAINMENT_ALIASES_BY_RESORT in
+ * entertainmentSuggestions.ts) must not require an explicit `resort` filter
+ * when `park` already identifies one unambiguously. Every ParkId belongs to
+ * exactly one resort (PARK_TO_RESORT, the same maintained park→resort
+ * relationship crossDayChecks.ts/resolveParkFilter above already use) — no
+ * new metadata is introduced here.
+ *
+ * An explicit `filters.resort` always wins and is never overridden by a
+ * park-derived guess: this is only ever used to fill in a MISSING resort
+ * hint, never to second-guess an explicit one. When both are supplied and
+ * disagree (e.g. resort=WDW + park=Disneyland), this still returns the
+ * explicit resort — the subsequent park filter (applied identically to
+ * every result below, resolved-by-name or not) then naturally yields no
+ * match rather than silently swapping in the park's resort.
+ */
+function resolveIdentityResortHint(filters: ParsedFilters): ResortId | undefined {
+  return filters.resort ?? (filters.park ? PARK_TO_RESORT[filters.park] : undefined);
+}
+
 function toResult(
   type: PlannerItemType,
   resort: ResortId,
@@ -147,10 +169,15 @@ function landMatches(entryLand: string | undefined, filterLand: string | undefin
 }
 
 function queryAttractions(filters: ParsedFilters): CatalogResult[] {
-  const resortsToSearch = filters.resort ? [filters.resort] : RESORT_IDS;
   const results: CatalogResult[] = [];
 
   if (filters.name) {
+    // CODEX P2 fix — narrow identity resolution to the park-derived resort
+    // when no explicit resort was supplied (see resolveIdentityResortHint).
+    // Falls back to searching both resorts only when neither resort nor
+    // park narrows it, same as before this fix.
+    const identityHint = resolveIdentityResortHint(filters);
+    const resortsToSearch = identityHint ? [identityHint] : RESORT_IDS;
     for (const resort of resortsToSearch) {
       const key = resolveAttractionIdentityKey(filters.name, resort, { allowContainment: true });
       if (!key) continue;
@@ -191,7 +218,12 @@ function queryPlaceDomain<T extends { name: string; resort: ResortId; parkId?: P
 ): CatalogResult[] {
   let candidates = activeEntries;
   if (filters.name) {
-    const key = resolveKey(filters.name, filters.resort);
+    // CODEX P2 fix — see resolveIdentityResortHint: falls back to a
+    // park-derived resort hint when no explicit resort was given, so a
+    // resort-scoped alias (e.g. entertainment's "Halloween Parade"/
+    // "projection show") can still resolve when the caller supplied an
+    // unambiguous park instead of a resort.
+    const key = resolveKey(filters.name, resolveIdentityResortHint(filters));
     if (!key) return [];
     candidates = activeEntries.filter((e) => normalizeKey(e.name) === key);
   }
@@ -420,6 +452,64 @@ export const DEV_CATALOG_QUERY_CASES: Array<{
         }),
       ),
     },
+  },
+  // ---- CODEX P2 fix — resort-scoped alias resolution via park-derived
+  // resort hint (no explicit `resort` supplied) ----
+  {
+    description: "CODEX P2: 'projection show' (WDW-only resort-scoped alias) + park=Hollywood Studios, no explicit resort -> resolves via park-derived resort hint",
+    filters: { name: "projection show", park: "Hollywood Studios" },
+    expected: {
+      ok: true,
+      results: [
+        {
+          type: "entertainment",
+          canonicalName: "Wonderful World of Animation",
+          resort: "WDW",
+          park: "Hollywood Studios",
+          land: "Hollywood Boulevard",
+          lifecycle: "active",
+        },
+      ],
+    },
+  },
+  {
+    description: "CODEX P2: 'halloween parade' (resort-ambiguous alias) + park=Disney California Adventure, no explicit resort -> resolves the DLR variant via park-derived resort hint",
+    filters: { name: "halloween parade", park: "Disney California Adventure" },
+    expected: {
+      ok: true,
+      results: [
+        {
+          type: "entertainment",
+          canonicalName: "Frightfully Fun Parade",
+          resort: "DLR",
+          park: "Disney California Adventure",
+          land: "Paradise Gardens Park",
+          lifecycle: "active",
+        },
+      ],
+    },
+  },
+  {
+    description: "CODEX P2: 'halloween parade' + explicit compatible resort=WDW + park=Magic Kingdom -> still resolves correctly (explicit resort path unaffected)",
+    filters: { name: "halloween parade", resort: "WDW", park: "Magic Kingdom" },
+    expected: {
+      ok: true,
+      results: [
+        {
+          type: "entertainment",
+          canonicalName: "Mickey's Boo-To-You Halloween Parade",
+          resort: "WDW",
+          park: "Magic Kingdom",
+          land: "Main Street, U.S.A.",
+          lifecycle: "active",
+        },
+      ],
+    },
+  },
+  {
+    description: "CODEX P2: 'halloween parade' + explicit CONFLICTING resort=WDW + park=Disneyland (a DLR park) -> no silent park-derived override, yields no match rather than an error",
+    filters: { name: "halloween parade", resort: "WDW", park: "Disneyland" },
+    expected: { ok: true, results: [] },
   },
   {
     description: "type=dining + land=Star Wars: Galaxy's Edge (straight apostrophe) matches catalog's typographic apostrophe",
