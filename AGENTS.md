@@ -201,6 +201,25 @@ is active: a known closure must not accidentally fall through to
 Queue-Times and render as `DOWN`/`OPERATING` (misleading live status)
 without going through the deliberate sanity override.
 
+### Planned-closure data-maintenance scope
+
+`plannedClosures.ts`'s manually maintained dataset is not intended to
+mirror every routine Disney refurbishment or temporary maintenance
+closure — it exists for closures that matter for trip planning:
+- Generally prioritize extended/multi-month closures.
+- Routine short-term maintenance closures of roughly a month or less
+  normally should not be added.
+- This is guidance, not a rigid duration cutoff — an unusually
+  significant short closure may still warrant an entry when there is a
+  clear trip-planning reason.
+- A short closure that isn't manually maintained still surfaces
+  correctly through the normal live/provider status path
+  (`liveWaitApi.ts`) while it's happening; it doesn't need a
+  `plannedClosures.ts` entry to be represented.
+- Future catalog/data-maintenance audits should apply this guidance
+  rather than proposing every short refurbishment as a planned-closure
+  data update.
+
 ## Tom integration
 
 ### Architecture

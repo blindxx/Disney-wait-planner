@@ -320,6 +320,21 @@ export const ALIASES_WDW: Record<string, string> = {
   // identity. ----
   "living with the land glimmering greenhouses": "living with the land",
 
+  // ---- Walt Disney World Railroad (MK Main Street, U.S.A.) — station-
+  // qualified provider name parity with liveWaitApi.ts's ALIASES_WDW.
+  // Queue-Times exposes each physical boarding station as its own ride
+  // record; a My Plans item manually entered, imported, or cloud-restored
+  // under one of those station-qualified names must still resolve the
+  // single canonical "Walt Disney World Railroad" identity (never a
+  // station-specific one) so it keeps its canonical park/land metadata and
+  // live-wait match. Frontierland kept as a defensive alias for the same
+  // reason as liveWaitApi.ts's ALIASES_WDW — real physical station, exact
+  // current Queue-Times string unconfirmed. ----
+  "walt disney world railroad main street u s a": "walt disney world railroad",
+  "walt disney world railroad main street usa":   "walt disney world railroad",
+  "walt disney world railroad frontierland":      "walt disney world railroad",
+  "walt disney world railroad fantasyland":       "walt disney world railroad",
+
   // ---- MK Fantasyland ----
   // "mermaid" alone is a single token → needs alias
   "mermaid":                     "under the sea journey of the little mermaid",
@@ -546,6 +561,10 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "Walt Disney's Carousel of Progress", resort: "WDW", expectedKey: "walt disneys carousel of progress" },
   // --- Living with the Land – Glimmering Greenhouses (EPCOT seasonal overlay name — parity with liveWaitApi.ts) ---
   { input: "Living with the Land – Glimmering Greenhouses", resort: "WDW", expectedKey: "living with the land" },
+  // --- Walt Disney World Railroad station-qualified names (MK — parity with liveWaitApi.ts's ALIASES_WDW) ---
+  { input: "Walt Disney World Railroad - Main Street, U.S.A.", resort: "WDW", expectedKey: "walt disney world railroad" },
+  { input: "Walt Disney World Railroad - Fantasyland",         resort: "WDW", expectedKey: "walt disney world railroad" },
+  { input: "Walt Disney World Railroad - Frontierland",        resort: "WDW", expectedKey: "walt disney world railroad" }, // defensive, unconfirmed provider string
   // --- Planner-wide common alias maintenance — acronyms ---
   { input: "sdd",                   resort: "WDW", expectedKey: "slinky dog dash" },
   { input: "SDD",                   resort: "WDW", expectedKey: "slinky dog dash" }, // case-insensitive

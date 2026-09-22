@@ -239,3 +239,56 @@ export function getAttractionContext(name: string, resort: ResortId): Attraction
   }
   return undefined;
 }
+
+// ---------------------------------------------------------------------------
+// Dev-only validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Reference cases proving getAttractionContext() resolves a station-
+ * qualified Walt Disney World Railroad plan item name (see plansMatching.ts's
+ * ALIASES_WDW — same parity entries as liveWaitApi.ts's live-feed aliases)
+ * to the single canonical identity's own park/land metadata, plus one
+ * pre-existing containment-based case as a no-regression control. Mirrors
+ * the DEV_PLAN_ALIAS_CASES convention (plansMatching.ts) — not wired into
+ * CI (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_ATTRACTION_CONTEXT_CASES, getAttractionContext } from "@/lib/legacyAttractions";
+ *   for (const c of DEV_ATTRACTION_CONTEXT_CASES) {
+ *     const got = getAttractionContext(c.input, c.resort);
+ *     const ok = got?.name === c.expected.name && got?.parkId === c.expected.parkId &&
+ *       got?.land === c.expected.land && got?.lifecycle === c.expected.lifecycle;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.description, got);
+ *   }
+ */
+export const DEV_ATTRACTION_CONTEXT_CASES: Array<{
+  description: string;
+  input: string;
+  resort: ResortId;
+  expected: { name: string; parkId: ParkId | null; land?: string; lifecycle: "active" | "legacy" };
+}> = [
+  {
+    description: "Railroad Main Street, U.S.A. station-qualified name resolves canonical MK metadata",
+    input: "Walt Disney World Railroad - Main Street, U.S.A.",
+    resort: "WDW",
+    expected: { name: "Walt Disney World Railroad", parkId: "mk", land: "Main Street, U.S.A.", lifecycle: "active" },
+  },
+  {
+    description: "Railroad Fantasyland station-qualified name resolves the SAME canonical MK metadata",
+    input: "Walt Disney World Railroad - Fantasyland",
+    resort: "WDW",
+    expected: { name: "Walt Disney World Railroad", parkId: "mk", land: "Main Street, U.S.A.", lifecycle: "active" },
+  },
+  {
+    description: "Railroad Frontierland defensive variant resolves the SAME canonical MK metadata",
+    input: "Walt Disney World Railroad - Frontierland",
+    resort: "WDW",
+    expected: { name: "Walt Disney World Railroad", parkId: "mk", land: "Main Street, U.S.A.", lifecycle: "active" },
+  },
+  {
+    description: "No-regression control: unrelated existing containment-based match (Big Thunder Mountain) unaffected",
+    input: "Big Thunder Mountain",
+    resort: "WDW",
+    expected: { name: "Big Thunder Mountain Railroad", parkId: "mk", land: "Frontierland", lifecycle: "active" },
+  },
+];
