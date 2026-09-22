@@ -347,6 +347,17 @@ const ALIASES_WDW = new Map<string, string>([
   // kept as alias so Queue-Times entries with the old name still resolve.
   ["soarin' around the world",                   "soarin' across america"],
   ["soarin around the world",                    "soarin' across america"],
+  // Walt Disney World Railroad (Magic Kingdom) — Queue-Times exposes each
+  // station as its own ride record (Main Street, U.S.A.; Frontierland;
+  // Fantasyland) rather than one attraction. All stations are the same
+  // physical ride and the same canonical DWP attraction/land (Main Street,
+  // U.S.A.); resolving them to one key lets the existing freshness dedupe
+  // (isFresher/dedupeByCanonicalIdentity below) pick the authoritative
+  // status instead of the app showing a separate card per station.
+  ["walt disney world railroad - main street, u.s.a.", "walt disney world railroad"],
+  ["walt disney world railroad - main street usa",      "walt disney world railroad"],
+  ["walt disney world railroad - frontierland",         "walt disney world railroad"],
+  ["walt disney world railroad - fantasyland",          "walt disney world railroad"],
   // Living with the Land (EPCOT, World Nature) — Queue-Times renames this to
   // "Living with the Land – Glimmering Greenhouses" during the EPCOT
   // International Festival of the Holidays (confirmed via Queue-Times-derived
@@ -789,3 +800,193 @@ export async function getWaitDatasetForResort(
   }, null);
   return { data, dataSource: isLive ? "live" : "mock", lastUpdated };
 }
+
+// ============================================
+// DEV-ONLY REGRESSION CASES (Queue-Times canonical identity / dedupe)
+// ============================================
+
+/**
+ * Dev-only wrapper exposing normalizeQueueTimesResponse for manual
+ * regression checks (see DEV_QUEUE_TIMES_DEDUPE_CASES below). Not used by
+ * any production code path.
+ */
+export function devNormalizeQueueTimesResponse(
+  body: unknown,
+  resortId: ResortId,
+  parkId: ParkId,
+): AttractionWait[] {
+  return normalizeQueueTimesResponse(body, resortId, parkId);
+}
+
+/** Builds a minimal Queue-Times ride record for DEV case construction. */
+function devQTRide(
+  id: number,
+  name: string,
+  isOpen: boolean,
+  waitTime: number,
+  lastUpdated: string,
+): QTRide {
+  return { id, name, is_open: isOpen, wait_time: waitTime, last_updated: lastUpdated };
+}
+
+/**
+ * Regression cases for Queue-Times canonical identity / dedupe handling —
+ * in particular Walt Disney World Railroad, which Queue-Times exposes as
+ * one ride record per station (Main Street, U.S.A.; Frontierland;
+ * Fantasyland) instead of one attraction. Mirrors the DEV_PLAN_ALIAS_CASES
+ * / DEV_CLOSURE_TIMING_CASES convention (plansMatching.ts, plannedClosures.ts)
+ * — not wired into CI (no test runner in this repo), run manually from Node:
+ *
+ *   import { DEV_QUEUE_TIMES_DEDUPE_CASES, devNormalizeQueueTimesResponse } from "@/lib/liveWaitApi";
+ *   for (const c of DEV_QUEUE_TIMES_DEDUPE_CASES) {
+ *     const result = devNormalizeQueueTimesResponse(c.body, c.resortId, c.parkId);
+ *     const failure = c.check(result);
+ *     console.log(failure ? `✗ FAIL ${c.description}: ${failure}` : `✓ ${c.description}`);
+ *   }
+ */
+export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
+  description: string;
+  resortId: ResortId;
+  parkId: ParkId;
+  body: unknown;
+  /** Returns null on pass, or a failure message. */
+  check: (result: AttractionWait[]) => string | null;
+}> = [
+  {
+    description: "Main Street, U.S.A. Railroad variant resolves to canonical attraction",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 1,
+          name: "Main Street, U.S.A.",
+          rides: [
+            devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 10, "2026-01-01T12:00:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      const railroad = matches[0];
+      if (railroad.status !== "OPERATING" || railroad.waitMins !== 10) {
+        return `expected OPERATING/10, got ${railroad.status}/${railroad.waitMins}`;
+      }
+      if (railroad.land !== "Main Street, U.S.A.") return `expected canonical land, got ${railroad.land}`;
+      return null;
+    },
+  },
+  {
+    description: "Fantasyland Railroad variant (provider ID 1181) resolves to same canonical attraction",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 2,
+          name: "Fantasyland",
+          rides: [
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:00:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      if (matches[0].land !== "Main Street, U.S.A.") return `expected canonical land, got ${matches[0].land}`;
+      return null;
+    },
+  },
+  {
+    description: "Frontierland Railroad variant resolves to same canonical attraction",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 3,
+          name: "Frontierland",
+          rides: [
+            devQTRide(1182, "Walt Disney World Railroad - Frontierland", false, 0, "2026-01-01T12:00:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      if (matches[0].land !== "Main Street, U.S.A.") return `expected canonical land, got ${matches[0].land}`;
+      return null;
+    },
+  },
+  {
+    description: "All three station variants in one payload still collapse to exactly one canonical attraction",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 10, "2026-01-01T12:00:00Z")] },
+        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:05:00Z")] },
+        { id: 3, name: "Frontierland", rides: [devQTRide(1182, "Walt Disney World Railroad - Frontierland", false, 0, "2026-01-01T12:02:00Z")] },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      // Fantasyland (12:05) is the freshest of the three — existing
+      // freshness dedupe (isFresher) must select it, not Main Street just
+      // because it happens to have a non-zero wait.
+      if (matches[0].status !== "DOWN" || matches[0].waitMins !== null) {
+        return `expected freshest (Fantasyland, DOWN/null) to win, got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description: "Equal/unparseable timestamps across station variants stay deterministic (first-seen wins)",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 10, "not-a-timestamp")] },
+        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "not-a-timestamp")] },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      // Neither timestamp parses, so isFresher() never lets the second row
+      // displace the first — the Main Street row (seen first) must win.
+      if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 10) {
+        return `expected first-seen (Main Street, OPERATING/10) to win, got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description: "Unrelated existing alias dedupe (Rock 'n' Roller Coaster old/new name) is unchanged",
+    resortId: "WDW",
+    parkId: "hs",
+    body: {
+      lands: [
+        {
+          id: 1,
+          name: "Sunset Boulevard",
+          rides: [
+            devQTRide(200, "Rock 'n' Roller Coaster Starring Aerosmith", true, 20, "2026-01-01T12:00:00Z"),
+            devQTRide(201, "Rock 'n' Roller Coaster Starring The Muppets", true, 35, "2026-01-01T12:10:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "hs-rock-n-roller-coaster");
+      if (matches.length !== 1) return `expected exactly 1 Rock 'n' Roller card, got ${matches.length}`;
+      if (matches[0].waitMins !== 35) return `expected freshest (Muppets, 35) to win, got ${matches[0].waitMins}`;
+      return null;
+    },
+  },
+];
