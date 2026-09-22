@@ -45,7 +45,7 @@ The system enforces a strict boundary between live data and local planner state,
 
 Tom is Disney Wait Planner's built-in assistant. Tom can:
 
-- Answer general Disney questions — parks, lands, attractions, dining, entertainment, experiences, and news, including where a known catalog item is located
+- Answer general Disney questions — parks, lands, attractions, dining, entertainment, experiences, and news, including where known attractions, dining locations, and experiences are located
 - Answer supported wait time questions
 - Answer **Planner Insights** questions: read-only, planner-aware questions and analytics about your local trip planner — what you have planned, conflicts, repeats, park assignments, and simple analytics like "which day has the most planned"
 - Hold a conversation, including natural follow-up questions
