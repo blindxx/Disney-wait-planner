@@ -384,6 +384,24 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
             {attraction.land}
           </div>
         )}
+        {/*
+          Shown ONLY when the numeric wait this card is displaying actually
+          came from DWP's mock/fallback data rather than a usable Queue-Times
+          live match — never inferred from status/waitMins/timestamp, only
+          from the explicit waitSource provenance field (see liveWaitApi.ts).
+        */}
+        {attraction.waitSource === "fallback" && attraction.waitMins != null && (
+          <div
+            style={{
+              fontSize: "11px",
+              lineHeight: "1.3",
+              color: "#9ca3af",
+              marginTop: "2px",
+            }}
+          >
+            Fallback wait &middot; not live
+          </div>
+        )}
       </div>
 
       {/* Right: wait badge */}
