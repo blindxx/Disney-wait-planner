@@ -73,7 +73,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     title: "Attractions",
     icon: "🎢",
     paragraphs: ["Ask about specific rides and attractions, including what to expect."],
-    examples: ["Tell me about TRON.", "Tell me about Rise of the Resistance."],
+    examples: ["Tell me about Guardians of the Galaxy: Cosmic Rewind.", "Tell me about Rise of the Resistance."],
     chipIcon: "🎢",
   },
   {
@@ -97,7 +97,12 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     title: "Entertainment",
     icon: "🎆",
     paragraphs: ["Ask about shows, parades, and fireworks."],
-    examples: ["What entertainment is at Magic Kingdom?", "Tell me about Fantasmic."],
+    examples: [
+      "What entertainment is at Magic Kingdom?",
+      "Tell me about Fantasmic.",
+      "What seasonal entertainment does Magic Kingdom have?",
+      "What does DCA do for the holidays?",
+    ],
     chipIcon: "🎆",
   },
   {
@@ -111,6 +116,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
       "What Experiences are in Hollywood Studios?",
       "What Experiences are at Disneyland?",
       "Tell me about Bibbidi Bobbidi Boutique.",
+      "Tell me about Savi's Workshop.",
     ],
     chipIcon: "✨",
   },
