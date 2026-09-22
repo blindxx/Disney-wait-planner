@@ -71,7 +71,6 @@ const HELP_DISNEY_EXAMPLES = [
   "Tell me about TRON.",
   "Where is TRON?",
   "Wait for Rise of the Resistance",
-  "What Experiences are in Hollywood Studios?",
   "Disney Parks Blog news",
   "Tell me about Savi's Workshop.",
 ];

@@ -56,7 +56,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     navGroupStart: true,
     paragraphs: [
       "Tom can answer general Disney questions spanning parks, lands, attractions, wait times, dining, entertainment, experiences, and news. The sections below break these down by category.",
-      "Tom can also tell you where a known attraction, dining location, or experience is — its park and land — using Disney Wait Planner's own catalog data.",
+      "Tom can also tell you where to find a known attraction, dining location, or experience, whether it's inside a park or elsewhere at Disney.",
     ],
     examples: ["Where is TRON?", "What land is Savi's Workshop in?"],
     chipIcon: "🗺️",
@@ -105,12 +105,12 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     title: "Experiences",
     icon: "✨",
     paragraphs: [
-      "Ask about experiences — hands-on activities like Savi's Workshop and Droid Depot — including where they are, and which ones are at a given park or resort.",
+      "Ask about experiences — hands-on activities like Savi's Workshop, Droid Depot, and Bibbidi Bobbidi Boutique — including where they are, and which ones are at a given park or resort.",
     ],
     examples: [
       "What Experiences are in Hollywood Studios?",
       "What Experiences are at Disneyland?",
-      "Tell me about Droid Depot.",
+      "Tell me about Bibbidi Bobbidi Boutique.",
     ],
     chipIcon: "✨",
   },
@@ -121,16 +121,6 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     paragraphs: ["Ask about the latest Disney, Star Wars, and Marvel news."],
     examples: ["What's the latest Star Wars news?", "What's the latest Marvel news?", "Disney Parks Blog news"],
     chipIcon: "📰",
-  },
-  {
-    id: "savis-workshop",
-    title: "Savi's Workshop",
-    icon: "🛠️",
-    paragraphs: [
-      "Ask about Savi's Workshop, the custom lightsaber-building experience at Star Wars: Galaxy's Edge.",
-    ],
-    examples: ["Tell me about Savi's Workshop."],
-    chipIcon: "🛠️",
   },
   {
     id: "planner",
