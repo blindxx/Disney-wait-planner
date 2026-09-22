@@ -69,7 +69,9 @@ const HELP_DISNEY_EXAMPLES = [
   "EPCOT updates",
   "What's new at Galaxy's Edge?",
   "Tell me about TRON.",
+  "Where is TRON?",
   "Wait for Rise of the Resistance",
+  "What Experiences are in Hollywood Studios?",
   "Disney Parks Blog news",
   "Tell me about Savi's Workshop.",
 ];
@@ -82,6 +84,8 @@ const HELP_PLANNER_EXAMPLES = [
   "What day is Magic Kingdom?",
   "What dining do I have?",
   "What entertainment do I have?",
+  "What Experiences do I have planned?",
+  "What do I have planned in Tomorrowland?",
   "What Lightning selections do I have?",
   "What comes after Space Mountain?",
   "Do I have any conflicts?",

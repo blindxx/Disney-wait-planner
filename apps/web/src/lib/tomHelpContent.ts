@@ -33,7 +33,7 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     title: "About Tom",
     icon: "🤖",
     paragraphs: [
-      "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Tom answers questions about Disney parks, attractions, dining, entertainment, wait times, and news, and can also answer read-only questions about your local trip planner.",
+      "Tom Morrow is Disney Wait Planner's AI assistant, inspired by Disney's classic futuristic character of the same name. Tom answers questions about Disney parks, attractions, dining, entertainment, experiences, wait times, and news, and can also answer read-only questions about your local trip planner.",
       "This guide is the full reference for what Tom can currently do. For a quick in-chat reference with clickable examples, use the Help button in the Ask Tom chat window.",
     ],
   },
@@ -55,8 +55,11 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     icon: "🏰",
     navGroupStart: true,
     paragraphs: [
-      "Tom can answer general Disney questions spanning parks, lands, attractions, wait times, dining, entertainment, and news. The sections below break these down by category.",
+      "Tom can answer general Disney questions spanning parks, lands, attractions, wait times, dining, entertainment, experiences, and news. The sections below break these down by category.",
+      "Tom can also tell you where a known attraction, dining location, or experience is — its park and land — using Disney Wait Planner's own catalog data.",
     ],
+    examples: ["Where is TRON?", "What land is Savi's Workshop in?"],
+    chipIcon: "🗺️",
   },
   {
     id: "parks-lands",
@@ -98,6 +101,20 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     chipIcon: "🎆",
   },
   {
+    id: "experiences",
+    title: "Experiences",
+    icon: "✨",
+    paragraphs: [
+      "Ask about experiences — hands-on activities like Savi's Workshop and Droid Depot — including where they are, and which ones are at a given park or resort.",
+    ],
+    examples: [
+      "What Experiences are in Hollywood Studios?",
+      "What Experiences are at Disneyland?",
+      "Tell me about Droid Depot.",
+    ],
+    chipIcon: "✨",
+  },
+  {
     id: "disney-news",
     title: "Disney News",
     icon: "📰",
@@ -121,14 +138,15 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
     icon: "📅",
     navGroupStart: true,
     paragraphs: [
-      "Tom can answer questions about your local planner, but can't make changes to it. Tom understands your itinerary information, including plans, Lightning Lane, dining, entertainment, conflicts, repeats, and park assignments.",
+      "Tom can answer questions about your local planner, but can't make changes to it. Tom understands your itinerary information, including plans, Lightning Lane, dining, entertainment, experiences, conflicts, repeats, lands, and park assignments.",
       "Tom also understands common Disney abbreviations and aliases when looking things up — for example MK, EPCOT, DHS, DAK, DLR, and DCA. These are just examples, not a complete list.",
     ],
     bullets: [
       "Trip itinerary summaries",
       "Individual day summaries",
       "Item day/time lookups — when a specific saved item is scheduled",
-      "Category summaries — attractions, dining, and entertainment you have planned",
+      "Category summaries — attractions, dining, entertainment, and experiences you have planned",
+      "Land-scoped lookups — what you have planned in a given land",
       "Park assignment lookups — which park a given day visits",
       "Park-to-day lookups — which day a given park falls on",
       "Conflicts between plans and Lightning selections",
@@ -141,6 +159,10 @@ export const TOM_HELP_SECTIONS: TomHelpSection[] = [
       "What attractions do I have?",
       "What dining do I have?",
       "What entertainment do I have?",
+      "What Experiences do I have planned?",
+      "What do I have planned in Tomorrowland?",
+      "What am I doing in Galaxy's Edge?",
+      "Which plans are in Fantasyland?",
       "What park am I visiting on Day 3?",
       "What day is Magic Kingdom?",
       "What Lightning selections do I have?",
