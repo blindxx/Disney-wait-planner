@@ -51,6 +51,10 @@ function toAttractionWait(
     parkId,
     status,
     waitMins: status === "OPERATING" ? (ride.waitMins ?? 15) : null,
+    // Mock data is DWP's own fallback wait, never live Queue-Times data.
+    // liveWaitApi.ts's overlay explicitly sets "live" on any mock ride it
+    // successfully matches to a live Queue-Times record.
+    waitSource: "fallback",
     updatedAt: recentTimestamp(index % 5),
   };
 }

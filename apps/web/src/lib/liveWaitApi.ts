@@ -348,12 +348,20 @@ const ALIASES_WDW = new Map<string, string>([
   ["soarin' around the world",                   "soarin' across america"],
   ["soarin around the world",                    "soarin' across america"],
   // Walt Disney World Railroad (Magic Kingdom) — Queue-Times exposes each
-  // station as its own ride record (Main Street, U.S.A.; Frontierland;
-  // Fantasyland) rather than one attraction. All stations are the same
-  // physical ride and the same canonical DWP attraction/land (Main Street,
-  // U.S.A.); resolving them to one key lets the existing freshness dedupe
-  // (isFresher/dedupeByCanonicalIdentity below) pick the authoritative
-  // status instead of the app showing a separate card per station.
+  // station as its own ride record rather than one attraction. All
+  // stations are the same physical ride and the same canonical DWP
+  // attraction/land (Main Street, U.S.A.); resolving them to one key lets
+  // MULTI_STATION_IDENTITIES_WDW/aggregateStationRecords() (below) combine
+  // the simultaneous station records into one authoritative status/wait
+  // instead of the app showing a separate card per station.
+  // Confirmed provider strings: Main Street, U.S.A. and Fantasyland
+  // (Fantasyland station ID 1181, observed live). Frontierland is a real
+  // physical station of this ride but its exact current Queue-Times string
+  // is unconfirmed — kept defensively since an unused alias key is a no-op
+  // if Queue-Times never sends it, and this needs no separate confirmation
+  // for correctness: any string reported for a Railroad station that isn't
+  // recognized here would surface as an "Unmatched live attraction" dev
+  // warning rather than silently misbehave.
   ["walt disney world railroad - main street, u.s.a.", "walt disney world railroad"],
   ["walt disney world railroad - main street usa",      "walt disney world railroad"],
   ["walt disney world railroad - frontierland",         "walt disney world railroad"],
@@ -426,6 +434,82 @@ function isFresher(candidate: QTRide, current: QTRide): boolean {
   return candidateTime > currentTime;
 }
 
+/**
+ * Canonical identities (post-ALIASES_WDW resolution) whose Queue-Times rows
+ * are simultaneous ride *stations*, not sequential revisions of one record.
+ *
+ * Ordinary duplicate handling (liveByName below: freshest `last_updated`
+ * row wins, older rows discarded) assumes every row for a given identity is
+ * describing the *same* thing at a different point in time — true for a
+ * renamed/aliased attraction (e.g. Rock 'n' Roller Coaster's old/new name),
+ * where only one literal name is "current" at once. It is wrong here:
+ * Walt Disney World Railroad is a single loop with three boarding stations
+ * (Main Street, U.S.A.; Frontierland; Fantasyland), and Queue-Times reports
+ * each station as its own ride record. Those records can legitimately have
+ * different `last_updated` values while all being simultaneously valid —
+ * picking only the freshest would let a station that happens to report a
+ * moment later, but is itself closed/boarding-only, discard another
+ * station's evidence that the ride is actually running.
+ *
+ * Rows for these identities are combined by aggregateStationRecords()
+ * *before* the freshest-wins loop below ever sees them, so ordinary
+ * duplicate/revision handling is completely unaffected for every other
+ * identity.
+ */
+const MULTI_STATION_IDENTITIES_WDW = new Set<string>([
+  "walt disney world railroad",
+]);
+
+/**
+ * Combines simultaneous station records for one multi-station identity
+ * (see MULTI_STATION_IDENTITIES_WDW) into a single synthesized live record.
+ *
+ * Status: the attraction is treated as operating if ANY station reports
+ * `is_open`. Queue-Times models each physical boarding platform as its own
+ * "ride", but the train itself is a single circuit — one open station means
+ * trains are running, so a closed station must never force the whole
+ * attraction DOWN while another station shows it operating.
+ *
+ * Wait: the `wait_time` of the freshest OPERATING station (freshest by
+ * `last_updated`, via the same isFresher() rule the rest of this module
+ * uses for tie-breaking). This is deliberately not min/max/a fixed
+ * station's priority — a boarding wait is a live, single-queue number tied
+ * to whichever station a rider actually queues at, and the freshest report
+ * among the currently-running stations is the most recently observed truth
+ * for that queue. When no station is operating, wait is 0/not applicable
+ * (the downstream overlay maps `is_open: false` to waitMins: null
+ * regardless of this value).
+ *
+ * last_updated: the freshest OPERATING station's timestamp when the
+ * attraction is operating; otherwise the freshest station's timestamp
+ * overall, so a fully-down attraction still carries a sensible "last
+ * checked" time instead of an arbitrary one.
+ *
+ * Ties (equal/unparseable timestamps) resolve deterministically to the
+ * first station encountered in provider response order — the same
+ * first-seen-wins behavior isFresher() already produces for ordinary
+ * duplicates.
+ */
+function aggregateStationRecords(stations: QTRide[]): QTRide {
+  const operatingStations = stations.filter((s) => s.is_open);
+  const pool = operatingStations.length > 0 ? operatingStations : stations;
+
+  let freshest = pool[0];
+  for (const candidate of pool.slice(1)) {
+    if (isFresher(candidate, freshest)) {
+      freshest = candidate;
+    }
+  }
+
+  return {
+    id: freshest.id,
+    name: freshest.name,
+    is_open: operatingStations.length > 0,
+    wait_time: operatingStations.length > 0 ? freshest.wait_time : 0,
+    last_updated: freshest.last_updated,
+  };
+}
+
 function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
@@ -460,15 +544,37 @@ function normalizeQueueTimesResponse(
   const allRides: QTRide[] = qt.lands.flatMap((land) => land.rides ?? []);
   allRides.push(...(qt.rides ?? []));
 
+  const multiStationIdentities = resortId === "WDW" ? MULTI_STATION_IDENTITIES_WDW : null;
+
+  // Rides resolving to a multi-station identity are collected separately —
+  // they're aggregated (aggregateStationRecords) rather than run through
+  // the freshest-wins loop below, which would otherwise incorrectly treat
+  // simultaneous station records as revisions of one another.
+  const stationGroups = new Map<string, QTRide[]>();
+
   const liveByName = new Map<string, QTRide>();
   for (const ride of allRides) {
     const normName = normalizeAttractionName(ride.name);
     const key = aliasMap?.get(normName) ?? normName;
+
+    if (multiStationIdentities?.has(key)) {
+      const group = stationGroups.get(key);
+      if (group) {
+        group.push(ride);
+      } else {
+        stationGroups.set(key, [ride]);
+      }
+      continue;
+    }
+
     const existing = liveByName.get(key);
     if (existing && !isFresher(ride, existing)) {
       continue;
     }
     liveByName.set(key, ride);
+  }
+  for (const [key, stations] of stationGroups) {
+    liveByName.set(key, aggregateStationRecords(stations));
   }
 
   // Dev-only: warn about live rides that have no mock counterpart.
@@ -524,24 +630,28 @@ function normalizeQueueTimesResponse(
       // through to live status below.
     }
 
-    if (!live) return mockRide; // no match: keep mock values unchanged
+    if (!live) return mockRide; // no match: keep mock values (waitSource "fallback")
 
     // Ride not operating: explicitly clear wait time so no stale/mock minutes leak.
+    // Still a live match (waitSource "live") even though no numeric wait is shown —
+    // provenance reflects the match, not the resulting status/wait value.
     if (!live.is_open) {
       return {
         ...mockRide,
         status: "DOWN",
         waitMins: null,
         updatedAt: live.last_updated,
+        waitSource: "live",
       };
     }
 
-    // Ride operating: apply live wait time.
+    // Ride operating: apply live wait time (including a live 0-minute wait).
     return {
       ...mockRide,
       status: "OPERATING",
       waitMins: live.wait_time,
       updatedAt: live.last_updated,
+      waitSource: "live",
     };
   });
 
@@ -830,12 +940,15 @@ function devQTRide(
 }
 
 /**
- * Regression cases for Queue-Times canonical identity / dedupe handling —
- * in particular Walt Disney World Railroad, which Queue-Times exposes as
- * one ride record per station (Main Street, U.S.A.; Frontierland;
- * Fantasyland) instead of one attraction. Mirrors the DEV_PLAN_ALIAS_CASES
- * / DEV_CLOSURE_TIMING_CASES convention (plansMatching.ts, plannedClosures.ts)
- * — not wired into CI (no test runner in this repo), run manually from Node:
+ * Regression cases for Queue-Times canonical identity / dedupe / station
+ * aggregation handling — in particular Walt Disney World Railroad, which
+ * Queue-Times exposes as one ride record per station (Main Street, U.S.A.;
+ * Frontierland; Fantasyland) instead of one attraction — plus wait-value
+ * provenance (`waitSource`), so a card can be told apart from the ground
+ * truth it actually came from rather than inferred from its status/wait.
+ * Mirrors the DEV_PLAN_ALIAS_CASES / DEV_CLOSURE_TIMING_CASES convention
+ * (plansMatching.ts, plannedClosures.ts) — not wired into CI (no test
+ * runner in this repo), run manually from Node:
  *
  *   import { DEV_QUEUE_TIMES_DEDUPE_CASES, devNormalizeQueueTimesResponse } from "@/lib/liveWaitApi";
  *   for (const c of DEV_QUEUE_TIMES_DEDUPE_CASES) {
@@ -853,7 +966,7 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
   check: (result: AttractionWait[]) => string | null;
 }> = [
   {
-    description: "Main Street, U.S.A. Railroad variant resolves to canonical attraction",
+    description: "Main Street, U.S.A. Railroad variant resolves to canonical attraction (live, positive wait)",
     resortId: "WDW",
     parkId: "mk",
     body: {
@@ -875,11 +988,12 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
         return `expected OPERATING/10, got ${railroad.status}/${railroad.waitMins}`;
       }
       if (railroad.land !== "Main Street, U.S.A.") return `expected canonical land, got ${railroad.land}`;
+      if (railroad.waitSource !== "live") return `expected waitSource "live", got ${railroad.waitSource}`;
       return null;
     },
   },
   {
-    description: "Fantasyland Railroad variant (provider ID 1181) resolves to same canonical attraction",
+    description: "Fantasyland Railroad variant (provider ID 1181) resolves to same canonical attraction (live, DOWN)",
     resortId: "WDW",
     parkId: "mk",
     body: {
@@ -896,7 +1010,14 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
     check: (result) => {
       const matches = result.filter((a) => a.id === "mk-wdw-railroad");
       if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
-      if (matches[0].land !== "Main Street, U.S.A.") return `expected canonical land, got ${matches[0].land}`;
+      const railroad = matches[0];
+      if (railroad.land !== "Main Street, U.S.A.") return `expected canonical land, got ${railroad.land}`;
+      // Closed live station: no numeric wait shown, but still a live match —
+      // status/waitMins must never make a live record look like fallback.
+      if (railroad.status !== "DOWN" || railroad.waitMins !== null) {
+        return `expected DOWN/null, got ${railroad.status}/${railroad.waitMins}`;
+      }
+      if (railroad.waitSource !== "live") return `expected waitSource "live", got ${railroad.waitSource}`;
       return null;
     },
   },
@@ -919,16 +1040,44 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
       const matches = result.filter((a) => a.id === "mk-wdw-railroad");
       if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
       if (matches[0].land !== "Main Street, U.S.A.") return `expected canonical land, got ${matches[0].land}`;
+      if (matches[0].waitSource !== "live") return `expected waitSource "live", got ${matches[0].waitSource}`;
       return null;
     },
   },
   {
-    description: "All three station variants in one payload still collapse to exactly one canonical attraction",
+    description:
+      "Codex P2: an OLDER operating station must not be discarded by a NEWER closed station (station aggregation, not freshest-wins)",
     resortId: "WDW",
     parkId: "mk",
     body: {
       lands: [
+        // Main Street: operating, 10 min, OLDER timestamp.
         { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 10, "2026-01-01T12:00:00Z")] },
+        // Fantasyland: closed, NEWER timestamp — must not win outright.
+        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:05:00Z")] },
+        // Frontierland: also closed, timestamp in between.
+        { id: 3, name: "Frontierland", rides: [devQTRide(1182, "Walt Disney World Railroad - Frontierland", false, 0, "2026-01-01T12:02:00Z")] },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      // Any station open → the ride is running. Wait comes from the (only)
+      // operating station, not from whichever station reported last.
+      if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 10) {
+        return `expected OPERATING/10 (Main Street, the only open station) to win, got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      if (matches[0].waitSource !== "live") return `expected waitSource "live", got ${matches[0].waitSource}`;
+      return null;
+    },
+  },
+  {
+    description: "All Railroad stations closed → aggregate DOWN, not OPERATING",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", false, 0, "2026-01-01T12:00:00Z")] },
         { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:05:00Z")] },
         { id: 3, name: "Frontierland", rides: [devQTRide(1182, "Walt Disney World Railroad - Frontierland", false, 0, "2026-01-01T12:02:00Z")] },
       ],
@@ -936,11 +1085,33 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
     check: (result) => {
       const matches = result.filter((a) => a.id === "mk-wdw-railroad");
       if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
-      // Fantasyland (12:05) is the freshest of the three — existing
-      // freshness dedupe (isFresher) must select it, not Main Street just
-      // because it happens to have a non-zero wait.
       if (matches[0].status !== "DOWN" || matches[0].waitMins !== null) {
-        return `expected freshest (Fantasyland, DOWN/null) to win, got ${matches[0].status}/${matches[0].waitMins}`;
+        return `expected DOWN/null, got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      if (matches[0].waitSource !== "live") return `expected waitSource "live", got ${matches[0].waitSource}`;
+      return null;
+    },
+  },
+  {
+    description:
+      "Multiple operating Railroad stations with differing waits/timestamps → freshest OPERATING station's wait wins",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        // Main Street: operating, older timestamp.
+        { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 10, "2026-01-01T12:00:00Z")] },
+        // Fantasyland: also operating, NEWER timestamp, different wait — this should win.
+        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 25, "2026-01-01T12:07:00Z")] },
+        // Frontierland: closed — excluded from the operating-station pool entirely.
+        { id: 3, name: "Frontierland", rides: [devQTRide(1182, "Walt Disney World Railroad - Frontierland", false, 0, "2026-01-01T12:09:00Z")] },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 25) {
+        return `expected OPERATING/25 (freshest operating station, Fantasyland) to win, got ${matches[0].status}/${matches[0].waitMins}`;
       }
       return null;
     },
@@ -952,14 +1123,15 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
     body: {
       lands: [
         { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 10, "not-a-timestamp")] },
-        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "not-a-timestamp")] },
+        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 25, "not-a-timestamp")] },
       ],
     },
     check: (result) => {
       const matches = result.filter((a) => a.id === "mk-wdw-railroad");
       if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
-      // Neither timestamp parses, so isFresher() never lets the second row
-      // displace the first — the Main Street row (seen first) must win.
+      // Neither timestamp parses, so isFresher() never lets the second
+      // operating station displace the first — Main Street (seen first,
+      // and itself operating) must win, deterministically.
       if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 10) {
         return `expected first-seen (Main Street, OPERATING/10) to win, got ${matches[0].status}/${matches[0].waitMins}`;
       }
@@ -967,7 +1139,7 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
     },
   },
   {
-    description: "Unrelated existing alias dedupe (Rock 'n' Roller Coaster old/new name) is unchanged",
+    description: "Unrelated existing alias dedupe (Rock 'n' Roller Coaster old/new name) is unchanged — freshest wins, not aggregated",
     resortId: "WDW",
     parkId: "hs",
     body: {
@@ -986,6 +1158,68 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
       const matches = result.filter((a) => a.id === "hs-rock-n-roller-coaster");
       if (matches.length !== 1) return `expected exactly 1 Rock 'n' Roller card, got ${matches.length}`;
       if (matches[0].waitMins !== 35) return `expected freshest (Muppets, 35) to win, got ${matches[0].waitMins}`;
+      if (matches[0].waitSource !== "live") return `expected waitSource "live", got ${matches[0].waitSource}`;
+      return null;
+    },
+  },
+  // ---- Wait provenance (waitSource) cases ----
+  {
+    description: "Provenance: unmatched attraction with no live row keeps mock wait, marked fallback",
+    resortId: "WDW",
+    parkId: "mk",
+    // No ride in this payload matches any mock MK attraction by name/alias.
+    body: { lands: [{ id: 1, name: "Main Street, U.S.A.", rides: [] }] },
+    check: (result) => {
+      const junglecruise = result.find((a) => a.id === "mk-jungle-cruise");
+      if (!junglecruise) return "expected mk-jungle-cruise in mock MK park data";
+      if (junglecruise.waitSource !== "fallback") {
+        return `expected waitSource "fallback" for an unmatched attraction, got ${junglecruise.waitSource}`;
+      }
+      if (junglecruise.waitMins == null) return "expected a numeric mock fallback wait to be displayed";
+      return null;
+    },
+  },
+  {
+    description: "Provenance: live 0-minute wait is NOT marked fallback",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        { id: 1, name: "Adventureland", rides: [devQTRide(300, "Jungle Cruise", true, 0, "2026-01-01T12:00:00Z")] },
+      ],
+    },
+    check: (result) => {
+      const junglecruise = result.find((a) => a.id === "mk-jungle-cruise");
+      if (!junglecruise) return "expected mk-jungle-cruise in mock MK park data";
+      if (junglecruise.status !== "OPERATING" || junglecruise.waitMins !== 0) {
+        return `expected OPERATING/0, got ${junglecruise.status}/${junglecruise.waitMins}`;
+      }
+      if (junglecruise.waitSource !== "live") {
+        return `expected waitSource "live" for a live 0-minute wait, got ${junglecruise.waitSource}`;
+      }
+      return null;
+    },
+  },
+  {
+    description: "Provenance: aliased live record (Expedition Everest subtitle) remains live, not fallback",
+    resortId: "WDW",
+    parkId: "ak",
+    body: {
+      lands: [
+        {
+          id: 1,
+          name: "Discovery Island",
+          rides: [
+            devQTRide(400, "Expedition Everest - Legend of the Forbidden Mountain", true, 45, "2026-01-01T12:00:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const everest = result.find((a) => a.id === "ak-expedition-everest");
+      if (!everest) return "expected ak-expedition-everest in mock AK park data";
+      if (everest.waitMins !== 45) return `expected live wait 45, got ${everest.waitMins}`;
+      if (everest.waitSource !== "live") return `expected waitSource "live", got ${everest.waitSource}`;
       return null;
     },
   },

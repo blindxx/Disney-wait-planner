@@ -40,4 +40,14 @@ export type AttractionWait = {
   waitMins: number | null;
   /** ISO timestamp of when this data was last updated */
   updatedAt: string;
+  /**
+   * Provenance of the numeric `waitMins` currently displayed for this
+   * attraction: "live" when it was overlaid from usable Queue-Times live
+   * data (including a live 0-minute wait, and Railroad-style multi-station
+   * aggregation of live data), "fallback" when no usable live match exists
+   * and `waitMins`/`status` are DWP's own mock/fallback values instead.
+   * Consumers must read this field rather than inferring provenance from
+   * `waitMins`, `status`, or `updatedAt`.
+   */
+  waitSource: "live" | "fallback";
 };
