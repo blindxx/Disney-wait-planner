@@ -451,10 +451,15 @@ function isFresher(candidate: QTRide, current: QTRide): boolean {
  * moment later, but is itself closed/boarding-only, discard another
  * station's evidence that the ride is actually running.
  *
- * Rows for these identities are combined by aggregateStationRecords()
- * *before* the freshest-wins loop below ever sees them, so ordinary
- * duplicate/revision handling is completely unaffected for every other
- * identity.
+ * Rows for these identities never enter the freshest-wins loop below.
+ * Instead: each row is first resolved to its own physical station via
+ * stationIdentity() and deduped against other rows for that SAME station
+ * (Queue-Times can report one station twice — e.g. once in `lands[].rides`,
+ * once in the top-level `rides` array — and only the freshest revision of
+ * a given station may count as its current state); only then are the
+ * surviving, per-station-deduped rows combined by aggregateStationRecords()
+ * into the canonical result. Ordinary duplicate/revision handling is
+ * completely unaffected for every other identity.
  */
 const MULTI_STATION_IDENTITIES_WDW = new Set<string>([
   "walt disney world railroad",
@@ -490,6 +495,35 @@ const MULTI_STATION_IDENTITIES_WDW = new Set<string>([
  * first-seen-wins behavior isFresher() already produces for ordinary
  * duplicates.
  */
+/**
+ * Identifies which physical station a Queue-Times row is reporting on,
+ * within one multi-station canonical identity (see
+ * MULTI_STATION_IDENTITIES_WDW) — distinct from identifying a *duplicate
+ * revision* of that same station. Queue-Times can report the same
+ * physical station twice in one payload (e.g. once in `lands[].rides`,
+ * once in the top-level `rides` array — see QTResponse's own doc comment
+ * on why that top-level array exists), and those duplicate rows must be
+ * resolved to one freshest revision *before* aggregateStationRecords()
+ * ever treats a row as evidence of a distinct, simultaneously-valid
+ * station.
+ *
+ * Prefers Queue-Times' own stable per-ride `id` — the same identifier
+ * `isFresher`'s ordinary duplicate-revision resolution effectively relies
+ * on elsewhere in this module (rows for one ride sharing an id/name should
+ * collapse to their freshest `last_updated`). Falls back to the row's own
+ * normalized station name only when `id` isn't a usable number at
+ * runtime (the QTResponse body is `unknown` cast, so a malformed payload
+ * can't be ruled out) — deliberately the row's *own* name, never the
+ * canonical alias-resolved identity, so two genuinely distinct stations
+ * (different ids and different names) are never collapsed together.
+ */
+function stationIdentity(ride: QTRide): string {
+  if (typeof ride.id === "number" && Number.isFinite(ride.id)) {
+    return `id:${ride.id}`;
+  }
+  return `name:${normalizeAttractionName(ride.name)}`;
+}
+
 function aggregateStationRecords(stations: QTRide[]): QTRide {
   const operatingStations = stations.filter((s) => s.is_open);
   const pool = operatingStations.length > 0 ? operatingStations : stations;
@@ -546,11 +580,18 @@ function normalizeQueueTimesResponse(
 
   const multiStationIdentities = resortId === "WDW" ? MULTI_STATION_IDENTITIES_WDW : null;
 
-  // Rides resolving to a multi-station identity are collected separately —
-  // they're aggregated (aggregateStationRecords) rather than run through
-  // the freshest-wins loop below, which would otherwise incorrectly treat
-  // simultaneous station records as revisions of one another.
-  const stationGroups = new Map<string, QTRide[]>();
+  // Rides resolving to a multi-station identity are collected separately,
+  // keyed first by canonical identity and then by stationIdentity() — the
+  // inner map resolves duplicate revisions of the SAME physical station
+  // (e.g. a row from `lands[].rides` and a row from the top-level `rides`
+  // array both describing Fantasyland) to their freshest revision via the
+  // same isFresher() rule used for ordinary duplicates below, so a stale
+  // revision can never smuggle a station's outdated state into
+  // aggregateStationRecords(). Only after that per-station dedupe does
+  // aggregateStationRecords() treat the surviving rows as distinct,
+  // simultaneously-valid stations — it never sees raw, unresolved
+  // duplicate revisions.
+  const stationGroups = new Map<string, Map<string, QTRide>>();
 
   const liveByName = new Map<string, QTRide>();
   for (const ride of allRides) {
@@ -558,11 +599,15 @@ function normalizeQueueTimesResponse(
     const key = aliasMap?.get(normName) ?? normName;
 
     if (multiStationIdentities?.has(key)) {
-      const group = stationGroups.get(key);
-      if (group) {
-        group.push(ride);
-      } else {
-        stationGroups.set(key, [ride]);
+      let stations = stationGroups.get(key);
+      if (!stations) {
+        stations = new Map<string, QTRide>();
+        stationGroups.set(key, stations);
+      }
+      const stationKey = stationIdentity(ride);
+      const existingStation = stations.get(stationKey);
+      if (!existingStation || isFresher(ride, existingStation)) {
+        stations.set(stationKey, ride);
       }
       continue;
     }
@@ -574,7 +619,7 @@ function normalizeQueueTimesResponse(
     liveByName.set(key, ride);
   }
   for (const [key, stations] of stationGroups) {
-    liveByName.set(key, aggregateStationRecords(stations));
+    liveByName.set(key, aggregateStationRecords(Array.from(stations.values())));
   }
 
   // Dev-only: warn about live rides that have no mock counterpart.
@@ -1134,6 +1179,163 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
       // and itself operating) must win, deterministically.
       if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 10) {
         return `expected first-seen (Main Street, OPERATING/10) to win, got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description:
+      "Codex P2 follow-up: same station (Fantasyland, id 1181) OLDER revision OPEN + NEWER revision CLOSED → freshest revision (CLOSED) wins before aggregation",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 2,
+          name: "Fantasyland",
+          rides: [
+            // Older revision: OPEN. Must not survive station-revision dedupe.
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 15, "2026-01-01T12:00:00Z"),
+            // Newer revision of the SAME station (same id): CLOSED.
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:05:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      // Only one physical station present (Fantasyland). If the stale OPEN
+      // revision incorrectly survived alongside the fresh CLOSED one,
+      // aggregateStationRecords() would see 2 "stations" and wrongly report
+      // OPERATING from the stale row.
+      if (matches[0].status !== "DOWN" || matches[0].waitMins !== null) {
+        return `expected DOWN/null (freshest CLOSED revision), got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description:
+      "Codex P2 follow-up: same station (Fantasyland, id 1181) OLDER revision CLOSED + NEWER revision OPEN → freshest revision (OPEN) wins",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 2,
+          name: "Fantasyland",
+          rides: [
+            // Older revision: CLOSED.
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:00:00Z"),
+            // Newer revision of the SAME station (same id): OPEN.
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 20, "2026-01-01T12:05:00Z"),
+          ],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 20) {
+        return `expected OPERATING/20 (freshest OPEN revision), got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description:
+      "Codex P2 follow-up: duplicate revisions of one station plus a distinct operating station — the distinct station still participates",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 2,
+          name: "Fantasyland",
+          rides: [
+            // Two revisions of the SAME station (id 1181) — both resolve
+            // CLOSED after dedupe (freshest of the two wins).
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 15, "2026-01-01T12:00:00Z"),
+            devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:05:00Z"),
+          ],
+        },
+        {
+          id: 1,
+          name: "Main Street, U.S.A.",
+          // A genuinely DISTINCT station (different id, different name) —
+          // must still be counted in the aggregation pool despite
+          // Fantasyland contributing 2 raw rows for 1 station.
+          rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", true, 8, "2026-01-01T12:02:00Z")],
+        },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      // Fantasyland resolves CLOSED; Main Street is the only operating
+      // station and must win — proving it wasn't lost/miscounted just
+      // because Fantasyland supplied 2 raw rows for what is still 1 station.
+      if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 8) {
+        return `expected OPERATING/8 (Main Street, the only operating station) to win, got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description:
+      "Codex P2 follow-up: same station duplicated across lands[].rides AND the top-level rides array → freshest revision wins",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        {
+          id: 2,
+          name: "Fantasyland",
+          // Older revision of Fantasyland (id 1181), nested under its land — OPEN.
+          rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 12, "2026-01-01T12:00:00Z")],
+        },
+      ],
+      // Newer revision of the SAME station (same id 1181), reported at the
+      // top level instead (QTResponse's own doc comment: Queue-Times uses
+      // this for rides not yet assigned to a land) — CLOSED. This is the
+      // exact shape Codex P2 flagged: both rows could previously reach
+      // aggregateStationRecords() as if they were 2 different stations.
+      rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", false, 0, "2026-01-01T12:06:00Z")],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      if (matches[0].status !== "DOWN" || matches[0].waitMins !== null) {
+        return `expected DOWN/null (top-level revision is freshest and CLOSED), got ${matches[0].status}/${matches[0].waitMins}`;
+      }
+      return null;
+    },
+  },
+  {
+    description: "Codex P2 follow-up: distinct Railroad stations are never deduped together into one station",
+    resortId: "WDW",
+    parkId: "mk",
+    body: {
+      lands: [
+        // Main Street: CLOSED, and reported LAST/newest — if station
+        // identity were mistakenly based on the shared canonical key
+        // rather than each row's own station, this closed row would
+        // overwrite Fantasyland's entry entirely (same fake "station"),
+        // leaving no evidence the ride is actually running.
+        { id: 2, name: "Fantasyland", rides: [devQTRide(1181, "Walt Disney World Railroad - Fantasyland", true, 18, "2026-01-01T12:00:00Z")] },
+        { id: 1, name: "Main Street, U.S.A.", rides: [devQTRide(1180, "Walt Disney World Railroad - Main Street, U.S.A.", false, 0, "2026-01-01T12:10:00Z")] },
+      ],
+    },
+    check: (result) => {
+      const matches = result.filter((a) => a.id === "mk-wdw-railroad");
+      if (matches.length !== 1) return `expected exactly 1 railroad card, got ${matches.length}`;
+      // Fantasyland (id 1181) and Main Street (id 1180) are distinct
+      // stations and must both remain visible to aggregation — Fantasyland
+      // operating must still win even though Main Street's closed row is
+      // both different-id AND chronologically last.
+      if (matches[0].status !== "OPERATING" || matches[0].waitMins !== 18) {
+        return `expected OPERATING/18 (Fantasyland, still a distinct operating station) to win, got ${matches[0].status}/${matches[0].waitMins}`;
       }
       return null;
     },
