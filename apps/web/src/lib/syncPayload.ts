@@ -46,6 +46,16 @@ export interface SyncedPlannerPayload {
    * included verbatim.
    */
   dayMeta?: Record<string, { label?: string; date?: string }>;
+  /**
+   * SH.3.3 — per-day explicit park assignment (dayId -> ParkId string),
+   * promoted from SH.3.1's local-only durable storage into a synced domain,
+   * mirroring dayMeta's own SH.3.2 promotion exactly. Optional and OMITTED
+   * when the pushing device has no opinion (a legacy client, or a device
+   * that has never touched dayParks locally) — see sanitizeDayParks()'s own
+   * doc for why this is never conflated with a present-but-empty `{}`,
+   * which is an INTENTIONAL clear and always included verbatim.
+   */
+  dayParks?: Record<string, string>;
 }
 
 // Canonical day ID shape, matching plans/page.tsx's VALID_DAY_ID_RE.
@@ -54,6 +64,21 @@ const DAY_ID_RE = /^day-[1-9]\d*$/;
 // shape (full calendar rollover strictness is that local write path's own
 // job; this sanitizer only needs to reject grossly malformed cloud content).
 const DAY_META_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// SH.3.3 — the single maintained source of truth for valid park IDs is
+// PARK_TO_RESORT (crossDayChecks.ts). It cannot be imported here directly:
+// crossDayChecks.ts itself imports from this module (capturePreFetchDomainSnapshot,
+// resolvePostFetchDomainBaseline, etc.), so importing it back would create a
+// circular dependency. This literal list duplicates PARK_TO_RESORT's keys for
+// the same reason DAY_ID_RE above duplicates plans/page.tsx's VALID_DAY_ID_RE —
+// keep in sync with PARK_TO_RESORT if the supported park set ever changes.
+const VALID_PARK_IDS: ReadonlySet<string> = new Set([
+  "disneyland",
+  "dca",
+  "mk",
+  "epcot",
+  "hs",
+  "ak",
+]);
 
 /**
  * Normalize a raw value down to a valid ordered days[] array (preserving
@@ -146,6 +171,32 @@ export function sanitizeDayMeta(
   return result;
 }
 
+/**
+ * SH.3.3 — sanitizes a raw dayParks record (dayId -> ParkId string), or
+ * `undefined` when `raw` isn't a plain object at all — mirrors
+ * sanitizeDayMeta() exactly, one level simpler (each entry is a validated
+ * ParkId string rather than a nested {label?,date?} object): only a
+ * structurally-wrong `raw` degrades to `undefined` ("no opinion" — preserve
+ * whatever cloud/existing storage already holds); a genuinely empty `{}` is
+ * a valid, meaningful INTENTIONAL clear (see SyncedPlannerPayload.dayParks'
+ * own doc) and is always returned as a real empty record. Entries keyed by
+ * an invalid day ID, or whose value isn't a known park ID (VALID_PARK_IDS —
+ * see its own doc for why the supported-park-ID list is duplicated here),
+ * are dropped rather than rejecting the whole record — same "sanitize, don't
+ * reject" treatment sanitizeDayMeta() gives a malformed entry.
+ */
+export function sanitizeDayParks(raw: unknown): Record<string, string> | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const result: Record<string, string> = {};
+  for (const [dayId, valueRaw] of Object.entries(raw as Record<string, unknown>)) {
+    if (!DAY_ID_RE.test(dayId)) continue;
+    if (typeof valueRaw === "string" && VALID_PARK_IDS.has(valueRaw)) {
+      result[dayId] = valueRaw;
+    }
+  }
+  return result;
+}
+
 // ===== BUILDERS =====
 
 export function buildSyncedPlannerPayload(
@@ -160,16 +211,22 @@ export function buildSyncedPlannerPayload(
   // `undefined` (the caller has no opinion — e.g. it never read a local
   // dayMeta key at all) is DELIBERATELY DISTINCT from a present `{}` — see
   // sanitizeDayMeta()'s own doc for why only the former is ever omitted.
-  dayMeta?: unknown
+  dayMeta?: unknown,
+  // SH.3.3 — same contract as `dayMeta` above, for the newly synced
+  // dayParks domain: `undefined` (no opinion) vs. a present `{}`
+  // (intentional clear) — see sanitizeDayParks()'s own doc.
+  dayParks?: unknown
 ): SyncedPlannerPayload {
   const sanitizedDays = sanitizeDaysOrder(days);
   const sanitizedDayMeta = dayMeta === undefined ? undefined : sanitizeDayMeta(dayMeta);
+  const sanitizedDayParks = dayParks === undefined ? undefined : sanitizeDayParks(dayParks);
   return {
     version: 1,
     plans,
     lightning,
     ...(sanitizedDays ? { days: sanitizedDays } : {}),
     ...(sanitizedDayMeta !== undefined ? { dayMeta: sanitizedDayMeta } : {}),
+    ...(sanitizedDayParks !== undefined ? { dayParks: sanitizedDayParks } : {}),
   };
 }
 
@@ -211,6 +268,9 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
   // r.dayMeta that IS structurally a plain object always sanitizes to a real
   // (possibly empty) record — see sanitizeDayMeta()'s own doc.
   const dayMeta = r.dayMeta !== undefined ? sanitizeDayMeta(r.dayMeta) : undefined;
+  // SH.3.3 — same "degrade to absent, never reject the whole payload" rule
+  // as dayMeta above, applied to the newly synced dayParks domain.
+  const dayParks = r.dayParks !== undefined ? sanitizeDayParks(r.dayParks) : undefined;
 
   return {
     version: 1,
@@ -218,6 +278,7 @@ export function parseSyncedPlannerPayload(raw: unknown): SyncedPlannerPayload | 
     lightning: { version: lightning.version as number, items: lightning.items as unknown[] },
     ...(days ? { days } : {}),
     ...(dayMeta !== undefined ? { dayMeta } : {}),
+    ...(dayParks !== undefined ? { dayParks } : {}),
   };
 }
 
@@ -272,6 +333,9 @@ export interface ConfirmedPlannerState {
   // SH.3.2 — dayMeta participates in confirmed-state tracking exactly like
   // every other domain (see ConfirmedDomainName in syncHelper.ts).
   dayMeta: ConfirmedDomainResult<Record<string, { label?: string; date?: string }>>;
+  // SH.3.3 — dayParks participates identically, one level simpler in value
+  // shape (a plain dayId -> ParkId string record, no nested entry object).
+  dayParks: ConfirmedDomainResult<Record<string, string>>;
 }
 
 function isPlannerDomainValue(v: unknown): v is { version: number; items: unknown[] } {
@@ -295,6 +359,14 @@ function isDaysValue(v: unknown): v is string[] {
 // by sanitizeDayMeta(), so a fact recorded from THIS codebase's own writers
 // can never contain anything this check would need to reject more strictly).
 function isDayMetaValue(v: unknown): v is Record<string, { label?: string; date?: string }> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+// SH.3.3 — the dayParks domain's own confirmed-fact value shape: same
+// lenient "plain object, never an array" gate as isDayMetaValue() above, for
+// the same reason (entries are already sanitized on the way in by
+// sanitizeDayParks()).
+function isDayParksValue(v: unknown): v is Record<string, string> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
@@ -350,18 +422,33 @@ export function parseConfirmedDayMetaFact(
 }
 
 /**
+ * SH.3.3 — same contract as parseConfirmedPlannerDomainFact()/
+ * parseConfirmedDaysFact()/parseConfirmedDayMetaFact(), for the dayParks
+ * domain's own value shape (a plain object keyed by day id, string values).
+ */
+export function parseConfirmedDayParksFact(
+  raw: unknown
+): ConfirmedDomainFact<Record<string, string>> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.revision !== "number" || !Number.isFinite(r.revision)) return null;
+  if (!isDayParksValue(r.value)) return null;
+  return { revision: r.revision, value: r.value };
+}
+
+/**
  * Reference cases for parseConfirmedPlannerDomainFact()/parseConfirmedDaysFact()/
- * parseConfirmedDayMetaFact(). Run from Node:
- *   import { DEV_PARSE_CONFIRMED_FACT_CASES, parseConfirmedPlannerDomainFact, parseConfirmedDaysFact, parseConfirmedDayMetaFact } from "@/lib/syncPayload";
+ * parseConfirmedDayMetaFact()/parseConfirmedDayParksFact(). Run from Node:
+ *   import { DEV_PARSE_CONFIRMED_FACT_CASES, parseConfirmedPlannerDomainFact, parseConfirmedDaysFact, parseConfirmedDayMetaFact, parseConfirmedDayParksFact } from "@/lib/syncPayload";
  *   DEV_PARSE_CONFIRMED_FACT_CASES.forEach(c => {
- *     const parse = c.domain === "days" ? parseConfirmedDaysFact : c.domain === "dayMeta" ? parseConfirmedDayMetaFact : parseConfirmedPlannerDomainFact;
+ *     const parse = c.domain === "days" ? parseConfirmedDaysFact : c.domain === "dayMeta" ? parseConfirmedDayMetaFact : c.domain === "dayParks" ? parseConfirmedDayParksFact : parseConfirmedPlannerDomainFact;
  *     const got = parse(c.raw);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
   name: string;
-  domain: "plannerDomain" | "days" | "dayMeta";
+  domain: "plannerDomain" | "days" | "dayMeta" | "dayParks";
   raw: unknown;
   expected: ConfirmedDomainFact<unknown> | null;
 }> = [
@@ -440,6 +527,24 @@ export const DEV_PARSE_CONFIRMED_FACT_CASES: Array<{
   {
     name: "dayMeta value is an array, not a plain object — rejected",
     domain: "dayMeta",
+    raw: { revision: 4, value: ["day-1"] },
+    expected: null,
+  },
+  {
+    name: "SH.3.3 — valid dayParks fact — parses as-is",
+    domain: "dayParks",
+    raw: { revision: 4, value: { "day-1": "mk", "day-2": "epcot" } },
+    expected: { revision: 4, value: { "day-1": "mk", "day-2": "epcot" } },
+  },
+  {
+    name: "SH.3.3 — valid dayParks fact — an intentional empty clear parses as-is",
+    domain: "dayParks",
+    raw: { revision: 5, value: {} },
+    expected: { revision: 5, value: {} },
+  },
+  {
+    name: "SH.3.3 — dayParks value is an array, not a plain object — rejected",
+    domain: "dayParks",
     raw: { revision: 4, value: ["day-1"] },
     expected: null,
   },
@@ -1237,6 +1342,7 @@ export interface AcceptedPlannerDomains {
   lightning?: { version: number; items: unknown[] };
   days?: string[];
   dayMeta?: Record<string, { label?: string; date?: string }>;
+  dayParks?: Record<string, string>;
 }
 
 /**
@@ -1301,6 +1407,7 @@ export function acceptedDomainFactsFromBeacon(
       lightning: cloudSnapshot.lightning,
       days: cloudSnapshot.days,
       dayMeta: cloudSnapshot.dayMeta,
+      dayParks: cloudSnapshot.dayParks,
     },
   };
 }
@@ -1397,6 +1504,22 @@ export const DEV_ACCEPTED_DOMAIN_FACTS_FROM_BEACON_CASES: Array<{
     expected: {
       revision: 8,
       accepted: { plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"], dayMeta: {} },
+    },
+  },
+  {
+    name: "SH.3.3 — accepted, with dayParks present (including an intentional empty clear) — dayParks included in the recorded facts",
+    beaconAccepted: true,
+    cloudRevision: 9,
+    cloudSnapshot: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: {},
+    },
+    expected: {
+      revision: 9,
+      accepted: { plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"], dayParks: {} },
     },
   },
 ];
@@ -1551,7 +1674,13 @@ export const DEV_EVALUATE_OPERATION_BASE_REVISION_CASES: Array<{
  */
 export function knownBaseRevisionFromConfirmedState(state: ConfirmedPlannerState): number {
   let max = 0;
-  const results: Array<ConfirmedDomainResult<unknown>> = [state.plans, state.lightning, state.days, state.dayMeta];
+  const results: Array<ConfirmedDomainResult<unknown>> = [
+    state.plans,
+    state.lightning,
+    state.days,
+    state.dayMeta,
+    state.dayParks,
+  ];
   for (const result of results) {
     if (result.status === "confirmed" && result.fact.revision > max) max = result.fact.revision;
     else if (result.status === "conflict" && result.revision > max) max = result.revision;
@@ -1574,26 +1703,34 @@ export const DEV_KNOWN_BASE_REVISION_CASES: Array<{
 }> = [
   {
     name: "nothing ever confirmed for any domain — 0 (no evidence)",
-    state: { plans: { status: "none" }, lightning: { status: "none" }, days: { status: "none" }, dayMeta: { status: "none" } },
+    state: {
+      plans: { status: "none" },
+      lightning: { status: "none" },
+      days: { status: "none" },
+      dayMeta: { status: "none" },
+      dayParks: { status: "none" },
+    },
     expected: 0,
   },
   {
-    name: "all four domains confirmed at the same revision (an ordinary push/pull) — that revision",
+    name: "all five domains confirmed at the same revision (an ordinary push/pull) — that revision",
     state: {
       plans: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
       lightning: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
       days: { status: "confirmed", fact: { revision: 5, value: ["day-1"] } },
       dayMeta: { status: "confirmed", fact: { revision: 5, value: {} } },
+      dayParks: { status: "confirmed", fact: { revision: 5, value: {} } },
     },
     expected: 5,
   },
   {
-    name: "disjoint per-domain revisions (e.g. a dayMeta-only cloud win at 7, plans still at 5) — the max",
+    name: "disjoint per-domain revisions (e.g. a dayParks-only cloud win at 7, plans still at 5) — the max",
     state: {
       plans: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
       lightning: { status: "none" },
       days: { status: "confirmed", fact: { revision: 5, value: ["day-1"] } },
-      dayMeta: { status: "confirmed", fact: { revision: 7, value: { "day-1": { label: "Arrival" } } } },
+      dayMeta: { status: "none" },
+      dayParks: { status: "confirmed", fact: { revision: 7, value: { "day-1": "mk" } } },
     },
     expected: 7,
   },
@@ -1604,6 +1741,7 @@ export const DEV_KNOWN_BASE_REVISION_CASES: Array<{
       lightning: { status: "confirmed", fact: { revision: 5, value: { version: 1, items: [] } } },
       days: { status: "none" },
       dayMeta: { status: "none" },
+      dayParks: { status: "none" },
     },
     expected: 9,
   },
@@ -1881,7 +2019,7 @@ export interface PendingOpDomainEvidence {
 
 export interface PendingOpRecord {
   opId: string;
-  domains: Partial<Record<"plans" | "lightning" | "days" | "dayMeta", PendingOpDomainEvidence>>;
+  domains: Partial<Record<"plans" | "lightning" | "days" | "dayMeta" | "dayParks", PendingOpDomainEvidence>>;
 }
 
 /**
@@ -2472,10 +2610,11 @@ export const DEV_HYDRATION_PROVENANCE_OBSOLETE_AFTER_CONFIRM_CASES: Array<{
  * SH.3.2 — "dayMeta" is appended here (plus its own parseSyncedPlannerPayload
  * extraction, already added above) to make it a synced domain — no other
  * change to mergePlannerDomains() was needed to support that, exactly as
- * this doc predicted. A future SH.3 slice may append "dayParks" |
- * "dayAutoFallbacks" the same way when they, too, become synced domains.
+ * this doc predicted. SH.3.3 appends "dayParks" the same way. A future SH.3
+ * slice may append "dayAutoFallbacks" identically, if it too becomes a
+ * synced domain (currently out of scope — it stays local-only/derived).
  */
-const OPTIONAL_DOMAIN_KEYS = ["days", "dayMeta"] as const;
+const OPTIONAL_DOMAIN_KEYS = ["days", "dayMeta", "dayParks"] as const;
 
 /**
  * Every top-level key a SH.1 server build recognizes: the `version`
@@ -2550,10 +2689,11 @@ export function findUnknownDomainKeys(incomingRaw: Record<string, unknown>): str
  *     left completely untouched by this function, simply because nothing
  *     ever writes over it.
  *   - Every other key already present in `base` — including a domain this
- *     server build has never heard of (e.g. a future SH.3 `dayMeta` domain
- *     written by a newer client, then this same profile receiving a write
- *     from an old client whose payload structurally has no `dayMeta`
- *     field at all) — survives untouched via the initial object spread.
+ *     server build has never heard of (e.g. a future SH.3 `dayAutoFallbacks`
+ *     domain written by a newer client, then this same profile receiving a
+ *     write from an old client whose payload structurally has no
+ *     `dayAutoFallbacks` field at all) — survives untouched via the initial
+ *     object spread.
  *     This is what makes future-domain preservation NOT require a new
  *     per-field branch here: the mechanism doesn't need to know a
  *     domain's name to protect it, only the domains it's actively
@@ -2698,7 +2838,7 @@ export const DEV_MERGE_CASES: Array<{
     expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"], dayMeta: {} },
   },
   {
-    name: "still-unknown future domain (dayParks) in existing row survives an old-client write that omits it entirely",
+    name: "SH.3.3 — dayParks absent from an old-client write survives untouched (now a KNOWN optional domain, same absent-preserves treatment as days/dayMeta)",
     existingRaw: {
       version: 1,
       plans: { version: 1, items: [] },
@@ -2714,6 +2854,75 @@ export const DEV_MERGE_CASES: Array<{
       lightning: { version: 1, items: [] },
       days: ["day-1"],
       dayParks: { "day-1": "mk" },
+    },
+  },
+  {
+    name: "SH.3.3 — dayParks present in incoming replaces existing (intentional overwrite)",
+    existingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "mk" },
+    },
+    incomingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "epcot" },
+    },
+    incomingParsed: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "epcot" },
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "epcot" },
+    },
+  },
+  {
+    name: "SH.3.3 — dayParks present-empty in incoming is an INTENTIONAL clear, not preserved (mirrors dayMeta's own present-empty rule)",
+    existingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "mk" },
+    },
+    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"], dayParks: {} },
+    incomingParsed: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: {},
+    },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, days: ["day-1"], dayParks: {} },
+  },
+  {
+    name: "still-unknown future domain (dayAutoFallbacks) in existing row survives an old-client write that omits it entirely",
+    existingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayAutoFallbacks: { "day-1": "mk" },
+    },
+    incomingRaw: { version: 1, plans: { version: 1, items: ["x"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    incomingParsed: { version: 1, plans: { version: 1, items: ["x"] }, lightning: { version: 1, items: [] }, days: ["day-1"] },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: ["x"] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayAutoFallbacks: { "day-1": "mk" },
     },
   },
   {
@@ -2756,23 +2965,7 @@ export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
   expectedUnknown: string[];
 }> = [
   {
-    name: "known-only payload (version + plans + lightning + days + dayMeta) — nothing unknown",
-    incomingRaw: {
-      version: 1,
-      plans: { version: 1, items: [] },
-      lightning: { version: 1, items: [] },
-      days: ["day-1"],
-      dayMeta: { "day-1": { label: "Arrival" } },
-    },
-    expectedUnknown: [],
-  },
-  {
-    name: "known-only payload without optional days/dayMeta — still nothing unknown",
-    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
-    expectedUnknown: [],
-  },
-  {
-    name: "SH.3.2 — newer-client payload carrying a STILL-unrecognized extension domain (dayParks) — must be flagged, never silently dropped",
+    name: "known-only payload (version + plans + lightning + days + dayMeta + dayParks) — nothing unknown",
     incomingRaw: {
       version: 1,
       plans: { version: 1, items: [] },
@@ -2781,7 +2974,25 @@ export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
       dayMeta: { "day-1": { label: "Arrival" } },
       dayParks: { "day-1": "mk" },
     },
-    expectedUnknown: ["dayParks"],
+    expectedUnknown: [],
+  },
+  {
+    name: "known-only payload without optional days/dayMeta/dayParks — still nothing unknown",
+    incomingRaw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expectedUnknown: [],
+  },
+  {
+    name: "SH.3.3 — newer-client payload carrying a STILL-unrecognized extension domain (dayAutoFallbacks) — must be flagged, never silently dropped",
+    incomingRaw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayMeta: { "day-1": { label: "Arrival" } },
+      dayParks: { "day-1": "mk" },
+      dayAutoFallbacks: { "day-1": "mk" },
+    },
+    expectedUnknown: ["dayAutoFallbacks"],
   },
   {
     name: "multiple unrecognized domains in one write — all flagged",
@@ -2789,10 +3000,10 @@ export const DEV_UNKNOWN_DOMAIN_CASES: Array<{
       version: 1,
       plans: { version: 1, items: [] },
       lightning: { version: 1, items: [] },
-      dayParks: { "day-1": "DISNEYLAND_PARK" },
       dayAutoFallbacks: {},
+      dayNotes: {},
     },
-    expectedUnknown: ["dayParks", "dayAutoFallbacks"],
+    expectedUnknown: ["dayAutoFallbacks", "dayNotes"],
   },
 ];
 
@@ -2898,6 +3109,53 @@ export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
   {
     name: "SH.3.2 — dayMeta structurally invalid (an array, not an object) — degrades to absent, never rejects the whole payload",
     raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, dayMeta: ["day-1"] },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "SH.3.3 — valid payload with dayParks — parses as-is",
+    raw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "mk" },
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      days: ["day-1"],
+      dayParks: { "day-1": "mk" },
+    },
+  },
+  {
+    name: "SH.3.3 — valid payload without dayParks — dayParks omitted from result (legacy/non-participating, NOT a clear)",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "SH.3.3 — present-empty dayParks ({}) is an INTENTIONAL clear, parses as a real empty record, never omitted",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, dayParks: {} },
+    expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, dayParks: {} },
+  },
+  {
+    name: "SH.3.3 — malformed dayParks entries sanitized, not rejected (plans/lightning still valid); invalid day-id key and unrecognized park value both dropped",
+    raw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      dayParks: { "day-1": "mk", "day-2": "not-a-real-park", "not-a-day": "epcot" },
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      dayParks: { "day-1": "mk" },
+    },
+  },
+  {
+    name: "SH.3.3 — dayParks structurally invalid (an array, not an object) — degrades to absent, never rejects the whole payload",
+    raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, dayParks: ["day-1"] },
     expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
   },
 ];

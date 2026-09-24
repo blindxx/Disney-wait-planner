@@ -13,6 +13,7 @@ import {
   computeCrossDayChecks,
   pickWinningDays,
   pickWinningDayMeta,
+  pickWinningDayParks,
   pickWinningItems,
   pruneOrphanedDayRecord,
   reconcilePlannerSnapshot,
@@ -227,10 +228,16 @@ function dayContextLabel(dayId: string, meta: Record<string, DayMeta>, knownDays
   return label || dayLabelFromId(dayId, knownDays);
 }
 
-/** Load per-day park overrides from profile-scoped localStorage (read-only on Lightning page). */
-function loadDayParks(key: string): Record<string, string> {
+/**
+ * SH.3.3 — parsing/sanitization extracted from loadDayParks() below (mirrors
+ * this file's own parseDayMetaRaw() extraction above exactly) so it can be
+ * applied to either a plain canonical read (loadDayParks' own contract,
+ * unchanged) OR the effective DURABLE raw value (readLatestDurableValue()) —
+ * see loadEffectiveDurableDayParks() below, needed once dayParks becomes a
+ * synced domain Lightning's own pull must carry through.
+ */
+function parseDayParksRaw(raw: string | null): Record<string, string> {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
@@ -244,6 +251,28 @@ function loadDayParks(key: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+/** Load per-day park overrides from profile-scoped localStorage (read-only on Lightning page). */
+function loadDayParks(key: string): Record<string, string> {
+  try {
+    return parseDayParksRaw(localStorage.getItem(key));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * SH.3.3 — the dayParks domain's own authority-bearing read for THIS page's
+ * own independent pull cycle, mirroring loadEffectiveDurableDayMeta() (above)
+ * exactly: reuses parseDayParksRaw() against the effective DURABLE raw value
+ * (canonical + any surviving local-edit fact published by Plans' own
+ * commitLocalDomainRawSync-backed saveDayParks()) rather than a plain
+ * canonical read, so Lightning's own sync/conflict decisions for this shared
+ * domain see the same durable local authority Plans itself does.
+ */
+function loadEffectiveDurableDayParks(key: string): Record<string, string> {
+  return parseDayParksRaw(readLatestDurableValue(key));
 }
 
 /**
@@ -752,9 +781,18 @@ export default function LightningPage() {
   // `knownDays` captured at effect-creation time cannot provide.
   const knownDaysRef = useRef(knownDays);
   knownDaysRef.current = knownDays;
-  // Phase 8.8 — per-day park overrides (read-only; Plans page owns writes).
+  // Phase 8.8 — per-day park overrides (read-only UI; Plans page owns
+  // writes). SH.3.3 — this page's own independent pull now also carries the
+  // dayParks domain through cloud sync (a pass-through, like `plans` below),
+  // so a device that only ever opens Lightning still keeps dayParks
+  // hydrated from cloud.
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
+  // SH.3.3 — mirrors itemsRef/knownDaysRef/dayMetaRef: always holds the
+  // latest dayParks state, used inside the async pull callback to avoid a
+  // stale closure.
+  const dayParksRef = useRef(dayParks);
+  dayParksRef.current = dayParks;
   // Phase 8.8 — day metadata for display labels (read-only UI; Plans page
   // owns editing). SH.3.2 — this page's own independent pull now also
   // carries the dayMeta domain through cloud sync (a pass-through, like
@@ -807,6 +845,11 @@ export default function LightningPage() {
   // pass-through, mirroring plansRawBaselineRef below — Lightning has no
   // dayMeta editing UI, only Plans does).
   const dayMetaBaselineRef = useRef<Record<string, DayMeta>>({});
+  // SH.3.3 — same fallback concept, applied to the newly synced dayParks
+  // domain Lightning now carries through its own pull (a pass-through — see
+  // dayMetaBaselineRef's own doc above; Lightning has no dayParks editing
+  // UI, only Plans does).
+  const dayParksBaselineRef = useRef<Record<string, string>>({});
   // Same fallback concept, applied to the OPPOSITE dataset (Plans' raw
   // storage) this page hydrates on every pull (Phase 7.6.3). Captured as
   // the raw string (Lightning never parses/normalizes Plans items) so
@@ -869,12 +912,14 @@ export default function LightningPage() {
     items: DomainPreFetchSnapshot<LightningItem[]>;
     days: DomainPreFetchSnapshot<string[]>;
     dayMeta: DomainPreFetchSnapshot<Record<string, DayMeta>>;
+    dayParks: DomainPreFetchSnapshot<Record<string, string>>;
     plansRaw: DomainPreFetchSnapshot<string | null>;
   } {
     return {
       items: capturePreFetchDomainSnapshot(migrateLightningDayIds(loadEffectiveDurableLightningItems(lightningKeyRef.current))),
       days: capturePreFetchDomainSnapshot(loadEffectiveDurableDays(daysKeyRef.current)),
       dayMeta: capturePreFetchDomainSnapshot(loadEffectiveDurableDayMeta(dayMetaKeyRef.current)),
+      dayParks: capturePreFetchDomainSnapshot(loadEffectiveDurableDayParks(dayParksKeyRef.current)),
       plansRaw: capturePreFetchDomainSnapshot(readLatestDurableValue(getActiveProfileKeys().plans)),
     };
   }
@@ -894,6 +939,7 @@ export default function LightningPage() {
       items: DomainPreFetchSnapshot<LightningItem[]>;
       days: DomainPreFetchSnapshot<string[]>;
       dayMeta: DomainPreFetchSnapshot<Record<string, DayMeta>>;
+      dayParks: DomainPreFetchSnapshot<Record<string, string>>;
       plansRaw: DomainPreFetchSnapshot<string | null>;
     },
     contentUsable = true
@@ -901,6 +947,7 @@ export default function LightningPage() {
     items: DomainBaselineOutcome<LightningItem[]>;
     days: DomainBaselineOutcome<string[]>;
     dayMeta: DomainBaselineOutcome<Record<string, DayMeta>>;
+    dayParks: DomainBaselineOutcome<Record<string, string>>;
     plansRaw: DomainBaselineOutcome<string | null>;
     // SH.2.2 (Codex P1 third follow-up round) — mirrors plans/page.tsx
     // exactly, see its own detailed doc: the RAW per-domain confirmed-state
@@ -916,6 +963,7 @@ export default function LightningPage() {
           lightning: { status: "none" as const },
           days: { status: "none" as const },
           dayMeta: { status: "none" as const },
+          dayParks: { status: "none" as const },
         };
 
     const items = resolvePostFetchDomainBaseline(
@@ -948,6 +996,17 @@ export default function LightningPage() {
     );
     clearRefOnFallbackMismatch(dayMetaBaselineRef, dayMeta, {}, contentOwnershipMismatch);
 
+    // SH.3.3 — dayParks' own baseline resolution, mirroring dayMeta's above.
+    const dayParks = resolvePostFetchDomainBaseline(
+      confirmed.dayParks,
+      cloudRevision,
+      (raw) => raw,
+      preFetch.dayParks,
+      domainFallbackValue(dayParksBaselineRef, {} as Record<string, string>, contentOwnershipMismatch),
+      contentUsable
+    );
+    clearRefOnFallbackMismatch(dayParksBaselineRef, dayParks, {}, contentOwnershipMismatch);
+
     const plansRaw = resolvePostFetchDomainBaseline(
       confirmed.plans,
       cloudRevision,
@@ -958,22 +1017,22 @@ export default function LightningPage() {
     );
     clearRefOnFallbackMismatch(plansRawBaselineRef, plansRaw, null, contentOwnershipMismatch);
 
-    return { items, days, dayMeta, plansRaw, confirmed };
+    return { items, days, dayMeta, dayParks, plansRaw, confirmed };
   }
 
   /**
    * Mirrors plans/page.tsx's own UnusableDomain type exactly.
    */
   type UnusableDomain =
-    | { domain: "plans" | "lightning" | "days" | "dayMeta"; reason: "conflict"; revision: number }
+    | { domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks"; reason: "conflict"; revision: number }
     | {
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "stale-response";
         confirmedRevision: number;
         cloudRevision: number;
       }
     | {
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "unusable-response";
         confirmedRevision: number;
       }
@@ -982,7 +1041,7 @@ export default function LightningPage() {
         // exactly, see its own detailed doc: this pull's response carried
         // a VALID revision but this domain's own cloud VALUE could not be
         // interpreted. Never auto-retried.
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "unusable-content";
         cloudRevision: number | null;
       }
@@ -992,7 +1051,7 @@ export default function LightningPage() {
         // (commitLocalDomainRaw() returned "superseded"), always safe to
         // auto-retry on its own via decideStaleResponseRecovery(), never
         // when mixed with a genuine "conflict"/"unusable-response".
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "local-edit-superseded";
       }
     | {
@@ -1000,7 +1059,7 @@ export default function LightningPage() {
         // own UnusableDomain arm exactly, see its own detailed doc:
         // confirmed authority for this domain no longer IDENTICALLY matches
         // `winnerSelectionAuthority`.
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "authority-changed";
         previousRevision: number | null;
         currentRevision: number | null;
@@ -1011,7 +1070,7 @@ export default function LightningPage() {
         // own detailed doc: getConfirmedStateAtomic() could not be
         // performed (Web Locks unavailable) — FAIL CLOSED, never
         // auto-retried.
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "authority-unavailable";
       }
     | {
@@ -1020,7 +1079,7 @@ export default function LightningPage() {
         // own detailed doc: recordDomainProvenance() could not durably
         // record EITHER confirmed server authority OR hydration
         // provenance for this domain — FAIL CLOSED, never auto-retried.
-        domain: "plans" | "lightning" | "days" | "dayMeta";
+        domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
         reason: "provenance-write-failed";
       };
 
@@ -1033,10 +1092,11 @@ export default function LightningPage() {
     items: DomainBaselineOutcome<unknown>;
     days: DomainBaselineOutcome<unknown>;
     dayMeta: DomainBaselineOutcome<unknown>;
+    dayParks: DomainBaselineOutcome<unknown>;
     plansRaw: DomainBaselineOutcome<unknown>;
   }): UnusableDomain[] {
     const unusable: UnusableDomain[] = [];
-    const check = (domain: "plans" | "lightning" | "days" | "dayMeta", outcome: DomainBaselineOutcome<unknown>) => {
+    const check = (domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks", outcome: DomainBaselineOutcome<unknown>) => {
       if (outcome.kind === "gated") {
         unusable.push({ domain, reason: "conflict", revision: outcome.revision });
       } else if (outcome.kind === "stale-response") {
@@ -1064,6 +1124,7 @@ export default function LightningPage() {
     check("plans", outcomes.plansRaw);
     check("days", outcomes.days);
     check("dayMeta", outcomes.dayMeta);
+    check("dayParks", outcomes.dayParks);
     return unusable;
   }
 
@@ -1150,7 +1211,13 @@ export default function LightningPage() {
     setKnownDays(loadedKnownDays);
     // Phase 8.8 — load day park overrides and metadata (read-only context display).
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
-    setDayParks(loadDayParks(dayParksKeyRef.current));
+    // SH.3.3 — read the domain's EFFECTIVE DURABLE value
+    // (loadEffectiveDurableDayParks()), not a canonical-only read, mirroring
+    // `loadedDayMeta` below for the same cross-tab-hydration-race reason.
+    // Captured once so the SAME value seeds both the rendered state and
+    // dayParksBaselineRef below — see that assignment's own doc.
+    const loadedDayParks = loadEffectiveDurableDayParks(dayParksKeyRef.current);
+    setDayParks(loadedDayParks);
     dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
     // SH.3.2 Codex P1 follow-up — read the domain's EFFECTIVE DURABLE value
     // (loadEffectiveDurableDayMeta() — canonical + any surviving local-edit
@@ -1195,6 +1262,11 @@ export default function LightningPage() {
     // the SAME `loadedDayMeta` read above, mirroring itemsBaselineRef/
     // daysBaselineRef exactly.
     dayMetaBaselineRef.current = loadedDayMeta;
+    // SH.3.3 — same mount-time baseline fix as dayMeta above, applied to the
+    // newly synced dayParks domain: seeded from the SAME `loadedDayParks`
+    // read above, mirroring itemsBaselineRef/daysBaselineRef/
+    // dayMetaBaselineRef exactly.
+    dayParksBaselineRef.current = loadedDayParks;
     // Same baseline concept for the opposite (Plans) dataset this page
     // hydrates on every pull — captured as the raw string since no
     // parsing/normalization is needed for a page that doesn't own that
@@ -1334,6 +1406,8 @@ export default function LightningPage() {
         // exactly. See pickWinningDayMeta()'s own doc for why `undefined`
         // and a present `{}` must never be conflated.
         const cloudDayMeta = planner?.dayMeta;
+        // SH.3.3 — dayParks' own raw cloud value, mirrors cloudDayMeta above.
+        const cloudDayParks = planner?.dayParks;
 
         // SH.2 architecture (Codex P1, 8th round; generalized 9th) — PULL
         // ORDER: resolve EVERY pending op's fate against THIS SAME GET
@@ -1522,7 +1596,7 @@ export default function LightningPage() {
         // eligible, the provenance/confirmed-fact write) and returns the
         // EXACT authority state this call itself established.
         async function commitDomain(
-          domain: "plans" | "lightning" | "days" | "dayMeta",
+          domain: "plans" | "lightning" | "days" | "dayMeta" | "dayParks",
           key: string,
           expectedPreviousRaw: string | null,
           nextRaw: string,
@@ -1585,6 +1659,7 @@ export default function LightningPage() {
           items: requireResolvedValue(baselineOutcomes.items),
           days: requireResolvedValue(baselineOutcomes.days),
           dayMeta: requireResolvedValue(baselineOutcomes.dayMeta),
+          dayParks: requireResolvedValue(baselineOutcomes.dayParks),
           plansRaw: requireResolvedValue(baselineOutcomes.plansRaw),
         };
 
@@ -1616,6 +1691,10 @@ export default function LightningPage() {
         // newly synced dayMeta domain.
         const currentDayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
         const currentDayMeta = loadEffectiveDurableDayMeta(dayMetaKeyRef.current);
+        // SH.3.3 — same two-read split as dayMeta above, applied to the
+        // newly synced dayParks domain.
+        const currentDayParksRaw = localStorage.getItem(dayParksKeyRef.current);
+        const currentDayParks = loadEffectiveDurableDayParks(dayParksKeyRef.current);
         const currentPlansRaw = localStorage.getItem(profileKeysForPull.plans);
         const currentPlansRawDurable = readLatestDurableValue(profileKeysForPull.plans);
 
@@ -1672,6 +1751,18 @@ export default function LightningPage() {
             planner?.revision ?? Number.POSITIVE_INFINITY,
             currentDayMeta
           );
+        // SH.3.3 — dayParks' own hydration-provenance check, mirrors dayMeta
+        // above.
+        const dayParksHydrationExplained =
+          !!pullCtx.userId &&
+          !hasSurvivingEditFact(dayParksKeyRef.current) &&
+          hasHydrationProvenanceMatch(
+            pullCtx.userId,
+            pullCtx.profileId,
+            "dayParks",
+            planner?.revision ?? Number.POSITIVE_INFINITY,
+            currentDayParks
+          );
         const plansHydrationExplained =
           !!pullCtx.userId &&
           !hasSurvivingEditFact(profileKeysForPull.plans) &&
@@ -1688,6 +1779,8 @@ export default function LightningPage() {
           contentOwnershipMismatch || daysHydrationExplained ? effectiveBaseline.days : currentDays;
         const dayMetaForComparison =
           contentOwnershipMismatch || dayMetaHydrationExplained ? effectiveBaseline.dayMeta : currentDayMeta;
+        const dayParksForComparison =
+          contentOwnershipMismatch || dayParksHydrationExplained ? effectiveBaseline.dayParks : currentDayParks;
         const plansRawForComparison =
           contentOwnershipMismatch || plansHydrationExplained ? effectiveBaseline.plansRaw : currentPlansRawDurable;
 
@@ -1729,6 +1822,13 @@ export default function LightningPage() {
           effectiveBaseline.dayMeta,
           dayMetaForComparison,
           cloudDayMeta
+        );
+        // SH.3.3 — dayParks' own local-vs-cloud winner, mirrors dayMeta's
+        // own comment above exactly.
+        const { dayParks: dayParksCandidate, changedLocally: dayParksChangedLocally } = pickWinningDayParks(
+          effectiveBaseline.dayParks,
+          dayParksForComparison,
+          cloudDayParks
         );
         // Structural reconciliation (Codex P1, 4th round) — reconciles
         // BOTH domains that will actually be persisted this pull, not just
@@ -2040,6 +2140,55 @@ export default function LightningPage() {
             return;
           }
         }
+
+        // SH.3.3 — dayParks domain: this page's own independent pull carries
+        // it through cloud sync too (a pass-through, mirroring dayMeta above
+        // — Lightning has no dayParks editing UI, only Plans does), gated on
+        // `!daysWriteFailed` for the identical reason dayMeta's own gating
+        // comment above gives. Pruned via the same pruneOrphanedDayRecord()
+        // Plans' own local dayParks lifecycle already uses, so the "dayParks
+        // entries only belong to valid durable day IDs" invariant holds
+        // regardless of which page's pull last touched it.
+        let dayParksWriteFailed = false;
+        if (!daysWriteFailed) {
+          const prunedDayParks = pruneOrphanedDayRecord(dayParksCandidate, winningDays).result;
+          const nextDayParksRaw = JSON.stringify(prunedDayParks);
+          const dayParksCloudWon = !dayParksChangedLocally && cloudDayParks !== undefined;
+          const { result: dayParksCommit, deferralReasons: dayParksDeferralReasons } = await commitDomain(
+            "dayParks",
+            dayParksKeyRef.current,
+            currentDayParksRaw,
+            nextDayParksRaw,
+            dayParksCloudWon
+              ? {
+                  candidateValue: prunedDayParks,
+                  cloudValue: cloudDayParks ?? null,
+                  confirmedValue: prunedDayParks,
+                  hydrationValue: prunedDayParks,
+                }
+              : null
+          );
+          if (!isPullCurrent()) return;
+          if (dayParksCommit.status === "authority-changed") {
+            handlePullDeferral([...supersededDomains, ...dayParksDeferralReasons]);
+            return;
+          }
+          const dayParksCommitStatus = dayParksCommit.status;
+          dayParksWriteFailed = dayParksCommit.primaryCommitStatus === null;
+          if (dayParksCommitStatus === "superseded") {
+            supersededDomains.push({ domain: "dayParks", reason: "local-edit-superseded" });
+          }
+          if (!dayParksWriteFailed && JSON.stringify(prunedDayParks) !== JSON.stringify(dayParksRef.current)) {
+            setDayParks(prunedDayParks);
+          }
+          if (dayParksCloudWon && !dayParksWriteFailed) {
+            dayParksBaselineRef.current = prunedDayParks;
+          }
+          if (dayParksCommit.status === "provenance-write-failed") {
+            handlePullDeferral([...supersededDomains, ...dayParksDeferralReasons]);
+            return;
+          }
+        }
         // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
         // attempted to record Days' own confirmed-baseline fact or
         // hydration provenance, whichever applies, gated by
@@ -2086,13 +2235,28 @@ export default function LightningPage() {
         // SH.3.2 — dayMeta's own write failure gates syncReady/ownership
         // transfer identically to days'/plans' own failures, mirroring
         // plans/page.tsx exactly.
-        if (hydrationSucceeded && !daysWriteFailed && !dayMetaWriteFailed && primaryPersistSucceeded) setSyncReady(true);
+        // SH.3.3 — dayParks' own write failure gates identically.
+        if (
+          hydrationSucceeded &&
+          !daysWriteFailed &&
+          !dayMetaWriteFailed &&
+          !dayParksWriteFailed &&
+          primaryPersistSucceeded
+        )
+          setSyncReady(true);
 
         // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
         // BOUNDARY. Mirrors plans/page.tsx exactly — see its own detailed
         // comment and getLocalContentOwner's doc in syncHelper.ts. Codex P1
         // fix (7th round) — also requires `primaryPersistSucceeded`.
-        if (pullCtx.userId && hydrationSucceeded && !daysWriteFailed && !dayMetaWriteFailed && primaryPersistSucceeded) {
+        if (
+          pullCtx.userId &&
+          hydrationSucceeded &&
+          !daysWriteFailed &&
+          !dayMetaWriteFailed &&
+          !dayParksWriteFailed &&
+          primaryPersistSucceeded
+        ) {
           setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
         }
 
