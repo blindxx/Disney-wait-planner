@@ -783,6 +783,7 @@ import {
   parseSyncedPlannerPayload,
   parseConfirmedPlannerDomainFact,
   parseConfirmedDaysFact,
+  parseConfirmedDayMetaFact,
   resolveConfirmedDomainState,
   confirmedFactRevisionIsUnambiguous,
   acceptedDomainFactsFromBeacon,
@@ -1994,9 +1995,9 @@ export function purgeProfileSyncState(profileId: string): void {
 
 // ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────
 
-/** The three synced domains this module tracks confirmed facts for. */
-type ConfirmedDomainName = "plans" | "lightning" | "days";
-const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightning", "days"];
+/** The four synced domains this module tracks confirmed facts for. */
+type ConfirmedDomainName = "plans" | "lightning" | "days" | "dayMeta";
+const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightning", "days", "dayMeta"];
 
 /**
  * SH.2 architecture (Codex P1, 11th round; storage representation replaced
@@ -2070,7 +2071,9 @@ function parseConfirmedFactForDomain(
   domain: ConfirmedDomainName,
   raw: unknown
 ): ConfirmedDomainFact<unknown> | null {
-  return domain === "days" ? parseConfirmedDaysFact(raw) : parseConfirmedPlannerDomainFact(raw);
+  if (domain === "days") return parseConfirmedDaysFact(raw);
+  if (domain === "dayMeta") return parseConfirmedDayMetaFact(raw);
+  return parseConfirmedPlannerDomainFact(raw);
 }
 
 /**
@@ -2138,7 +2141,12 @@ function scanConfirmedFactEntries(
  */
 export function getConfirmedState(userId: string, profileId: string): ConfirmedPlannerState {
   if (typeof window === "undefined") {
-    return { plans: { status: "none" }, lightning: { status: "none" }, days: { status: "none" } };
+    return {
+      plans: { status: "none" },
+      lightning: { status: "none" },
+      days: { status: "none" },
+      dayMeta: { status: "none" },
+    };
   }
   const state = {} as ConfirmedPlannerState;
   for (const domain of CONFIRMED_DOMAIN_NAMES) {
@@ -2451,6 +2459,12 @@ function recordConfirmedFactBody(
       if (domain === "days") {
         const parsedDays: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
         currentCanonicalValue = Array.isArray(parsedDays) ? parsedDays : null;
+      } else if (domain === "dayMeta") {
+        const parsedDayMeta: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
+        currentCanonicalValue =
+          parsedDayMeta !== null && typeof parsedDayMeta === "object" && !Array.isArray(parsedDayMeta)
+            ? parsedDayMeta
+            : null;
       } else {
         currentCanonicalValue = parseLocalDatasetEntry(currentRaw);
       }
@@ -2539,7 +2553,12 @@ export async function commitConfirmedBaseline(
   accepted: AcceptedPlannerDomains
 ): Promise<boolean> {
   if (typeof window === "undefined") return false;
-  if (accepted.plans === undefined && accepted.lightning === undefined && accepted.days === undefined) {
+  if (
+    accepted.plans === undefined &&
+    accepted.lightning === undefined &&
+    accepted.days === undefined &&
+    accepted.dayMeta === undefined
+  ) {
     return true;
   }
   let allOk = true;
@@ -2551,6 +2570,9 @@ export async function commitConfirmedBaseline(
   }
   if (accepted.days !== undefined) {
     allOk = (await recordConfirmedFact(userId, profileId, "days", revision, accepted.days)) && allOk;
+  }
+  if (accepted.dayMeta !== undefined) {
+    allOk = (await recordConfirmedFact(userId, profileId, "dayMeta", revision, accepted.dayMeta)) && allOk;
   }
   return allOk;
 }
@@ -3416,6 +3438,12 @@ function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload)
       editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "days"))),
     };
   }
+  if (payload.dayMeta !== undefined) {
+    domains.dayMeta = {
+      digest: canonicalDigest(payload.dayMeta),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayMeta"))),
+    };
+  }
   return domains;
 }
 
@@ -3768,6 +3796,9 @@ export async function reconcilePendingOperations(
           if (domain === "days") {
             const parsed: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
             currentValue = Array.isArray(parsed) ? parsed : null;
+          } else if (domain === "dayMeta") {
+            const parsed: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
+            currentValue = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
           } else {
             currentValue = parseLocalDatasetEntry(currentRaw);
           }
@@ -4202,7 +4233,14 @@ function parseOpStatuses(raw: unknown): OpStatus[] {
  */
 export type PulledPlannerEnvelope =
   | (SyncedPlannerPayload & { revision: number | null; opStatuses: OpStatus[] })
-  | { plans: null; lightning: null; days?: undefined; revision: number | null; opStatuses: OpStatus[] };
+  | {
+      plans: null;
+      lightning: null;
+      days?: undefined;
+      dayMeta?: undefined;
+      revision: number | null;
+      opStatuses: OpStatus[];
+    };
 
 /**
  * SH.2.6 — pure decision core for a single HTTP 200 `/api/sync/planner` GET
@@ -4608,6 +4646,29 @@ function readLocalDaysOrder(profileId: string): unknown[] | undefined {
 }
 
 /**
+ * SH.3.2 — read the profile's locally persisted dayMeta record
+ * (dwp:{profileId}:dayMeta, owned/written by the Plans page, reusing
+ * SH.3.1's commitLocalDomainRawSync-backed saveDayMeta()) for inclusion in
+ * the sync payload. Mirrors readLocalDaysOrder() exactly, one level up in
+ * shape: `undefined` for a MISSING key (this device has never touched
+ * dayMeta locally at all — "no opinion", never an intentional clear) or a
+ * malformed/non-object raw value; a genuinely parsed plain object — INCLUDING
+ * an intentionally-empty `{}` (e.g. after Clear All) — is handed through
+ * as-is for buildSyncedPlannerPayload()'s own sanitizeDayMeta() to validate,
+ * exactly as this function's days[] counterpart does not pre-validate either.
+ */
+function readLocalDayMeta(profileId: string): unknown {
+  try {
+    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayMeta"));
+    if (raw === null) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Read the current plans + lightning + days for a profile from localStorage
  * and construct a SyncedPlannerPayload.
  *
@@ -4654,7 +4715,8 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     if (plans === null || lightning === null) return null;
 
     const days = readLocalDaysOrder(profileId);
-    return buildSyncedPlannerPayload(plans, lightning, days);
+    const dayMeta = readLocalDayMeta(profileId);
+    return buildSyncedPlannerPayload(plans, lightning, days, dayMeta);
   } catch {
     return null;
   }
@@ -5128,6 +5190,7 @@ async function doPush(): Promise<void> {
               plans: payload.plans,
               lightning: payload.lightning,
               days: payload.days,
+              dayMeta: payload.dayMeta,
             });
           }
         } catch {

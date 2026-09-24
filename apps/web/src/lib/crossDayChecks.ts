@@ -358,6 +358,89 @@ export function pickWinningItems<T>(
 }
 
 /**
+ * SH.3.2 — determines the winning dayMeta record for one pull. Same
+ * "local wins whenever a fresh read differs from the stable baseline" rule
+ * as pickWinningDays/pickWinningItems, applied to the dayMeta domain — a
+ * plain Record<dayId, {label?,date?}> rather than an ordered array, so the
+ * "does cloud win" check is deliberately DIFFERENT from pickWinningDays':
+ * `cloudDayMeta !== undefined` (never a truthiness/length check) — a
+ * present-but-EMPTY `{}` cloud value is a real, intentional clear (see
+ * SyncedPlannerPayload.dayMeta's own doc) and must win exactly like any
+ * other non-empty cloud value would, whereas `undefined` (a legacy payload
+ * that never carried dayMeta at all) must never be treated as "cloud sent an
+ * empty record" — current local content is kept instead.
+ */
+export function pickWinningDayMeta<T>(
+  baseline: Record<string, T>,
+  current: Record<string, T>,
+  cloudDayMeta: Record<string, T> | undefined
+): { dayMeta: Record<string, T>; changedLocally: boolean } {
+  const changedLocally = JSON.stringify(baseline) !== JSON.stringify(current);
+  if (changedLocally) return { dayMeta: current, changedLocally };
+  if (cloudDayMeta !== undefined) return { dayMeta: cloudDayMeta, changedLocally: false };
+  return { dayMeta: current, changedLocally: false };
+}
+
+/**
+ * Reference cases for pickWinningDayMeta(). Run from Node:
+ *   import { DEV_PICK_WINNING_DAY_META_CASES, pickWinningDayMeta } from "@/lib/crossDayChecks";
+ *   DEV_PICK_WINNING_DAY_META_CASES.forEach(c => {
+ *     const got = pickWinningDayMeta(c.baseline, c.current, c.cloudDayMeta);
+ *     const winnerOk = c.expectedWinner === "current" ? got.dayMeta === c.current : got.dayMeta === c.cloudDayMeta;
+ *     console.log(winnerOk && got.changedLocally === c.expectedChangedLocally ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PICK_WINNING_DAY_META_CASES: Array<{
+  name: string;
+  baseline: Record<string, { label?: string; date?: string }>;
+  current: Record<string, { label?: string; date?: string }>;
+  cloudDayMeta: Record<string, { label?: string; date?: string }> | undefined;
+  expectedWinner: "current" | "cloud";
+  expectedChangedLocally: boolean;
+}> = [
+  {
+    name: "no local change, cloud omits dayMeta entirely (legacy payload) — current kept, never treated as an empty clear",
+    baseline: { "day-1": { label: "Arrival" } },
+    current: { "day-1": { label: "Arrival" } },
+    cloudDayMeta: undefined,
+    expectedWinner: "current",
+    expectedChangedLocally: false,
+  },
+  {
+    name: "no local change, cloud sends an intentional empty clear ({}) — cloud wins, clearing local",
+    baseline: { "day-1": { label: "Arrival" } },
+    current: { "day-1": { label: "Arrival" } },
+    cloudDayMeta: {},
+    expectedWinner: "cloud",
+    expectedChangedLocally: false,
+  },
+  {
+    name: "no local change, cloud sends a populated record — cloud wins",
+    baseline: { "day-1": { label: "Arrival" } },
+    current: { "day-1": { label: "Arrival" } },
+    cloudDayMeta: { "day-1": { label: "Arrival" }, "day-2": { date: "2025-05-12" } },
+    expectedWinner: "cloud",
+    expectedChangedLocally: false,
+  },
+  {
+    name: "local edit made before this pull started (baseline predates it) — local wins even though cloud has data",
+    baseline: { "day-1": { label: "Arrival" } },
+    current: { "day-1": { label: "Arrival Day" } },
+    cloudDayMeta: { "day-1": { label: "Cloud label" } },
+    expectedWinner: "current",
+    expectedChangedLocally: true,
+  },
+  {
+    name: "cross-tab edit landed in storage during the pull — fresh read (current) differs from baseline, local wins",
+    baseline: {},
+    current: { "day-1": { label: "New from another tab" } },
+    cloudDayMeta: { "day-1": { label: "Stale cloud label" } },
+    expectedWinner: "current",
+    expectedChangedLocally: true,
+  },
+];
+
+/**
  * Reference cases for pickWinningItems() — generic over both PlanItem[]
  * and LightningItem[], so these use a minimal shared shape. Run from Node:
  *   import { DEV_PICK_WINNING_ITEMS_CASES, pickWinningItems } from "@/lib/crossDayChecks";
