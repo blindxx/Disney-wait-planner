@@ -105,6 +105,188 @@ export function removedDayIds(prevDayIds: string[], nextDayIds: string[]): strin
 }
 
 /**
+ * SH.3.1 — prune a per-day annotation record (dayMeta, dayParks,
+ * dayAutoFallbacks) down to only the day IDs present in `validDayIds`.
+ *
+ * These three datasets are keyed by dayId but, unlike `plans`/`lightning`
+ * items, are never filtered against the current `days` list by
+ * reconcilePlannerSnapshot() below (that function only reconciles items,
+ * not per-day annotation records). Local day-lifecycle handlers in
+ * plans/page.tsx (Remove Day, Clear Day, Clear All) already delete their
+ * own day's entries directly at the point of removal; this generic,
+ * reusable helper lets the SAME cleanup rule also cover the cloud-pull
+ * reconciliation path — a day removed on another device and synced in here
+ * via the `days` domain previously left this device's dayMeta/dayParks/
+ * dayAutoFallbacks entries for that day orphaned in localStorage. Day IDs
+ * are reused (see removedDayIds()'s own doc above), so an orphaned entry
+ * could otherwise be silently inherited by a LATER day that reuses the
+ * same numeric dayId, instead of that day starting clean.
+ *
+ * Pure and order-preserving; returns the original `record` reference
+ * (never a copy) when nothing is stale, so callers can skip a write/state
+ * update when `changed` is false.
+ */
+export function pruneOrphanedDayRecord<T>(
+  record: Record<string, T>,
+  validDayIds: readonly string[]
+): { result: Record<string, T>; changed: boolean } {
+  const validSet = new Set(validDayIds);
+  const hasStaleKey = Object.keys(record).some((id) => !validSet.has(id));
+  if (!hasStaleKey) return { result: record, changed: false };
+  const result: Record<string, T> = {};
+  for (const [id, value] of Object.entries(record)) {
+    if (validSet.has(id)) result[id] = value;
+  }
+  return { result, changed: true };
+}
+
+/**
+ * Reference cases for pruneOrphanedDayRecord(). Run from Node:
+ *   import { DEV_PRUNE_ORPHANED_DAY_RECORD_CASES, pruneOrphanedDayRecord } from "@/lib/crossDayChecks";
+ *   DEV_PRUNE_ORPHANED_DAY_RECORD_CASES.forEach(c => {
+ *     const got = pruneOrphanedDayRecord(c.record, c.validDayIds);
+ *     const pass = JSON.stringify(got.result) === JSON.stringify(c.expectedResult) && got.changed === c.expectedChanged;
+ *     console.log(pass ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PRUNE_ORPHANED_DAY_RECORD_CASES: Array<{
+  name: string;
+  record: Record<string, unknown>;
+  validDayIds: string[];
+  expectedResult: Record<string, unknown>;
+  expectedChanged: boolean;
+}> = [
+  {
+    name: "nothing stale — every key still valid, no-op (changed: false)",
+    record: { "day-1": { label: "Arrival" }, "day-2": { label: "MK Day" } },
+    validDayIds: ["day-1", "day-2"],
+    expectedResult: { "day-1": { label: "Arrival" }, "day-2": { label: "MK Day" } },
+    expectedChanged: false,
+  },
+  {
+    name: "one stale key (a day removed elsewhere) pruned, valid keys survive",
+    record: { "day-1": { label: "Arrival" }, "day-3": "STALE" },
+    validDayIds: ["day-1", "day-2"],
+    expectedResult: { "day-1": { label: "Arrival" } },
+    expectedChanged: true,
+  },
+  {
+    name: "empty record — no-op",
+    record: {},
+    validDayIds: ["day-1"],
+    expectedResult: {},
+    expectedChanged: false,
+  },
+  {
+    name: "all keys stale — pruned to empty object",
+    record: { "day-5": "X", "day-6": "Y" },
+    validDayIds: ["day-1"],
+    expectedResult: {},
+    expectedChanged: true,
+  },
+  {
+    name: "day removed by a cross-device pull, not yet re-added — pruned so a later day reusing this numeric id starts clean instead of inheriting stale data",
+    record: { "day-3": "OLD-AUTO-FALLBACK" },
+    validDayIds: ["day-1", "day-2"],
+    expectedResult: {},
+    expectedChanged: true,
+  },
+  {
+    name: "day removed then recreated with the same ID before this check runs — no longer stale, value preserved",
+    record: { "day-3": "Kept" },
+    validDayIds: ["day-1", "day-2", "day-3"],
+    expectedResult: { "day-3": "Kept" },
+    expectedChanged: false,
+  },
+  {
+    name: "REQUIRED (Codex P1 finding, reviewed commit 9942288) — a day added by a CONCURRENT tab (Add/Duplicate Day) mid-pull, with its own freshly-written annotation entry: as long as the caller passes the CURRENT (freshly re-read) days list rather than a stale pull-start snapshot, the new day's entry is a valid member of validDayIds and must survive — never pruned merely because an earlier, now-stale days snapshot didn't yet know about it",
+    record: { "day-1": { label: "Arrival" }, "day-4": { label: "Just added by another tab" } },
+    validDayIds: ["day-1", "day-4"],
+    expectedResult: { "day-1": { label: "Arrival" }, "day-4": { label: "Just added by another tab" } },
+    expectedChanged: false,
+  },
+  {
+    name: "REQUIRED (Codex P2 finding, reviewed commit adbc245) — 'prune annotations whenever durable days change': this function is path-agnostic by construction — it prunes correctly from `validDayIds` alone, with no way to know (or need to know) WHICH writer produced that days list. This is what makes it safe to invoke from the shared reconcileAnnotationsForDays() (plans/page.tsx) for a days change that originated from THIS page's own cloud pull, ANOTHER Plans tab's local Remove/Duplicate Day, or Lightning's own independent cloud-pull reconciliation of the shared `days` domain — all three feed the exact same pruning contract",
+    record: { "day-1": { label: "Arrival" }, "day-2": { label: "Removed via a different writer's days commit" } },
+    validDayIds: ["day-1"],
+    expectedResult: { "day-1": { label: "Arrival" } },
+    expectedChanged: true,
+  },
+  {
+    name: "REQUIRED (Codex P2 finding, reviewed commit 99f311c) — 'prune annotations on signed-out mounts': no Plans tab was open when `days` last changed (e.g. Lightning's own pull, on a session with no authenticated pull ever running), so no cross-tab storage event exists to replay and this mount is signed OUT — reconcileAnnotationsForDays() must still be reachable from this page's auth-independent initialization effect alone, and pruneOrphanedDayRecord() needs nothing auth/cloud-specific to do so: the SAME `validDayIds`-only contract applies whether the trigger was a pull, a storage event, or a plain mount-time load",
+    record: { "day-1": { label: "Arrival" }, "day-3": { label: "Orphaned before this device ever signed in" } },
+    validDayIds: ["day-1"],
+    expectedResult: { "day-1": { label: "Arrival" } },
+    expectedChanged: true,
+  },
+];
+
+/**
+ * SH.3.1 (Codex follow-up on reviewed commit a6ea487) — whether a prune
+ * computed by pruneOrphanedDayRecord() should actually be applied to a
+ * page's React state, given the outcome of the CAS-protected commit that
+ * attempted to persist it (see plans/page.tsx's pull effect:
+ * dayMeta/dayParks/dayAutoFallbacks pruning writes through
+ * commitLocalDomainRaw() — syncHelper.ts — never a blind
+ * localStorage.setItem(), specifically so a concurrent same-profile write
+ * from another tab landing between the read and the write is detected and
+ * wins over a stale prune instead of being silently overwritten by it).
+ *
+ * `changed` false means pruneOrphanedDayRecord() found nothing stale — no
+ * commit was even attempted, so there is nothing to apply regardless of
+ * `commitSucceeded`. `changed` true with `commitSucceeded` false means a
+ * commit WAS attempted but lost its CAS race (another tab's write landed
+ * first) or otherwise failed to persist — that newer/foreign content must
+ * win, so the prune is dropped without ever touching React state; the
+ * page's existing cross-tab `storage` listener (or the next pull) is what
+ * eventually reflects whatever the other write actually left on disk,
+ * never this function.
+ */
+export function shouldApplyPrunedDayRecord(changed: boolean, commitSucceeded: boolean): boolean {
+  return changed && commitSucceeded;
+}
+
+/**
+ * Reference cases for shouldApplyPrunedDayRecord(). Run from Node:
+ *   import { DEV_SHOULD_APPLY_PRUNED_DAY_RECORD_CASES, shouldApplyPrunedDayRecord } from "@/lib/crossDayChecks";
+ *   DEV_SHOULD_APPLY_PRUNED_DAY_RECORD_CASES.forEach(c => {
+ *     const got = shouldApplyPrunedDayRecord(c.changed, c.commitSucceeded);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_SHOULD_APPLY_PRUNED_DAY_RECORD_CASES: Array<{
+  name: string;
+  changed: boolean;
+  commitSucceeded: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "nothing was stale — no commit was even attempted, nothing to apply",
+    changed: false,
+    commitSucceeded: false,
+    expected: false,
+  },
+  {
+    name: "nothing was stale — irrelevant what commitSucceeded says, still nothing to apply",
+    changed: false,
+    commitSucceeded: true,
+    expected: false,
+  },
+  {
+    name: "pruned and the CAS-protected commit landed (committed or noop) — apply to React state",
+    changed: true,
+    commitSucceeded: true,
+    expected: true,
+  },
+  {
+    name: "REQUIRED (Codex finding) — pruned but the commit lost its CAS race to a concurrent same-profile write in another tab (status 'superseded') — must NOT apply the stale prune over the newer write",
+    changed: true,
+    commitSucceeded: false,
+    expected: false,
+  },
+];
+
+/**
  * Extracts a raw, untyped item's `dayId`, or undefined when it's missing,
  * non-string, or the entry itself isn't an object — used by
  * reconcilePlannerSnapshot() below to filter/discover days from the
