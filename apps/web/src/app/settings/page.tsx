@@ -36,6 +36,7 @@ import {
   deleteProfile,
   getActiveProfileKeys,
 } from "../../lib/profileStorage";
+import { reconcileProfileRegistry } from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -190,6 +191,27 @@ export default function SettingsPage() {
       window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
     };
   }, []);
+
+  // SH.4.1 — account profile registry reconciliation. Deliberately a
+  // SEPARATE effect from planner sync (which lives in plans/page.tsx and
+  // has its own auth-transition handling): this only reconciles the
+  // device-local profile LIST (dwp.profiles) against the durable
+  // `user_profiles` registry — legacy local profiles get additively
+  // registered, and any account profiles this device hasn't seen yet get
+  // additively discovered — never planner content, never
+  // `dwp.activeProfile`. See profileRegistrySync.ts for the full contract.
+  // Best-effort and silent: reconcileProfileRegistry() never throws, and a
+  // signed-out/loading session simply skips this round.
+  useEffect(() => {
+    if (sessionStatus !== "authenticated") return;
+    let cancelled = false;
+    reconcileProfileRegistry().then(() => {
+      if (!cancelled) setProfiles(getProfiles());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionStatus]);
 
   // Mediate syncState → displayedSyncState with a minimum "syncing" display time.
   useEffect(() => {

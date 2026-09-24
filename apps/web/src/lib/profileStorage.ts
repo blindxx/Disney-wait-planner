@@ -309,3 +309,96 @@ export function getActiveProfileKeys(): {
     selectedPark: buildNamespacedKey(id, "selectedPark"),
   };
 }
+
+// ===== SH.4.1 — REGISTRY RECONCILIATION (ADDITIVE MERGE) =====
+//
+// `dwp.profiles` remains this module's own source of truth for what a
+// device shows in its profile picker; SH.4.1 adds a durable, account-wide
+// registry behind it (`user_profiles` table, via /api/sync/profiles — see
+// profileRegistrySync.ts) so a second authenticated device can discover the
+// same ids/names. The two functions below are the ONLY seam between that
+// registry and this device's local list, and they are deliberately narrow:
+// additive-only, never renaming or removing an existing local entry. Any
+// tombstone/rename-propagation policy belongs to a later phase (SH.4.2/
+// SH.4.3), not here.
+
+/**
+ * Merge `candidates` (typically the account's ACTIVE server-known profiles
+ * — see selectActiveServerProfiles in profileRegistrySync.ts) into an
+ * existing local profile list, additively only: a candidate whose id is
+ * already present in `local` is dropped — the existing local entry (id AND
+ * name) is left completely untouched, so a stale local name can never be
+ * overwritten by this merge and a candidate can never resurrect/rename
+ * anything already known locally. A candidate whose id is new is appended
+ * exactly as given, preserving its id unchanged. Pure — never touches
+ * localStorage; callers persist the result themselves (see
+ * adoptServerProfiles below).
+ *
+ * Run from Node:
+ *   import { DEV_MERGE_PROFILES_ADDITIVE_CASES, mergeProfilesAdditive } from "@/lib/profileStorage";
+ *   DEV_MERGE_PROFILES_ADDITIVE_CASES.forEach(c => {
+ *     const got = mergeProfilesAdditive(c.local, c.candidates);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function mergeProfilesAdditive(local: Profile[], candidates: Profile[]): Profile[] {
+  const localIds = new Set(local.map((p) => p.id));
+  const additions = candidates.filter((p) => !localIds.has(p.id));
+  if (additions.length === 0) return local;
+  return [...local, ...additions];
+}
+
+export const DEV_MERGE_PROFILES_ADDITIVE_CASES: Array<{
+  name: string;
+  local: Profile[];
+  candidates: Profile[];
+  expected: Profile[];
+}> = [
+  {
+    name: "fresh device with only local Default — server profiles discovered/appended",
+    local: [{ id: "default", name: "Default" }],
+    candidates: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
+    expected: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
+  },
+  {
+    name: "already-known id — local name preserved, candidate's name never overwrites it",
+    local: [{ id: "mom", name: "Mommy (local stale name)" }],
+    candidates: [{ id: "mom", name: "Mom" }],
+    expected: [{ id: "mom", name: "Mommy (local stale name)" }],
+  },
+  {
+    name: "grandfathered custom id preserved exactly when adopted onto an empty local list",
+    local: [],
+    candidates: [{ id: "lindsay-2", name: "Lindsay" }],
+    expected: [{ id: "lindsay-2", name: "Lindsay" }],
+  },
+  {
+    name: "no candidates — local list returned unchanged (same reference, no write needed)",
+    local: [{ id: "default", name: "Default" }],
+    candidates: [],
+    expected: [{ id: "default", name: "Default" }],
+  },
+];
+
+/**
+ * Persist the additive merge of `serverProfiles` into the local
+ * `dwp.profiles` list and return the resulting list. `serverProfiles` is
+ * expected to already be filtered to ACTIVE/non-tombstoned rows by the
+ * caller (see selectActiveServerProfiles in profileRegistrySync.ts) — this
+ * function itself has no concept of tombstones, only of "candidates safe to
+ * merge in". Never removes, renames, or reorders an existing local entry;
+ * only ever appends ids this device didn't already know about. Only writes
+ * to localStorage when the merge actually adds something.
+ */
+export function adoptServerProfiles(serverProfiles: Profile[]): Profile[] {
+  const local = getProfiles();
+  const merged = mergeProfilesAdditive(local, serverProfiles);
+  if (merged.length !== local.length) writeProfiles(merged);
+  return merged;
+}
