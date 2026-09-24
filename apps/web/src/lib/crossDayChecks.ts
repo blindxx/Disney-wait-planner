@@ -105,6 +105,102 @@ export function removedDayIds(prevDayIds: string[], nextDayIds: string[]): strin
 }
 
 /**
+ * SH.3.1 — prune a per-day annotation record (dayMeta, dayParks,
+ * dayAutoFallbacks) down to only the day IDs present in `validDayIds`.
+ *
+ * These three datasets are keyed by dayId but, unlike `plans`/`lightning`
+ * items, are never filtered against the current `days` list by
+ * reconcilePlannerSnapshot() below (that function only reconciles items,
+ * not per-day annotation records). Local day-lifecycle handlers in
+ * plans/page.tsx (Remove Day, Clear Day, Clear All) already delete their
+ * own day's entries directly at the point of removal; this generic,
+ * reusable helper lets the SAME cleanup rule also cover the cloud-pull
+ * reconciliation path — a day removed on another device and synced in here
+ * via the `days` domain previously left this device's dayMeta/dayParks/
+ * dayAutoFallbacks entries for that day orphaned in localStorage. Day IDs
+ * are reused (see removedDayIds()'s own doc above), so an orphaned entry
+ * could otherwise be silently inherited by a LATER day that reuses the
+ * same numeric dayId, instead of that day starting clean.
+ *
+ * Pure and order-preserving; returns the original `record` reference
+ * (never a copy) when nothing is stale, so callers can skip a write/state
+ * update when `changed` is false.
+ */
+export function pruneOrphanedDayRecord<T>(
+  record: Record<string, T>,
+  validDayIds: readonly string[]
+): { result: Record<string, T>; changed: boolean } {
+  const validSet = new Set(validDayIds);
+  const hasStaleKey = Object.keys(record).some((id) => !validSet.has(id));
+  if (!hasStaleKey) return { result: record, changed: false };
+  const result: Record<string, T> = {};
+  for (const [id, value] of Object.entries(record)) {
+    if (validSet.has(id)) result[id] = value;
+  }
+  return { result, changed: true };
+}
+
+/**
+ * Reference cases for pruneOrphanedDayRecord(). Run from Node:
+ *   import { DEV_PRUNE_ORPHANED_DAY_RECORD_CASES, pruneOrphanedDayRecord } from "@/lib/crossDayChecks";
+ *   DEV_PRUNE_ORPHANED_DAY_RECORD_CASES.forEach(c => {
+ *     const got = pruneOrphanedDayRecord(c.record, c.validDayIds);
+ *     const pass = JSON.stringify(got.result) === JSON.stringify(c.expectedResult) && got.changed === c.expectedChanged;
+ *     console.log(pass ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PRUNE_ORPHANED_DAY_RECORD_CASES: Array<{
+  name: string;
+  record: Record<string, unknown>;
+  validDayIds: string[];
+  expectedResult: Record<string, unknown>;
+  expectedChanged: boolean;
+}> = [
+  {
+    name: "nothing stale — every key still valid, no-op (changed: false)",
+    record: { "day-1": { label: "Arrival" }, "day-2": { label: "MK Day" } },
+    validDayIds: ["day-1", "day-2"],
+    expectedResult: { "day-1": { label: "Arrival" }, "day-2": { label: "MK Day" } },
+    expectedChanged: false,
+  },
+  {
+    name: "one stale key (a day removed elsewhere) pruned, valid keys survive",
+    record: { "day-1": { label: "Arrival" }, "day-3": "STALE" },
+    validDayIds: ["day-1", "day-2"],
+    expectedResult: { "day-1": { label: "Arrival" } },
+    expectedChanged: true,
+  },
+  {
+    name: "empty record — no-op",
+    record: {},
+    validDayIds: ["day-1"],
+    expectedResult: {},
+    expectedChanged: false,
+  },
+  {
+    name: "all keys stale — pruned to empty object",
+    record: { "day-5": "X", "day-6": "Y" },
+    validDayIds: ["day-1"],
+    expectedResult: {},
+    expectedChanged: true,
+  },
+  {
+    name: "day removed by a cross-device pull, not yet re-added — pruned so a later day reusing this numeric id starts clean instead of inheriting stale data",
+    record: { "day-3": "OLD-AUTO-FALLBACK" },
+    validDayIds: ["day-1", "day-2"],
+    expectedResult: {},
+    expectedChanged: true,
+  },
+  {
+    name: "day removed then recreated with the same ID before this check runs — no longer stale, value preserved",
+    record: { "day-3": "Kept" },
+    validDayIds: ["day-1", "day-2", "day-3"],
+    expectedResult: { "day-3": "Kept" },
+    expectedChanged: false,
+  },
+];
+
+/**
  * Extracts a raw, untyped item's `dayId`, or undefined when it's missing,
  * non-string, or the entry itself isn't an object — used by
  * reconcilePlannerSnapshot() below to filter/discover days from the

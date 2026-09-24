@@ -49,6 +49,7 @@ import {
   inferDayPark,
   pickWinningDays,
   pickWinningItems,
+  pruneOrphanedDayRecord,
   reconcilePlannerSnapshot,
   resolveIdentityKey,
   PARK_TO_RESORT,
@@ -1538,9 +1539,18 @@ export default function PlansPage() {
   // Phase 8.1 — day metadata (labels + dates) and per-profile storage key
   const dayMetaKeyRef = useRef("dwp:default:dayMeta");
   const [dayMeta, setDayMeta] = useState<Record<string, DayMeta>>({});
+  // SH.3.1 — ref that always holds the latest `dayMeta`, same pattern as
+  // daysRef above: used by the cross-tab storage listener below so a
+  // cross-tab write's "did this actually change" check reads current
+  // state, not a stale closure from this effect's single mount run.
+  const dayMetaRef = useRef(dayMeta);
+  dayMetaRef.current = dayMeta;
   // Phase 8.4 — per-day park overrides and per-profile storage key
   const dayParksKeyRef = useRef("dwp:default:dayParks");
   const [dayParks, setDayParks] = useState<Record<string, string>>({});
+  // SH.3.1 — see dayMetaRef above; same rationale, for dayParks.
+  const dayParksRef = useRef(dayParks);
+  dayParksRef.current = dayParks;
   // Phase 9.6 backup gap fix — per-day effective park fallbacks for Auto days,
   // populated at restore time (and at empty-day import bootstrap time).
   // resolveDayPark checks this after item inference (step 2); a day with
@@ -1552,6 +1562,9 @@ export default function PlansPage() {
   // expose it to Tom as planner_context.dayAutoFallbacks.
   const dayAutoFallbacksKeyRef = useRef("dwp:default:dayAutoFallbacks");
   const [dayAutoFallbacks, setDayAutoFallbacks] = useState<Record<string, string>>({});
+  // SH.3.1 — see dayMetaRef above; same rationale, for dayAutoFallbacks.
+  const dayAutoFallbacksRef = useRef(dayAutoFallbacks);
+  dayAutoFallbacksRef.current = dayAutoFallbacks;
   // Phase 8.1 — day control UI state
   // removeConfirmDayId: the day whose removal is pending confirmation (null = no pending)
   const [removeConfirmDayId, setRemoveConfirmDayId] = useState<string | null>(null);
@@ -1780,6 +1793,45 @@ export default function PlansPage() {
         if (!next.includes(activeDayIdRef.current)) {
           setActiveDayId(next[0]);
           saveActiveDayId(next[0], activeDayKeyRef.current);
+        }
+      }
+      // SH.3.1 — dayMeta/dayParks/dayAutoFallbacks are written ONLY by this
+      // page (Lightning only ever reads/mirrors them), and every write site
+      // (handleSaveDayMeta, handleSetDayPark, handleRemoveDay,
+      // handleDuplicateDay, handleClearAll, handleRestoreConfirm) merges its
+      // next value from THIS page's own React state via `{...dayMeta}` /
+      // `{...dayParks}` / `{...dayAutoFallbacks, [dayId]: ...}`. Before this
+      // fix, a second tab on the same profile holding a stale in-memory copy
+      // would silently drop another tab's edit the next time it performed
+      // ANY write to that same record — not just an edit to the same day.
+      // Refresh from disk on every cross-tab write to this profile's key,
+      // same "reload the effective value, only re-render on a genuine
+      // change" treatment `days` already gets above. All three stay
+      // local-only in SH.3.1 — this is plain display/edit-base freshness,
+      // not sync/conflict machinery.
+      if (e.key === dayMetaKeyRef.current) {
+        const nextDayMeta = loadDayMeta(dayMetaKeyRef.current);
+        if (JSON.stringify(nextDayMeta) !== JSON.stringify(dayMetaRef.current)) {
+          setDayMeta(nextDayMeta);
+        }
+      }
+      if (e.key === dayParksKeyRef.current) {
+        const nextDayParks = loadDayParks(dayParksKeyRef.current);
+        if (JSON.stringify(nextDayParks) !== JSON.stringify(dayParksRef.current)) {
+          setDayParks(nextDayParks);
+        }
+      }
+      if (e.key === dayAutoFallbacksKeyRef.current) {
+        // dayAutoFallbacks has no direct edit UI, but handleSetDayPark's
+        // Auto-branch (clearing a manual override with no inferable items)
+        // still merges its next value from this page's own
+        // `dayAutoFallbacks` React state — the identical stale-base clobber
+        // risk as dayMeta/dayParks, just reached through a narrower path
+        // (see that branch's own `nextAutoFallbacks` spread). Included here
+        // for the same reason, not merely for symmetry.
+        const nextDayAutoFallbacks = loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current);
+        if (JSON.stringify(nextDayAutoFallbacks) !== JSON.stringify(dayAutoFallbacksRef.current)) {
+          setDayAutoFallbacks(nextDayAutoFallbacks);
         }
       }
       // SH.2 architecture — no confirmed-snapshot listener here (removed —
@@ -3076,6 +3128,43 @@ export default function PlansPage() {
         // assuming it's safe.
         if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
           daysBaselineRef.current = winningDays;
+        }
+        // SH.3.1 — enforce the "dayMeta/dayParks/dayAutoFallbacks keys must
+        // be a subset of days" invariant on the cloud/reconciliation path,
+        // not just the local Remove Day/Clear Day/Clear All handlers (which
+        // already delete their own day's entries directly at the point of
+        // removal — see those handlers below). Without this, a day removed
+        // on ANOTHER device and synced in here via the `days` domain left
+        // this device's per-day annotations orphaned in localStorage — see
+        // pruneOrphanedDayRecord()'s own doc in crossDayChecks.ts for why an
+        // orphaned entry matters (a later Add/Duplicate Day reusing that
+        // same numeric dayId could silently inherit stale data). Gated on
+        // `!daysWriteFailed` since `winningDays` is only durably true once
+        // the days write itself actually landed (or was already a no-op) —
+        // pruning against a winner that lost its own commit race would prune
+        // against a value that never became authoritative. Reads/writes are
+        // plain localStorage, exactly like the local handlers already do —
+        // dayMeta/dayParks/dayAutoFallbacks stay local-only in SH.3.1, never
+        // pushed or read as sync/conflict evidence.
+        if (!daysWriteFailed) {
+          const currentDayMetaOnDisk = loadDayMeta(dayMetaKeyRef.current);
+          const dayMetaPrune = pruneOrphanedDayRecord(currentDayMetaOnDisk, winningDays);
+          if (dayMetaPrune.changed) {
+            saveDayMeta(dayMetaPrune.result, dayMetaKeyRef.current);
+            setDayMeta(dayMetaPrune.result);
+          }
+          const currentDayParksOnDisk = loadDayParks(dayParksKeyRef.current);
+          const dayParksPrune = pruneOrphanedDayRecord(currentDayParksOnDisk, winningDays);
+          if (dayParksPrune.changed) {
+            saveDayParks(dayParksPrune.result, dayParksKeyRef.current);
+            setDayParks(dayParksPrune.result);
+          }
+          const currentDayAutoFallbacksOnDisk = loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current);
+          const dayAutoFallbacksPrune = pruneOrphanedDayRecord(currentDayAutoFallbacksOnDisk, winningDays);
+          if (dayAutoFallbacksPrune.changed) {
+            saveDayAutoFallbacks(dayAutoFallbacksPrune.result, dayAutoFallbacksKeyRef.current);
+            setDayAutoFallbacks(dayAutoFallbacksPrune.result);
+          }
         }
         // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
         // attempted to record Days' own confirmed-baseline fact or
