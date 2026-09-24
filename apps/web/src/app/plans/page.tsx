@@ -48,6 +48,7 @@ import {
   computeCrossDayChecks,
   inferDayPark,
   pickWinningDays,
+  pickWinningDayMeta,
   pickWinningItems,
   pruneOrphanedDayRecord,
   shouldApplyPrunedDayRecord,
@@ -685,6 +686,19 @@ function loadEffectiveDurableDays(key: string): string[] {
   return parseDaysRaw(readLatestDurableValue(key));
 }
 
+/**
+ * SH.3.2 — the dayMeta domain's own authority-bearing read, mirroring
+ * loadEffectiveDurableDays() exactly (see its own doc above for the full
+ * rationale): reuses parseDayMetaRaw() — SH.3.1's already-extracted
+ * sanitizer — against the effective DURABLE raw value (canonical + any
+ * surviving local-edit fact) rather than a plain canonical read, so this
+ * page's dayMeta sync/conflict decisions see the same durable local
+ * authority every other synced domain already does.
+ */
+function loadEffectiveDurableDayMeta(key: string): Record<string, DayMeta> {
+  return parseDayMetaRaw(readLatestDurableValue(key));
+}
+
 // SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
 // same commitLocalDomainRawSync routing as saveToStorage above; see its own
 // doc there and in syncHelper.ts.
@@ -1135,6 +1149,9 @@ export default function PlansPage() {
   // fallback.
   const itemsBaselineRef = useRef<PlanItem[]>([]);
   const daysBaselineRef = useRef<string[]>([]);
+  // SH.3.2 — same fallback concept as daysBaselineRef, applied to the newly
+  // synced dayMeta domain.
+  const dayMetaBaselineRef = useRef<Record<string, DayMeta>>({});
   // Same fallback concept, applied to the OPPOSITE dataset (Lightning's
   // raw storage) this page hydrates on every pull (Phase 7.6.3). Captured
   // as the raw string (Plans never parses/normalizes Lightning items) so
@@ -1240,11 +1257,13 @@ export default function PlansPage() {
   function buildPreFetchPullBaseline(): {
     items: DomainPreFetchSnapshot<PlanItem[]>;
     days: DomainPreFetchSnapshot<string[]>;
+    dayMeta: DomainPreFetchSnapshot<Record<string, DayMeta>>;
     lightningRaw: DomainPreFetchSnapshot<string | null>;
   } {
     return {
       items: capturePreFetchDomainSnapshot(migrateDayIds(loadEffectiveDurablePlanItems(planKeyRef.current))),
       days: capturePreFetchDomainSnapshot(loadEffectiveDurableDays(daysKeyRef.current)),
+      dayMeta: capturePreFetchDomainSnapshot(loadEffectiveDurableDayMeta(dayMetaKeyRef.current)),
       lightningRaw: capturePreFetchDomainSnapshot(readLatestDurableValue(getActiveProfileKeys().lightning)),
     };
   }
@@ -1287,12 +1306,14 @@ export default function PlansPage() {
     preFetch: {
       items: DomainPreFetchSnapshot<PlanItem[]>;
       days: DomainPreFetchSnapshot<string[]>;
+      dayMeta: DomainPreFetchSnapshot<Record<string, DayMeta>>;
       lightningRaw: DomainPreFetchSnapshot<string | null>;
     },
     contentUsable = true
   ): {
     items: DomainBaselineOutcome<PlanItem[]>;
     days: DomainBaselineOutcome<string[]>;
+    dayMeta: DomainBaselineOutcome<Record<string, DayMeta>>;
     lightningRaw: DomainBaselineOutcome<string | null>;
     // SH.2.2 (Codex P1 third follow-up round) — the RAW per-domain
     // confirmed-state read this call itself made, returned alongside the
@@ -1308,7 +1329,12 @@ export default function PlansPage() {
   } {
     const confirmed = identity.userId
       ? getConfirmedState(identity.userId, identity.profileId)
-      : { plans: { status: "none" as const }, lightning: { status: "none" as const }, days: { status: "none" as const } };
+      : {
+          plans: { status: "none" as const },
+          lightning: { status: "none" as const },
+          days: { status: "none" as const },
+          dayMeta: { status: "none" as const },
+        };
 
     const items = resolvePostFetchDomainBaseline(
       confirmed.plans,
@@ -1330,6 +1356,16 @@ export default function PlansPage() {
     );
     clearRefOnFallbackMismatch(daysBaselineRef, days, ["day-1"], contentOwnershipMismatch);
 
+    const dayMeta = resolvePostFetchDomainBaseline(
+      confirmed.dayMeta,
+      cloudRevision,
+      (raw) => raw,
+      preFetch.dayMeta,
+      domainFallbackValue(dayMetaBaselineRef, {} as Record<string, DayMeta>, contentOwnershipMismatch),
+      contentUsable
+    );
+    clearRefOnFallbackMismatch(dayMetaBaselineRef, dayMeta, {}, contentOwnershipMismatch);
+
     const lightningRaw = resolvePostFetchDomainBaseline(
       confirmed.lightning,
       cloudRevision,
@@ -1340,7 +1376,7 @@ export default function PlansPage() {
     );
     clearRefOnFallbackMismatch(lightningRawBaselineRef, lightningRaw, null, contentOwnershipMismatch);
 
-    return { items, days, lightningRaw, confirmed };
+    return { items, days, dayMeta, lightningRaw, confirmed };
   }
 
   /**
@@ -1353,15 +1389,15 @@ export default function PlansPage() {
    * information worth logging distinctly.
    */
   type UnusableDomain =
-    | { domain: "plans" | "lightning" | "days"; reason: "conflict"; revision: number }
+    | { domain: "plans" | "lightning" | "days" | "dayMeta"; reason: "conflict"; revision: number }
     | {
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "stale-response";
         confirmedRevision: number;
         cloudRevision: number;
       }
     | {
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "unusable-response";
         confirmedRevision: number;
       }
@@ -1378,7 +1414,7 @@ export default function PlansPage() {
         // `confirmedRevision`. Never auto-retried (see
         // decideStaleResponseRecovery()'s own doc in syncPayload.ts) — the
         // next GET is exactly as likely to be unreadable again.
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "unusable-content";
         cloudRevision: number | null;
       }
@@ -1392,7 +1428,7 @@ export default function PlansPage() {
         // (see that function's own SH.2.2 doc in syncPayload.ts): always
         // safe to auto-retry on its own, never when mixed with a genuine
         // "conflict"/"unusable-response".
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "local-edit-superseded";
       }
     | {
@@ -1406,7 +1442,7 @@ export default function PlansPage() {
         // commit against. `previousRevision`/`currentRevision` are `null`
         // for a "none" or "conflict" (unrevisioned-in-this-context) side of
         // the comparison — purely diagnostic, carries no decision weight.
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "authority-changed";
         previousRevision: number | null;
         currentRevision: number | null;
@@ -1421,7 +1457,7 @@ export default function PlansPage() {
         // auto-retried (see decideStaleResponseRecovery()'s own doc in
         // syncPayload.ts): this reflects a permanent environment
         // limitation, not a transient race a fresh pull could resolve.
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "authority-unavailable";
       }
     | {
@@ -1434,7 +1470,7 @@ export default function PlansPage() {
         // syncReady/push — see recordDomainProvenance's own doc above.
         // Never auto-retried: see decideStaleResponseRecovery()'s own doc
         // in syncPayload.ts.
-        domain: "plans" | "lightning" | "days";
+        domain: "plans" | "lightning" | "days" | "dayMeta";
         reason: "provenance-write-failed";
       };
 
@@ -1476,10 +1512,11 @@ export default function PlansPage() {
   function collectUnusableDomains(outcomes: {
     items: DomainBaselineOutcome<unknown>;
     days: DomainBaselineOutcome<unknown>;
+    dayMeta: DomainBaselineOutcome<unknown>;
     lightningRaw: DomainBaselineOutcome<unknown>;
   }): UnusableDomain[] {
     const unusable: UnusableDomain[] = [];
-    const check = (domain: "plans" | "lightning" | "days", outcome: DomainBaselineOutcome<unknown>) => {
+    const check = (domain: "plans" | "lightning" | "days" | "dayMeta", outcome: DomainBaselineOutcome<unknown>) => {
       if (outcome.kind === "gated") {
         unusable.push({ domain, reason: "conflict", revision: outcome.revision });
       } else if (outcome.kind === "stale-response") {
@@ -1506,6 +1543,7 @@ export default function PlansPage() {
     check("plans", outcomes.items);
     check("lightning", outcomes.lightningRaw);
     check("days", outcomes.days);
+    check("dayMeta", outcomes.dayMeta);
     return unusable;
   }
 
@@ -2535,6 +2573,12 @@ export default function PlansPage() {
           cloudItems = migrateDayIds((cloud.items as unknown[]).map(normalizePlanItem));
         }
         const cloudDaysOrder = planner?.days;
+        // SH.3.2 — dayMeta's own raw cloud value: `undefined` when this
+        // response's payload never carried the field at all (legacy/
+        // non-participating), a real (possibly empty `{}`) record otherwise.
+        // See pickWinningDayMeta()'s own doc for why `undefined` and `{}`
+        // must never be conflated.
+        const cloudDayMeta = planner?.dayMeta;
 
         // SH.2 architecture (Codex P1, 8th round; generalized 9th) — PULL
         // ORDER: resolve EVERY pending op's fate against THIS SAME GET
@@ -2859,7 +2903,7 @@ export default function PlansPage() {
         // says nothing should be recorded either way; the commit still
         // happens, simply without any provenance write.
         async function commitDomain(
-          domain: "plans" | "lightning" | "days",
+          domain: "plans" | "lightning" | "days" | "dayMeta",
           key: string,
           expectedPreviousRaw: string | null,
           nextRaw: string,
@@ -2922,6 +2966,7 @@ export default function PlansPage() {
         const effectiveBaseline = {
           items: requireResolvedValue(baselineOutcomes.items),
           days: requireResolvedValue(baselineOutcomes.days),
+          dayMeta: requireResolvedValue(baselineOutcomes.dayMeta),
           lightningRaw: requireResolvedValue(baselineOutcomes.lightningRaw),
         };
 
@@ -2967,6 +3012,10 @@ export default function PlansPage() {
         const currentItems = migrateDayIds(loadEffectiveDurablePlanItems(planKeyRef.current));
         const currentDaysRaw = localStorage.getItem(daysKeyRef.current);
         const currentDays = loadEffectiveDurableDays(daysKeyRef.current);
+        // SH.3.2 — same two-read split as items/days above, applied to the
+        // newly synced dayMeta domain.
+        const currentDayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
+        const currentDayMeta = loadEffectiveDurableDayMeta(dayMetaKeyRef.current);
         const currentLightningRaw = localStorage.getItem(profileKeysForPull.lightning);
         const currentLightningRawDurable = readLatestDurableValue(profileKeysForPull.lightning);
 
@@ -3050,6 +3099,16 @@ export default function PlansPage() {
             planner?.revision ?? Number.POSITIVE_INFINITY,
             currentDays
           );
+        const dayMetaHydrationExplained =
+          !!pullCtx.userId &&
+          !hasSurvivingEditFact(dayMetaKeyRef.current) &&
+          hasHydrationProvenanceMatch(
+            pullCtx.userId,
+            pullCtx.profileId,
+            "dayMeta",
+            planner?.revision ?? Number.POSITIVE_INFINITY,
+            currentDayMeta
+          );
         const lightningHydrationExplained =
           !!pullCtx.userId &&
           !hasSurvivingEditFact(profileKeysForPull.lightning) &&
@@ -3064,6 +3123,8 @@ export default function PlansPage() {
           contentOwnershipMismatch || itemsHydrationExplained ? effectiveBaseline.items : currentItems;
         const daysForComparison =
           contentOwnershipMismatch || daysHydrationExplained ? effectiveBaseline.days : currentDays;
+        const dayMetaForComparison =
+          contentOwnershipMismatch || dayMetaHydrationExplained ? effectiveBaseline.dayMeta : currentDayMeta;
         const lightningRawForComparison =
           contentOwnershipMismatch || lightningHydrationExplained
             ? effectiveBaseline.lightningRaw
@@ -3100,6 +3161,18 @@ export default function PlansPage() {
           effectiveBaseline.days,
           daysForComparison,
           cloudDaysOrder
+        );
+        // SH.3.2 — dayMeta's own local-vs-cloud winner, same "local wins
+        // whenever a fresh read differs from the stable baseline" rule as
+        // days/items above. Unlike items/lightning, dayMeta is never
+        // structurally reconciled against the sibling dataset — it only
+        // ever needs pruning against the FINAL winningDays (below, once
+        // known) to preserve the "dayMeta entries only belong to valid
+        // durable day IDs" invariant.
+        const { dayMeta: dayMetaCandidate, changedLocally: dayMetaChangedLocally } = pickWinningDayMeta(
+          effectiveBaseline.dayMeta,
+          dayMetaForComparison,
+          cloudDayMeta
         );
         // Structural reconciliation (Codex P1, 4th round) — reconciles
         // BOTH domains that will actually be persisted this pull, not just
@@ -3325,6 +3398,73 @@ export default function PlansPage() {
         if (itemsCloudWon && !daysChangedLocally && !daysWriteFailed) {
           daysBaselineRef.current = winningDays;
         }
+
+        // SH.3.2 — dayMeta domain: same shared commit primitive as Plans'
+        // own items/days, gated on `!daysWriteFailed` (winningDays is only
+        // authoritative once the days write itself durably landed — pruning
+        // dayMeta against a winner that lost its own commit race would
+        // reconcile against a value that never became authoritative, same
+        // rationale as reconcileAnnotationsForDays()'s own gating below).
+        // Pruned against winningDays HERE, via the same pruneOrphanedDayRecord()
+        // SH.3.1 already uses locally, so the "dayMeta entries only belong
+        // to valid durable day IDs" invariant holds for the CLOUD-SYNCED
+        // value too — regardless of whether dayMeta itself won locally or
+        // cloud, and regardless of whether the raw cloud value referenced a
+        // day this pull's own winningDays no longer contains. Runs BEFORE
+        // reconcileAnnotationsForDays() below so that local backstop
+        // (dayParks/dayAutoFallbacks, and dayMeta redundantly/harmlessly)
+        // observes already-pruned dayMeta content rather than racing this
+        // commit's own CAS.
+        let dayMetaWriteFailed = false;
+        if (!daysWriteFailed) {
+          const prunedDayMeta = pruneOrphanedDayRecord(dayMetaCandidate, winningDays).result;
+          const nextDayMetaRaw = JSON.stringify(prunedDayMeta);
+          // Cloud "won" the dayMeta domain when local hadn't changed and
+          // this response actually carried a dayMeta value (present, even
+          // {} — see pickWinningDayMeta()'s own doc for why `undefined`
+          // never counts). Mirrors itemsCloudWon/lightningCloudSourced's own
+          // per-domain pattern.
+          const dayMetaCloudWon = !dayMetaChangedLocally && cloudDayMeta !== undefined;
+          const { result: dayMetaCommit, deferralReasons: dayMetaDeferralReasons } = await commitDomain(
+            "dayMeta",
+            dayMetaKeyRef.current,
+            currentDayMetaRaw,
+            nextDayMetaRaw,
+            dayMetaCloudWon
+              ? {
+                  candidateValue: prunedDayMeta,
+                  cloudValue: cloudDayMeta ?? null,
+                  confirmedValue: prunedDayMeta,
+                  hydrationValue: prunedDayMeta,
+                }
+              : null
+          );
+          if (!isPullCurrent()) return;
+          // SH.2.2 — see the identical checkpoint above the items/days
+          // commits for the full rationale.
+          if (dayMetaCommit.status === "authority-changed") {
+            handlePullDeferral([...supersededDomains, ...dayMetaDeferralReasons]);
+            return;
+          }
+          const dayMetaCommitStatus = dayMetaCommit.status;
+          dayMetaWriteFailed = dayMetaCommit.primaryCommitStatus === null;
+          if (dayMetaCommitStatus === "superseded") {
+            supersededDomains.push({ domain: "dayMeta", reason: "local-edit-superseded" });
+          }
+          if (!dayMetaWriteFailed && JSON.stringify(prunedDayMeta) !== JSON.stringify(dayMetaRef.current)) {
+            setDayMeta(prunedDayMeta);
+          }
+          if (dayMetaCloudWon && !dayMetaWriteFailed) {
+            dayMetaBaselineRef.current = prunedDayMeta;
+          }
+          // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
+          // attempted to record dayMeta's own confirmed-baseline fact or
+          // hydration provenance, whichever applies.
+          if (dayMetaCommit.status === "provenance-write-failed") {
+            handlePullDeferral([...supersededDomains, ...dayMetaDeferralReasons]);
+            return;
+          }
+        }
         // SH.3.1 — enforce the "dayMeta/dayParks/dayAutoFallbacks keys must
         // be a subset of days" invariant via the shared
         // reconcileAnnotationsForDays() (see its own doc near this page's
@@ -3457,7 +3597,11 @@ export default function PlansPage() {
         // round) — also requires `primaryPersistSucceeded`: THIS page's own
         // primary (Plans) domain write must have durably landed too, not
         // just the sibling/days writes (see its own doc above).
-        if (hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) setSyncReady(true);
+        // SH.3.2 — dayMeta's own write failure gates syncReady/ownership
+        // transfer identically to days'/lightning's own failures above: a
+        // failed dayMeta commit must never let a subsequent push proceed
+        // over unconfirmed/possibly-stale local dayMeta content.
+        if (hydrationSucceeded && !daysWriteFailed && !dayMetaWriteFailed && primaryPersistSucceeded) setSyncReady(true);
 
         // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
         // BOUNDARY: only NOW — after this pull genuinely resolved
@@ -3472,7 +3616,7 @@ export default function PlansPage() {
         // `primaryPersistSucceeded` (#3): ownership must never transfer
         // before THIS page's own primary domain — not just the sibling's —
         // is confirmed durably persisted.
-        if (pullCtx.userId && hydrationSucceeded && !daysWriteFailed && primaryPersistSucceeded) {
+        if (pullCtx.userId && hydrationSucceeded && !daysWriteFailed && !dayMetaWriteFailed && primaryPersistSucceeded) {
           setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
         }
 
