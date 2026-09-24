@@ -31,10 +31,12 @@ import type { PlannerItemType } from "@/lib/plansTransfer";
 // the same authoritative set without a circular import (syncPayload.ts is
 // itself a dependency of this file). Re-exported below so every existing
 // importer of PARK_LABELS/PARK_TO_RESORT from "./crossDayChecks" is
-// unaffected.
-import { PARK_LABELS, PARK_TO_RESORT } from "@/lib/parkMetadata";
+// unaffected. isValidParkId() (P2 follow-up) is the safe own-property park-
+// ID membership check — see its own doc — also re-exported so every
+// consumer already importing PARK_TO_RESORT from here can adopt it too.
+import { PARK_LABELS, PARK_TO_RESORT, isValidParkId } from "@/lib/parkMetadata";
 
-export { PARK_LABELS, PARK_TO_RESORT };
+export { PARK_LABELS, PARK_TO_RESORT, isValidParkId };
 
 export type { PlannerItemType };
 
@@ -1462,7 +1464,7 @@ export function computeCrossDayChecks(
   const dayResortMap = new Map<string, ResortId>();
   for (const dayId of days) {
     const override = dayParks[dayId];
-    if (override && override in PARK_TO_RESORT) {
+    if (override && isValidParkId(override)) {
       dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
       continue;
     }

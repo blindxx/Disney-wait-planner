@@ -17,7 +17,7 @@
  * (see plans/page.tsx and lightning/page.tsx pull handling).
  */
 
-import { PARK_TO_RESORT } from "@/lib/parkMetadata";
+import { isValidParkId } from "@/lib/parkMetadata";
 
 // ===== TYPES =====
 
@@ -67,13 +67,19 @@ const DAY_ID_RE = /^day-[1-9]\d*$/;
 // job; this sanitizer only needs to reject grossly malformed cloud content).
 const DAY_META_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // SH.3.3 Codex follow-up — the single maintained source of truth for valid
-// park IDs is PARK_TO_RESORT, imported above from parkMetadata.ts. That
-// module has no dependency on this one or on crossDayChecks.ts (which DOES
-// import from this module — capturePreFetchDomainSnapshot,
-// resolvePostFetchDomainBaseline, etc.), so both this file and
-// crossDayChecks.ts can import PARK_TO_RESORT directly without creating a
-// circular dependency, and without either maintaining its own copy of the
-// key set (see parkMetadata.ts's own doc for the full rationale).
+// park IDs is PARK_TO_RESORT/isValidParkId, imported above from
+// parkMetadata.ts. That module has no dependency on this one or on
+// crossDayChecks.ts (which DOES import from this module —
+// capturePreFetchDomainSnapshot, resolvePostFetchDomainBaseline, etc.), so
+// both this file and crossDayChecks.ts can import from it directly without
+// creating a circular dependency, and without either maintaining its own
+// copy of the key set (see parkMetadata.ts's own doc for the full
+// rationale). isValidParkId() (not the bare `in` operator) is required here
+// specifically: `in` also matches PARK_TO_RESORT's INHERITED
+// Object.prototype properties ("toString", "constructor", etc. — see that
+// function's own doc), which would let a raw cloud-payload string equal to
+// one of those names pass validation and be persisted as if it were a real
+// park ID.
 
 /**
  * Normalize a raw value down to a valid ordered days[] array (preserving
@@ -175,9 +181,11 @@ export function sanitizeDayMeta(
  * whatever cloud/existing storage already holds); a genuinely empty `{}` is
  * a valid, meaningful INTENTIONAL clear (see SyncedPlannerPayload.dayParks'
  * own doc) and is always returned as a real empty record. Entries keyed by
- * an invalid day ID, or whose value isn't a known park ID (membership in
- * PARK_TO_RESORT — the authoritative set, imported from parkMetadata.ts),
- * are dropped rather than rejecting the whole record — same "sanitize, don't
+ * an invalid day ID, or whose value isn't a known park ID (isValidParkId() —
+ * the authoritative own-property check, imported from parkMetadata.ts —
+ * never the bare `in` operator, which would also match inherited
+ * Object.prototype property names like "toString"/"constructor"), are
+ * dropped rather than rejecting the whole record — same "sanitize, don't
  * reject" treatment sanitizeDayMeta() gives a malformed entry.
  */
 export function sanitizeDayParks(raw: unknown): Record<string, string> | undefined {
@@ -185,7 +193,7 @@ export function sanitizeDayParks(raw: unknown): Record<string, string> | undefin
   const result: Record<string, string> = {};
   for (const [dayId, valueRaw] of Object.entries(raw as Record<string, unknown>)) {
     if (!DAY_ID_RE.test(dayId)) continue;
-    if (typeof valueRaw === "string" && valueRaw in PARK_TO_RESORT) {
+    if (typeof valueRaw === "string" && isValidParkId(valueRaw)) {
       result[dayId] = valueRaw;
     }
   }
@@ -3152,6 +3160,21 @@ export const DEV_PARSE_SYNCED_PAYLOAD_CASES: Array<{
     name: "SH.3.3 — dayParks structurally invalid (an array, not an object) — degrades to absent, never rejects the whole payload",
     raw: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] }, dayParks: ["day-1"] },
     expected: { version: 1, plans: { version: 1, items: [] }, lightning: { version: 1, items: [] } },
+  },
+  {
+    name: "SH.3.3 Codex P2 — dayParks entries whose value is an inherited Object.prototype property name (\"toString\", \"constructor\") are dropped, never synced/persisted as if they were real park IDs; a genuinely valid entry survives alongside them",
+    raw: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      dayParks: { "day-1": "toString", "day-2": "constructor", "day-3": "mk" },
+    },
+    expected: {
+      version: 1,
+      plans: { version: 1, items: [] },
+      lightning: { version: 1, items: [] },
+      dayParks: { "day-3": "mk" },
+    },
   },
 ];
 

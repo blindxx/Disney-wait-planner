@@ -45,7 +45,7 @@ import { resolveAttractionIdentityKey } from "./legacyAttractions";
 import { DINING_PLACES, resolveDiningKey, type DiningPlace } from "./diningSuggestions";
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey, type EntertainmentPlace } from "./entertainmentSuggestions";
 import { EXPERIENCE_PLACES, resolveExperienceKey, type ExperiencePlace } from "./experienceSuggestions";
-import { PARK_LABELS, PARK_TO_RESORT } from "./crossDayChecks";
+import { PARK_LABELS, PARK_TO_RESORT, isValidParkId } from "./crossDayChecks";
 import type { PlannerItemType } from "./plansTransfer";
 
 const RESORT_IDS: ResortId[] = ["DLR", "WDW"];
@@ -107,7 +107,7 @@ function isResortId(value: string): value is ResortId {
  */
 function resolveParkFilter(raw: string): ParkId | null {
   const lowered = raw.trim().toLowerCase();
-  if (lowered in PARK_TO_RESORT) return lowered as ParkId;
+  if (isValidParkId(lowered)) return lowered;
   const key = normalizeKey(raw);
   for (const parkId of Object.keys(PARK_LABELS) as ParkId[]) {
     if (normalizeKey(PARK_LABELS[parkId]) === key) return parkId;

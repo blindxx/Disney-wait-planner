@@ -19,6 +19,7 @@ import {
   reconcilePlannerSnapshot,
   PARK_LABELS,
   PARK_TO_RESORT,
+  isValidParkId,
 } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
@@ -233,7 +234,7 @@ function parseDayParksRaw(raw: string | null): Record<string, string> {
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
     const result: Record<string, string> = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && isValidParkId(v)) {
         result[k] = v;
       }
     }

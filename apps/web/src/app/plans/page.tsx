@@ -57,6 +57,7 @@ import {
   resolveIdentityKey,
   PARK_TO_RESORT,
   PARK_LABELS,
+  isValidParkId,
   RIDE_TO_PARK_DLR,
   RIDE_TO_PARK_WDW,
 } from "@/lib/crossDayChecks";
@@ -901,7 +902,7 @@ function readSessionContext(
     const storedResort = localStorage.getItem(resortKey);
     const storedPark = localStorage.getItem(parkKey);
     const hasResort = storedResort === "DLR" || storedResort === "WDW";
-    const haspark = !!storedPark && storedPark in PARK_TO_RESORT;
+    const haspark = !!storedPark && isValidParkId(storedPark);
 
     if (hasResort || haspark) {
       // Derive resort: explicit resort key wins; fall back to deriving from park.
@@ -997,7 +998,7 @@ function parseDayParksRaw(raw: string | null): Record<string, string> {
     const result: Record<string, string> = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
       // Only accept valid day IDs with known park values
-      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && isValidParkId(v)) {
         result[k] = v;
       }
     }
@@ -1045,7 +1046,7 @@ function parseDayAutoFallbacksRaw(raw: string | null): Record<string, string> {
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
     const result: Record<string, string> = {};
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && v in PARK_TO_RESORT) {
+      if (VALID_DAY_ID_RE.test(k) && typeof v === "string" && isValidParkId(v)) {
         result[k] = v;
       }
     }
@@ -3910,7 +3911,7 @@ export default function PlansPage() {
   useEffect(() => {
     if (!initialized || !ready) return;
     const override = dayParks[activeDayId];
-    if (override && override in PARK_TO_RESORT) {
+    if (override && isValidParkId(override)) {
       // Manual override — sync both park and resort to match the override.
       const overrideResort = PARK_TO_RESORT[override] as ResortId;
       setSelectedResort(overrideResort);
@@ -4046,7 +4047,7 @@ export default function PlansPage() {
   // Syncs both selectedPark and selectedResort immediately for instant UI feedback.
   function handleSetDayPark(dayId: string, parkId: string) {
     // Reject unknown park IDs silently; empty string ("") = Auto (clear override).
-    if (parkId && !(parkId in PARK_TO_RESORT)) return;
+    if (parkId && !isValidParkId(parkId)) return;
     const _profileId = getActiveProfileId();
     const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
@@ -5248,7 +5249,7 @@ export default function PlansPage() {
     const restoredDayParks: Record<string, string> = {};
     if (data.dayParks) {
       for (const [k, v] of Object.entries(data.dayParks)) {
-        if (VALID_DAY_ID_RE.test(k) && v in PARK_TO_RESORT && restoredDaysSet.has(k)) {
+        if (VALID_DAY_ID_RE.test(k) && isValidParkId(v) && restoredDaysSet.has(k)) {
           restoredDayParks[k] = v;
         }
       }
