@@ -205,6 +205,13 @@ export const DEV_PRUNE_ORPHANED_DAY_RECORD_CASES: Array<{
     expectedResult: { "day-1": { label: "Arrival" }, "day-4": { label: "Just added by another tab" } },
     expectedChanged: false,
   },
+  {
+    name: "REQUIRED (Codex P2 finding, reviewed commit adbc245) — 'prune annotations whenever durable days change': this function is path-agnostic by construction — it prunes correctly from `validDayIds` alone, with no way to know (or need to know) WHICH writer produced that days list. This is what makes it safe to invoke from the shared reconcileAnnotationsForDays() (plans/page.tsx) for a days change that originated from THIS page's own cloud pull, ANOTHER Plans tab's local Remove/Duplicate Day, or Lightning's own independent cloud-pull reconciliation of the shared `days` domain — all three feed the exact same pruning contract",
+    record: { "day-1": { label: "Arrival" }, "day-2": { label: "Removed via a different writer's days commit" } },
+    validDayIds: ["day-1"],
+    expectedResult: { "day-1": { label: "Arrival" } },
+    expectedChanged: true,
+  },
 ];
 
 /**

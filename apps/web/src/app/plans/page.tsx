@@ -1793,6 +1793,91 @@ export default function PlansPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightningVersion, days]);
 
+  // SH.3.1 Codex follow-up (P2, reviewed commit adbc245) — "prune
+  // annotations whenever durable days change." commitPrunedDayRecord() and
+  // reconcileAnnotationsForDays() were previously nested INSIDE the cloud-
+  // pull effect below, so only THIS page's own pull could ever trigger the
+  // dayMeta/dayParks/dayAutoFallbacks orphan prune. But Lightning
+  // (lightning/page.tsx) runs its OWN independent cloud-pull effect that
+  // ALSO reconciles/commits the shared `days` domain — a cross-device day
+  // removal synced in through LIGHTNING's pull, not this page's, left this
+  // device's annotations orphaned until this page's own pull next happened
+  // to run. Adding pruning to lightning/page.tsx itself would be a narrow,
+  // duplicated per-page patch: Lightning has no write access to (and, for
+  // dayAutoFallbacks, no awareness of) these three datasets at all — only
+  // this page owns them.
+  //
+  // The actual shared invariant is "whenever THIS TAB observes the
+  // authoritative `days` key change, for ANY reason" — and this page
+  // already has exactly one boundary that already fires for every such
+  // reason: the canonical `dwp:{profileId}:days` localStorage key itself.
+  // This page's own pull committing it is one writer; the 'storage'
+  // listener below (already existing, previously DISPLAY-only) fires for
+  // every OTHER writer to that same key from any other tab/page for this
+  // profile, Lightning's own pull included — since a 'storage' event is
+  // dispatched to every other same-origin tab/document on any write to a
+  // localStorage key, regardless of which page or code path performed it.
+  // Promoting these two functions to this shared, component-level scope —
+  // pure refactor, no behavior change to the pull's own call, whose
+  // `isStillValid` becomes an explicit parameter (`isPullCurrent`) instead
+  // of an implicit closure capture — lets the 'storage' listener's `days`
+  // branch below call the IDENTICAL reconciliation logic, closing the gap
+  // at this single shared boundary instead of adding new per-page
+  // machinery. (Lightning is not open with its own Plans-style listener
+  // when NO Plans tab is open at all; that remaining window is closed the
+  // next time this page mounts, since its own pull-effect prune below
+  // already reruns unconditionally on `!daysWriteFailed`, independent of
+  // whether `days` actually changed this cycle.)
+  async function commitPrunedDayRecord<T>(
+    key: string,
+    currentRaw: string | null,
+    pruned: { result: Record<string, T>; changed: boolean },
+    isStillValid: () => boolean
+  ): Promise<Record<string, T> | null> {
+    if (!pruned.changed) return null;
+    const status = await commitLocalDomainRaw(key, currentRaw, JSON.stringify(pruned.result), isStillValid);
+    return shouldApplyPrunedDayRecord(pruned.changed, isLocalDomainCommitSuccess(status))
+      ? pruned.result
+      : null;
+  }
+
+  async function reconcileAnnotationsForDays(isStillValid: () => boolean): Promise<void> {
+    const dayMetaValidDays = loadEffectiveDurableDays(daysKeyRef.current);
+    const dayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
+    const dayMetaPrune = pruneOrphanedDayRecord(
+      parseDayMetaRaw(readLatestDurableValue(dayMetaKeyRef.current)),
+      dayMetaValidDays
+    );
+    const appliedDayMeta = await commitPrunedDayRecord(dayMetaKeyRef.current, dayMetaRaw, dayMetaPrune, isStillValid);
+    if (!isStillValid()) return;
+    if (appliedDayMeta) setDayMeta(appliedDayMeta);
+
+    const dayParksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
+    const dayParksRaw = localStorage.getItem(dayParksKeyRef.current);
+    const dayParksPrune = pruneOrphanedDayRecord(
+      parseDayParksRaw(readLatestDurableValue(dayParksKeyRef.current)),
+      dayParksValidDays
+    );
+    const appliedDayParks = await commitPrunedDayRecord(dayParksKeyRef.current, dayParksRaw, dayParksPrune, isStillValid);
+    if (!isStillValid()) return;
+    if (appliedDayParks) setDayParks(appliedDayParks);
+
+    const dayAutoFallbacksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
+    const dayAutoFallbacksRaw = localStorage.getItem(dayAutoFallbacksKeyRef.current);
+    const dayAutoFallbacksPrune = pruneOrphanedDayRecord(
+      parseDayAutoFallbacksRaw(readLatestDurableValue(dayAutoFallbacksKeyRef.current)),
+      dayAutoFallbacksValidDays
+    );
+    const appliedDayAutoFallbacks = await commitPrunedDayRecord(
+      dayAutoFallbacksKeyRef.current,
+      dayAutoFallbacksRaw,
+      dayAutoFallbacksPrune,
+      isStillValid
+    );
+    if (!isStillValid()) return;
+    if (appliedDayAutoFallbacks) setDayAutoFallbacks(appliedDayAutoFallbacks);
+  }
+
   // Phase 8.9.2 — Listen for Lightning storage changes made from the Lightning page
   // or another tab so lightningClearAllStats stays fresh without a full page reload.
   // Bumps lightningVersion (same counter used by crossDayChecks and lightningClearAllStats)
@@ -1852,6 +1937,20 @@ export default function PlansPage() {
         const isGenuineChange = next.join(",") !== daysRef.current.join(",");
         if (isGenuineChange) {
           setDays(next);
+          // SH.3.1 Codex follow-up (P2) — `days` genuinely changed via SOME
+          // other writer for this profile (this page's own pull already
+          // reconciles itself below; this covers every OTHER path —
+          // Lightning's independent pull, another Plans tab's local Remove/
+          // Duplicate Day, etc.). Reconcile dayMeta/dayParks/
+          // dayAutoFallbacks against the new order now, via the SAME
+          // CAS-protected reconciliation the pull effect uses (see
+          // reconcileAnnotationsForDays()'s own doc above). Fire-and-forget:
+          // this listener callback is synchronous (the DOM StorageEvent API
+          // gives no way to await it), and there is no "pull" for this
+          // trigger to go stale relative to — `() => true` is the correct,
+          // always-valid `isStillValid` here, exactly as ordinary local
+          // handlers (handleRemoveDay, etc.) also have no such concept.
+          void reconcileAnnotationsForDays(() => true);
         }
         // Mirror the same active-day fallback used after a cloud-authoritative
         // replacement (and in handleRemoveDay): if the other tab's write
@@ -3202,157 +3301,24 @@ export default function PlansPage() {
           daysBaselineRef.current = winningDays;
         }
         // SH.3.1 — enforce the "dayMeta/dayParks/dayAutoFallbacks keys must
-        // be a subset of days" invariant on the cloud/reconciliation path,
-        // not just the local Remove Day/Clear Day/Clear All handlers (which
-        // already delete their own day's entries directly at the point of
-        // removal — see those handlers below). Without this, a day removed
-        // on ANOTHER device and synced in here via the `days` domain left
-        // this device's per-day annotations orphaned in localStorage — see
-        // pruneOrphanedDayRecord()'s own doc in crossDayChecks.ts for why an
-        // orphaned entry matters (a later Add/Duplicate Day reusing that
-        // same numeric dayId could silently inherit stale data). Gated on
-        // `!daysWriteFailed` since `winningDays` is only durably true once
-        // the days write itself actually landed (or was already a no-op) —
-        // pruning against a winner that lost its own commit race would prune
-        // against a value that never became authoritative.
-        //
-        // Codex follow-up (P1, reviewed commit 9942288) — `winningDays` is
-        // frozen the moment THIS pull's own days-domain commit resolved,
-        // above. Each of the three commits below is independently awaited
-        // (real wall-clock time, e.g. Web Lock contention), during which
-        // another tab can legitimately Add/Duplicate a day — genuinely
-        // extending the authoritative `days` list to include a brand-new
-        // day with its own freshly-written dayMeta/dayParks entry. Pruning
-        // that entry against the now-stale `winningDays` would silently
-        // delete a legitimately just-created day's annotation, even though
-        // commitPrunedDayRecord()'s own CAS (below) cannot catch this case:
-        // the record's raw bytes it re-validates against were already read
-        // AFTER the concurrent write landed, so the CAS correctly sees no
-        // further change and lets the (already stale-computed) prune
-        // through. The fix: read the CURRENT authoritative local `days`
-        // value fresh, via loadEffectiveDurableDays() — the SAME helper this
-        // page already treats as authoritative for `days` everywhere else
-        // (mount hydration, the cross-tab `days` listener, this pull's own
-        // `currentDays` above) — immediately adjacent to each record's own
-        // raw read, instead of reusing one pull-start `winningDays` snapshot
-        // for all three. This mirrors the existing "separate, freshly-taken
-        // reads" discipline currentItemsRaw/currentDays/currentLightningRaw
-        // already use earlier in this pull, applied here to `days`
-        // staleness specifically (a different axis from the record's OWN
-        // staleness, which the CAS already covers).
-        //
-        // Codex follow-up (P1, reviewed commit 0c45e32) — "read durable
-        // annotation facts before pruning." Since the previous P2 follow-up,
-        // ordinary dayMeta/dayParks/dayAutoFallbacks writers publish a local-
-        // edit fact via commitLocalDomainRawSync() (saveDayMeta() etc.,
-        // above) — the SAME fact log commitLocalDomainRaw() (used by
-        // commitPrunedDayRecord below) already re-scans and, on a successful
-        // write, RETIRES (see its own baselineEditFactIds doc in
-        // syncHelper.ts). That retirement assumes the write it just
-        // committed durably embodies whatever those facts represented. But
-        // the prune's OWN "what to keep" computation still read canonical-
-        // only bytes (loadDayMeta()/loadDayParks()/loadDayAutoFallbacks()) —
-        // if a still-unresolved fact held content NEWER than stale canonical
-        // (the documented cross-tab hydration race — see
-        // readLatestDurableValue()'s own doc), the prune would compute its
-        // next value from the STALE canonical bytes, and
-        // commitLocalDomainRaw() would then retire that newer fact in the
-        // SAME commit as writing the stale, pruned value — permanently
-        // losing the real edit. The fix: compute each record's "current"
-        // input to pruneOrphanedDayRecord() from the EFFECTIVE DURABLE raw
-        // value — readLatestDurableValue(key), the same authority reader
-        // this page already uses for `items`/`days`/lightning everywhere
-        // else — parsed via the SAME sanitizer loadDayMeta()/loadDayParks()/
-        // loadDayAutoFallbacks() themselves now delegate to
-        // (parseDayMetaRaw()/parseDayParksRaw()/parseDayAutoFallbacksRaw(),
-        // see their own doc above), so a surviving newer fact's content is
-        // never silently dropped by this prune. The CAS token passed to
-        // commitPrunedDayRecord() below is UNCHANGED — still the literal
-        // CANONICAL key's raw bytes (`localStorage.getItem`), never the
-        // durable value — because commitLocalDomainRaw()'s own internal
-        // re-check compares against canonical bytes specifically; this is
-        // the same "two deliberately separate reads, one for CAS, one for
-        // the actual decision" split already used for `items`/`days` above.
-        //
-        // Codex follow-up (reviewed commit a6ea487) — the original version of
-        // this block did a plain read (via loadDayMeta/loadDayParks/
-        // loadDayAutoFallbacks) → prune → unconditional localStorage.setItem,
-        // exactly the same shape of race the rest of this pull effect goes to
-        // great lengths to avoid for plans/lightning/days: a concurrent
-        // same-profile write in ANOTHER tab (e.g. the user renaming a day via
-        // handleSaveDayMeta) landing between the read and the write would be
-        // silently overwritten by this stale prune, with no CAS to catch it
-        // and no way for a later 'storage' event to recover content already
-        // clobbered. The fix reuses the SAME established local-domain commit
-        // primitive plans/lightning/days already use for exactly this
-        // problem — commitLocalDomainRaw() (syncHelper.ts): it re-reads the
-        // canonical key's raw bytes ONE LAST TIME, inside a Web-Locks-
-        // serialized critical section (cross-tab, not merely cross-await),
-        // immediately before writing, and only writes when those bytes still
-        // equal `currentRaw` (captured here, before the prune decision) —
-        // otherwise it reports "superseded" and writes nothing, exactly the
-        // same CAS discipline the items/lightning/days commits above already
-        // rely on. dayMeta/dayParks/dayAutoFallbacks still do NOT get their
-        // own local-edit-fact log, confirmed facts, hydration provenance, or
-        // any ConfirmedDomainName entry — this call sits at the SAME layer
-        // commitDomainHydration() itself is built on, not the sync/conflict
-        // layer above it, so these three datasets remain fully local-only
-        // (never pushed, never read as sync/conflict evidence) in SH.3.1.
-        // `currentRaw` and the parsed load below are two deliberately
-        // separate reads of the same key, back-to-back with no `await`
-        // between them — the identical pattern currentItemsRaw/currentDays/
-        // currentLightningRaw already use earlier in this same pull for the
-        // exact same reason (see their own doc above).
-        async function commitPrunedDayRecord<T>(
-          key: string,
-          currentRaw: string | null,
-          pruned: { result: Record<string, T>; changed: boolean }
-        ): Promise<Record<string, T> | null> {
-          if (!pruned.changed) return null;
-          const status = await commitLocalDomainRaw(
-            key,
-            currentRaw,
-            JSON.stringify(pruned.result),
-            isPullCurrent
-          );
-          return shouldApplyPrunedDayRecord(pruned.changed, isLocalDomainCommitSuccess(status))
-            ? pruned.result
-            : null;
-        }
+        // be a subset of days" invariant via the shared
+        // reconcileAnnotationsForDays() (see its own doc near this page's
+        // cross-tab storage listener, above, for the full history: the
+        // original cloud-reconciliation-path gap, the CAS-protected commit
+        // fix, the fresh-days-revalidation fix, the durable-vs-canonical
+        // read fix, and why this call is now promoted to component scope so
+        // the storage listener's `days` branch can enforce the SAME
+        // invariant for every OTHER writer of `days` — Lightning's own
+        // independent pull included, per the SH.3.1 P2 "prune annotations
+        // whenever durable days change" follow-up). Gated on
+        // `!daysWriteFailed` since the reconciled `days` value is only
+        // durably true once THIS pull's own days write actually landed (or
+        // was already a no-op) — reconciling against a winner that lost its
+        // own commit race would reconcile against a value that never became
+        // authoritative.
         if (!daysWriteFailed) {
-          const dayMetaValidDays = loadEffectiveDurableDays(daysKeyRef.current);
-          const dayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
-          const dayMetaPrune = pruneOrphanedDayRecord(
-            parseDayMetaRaw(readLatestDurableValue(dayMetaKeyRef.current)),
-            dayMetaValidDays
-          );
-          const appliedDayMeta = await commitPrunedDayRecord(dayMetaKeyRef.current, dayMetaRaw, dayMetaPrune);
+          await reconcileAnnotationsForDays(isPullCurrent);
           if (!isPullCurrent()) return;
-          if (appliedDayMeta) setDayMeta(appliedDayMeta);
-
-          const dayParksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
-          const dayParksRaw = localStorage.getItem(dayParksKeyRef.current);
-          const dayParksPrune = pruneOrphanedDayRecord(
-            parseDayParksRaw(readLatestDurableValue(dayParksKeyRef.current)),
-            dayParksValidDays
-          );
-          const appliedDayParks = await commitPrunedDayRecord(dayParksKeyRef.current, dayParksRaw, dayParksPrune);
-          if (!isPullCurrent()) return;
-          if (appliedDayParks) setDayParks(appliedDayParks);
-
-          const dayAutoFallbacksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
-          const dayAutoFallbacksRaw = localStorage.getItem(dayAutoFallbacksKeyRef.current);
-          const dayAutoFallbacksPrune = pruneOrphanedDayRecord(
-            parseDayAutoFallbacksRaw(readLatestDurableValue(dayAutoFallbacksKeyRef.current)),
-            dayAutoFallbacksValidDays
-          );
-          const appliedDayAutoFallbacks = await commitPrunedDayRecord(
-            dayAutoFallbacksKeyRef.current,
-            dayAutoFallbacksRaw,
-            dayAutoFallbacksPrune
-          );
-          if (!isPullCurrent()) return;
-          if (appliedDayAutoFallbacks) setDayAutoFallbacks(appliedDayAutoFallbacks);
         }
         // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
         // attempted to record Days' own confirmed-baseline fact or
