@@ -1152,7 +1152,14 @@ export default function LightningPage() {
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
     setDayParks(loadDayParks(dayParksKeyRef.current));
     dayMetaKeyRef.current = buildNamespacedKey(currentProfileId, "dayMeta");
-    setDayMeta(loadDayMeta(dayMetaKeyRef.current));
+    // SH.3.2 Codex P1 follow-up — read the domain's EFFECTIVE DURABLE value
+    // (loadEffectiveDurableDayMeta() — canonical + any surviving local-edit
+    // fact), not a canonical-only read, mirroring `loadedKnownDays`/
+    // `loadedItems` above for the same cross-tab-hydration-race reason.
+    // Captured once so the SAME value seeds both the rendered state and
+    // dayMetaBaselineRef below — see that assignment's own doc.
+    const loadedDayMeta = loadEffectiveDurableDayMeta(dayMetaKeyRef.current);
+    setDayMeta(loadedDayMeta);
     // Phase 8.8 — load plan items so auto park can be inferred the same way My Plans does.
     plansKeyRef.current = buildNamespacedKey(currentProfileId, "plans");
     const loadedActiveDayId = normalizeDayId(localStorage.getItem(buildNamespacedKey(currentProfileId, "activeDayId")));
@@ -1176,6 +1183,18 @@ export default function LightningPage() {
     // until then.
     itemsBaselineRef.current = loadedItems;
     daysBaselineRef.current = loadedKnownDays;
+    // SH.3.2 Codex P1 follow-up — dayMeta's own mount-time baseline was
+    // previously left at its `useRef({})` initial value, never seeded from
+    // durable local state the way items/days are just above. An existing
+    // browser can already have real durable dayMeta (set via Plans, before
+    // this profile ever had a confirmed cloud fact) — with the baseline
+    // wrongly stuck at `{}`, the first pull's fallback comparison would see
+    // that real content as "differs from baseline" and misclassify
+    // unchanged local metadata as a fresh edit, letting it win outright
+    // over newer cloud state it never actually conflicted with. Seeded from
+    // the SAME `loadedDayMeta` read above, mirroring itemsBaselineRef/
+    // daysBaselineRef exactly.
+    dayMetaBaselineRef.current = loadedDayMeta;
     // Same baseline concept for the opposite (Plans) dataset this page
     // hydrates on every pull — captured as the raw string since no
     // parsing/normalization is needed for a page that doesn't own that

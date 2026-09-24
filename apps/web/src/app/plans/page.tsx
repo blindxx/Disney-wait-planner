@@ -2205,6 +2205,25 @@ export default function PlansPage() {
     // exists, falling back to these refs only until then.
     itemsBaselineRef.current = loaded;
     daysBaselineRef.current = mergedDays;
+    // SH.3.2 Codex P1 follow-up — dayMeta's own mount-time baseline was
+    // previously left at its `useRef({})` initial value here, never seeded
+    // from durable local state the way items/days are just above. An
+    // existing browser can already have real durable dayMeta (labels/dates
+    // set before this profile ever had a confirmed cloud fact) — with the
+    // baseline wrongly stuck at `{}`, the first pull's fallback comparison
+    // (buildPostFetchPullBaseline(), consulted only pre-first-confirmation)
+    // would see that real content as "differs from baseline" and
+    // misclassify unchanged local metadata as a fresh edit, letting it win
+    // outright over newer cloud state it never actually conflicted with.
+    // Fixed the same way items/days are: read the domain's EFFECTIVE
+    // DURABLE value (loadEffectiveDurableDayMeta() — canonical + any
+    // surviving local-edit fact, never a canonical-only read, for the same
+    // cross-tab-hydration-race reason loaded/storedDays use it above) once,
+    // and use that SAME value for both the rendered state and the baseline
+    // ref, mirroring `loaded`/`itemsBaselineRef` exactly.
+    const loadedDayMeta = loadEffectiveDurableDayMeta(dayMetaKeyRef.current);
+    setDayMeta(loadedDayMeta);
+    dayMetaBaselineRef.current = loadedDayMeta;
     // Same baseline concept for the opposite (Lightning) dataset this page
     // hydrates on every pull — captured as the raw string so no parsing/
     // normalization is needed for a page that doesn't own that domain.
@@ -2215,8 +2234,6 @@ export default function PlansPage() {
     } catch {
       lightningRawBaselineRef.current = null;
     }
-    // Phase 8.1 — load day metadata (labels + dates)
-    setDayMeta(loadDayMeta(dayMetaKeyRef.current));
     // Phase 8.4 — load per-day park overrides
     setDayParks(loadDayParks(dayParksKeyRef.current));
     // Phase 10.4.1 — load persisted per-day Auto fallbacks (survives reloads)
@@ -2349,10 +2366,10 @@ export default function PlansPage() {
     saveToStorage(items, planKeyRef.current);
   }, [items, initialized]);
 
-  // Schedule a debounced cloud push after every items OR days change, but
-  // only once syncReady is true (initial cloud pull has resolved) AND the
-  // user is authenticated. Unauthenticated edits are local-only — no
-  // network calls.
+  // Schedule a debounced cloud push after every items, days, OR dayMeta
+  // change, but only once syncReady is true (initial cloud pull has
+  // resolved) AND the user is authenticated. Unauthenticated edits are
+  // local-only — no network calls.
   // Phase 11.2 Codex fix — `days` is included so a reorder (Move Up/Down,
   // Add/Remove/Duplicate Day) alone schedules a push: buildPayloadFromStorage
   // already reads days[] fresh from localStorage at push time (Move Up/Down
@@ -2360,6 +2377,15 @@ export default function PlansPage() {
   // so reordering without any other items mutation would otherwise never
   // reach the cloud until some unrelated items change happened to fire this
   // same effect.
+  // SH.3.2 Codex P1 follow-up — `dayMeta` is included for the identical
+  // reason `days` is: buildPayloadFromStorage() (syncHelper.ts) already
+  // reads dayMeta fresh from localStorage at push time (handleSaveDayMeta/
+  // handleRemoveDay/handleDuplicateDay/handleClearAll all persist
+  // synchronously via saveDayMeta before this effect's next run), so a
+  // label/date-only edit — no items or days mutation at all — would
+  // otherwise never reach the cloud until some unrelated items/days change
+  // happened to fire this same effect. This is the ONLY scheduling
+  // boundary; no separate push mechanism is introduced.
   // NOTE: no unmount cleanup here intentionally — cancelling on unmount would
   // silently drop the pending push on SPA navigation before the debounce fires,
   // because beforeunload does not fire on in-app route changes. Auth/session
@@ -2369,7 +2395,7 @@ export default function PlansPage() {
     if (!initialized || !syncReady || sessionStatus !== "authenticated") return;
     scheduleSync();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, days, initialized, syncReady, sessionStatus]);
+  }, [items, days, dayMeta, initialized, syncReady, sessionStatus]);
 
   // Manage syncReady gate based on auth state transitions.
   // loading      → gate resets to false immediately; guards against re-auth races
