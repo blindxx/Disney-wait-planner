@@ -43,10 +43,17 @@
  *     whichever account reconciles it first.
  *   - Every round that reaches the server successfully durably stamps
  *     ownership (profileStorage.ts's markProfileOwner) for every id the
- *     server confirms belongs to this account — both what GET already
- *     returned and what this round's PUT just registered — so a LATER
- *     reconciliation under a different account can correctly refuse to
- *     re-adopt it.
+ *     server confirms belongs to this account. Codex P1 follow-up (2nd
+ *     round) — this is NEVER decided from the PUT response's own
+ *     `registered` field: a push whose response is lost or malformed may
+ *     still have committed server-side, so whenever a push was attempted
+ *     this round, ownership is instead decided from a fresh, AUTHORITATIVE
+ *     re-GET performed right after it (see resolveAuthoritativeServerProfiles
+ *     and reconcileProfileRegistry's own doc) — never from assuming the push
+ *     failed just because its own response did. This closes the window
+ *     where a commit that actually reached the server, but whose response
+ *     didn't reach this client, would otherwise leave the id looking
+ *     "unowned" and adoptable by a different account reconciling next.
  *   - Renaming an id already known to the server is NOT propagated in
  *     either direction yet — SH.4.2 owns that policy. An id already present
  *     both locally and on the server keeps its LOCAL name untouched here.
@@ -64,6 +71,16 @@
  * in-flight round is still allowed to act (issue a request, or write to
  * `dwp.profiles`/the ownership map) once auth identity has moved on. See
  * reconcileProfileRegistry's own doc for exactly where it's checked.
+ *
+ * Codex P1 follow-up (2nd round) — this binding is a LIFECYCLE resource, not
+ * just an auth-transition guard: the Settings integration that owns it MUST
+ * invalidate it (call setRegistryIdentity(null)) on its own unmount, not
+ * only when the resolved identity value changes. A round left bound to "the
+ * last identity Settings happened to run under" would otherwise keep
+ * looking current indefinitely once Settings unmounts — nothing else in the
+ * app calls setRegistryIdentity — letting it complete a later request/local
+ * write with no live UI still vouching for that identity. See
+ * settings/page.tsx's own effect for where this is done.
  */
 
 import {
@@ -228,6 +245,14 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
     profileOwners: { mom: "userA" },
     expected: [{ id: "mom", name: "Mom" }],
   },
+  {
+    name: "Codex P1 follow-up #3 — an ambiguous PUT (response lost, picked up by the authoritative re-GET and stamped for A — see DEV_RESOLVE_AUTHORITATIVE_SERVER_PROFILES_CASES) cannot later be claimed by B",
+    serverProfiles: [],
+    localProfiles: [{ id: "family", name: "Family" }],
+    currentOwnerUserId: "userB",
+    profileOwners: { family: "userA" },
+    expected: [],
+  },
 ];
 
 /**
@@ -390,6 +415,18 @@ export const DEV_STALE_RUN_GUARD_CASES: Array<{
     laterTransitions: ["userB", "userA"],
     expectedStillCurrent: false,
   },
+  {
+    name: "Codex P1 follow-up (2nd round) — Settings unmounts while A's round is in flight (cleanup invalidates to null) — the pending A round is stale",
+    capturedUserId: "userA",
+    laterTransitions: [null],
+    expectedStillCurrent: false,
+  },
+  {
+    name: "Codex P1 follow-up (2nd round) — Settings unmounts (-> null) then remounts as B — A's original round is still stale, exactly as a direct A -> B transition would be",
+    capturedUserId: "userA",
+    laterTransitions: [null, "userB"],
+    expectedStillCurrent: false,
+  },
 ];
 
 let registryIdentityState: RegistryIdentityState = { currentUserId: null, epoch: 0 };
@@ -406,6 +443,96 @@ let registryIdentityState: RegistryIdentityState = { currentUserId: null, epoch:
 export function setRegistryIdentity(userId: string | null): void {
   registryIdentityState = advanceRegistryIdentity(registryIdentityState, userId);
 }
+
+// ===== AMBIGUOUS ADOPTION OUTCOME RESOLUTION (Codex P1 follow-up #3) =====
+
+/**
+ * Decide which server-profile set is AUTHORITATIVE for this round's
+ * ownership-stamping and discovery — i.e. never derived from a PUT's own
+ * (possibly lost/malformed) response. When no push was attempted this
+ * round, the initial GET is already authoritative (nothing could have
+ * changed server-side that this round itself caused). When a push WAS
+ * attempted, a commit that reached the server but whose response never
+ * reached this client must still be reflected — so the fresh, confirmatory
+ * re-GET performed right after the push (`reconfirmedServerProfiles`) is
+ * used instead, whenever it itself succeeded. If even THAT re-GET fails
+ * (`null`), this deliberately falls back to the pre-push snapshot rather
+ * than guessing: nothing gets falsely stamped as owned this round, and a
+ * LATER round's fresh GET will correctly pick up a commit that did land,
+ * with no retry loop needed here.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_RESOLVE_AUTHORITATIVE_SERVER_PROFILES_CASES, resolveAuthoritativeServerProfiles } from "@/lib/profileRegistrySync";
+ *   DEV_RESOLVE_AUTHORITATIVE_SERVER_PROFILES_CASES.forEach(c => {
+ *     const got = resolveAuthoritativeServerProfiles(c.initialServerProfiles, c.pushAttempted, c.reconfirmedServerProfiles);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function resolveAuthoritativeServerProfiles(
+  initialServerProfiles: ServerProfileRecord[],
+  pushAttempted: boolean,
+  reconfirmedServerProfiles: ServerProfileRecord[] | null
+): ServerProfileRecord[] {
+  if (pushAttempted && reconfirmedServerProfiles !== null) return reconfirmedServerProfiles;
+  return initialServerProfiles;
+}
+
+export const DEV_RESOLVE_AUTHORITATIVE_SERVER_PROFILES_CASES: Array<{
+  name: string;
+  initialServerProfiles: ServerProfileRecord[];
+  pushAttempted: boolean;
+  reconfirmedServerProfiles: ServerProfileRecord[] | null;
+  expected: ServerProfileRecord[];
+}> = [
+  {
+    name: "no push attempted this round — the initial GET is already authoritative",
+    initialServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pushAttempted: false,
+    reconfirmedServerProfiles: null,
+    expected: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+  },
+  {
+    name: "Codex P1 follow-up #3 — push attempted, PUT response lost, but the confirmatory re-GET reveals the commit that actually happened",
+    initialServerProfiles: [],
+    pushAttempted: true,
+    reconfirmedServerProfiles: [
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expected: [
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+  },
+  {
+    name: "push attempted and the re-GET confirms nothing new committed — falls back correctly to the (unchanged) initial snapshot",
+    initialServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pushAttempted: true,
+    reconfirmedServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expected: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+  },
+  {
+    name: "push attempted but even the confirmatory re-GET failed — conservatively falls back to the pre-push snapshot rather than guessing",
+    initialServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pushAttempted: true,
+    reconfirmedServerProfiles: null,
+    expected: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+  },
+];
 
 // ===== NETWORK ORCHESTRATION =====
 //
@@ -446,30 +573,29 @@ async function fetchServerProfiles(): Promise<ServerProfileRecord[] | null> {
 }
 
 /**
- * Pushes the adopt-list and returns the ids the server actually confirms as
- * newly registered (its `registered` response field) — never assumed;
- * `[]` on any failure (network error, non-2xx, or malformed body), which the
- * caller correctly treats as "nothing to durably attribute to this account
- * yet" rather than guessing.
+ * Fire-and-forget push of the adopt-list. Codex P1 follow-up (2nd round) —
+ * its outcome (success, non-2xx, a lost/malformed response, or a thrown
+ * network error) is deliberately NEVER used to decide ownership:
+ * reconcileProfileRegistry always re-confirms via a fresh, authoritative GET
+ * afterward instead (see resolveAuthoritativeServerProfiles's own doc),
+ * since a commit that reached the server but whose response never reached
+ * this client must still be reflected, not treated as though it never
+ * happened. Swallows all errors — best-effort, exactly like
+ * scheduleSync()'s doPush() for planner sync.
  */
-async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<string[]> {
-  if (toAdopt.length === 0) return [];
+async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
+  if (toAdopt.length === 0) return;
   try {
-    const res = await fetch("/api/sync/profiles", {
+    await fetch("/api/sync/profiles", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name })),
       }),
     });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { registered?: unknown } | null;
-    if (!data || !Array.isArray(data.registered)) return [];
-    return data.registered.filter((id): id is string => typeof id === "string");
   } catch {
-    // Best-effort — a failed push just means these ids stay unowned/local-only
-    // until the next reconciliation round picks them up again.
-    return [];
+    // Best-effort — the confirmatory re-GET below determines what actually
+    // committed, regardless of what happened to this request/response.
   }
 }
 
@@ -479,11 +605,21 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<string[]> {
  * (called synchronously, immediately before this) — refuses to run at all
  * if that binding doesn't hold, and re-checks it after every await before
  * issuing the next request or writing anything locally (see
- * isRegistryRunCurrent's own doc): if the identity has moved on in the
- * meantime, this round stops immediately, performing no further request and
- * no local mutation. Silently no-ops on any auth/network failure — never
- * throws, never blocks page rendering, and never touches planner content or
+ * isRegistryRunCurrent's own doc): if the identity has moved on — including
+ * to null, which the Settings integration's unmount cleanup sets — this
+ * round stops immediately, performing no further request and no local
+ * mutation. Silently no-ops on any auth/network failure — never throws,
+ * never blocks page rendering, and never touches planner content or
  * `dwp.activeProfile`.
+ *
+ * Codex P1 follow-up (2nd round) finding #3 — when this round proposes
+ * anything to adopt, its outcome is never taken on faith from the PUT's own
+ * response: a fresh, authoritative re-GET runs right after the push, and
+ * ownership/discovery for this round are both decided from THAT result
+ * (resolveAuthoritativeServerProfiles), never from the push response. This
+ * closes the window where a push that actually committed server-side, but
+ * whose response was lost, would otherwise leave the id "unowned" and
+ * adoptable by a different account reconciling next.
  */
 export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
@@ -491,24 +627,35 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const capturedEpoch = registryIdentityState.epoch;
   const isCurrent = () => isRegistryRunCurrent(registryIdentityState, userId, capturedEpoch);
 
-  const serverProfiles = await fetchServerProfiles();
-  if (!isCurrent() || serverProfiles === null) return;
+  const initialServerProfiles = await fetchServerProfiles();
+  if (!isCurrent() || initialServerProfiles === null) return;
 
   const localProfiles = getProfiles();
   const profileOwners = getProfileOwners();
-  const toAdopt = computeProfilesToAdopt(serverProfiles, localProfiles, userId, profileOwners);
+  const toAdopt = computeProfilesToAdopt(initialServerProfiles, localProfiles, userId, profileOwners);
 
-  const registeredIds = await pushProfilesToAdopt(toAdopt);
-  if (!isCurrent()) return;
+  const pushAttempted = toAdopt.length > 0;
+  let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
+  if (pushAttempted) {
+    await pushProfilesToAdopt(toAdopt);
+    if (!isCurrent()) return;
+    reconfirmedServerProfiles = await fetchServerProfiles();
+    if (!isCurrent()) return;
+  }
 
-  // Every id the server just confirmed as this account's — whether it was
-  // already there (GET) or just registered (this round's PUT) — is durably
-  // stamped as owned by `userId` so a later round under a DIFFERENT account
-  // correctly refuses to re-adopt it (Codex P1 finding #2).
-  for (const id of [...serverProfiles.map((p) => p.profileId), ...registeredIds]) {
+  const authoritativeServerProfiles = resolveAuthoritativeServerProfiles(
+    initialServerProfiles,
+    pushAttempted,
+    reconfirmedServerProfiles
+  );
+
+  // Every id the server authoritatively confirms as this account's is
+  // durably stamped as owned by `userId` so a later round under a
+  // DIFFERENT account correctly refuses to re-adopt it (finding #2).
+  for (const id of authoritativeServerProfiles.map((p) => p.profileId)) {
     markProfileOwner(id, userId);
   }
 
-  const locallyDeletedIds = getLocallyDeletedProfileIds();
-  adoptServerProfiles(selectActiveServerProfiles(serverProfiles, locallyDeletedIds));
+  const locallyDeletedIds = getLocallyDeletedProfileIds(userId);
+  adoptServerProfiles(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
 }

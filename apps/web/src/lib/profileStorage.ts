@@ -30,7 +30,7 @@ const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
 const PROFILES_LIST_KEY = "dwp.profiles";
 
 /**
- * SH.4.1 (Codex P1 findings #2/#3, follow-up round) — durable, per-profile-id
+ * SH.4.1 (Codex P1 findings #2/#3, follow-up rounds) — durable, per-profile-id
  * REGISTRY PROVENANCE, entirely separate from `dwp.profiles` (what a device
  * shows) and from syncHelper.ts's planner-content ownership marker
  * (`getLocalContentOwner`/`setLocalContentOwner`, which governs PLANNER DATA
@@ -53,6 +53,13 @@ const PROFILES_LIST_KEY = "dwp.profiles";
  *     device's own next registry reconciliation round doesn't immediately
  *     rediscover the id it was just told to forget, until SH.4.3 implements
  *     real server-side tombstones this device can also observe.
+ *     ACCOUNT-SCOPED when read (Codex P1 follow-up, 2nd round) via `owner`:
+ *     see getLocallyDeletedProfileIds's own doc — the flag itself stays a
+ *     single per-id boolean (no per-account list), but is only ever HONORED
+ *     for the account that owns the id, or for everyone when the id is
+ *     still genuinely unowned. This is what stops account A's delete of a
+ *     grandfathered id from hiding account B's own, distinct profile under
+ *     that same literal id on a shared browser.
  * Deliberately a flat, unbounded-growth-tolerant map (bounded in practice by
  * however many profile ids this device has ever touched — never pruned, no
  * revision/ledger, no conflict resolution) — this is provenance metadata,
@@ -60,7 +67,7 @@ const PROFILES_LIST_KEY = "dwp.profiles";
  */
 const PROFILE_REGISTRY_STATE_KEY = "dwp.profileRegistryState";
 
-type ProfileRegistryLocalState = {
+export type ProfileRegistryLocalState = {
   owner?: string;
   locallyDeleted?: boolean;
 };
@@ -149,18 +156,88 @@ function clearLocalDeletionMarker(profileId: string): void {
 }
 
 /**
- * Bulk read of every profile id this device has explicitly, locally
- * deleted and not since recreated — see PROFILE_REGISTRY_STATE_KEY's module
- * doc above. Pass this straight into profileRegistrySync.ts's
- * selectActiveServerProfiles, which treats it as plain input data.
+ * Pure filter: given the full per-id provenance state and the CURRENT
+ * reconciling account, return the ids whose local-delete suppression
+ * applies to that account. Codex P1 follow-up (2nd round) — ACCOUNT-SCOPED,
+ * not global: a `locallyDeleted` id is only included when it has NO
+ * recorded owner yet (a genuinely unowned/ambiguous legacy id — safe to
+ * suppress for whoever reconciles it next, matching the ORIGINAL behavior
+ * for that unambiguous case) OR when its owner IS `currentOwnerUserId`. An
+ * id durably owned by a DIFFERENT account is never suppressed here, even if
+ * THIS DEVICE'S single shared `dwp.profiles` list happens to carry that
+ * same literal id for a grandfathered profile — deleting account A's
+ * "family" must never hide account B's own, distinct "family" from B's own
+ * reconciliation. Pure — takes the state as a parameter, so it stays
+ * directly DEV-testable without a browser/localStorage.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_LOCALLY_DELETED_FOR_ACCOUNT_CASES, selectLocallyDeletedIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_SELECT_LOCALLY_DELETED_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = [...selectLocallyDeletedIdsForAccount(c.state, c.currentOwnerUserId)].sort();
+ *     console.log(JSON.stringify(got) === JSON.stringify([...c.expected].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
  */
-export function getLocallyDeletedProfileIds(): Set<string> {
-  const state = readProfileRegistryState();
+export function selectLocallyDeletedIdsForAccount(
+  state: Record<string, ProfileRegistryLocalState>,
+  currentOwnerUserId: string
+): Set<string> {
   const ids = new Set<string>();
   for (const [id, entry] of Object.entries(state)) {
-    if (entry?.locallyDeleted) ids.add(id);
+    if (!entry?.locallyDeleted) continue;
+    if (entry.owner === undefined || entry.owner === currentOwnerUserId) {
+      ids.add(id);
+    }
   }
   return ids;
+}
+
+export const DEV_SELECT_LOCALLY_DELETED_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: Record<string, ProfileRegistryLocalState>;
+  currentOwnerUserId: string;
+  expected: string[];
+}> = [
+  {
+    name: "genuinely unowned legacy id, locally deleted — suppressed for whoever reconciles it (unchanged original behavior)",
+    state: { mom: { locallyDeleted: true } },
+    currentOwnerUserId: "userA",
+    expected: ["mom"],
+  },
+  {
+    name: "Codex P1 follow-up #2 — A owns and deletes 'family'; A's OWN reconciliation still suppresses it",
+    state: { family: { owner: "userA", locallyDeleted: true } },
+    currentOwnerUserId: "userA",
+    expected: ["family"],
+  },
+  {
+    name: "Codex P1 follow-up #2 — A owns and deletes 'family'; B's reconciliation (same grandfathered id, different account) is NOT suppressed",
+    state: { family: { owner: "userA", locallyDeleted: true } },
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+  {
+    name: "owned but not locally deleted — never suppressed regardless of account",
+    state: { mom: { owner: "userA" } },
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "empty state — nothing suppressed",
+    state: {},
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+];
+
+/**
+ * Bulk read of every profile id whose local-delete suppression applies to
+ * `currentOwnerUserId` — see selectLocallyDeletedIdsForAccount's own doc for
+ * the account-scoping rationale. Pass this straight into
+ * profileRegistrySync.ts's selectActiveServerProfiles, which treats it as
+ * plain input data.
+ */
+export function getLocallyDeletedProfileIds(currentOwnerUserId: string): Set<string> {
+  return selectLocallyDeletedIdsForAccount(readProfileRegistryState(), currentOwnerUserId);
 }
 
 const DEFAULT_PROFILE: Profile = { id: "default", name: "Default" };
