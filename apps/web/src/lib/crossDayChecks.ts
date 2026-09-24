@@ -26,6 +26,17 @@ import {
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
 import type { PlannerItemType } from "@/lib/plansTransfer";
+// SH.3.3 Codex follow-up — PARK_LABELS/PARK_TO_RESORT moved to their own
+// dependency-neutral module (see its own doc) so syncPayload.ts can consume
+// the same authoritative set without a circular import (syncPayload.ts is
+// itself a dependency of this file). Re-exported below so every existing
+// importer of PARK_LABELS/PARK_TO_RESORT from "./crossDayChecks" is
+// unaffected. isValidParkId() (P2 follow-up) is the safe own-property park-
+// ID membership check — see its own doc — also re-exported so every
+// consumer already importing PARK_TO_RESORT from here can adopt it too.
+import { PARK_LABELS, PARK_TO_RESORT, isValidParkId } from "@/lib/parkMetadata";
+
+export { PARK_LABELS, PARK_TO_RESORT, isValidParkId };
 
 export type { PlannerItemType };
 
@@ -435,6 +446,82 @@ export const DEV_PICK_WINNING_DAY_META_CASES: Array<{
     baseline: {},
     current: { "day-1": { label: "New from another tab" } },
     cloudDayMeta: { "day-1": { label: "Stale cloud label" } },
+    expectedWinner: "current",
+    expectedChangedLocally: true,
+  },
+];
+
+/**
+ * SH.3.3 — determines the winning dayParks record for one pull. dayParks is
+ * exactly the same Record<dayId, T> shape pickWinningDayMeta() already
+ * handles generically (dayParks' own T is a ParkId string rather than a
+ * {label?,date?} entry), so this reuses that function outright instead of
+ * duplicating its comparison logic — only the result's field name differs,
+ * for readability at call sites.
+ */
+export function pickWinningDayParks(
+  baseline: Record<string, string>,
+  current: Record<string, string>,
+  cloudDayParks: Record<string, string> | undefined
+): { dayParks: Record<string, string>; changedLocally: boolean } {
+  const { dayMeta: dayParks, changedLocally } = pickWinningDayMeta<string>(baseline, current, cloudDayParks);
+  return { dayParks, changedLocally };
+}
+
+/**
+ * Reference cases for pickWinningDayParks(). Run from Node:
+ *   import { DEV_PICK_WINNING_DAY_PARKS_CASES, pickWinningDayParks } from "@/lib/crossDayChecks";
+ *   DEV_PICK_WINNING_DAY_PARKS_CASES.forEach(c => {
+ *     const got = pickWinningDayParks(c.baseline, c.current, c.cloudDayParks);
+ *     const winnerOk = c.expectedWinner === "current" ? got.dayParks === c.current : got.dayParks === c.cloudDayParks;
+ *     console.log(winnerOk && got.changedLocally === c.expectedChangedLocally ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PICK_WINNING_DAY_PARKS_CASES: Array<{
+  name: string;
+  baseline: Record<string, string>;
+  current: Record<string, string>;
+  cloudDayParks: Record<string, string> | undefined;
+  expectedWinner: "current" | "cloud";
+  expectedChangedLocally: boolean;
+}> = [
+  {
+    name: "no local change, cloud omits dayParks entirely (legacy payload) — current kept, never treated as an empty clear",
+    baseline: { "day-1": "mk" },
+    current: { "day-1": "mk" },
+    cloudDayParks: undefined,
+    expectedWinner: "current",
+    expectedChangedLocally: false,
+  },
+  {
+    name: "no local change, cloud sends an intentional empty clear ({}) — cloud wins, clearing local",
+    baseline: { "day-1": "mk" },
+    current: { "day-1": "mk" },
+    cloudDayParks: {},
+    expectedWinner: "cloud",
+    expectedChangedLocally: false,
+  },
+  {
+    name: "no local change, cloud sends a populated record — cloud wins",
+    baseline: { "day-1": "mk" },
+    current: { "day-1": "mk" },
+    cloudDayParks: { "day-1": "mk", "day-2": "epcot" },
+    expectedWinner: "cloud",
+    expectedChangedLocally: false,
+  },
+  {
+    name: "local edit made before this pull started (baseline predates it) — local wins even though cloud has data",
+    baseline: { "day-1": "mk" },
+    current: { "day-1": "epcot" },
+    cloudDayParks: { "day-1": "hs" },
+    expectedWinner: "current",
+    expectedChangedLocally: true,
+  },
+  {
+    name: "cross-tab edit landed in storage during the pull — fresh read (current) differs from baseline, local wins",
+    baseline: {},
+    current: { "day-1": "ak" },
+    cloudDayParks: { "day-1": "mk" },
     expectedWinner: "current",
     expectedChangedLocally: true,
   },
@@ -1172,24 +1259,6 @@ function stripTrailingTimeForInference(name: string): string {
     .trim();
 }
 
-export const PARK_LABELS: Record<ParkId, string> = {
-  disneyland: "Disneyland",
-  dca: "Disney California Adventure",
-  mk: "Magic Kingdom",
-  epcot: "EPCOT",
-  hs: "Hollywood Studios",
-  ak: "Animal Kingdom",
-};
-
-export const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
-  disneyland: "DLR",
-  dca: "DLR",
-  mk: "WDW",
-  epcot: "WDW",
-  hs: "WDW",
-  ak: "WDW",
-};
-
 export const RIDE_TO_PARK_DLR = new Map<string, string>();
 export const RIDE_TO_PARK_WDW = new Map<string, string>();
 for (const _inf of mockAttractionWaits) {
@@ -1395,7 +1464,7 @@ export function computeCrossDayChecks(
   const dayResortMap = new Map<string, ResortId>();
   for (const dayId of days) {
     const override = dayParks[dayId];
-    if (override && override in PARK_TO_RESORT) {
+    if (override && isValidParkId(override)) {
       dayResortMap.set(dayId, PARK_TO_RESORT[override] as ResortId);
       continue;
     }

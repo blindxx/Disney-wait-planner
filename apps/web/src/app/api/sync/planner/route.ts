@@ -172,7 +172,7 @@
  * `plans`/`lightning` always (present-empty is an intentional clear), and
  * `days` only when present and valid. Any other key already in the stored
  * row — including a domain this server build has never heard of, such as a
- * future SH.3 `dayMeta` written by a newer client — survives untouched,
+ * future SH.3 `dayAutoFallbacks` written by a newer client — survives untouched,
  * because the merge starts from the existing stored object rather than
  * from a fixed list of fields to reconstruct. This generalizes and
  * replaces the old bespoke "if incoming lacks `days`, read and re-splice

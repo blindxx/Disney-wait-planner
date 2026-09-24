@@ -27,7 +27,7 @@ import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profi
 import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
-import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, PARK_LABELS, daySort, inferDayPark } from "./crossDayChecks";
+import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT, PARK_LABELS, isValidParkId, daySort, inferDayPark } from "./crossDayChecks";
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { resolveExperienceKey } from "./experienceSuggestions";
@@ -244,7 +244,7 @@ function readRestoredDayAutoFallbacks(profileId: string): Record<string, string>
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const result: Record<string, string> = {};
   for (const [dayId, park] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof park === "string" && park in PARK_TO_RESORT) result[dayId] = park;
+    if (typeof park === "string" && isValidParkId(park)) result[dayId] = park;
   }
   return result;
 }
@@ -527,7 +527,7 @@ function buildDayResortMap(
   const map = new Map<string, ResortId>();
   for (const dayId of days) {
     const override = dayParks[dayId];
-    if (override && override in PARK_TO_RESORT) {
+    if (override && isValidParkId(override)) {
       map.set(dayId, PARK_TO_RESORT[override] as ResortId);
       continue;
     }

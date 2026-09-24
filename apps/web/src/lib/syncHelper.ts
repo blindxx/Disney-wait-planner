@@ -784,6 +784,7 @@ import {
   parseConfirmedPlannerDomainFact,
   parseConfirmedDaysFact,
   parseConfirmedDayMetaFact,
+  parseConfirmedDayParksFact,
   resolveConfirmedDomainState,
   confirmedFactRevisionIsUnambiguous,
   acceptedDomainFactsFromBeacon,
@@ -1995,9 +1996,15 @@ export function purgeProfileSyncState(profileId: string): void {
 
 // ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────
 
-/** The four synced domains this module tracks confirmed facts for. */
-type ConfirmedDomainName = "plans" | "lightning" | "days" | "dayMeta";
-const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = ["plans", "lightning", "days", "dayMeta"];
+/** The five synced domains this module tracks confirmed facts for. */
+type ConfirmedDomainName = "plans" | "lightning" | "days" | "dayMeta" | "dayParks";
+const CONFIRMED_DOMAIN_NAMES: readonly ConfirmedDomainName[] = [
+  "plans",
+  "lightning",
+  "days",
+  "dayMeta",
+  "dayParks",
+];
 
 /**
  * SH.2 architecture (Codex P1, 11th round; storage representation replaced
@@ -2073,6 +2080,7 @@ function parseConfirmedFactForDomain(
 ): ConfirmedDomainFact<unknown> | null {
   if (domain === "days") return parseConfirmedDaysFact(raw);
   if (domain === "dayMeta") return parseConfirmedDayMetaFact(raw);
+  if (domain === "dayParks") return parseConfirmedDayParksFact(raw);
   return parseConfirmedPlannerDomainFact(raw);
 }
 
@@ -2146,6 +2154,7 @@ export function getConfirmedState(userId: string, profileId: string): ConfirmedP
       lightning: { status: "none" },
       days: { status: "none" },
       dayMeta: { status: "none" },
+      dayParks: { status: "none" },
     };
   }
   const state = {} as ConfirmedPlannerState;
@@ -2459,11 +2468,11 @@ function recordConfirmedFactBody(
       if (domain === "days") {
         const parsedDays: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
         currentCanonicalValue = Array.isArray(parsedDays) ? parsedDays : null;
-      } else if (domain === "dayMeta") {
-        const parsedDayMeta: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
+      } else if (domain === "dayMeta" || domain === "dayParks") {
+        const parsedDayRecord: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
         currentCanonicalValue =
-          parsedDayMeta !== null && typeof parsedDayMeta === "object" && !Array.isArray(parsedDayMeta)
-            ? parsedDayMeta
+          parsedDayRecord !== null && typeof parsedDayRecord === "object" && !Array.isArray(parsedDayRecord)
+            ? parsedDayRecord
             : null;
       } else {
         currentCanonicalValue = parseLocalDatasetEntry(currentRaw);
@@ -2557,7 +2566,8 @@ export async function commitConfirmedBaseline(
     accepted.plans === undefined &&
     accepted.lightning === undefined &&
     accepted.days === undefined &&
-    accepted.dayMeta === undefined
+    accepted.dayMeta === undefined &&
+    accepted.dayParks === undefined
   ) {
     return true;
   }
@@ -2573,6 +2583,9 @@ export async function commitConfirmedBaseline(
   }
   if (accepted.dayMeta !== undefined) {
     allOk = (await recordConfirmedFact(userId, profileId, "dayMeta", revision, accepted.dayMeta)) && allOk;
+  }
+  if (accepted.dayParks !== undefined) {
+    allOk = (await recordConfirmedFact(userId, profileId, "dayParks", revision, accepted.dayParks)) && allOk;
   }
   return allOk;
 }
@@ -3444,6 +3457,12 @@ function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload)
       editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayMeta"))),
     };
   }
+  if (payload.dayParks !== undefined) {
+    domains.dayParks = {
+      digest: canonicalDigest(payload.dayParks),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayParks"))),
+    };
+  }
   return domains;
 }
 
@@ -3796,7 +3815,7 @@ export async function reconcilePendingOperations(
           if (domain === "days") {
             const parsed: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
             currentValue = Array.isArray(parsed) ? parsed : null;
-          } else if (domain === "dayMeta") {
+          } else if (domain === "dayMeta" || domain === "dayParks") {
             const parsed: unknown = currentRaw !== null ? JSON.parse(currentRaw) : null;
             currentValue = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
           } else {
@@ -4238,6 +4257,7 @@ export type PulledPlannerEnvelope =
       lightning: null;
       days?: undefined;
       dayMeta?: undefined;
+      dayParks?: undefined;
       revision: number | null;
       opStatuses: OpStatus[];
     };
@@ -4669,6 +4689,28 @@ function readLocalDayMeta(profileId: string): unknown {
 }
 
 /**
+ * SH.3.3 — read the profile's locally persisted dayParks record
+ * (dwp:{profileId}:dayParks, owned/written by the Plans page, reusing
+ * SH.3.1's commitLocalDomainRawSync-backed saveDayParks()) for inclusion in
+ * the sync payload. Mirrors readLocalDayMeta() exactly — `undefined` for a
+ * MISSING key (this device has never touched dayParks locally at all — "no
+ * opinion", never an intentional clear) or a malformed/non-object raw value;
+ * a genuinely parsed plain object — INCLUDING an intentionally-empty `{}`
+ * (e.g. after Clear All) — is handed through as-is for
+ * buildSyncedPlannerPayload()'s own sanitizeDayParks() to validate.
+ */
+function readLocalDayParks(profileId: string): unknown {
+  try {
+    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayParks"));
+    if (raw === null) return undefined;
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Read the current plans + lightning + days for a profile from localStorage
  * and construct a SyncedPlannerPayload.
  *
@@ -4716,7 +4758,8 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
 
     const days = readLocalDaysOrder(profileId);
     const dayMeta = readLocalDayMeta(profileId);
-    return buildSyncedPlannerPayload(plans, lightning, days, dayMeta);
+    const dayParks = readLocalDayParks(profileId);
+    return buildSyncedPlannerPayload(plans, lightning, days, dayMeta, dayParks);
   } catch {
     return null;
   }
@@ -5191,6 +5234,7 @@ async function doPush(): Promise<void> {
               lightning: payload.lightning,
               days: payload.days,
               dayMeta: payload.dayMeta,
+              dayParks: payload.dayParks,
             });
           }
         } catch {
