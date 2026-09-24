@@ -2183,6 +2183,31 @@ export default function PlansPage() {
     setDayParks(loadDayParks(dayParksKeyRef.current));
     // Phase 10.4.1 — load persisted per-day Auto fallbacks (survives reloads)
     setDayAutoFallbacks(loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current));
+    // SH.3.1 Codex follow-up (P2, reviewed commit 99f311c) — "prune
+    // annotations on signed-out mounts." reconcileAnnotationsForDays() was
+    // previously reachable only from the authenticated cloud-pull effect
+    // below and the cross-tab `days` storage listener — both MISS the case
+    // where no Plans tab was open when some other path (Lightning's own
+    // pull, another device entirely) last changed durable `days`, and this
+    // mount is now happening signed OUT (or before the pull below has run):
+    // no historical storage event exists to replay, and the pull effect
+    // never runs at all. The three loads just above can render orphaned
+    // dayMeta/dayParks/dayAutoFallbacks entries indefinitely in that case.
+    // This is this page's AUTH-INDEPENDENT initialization effect (`[]`
+    // deps, runs exactly once per mount for every sessionStatus, ALWAYS
+    // before the pull effect below even starts — that effect's own first
+    // statement is `if (!initialized) return;`), so it is the highest
+    // boundary that fires for every mount regardless of auth/cloud
+    // availability, without adding a second, competing initialization path.
+    // Fire-and-forget, same as the storage listener's call: this effect
+    // callback is synchronous and there is no "pull" for this trigger to go
+    // stale against, so `() => true` is the correct, always-valid
+    // `isStillValid` — mirrors every other auth-independent caller of this
+    // shared function. Reuses the SAME CAS-protected, durable-fact-aware,
+    // fresh-days-revalidating reconciliation already established for the
+    // pull and storage-listener paths — no duplicated pruning logic, and
+    // this effect's own `[]` deps mean it cannot loop or re-fire on its own.
+    void reconcileAnnotationsForDays(() => true);
     setAutoSortEnabled(loadSortPref());
     setInitialized(true);
 

@@ -212,6 +212,13 @@ export const DEV_PRUNE_ORPHANED_DAY_RECORD_CASES: Array<{
     expectedResult: { "day-1": { label: "Arrival" } },
     expectedChanged: true,
   },
+  {
+    name: "REQUIRED (Codex P2 finding, reviewed commit 99f311c) — 'prune annotations on signed-out mounts': no Plans tab was open when `days` last changed (e.g. Lightning's own pull, on a session with no authenticated pull ever running), so no cross-tab storage event exists to replay and this mount is signed OUT — reconcileAnnotationsForDays() must still be reachable from this page's auth-independent initialization effect alone, and pruneOrphanedDayRecord() needs nothing auth/cloud-specific to do so: the SAME `validDayIds`-only contract applies whether the trigger was a pull, a storage event, or a plain mount-time load",
+    record: { "day-1": { label: "Arrival" }, "day-3": { label: "Orphaned before this device ever signed in" } },
+    validDayIds: ["day-1"],
+    expectedResult: { "day-1": { label: "Arrival" } },
+    expectedChanged: true,
+  },
 ];
 
 /**
