@@ -50,6 +50,7 @@ import {
   pickWinningDays,
   pickWinningItems,
   pruneOrphanedDayRecord,
+  shouldApplyPrunedDayRecord,
   reconcilePlannerSnapshot,
   resolveIdentityKey,
   PARK_TO_RESORT,
@@ -111,7 +112,9 @@ import {
   setLocalContentOwner,
   selectPendingOpBatch,
   reconcilePendingOperations,
+  commitLocalDomainRaw,
   commitLocalDomainRawSync,
+  isLocalDomainCommitSuccess,
   commitDomainHydration,
   beginPullContext,
   isPullContextCurrent,
@@ -3142,29 +3145,78 @@ export default function PlansPage() {
         // `!daysWriteFailed` since `winningDays` is only durably true once
         // the days write itself actually landed (or was already a no-op) —
         // pruning against a winner that lost its own commit race would prune
-        // against a value that never became authoritative. Reads/writes are
-        // plain localStorage, exactly like the local handlers already do —
-        // dayMeta/dayParks/dayAutoFallbacks stay local-only in SH.3.1, never
-        // pushed or read as sync/conflict evidence.
+        // against a value that never became authoritative.
+        //
+        // Codex follow-up (reviewed commit a6ea487) — the original version of
+        // this block did a plain read (via loadDayMeta/loadDayParks/
+        // loadDayAutoFallbacks) → prune → unconditional localStorage.setItem,
+        // exactly the same shape of race the rest of this pull effect goes to
+        // great lengths to avoid for plans/lightning/days: a concurrent
+        // same-profile write in ANOTHER tab (e.g. the user renaming a day via
+        // handleSaveDayMeta) landing between the read and the write would be
+        // silently overwritten by this stale prune, with no CAS to catch it
+        // and no way for a later 'storage' event to recover content already
+        // clobbered. The fix reuses the SAME established local-domain commit
+        // primitive plans/lightning/days already use for exactly this
+        // problem — commitLocalDomainRaw() (syncHelper.ts): it re-reads the
+        // canonical key's raw bytes ONE LAST TIME, inside a Web-Locks-
+        // serialized critical section (cross-tab, not merely cross-await),
+        // immediately before writing, and only writes when those bytes still
+        // equal `currentRaw` (captured here, before the prune decision) —
+        // otherwise it reports "superseded" and writes nothing, exactly the
+        // same CAS discipline the items/lightning/days commits above already
+        // rely on. dayMeta/dayParks/dayAutoFallbacks still do NOT get their
+        // own local-edit-fact log, confirmed facts, hydration provenance, or
+        // any ConfirmedDomainName entry — this call sits at the SAME layer
+        // commitDomainHydration() itself is built on, not the sync/conflict
+        // layer above it, so these three datasets remain fully local-only
+        // (never pushed, never read as sync/conflict evidence) in SH.3.1.
+        // `currentRaw` and the parsed load below are two deliberately
+        // separate reads of the same key, back-to-back with no `await`
+        // between them — the identical pattern currentItemsRaw/currentDays/
+        // currentLightningRaw already use earlier in this same pull for the
+        // exact same reason (see their own doc above).
+        async function commitPrunedDayRecord<T>(
+          key: string,
+          currentRaw: string | null,
+          pruned: { result: Record<string, T>; changed: boolean }
+        ): Promise<Record<string, T> | null> {
+          if (!pruned.changed) return null;
+          const status = await commitLocalDomainRaw(
+            key,
+            currentRaw,
+            JSON.stringify(pruned.result),
+            isPullCurrent
+          );
+          return shouldApplyPrunedDayRecord(pruned.changed, isLocalDomainCommitSuccess(status))
+            ? pruned.result
+            : null;
+        }
         if (!daysWriteFailed) {
-          const currentDayMetaOnDisk = loadDayMeta(dayMetaKeyRef.current);
-          const dayMetaPrune = pruneOrphanedDayRecord(currentDayMetaOnDisk, winningDays);
-          if (dayMetaPrune.changed) {
-            saveDayMeta(dayMetaPrune.result, dayMetaKeyRef.current);
-            setDayMeta(dayMetaPrune.result);
-          }
-          const currentDayParksOnDisk = loadDayParks(dayParksKeyRef.current);
-          const dayParksPrune = pruneOrphanedDayRecord(currentDayParksOnDisk, winningDays);
-          if (dayParksPrune.changed) {
-            saveDayParks(dayParksPrune.result, dayParksKeyRef.current);
-            setDayParks(dayParksPrune.result);
-          }
-          const currentDayAutoFallbacksOnDisk = loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current);
-          const dayAutoFallbacksPrune = pruneOrphanedDayRecord(currentDayAutoFallbacksOnDisk, winningDays);
-          if (dayAutoFallbacksPrune.changed) {
-            saveDayAutoFallbacks(dayAutoFallbacksPrune.result, dayAutoFallbacksKeyRef.current);
-            setDayAutoFallbacks(dayAutoFallbacksPrune.result);
-          }
+          const dayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
+          const dayMetaPrune = pruneOrphanedDayRecord(loadDayMeta(dayMetaKeyRef.current), winningDays);
+          const appliedDayMeta = await commitPrunedDayRecord(dayMetaKeyRef.current, dayMetaRaw, dayMetaPrune);
+          if (!isPullCurrent()) return;
+          if (appliedDayMeta) setDayMeta(appliedDayMeta);
+
+          const dayParksRaw = localStorage.getItem(dayParksKeyRef.current);
+          const dayParksPrune = pruneOrphanedDayRecord(loadDayParks(dayParksKeyRef.current), winningDays);
+          const appliedDayParks = await commitPrunedDayRecord(dayParksKeyRef.current, dayParksRaw, dayParksPrune);
+          if (!isPullCurrent()) return;
+          if (appliedDayParks) setDayParks(appliedDayParks);
+
+          const dayAutoFallbacksRaw = localStorage.getItem(dayAutoFallbacksKeyRef.current);
+          const dayAutoFallbacksPrune = pruneOrphanedDayRecord(
+            loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current),
+            winningDays
+          );
+          const appliedDayAutoFallbacks = await commitPrunedDayRecord(
+            dayAutoFallbacksKeyRef.current,
+            dayAutoFallbacksRaw,
+            dayAutoFallbacksPrune
+          );
+          if (!isPullCurrent()) return;
+          if (appliedDayAutoFallbacks) setDayAutoFallbacks(appliedDayAutoFallbacks);
         }
         // SH.2.2 — PARTIAL-APPLY PROVENANCE: commitDomain() above already
         // attempted to record Days' own confirmed-baseline fact or

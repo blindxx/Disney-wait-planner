@@ -201,6 +201,71 @@ export const DEV_PRUNE_ORPHANED_DAY_RECORD_CASES: Array<{
 ];
 
 /**
+ * SH.3.1 (Codex follow-up on reviewed commit a6ea487) — whether a prune
+ * computed by pruneOrphanedDayRecord() should actually be applied to a
+ * page's React state, given the outcome of the CAS-protected commit that
+ * attempted to persist it (see plans/page.tsx's pull effect:
+ * dayMeta/dayParks/dayAutoFallbacks pruning writes through
+ * commitLocalDomainRaw() — syncHelper.ts — never a blind
+ * localStorage.setItem(), specifically so a concurrent same-profile write
+ * from another tab landing between the read and the write is detected and
+ * wins over a stale prune instead of being silently overwritten by it).
+ *
+ * `changed` false means pruneOrphanedDayRecord() found nothing stale — no
+ * commit was even attempted, so there is nothing to apply regardless of
+ * `commitSucceeded`. `changed` true with `commitSucceeded` false means a
+ * commit WAS attempted but lost its CAS race (another tab's write landed
+ * first) or otherwise failed to persist — that newer/foreign content must
+ * win, so the prune is dropped without ever touching React state; the
+ * page's existing cross-tab `storage` listener (or the next pull) is what
+ * eventually reflects whatever the other write actually left on disk,
+ * never this function.
+ */
+export function shouldApplyPrunedDayRecord(changed: boolean, commitSucceeded: boolean): boolean {
+  return changed && commitSucceeded;
+}
+
+/**
+ * Reference cases for shouldApplyPrunedDayRecord(). Run from Node:
+ *   import { DEV_SHOULD_APPLY_PRUNED_DAY_RECORD_CASES, shouldApplyPrunedDayRecord } from "@/lib/crossDayChecks";
+ *   DEV_SHOULD_APPLY_PRUNED_DAY_RECORD_CASES.forEach(c => {
+ *     const got = shouldApplyPrunedDayRecord(c.changed, c.commitSucceeded);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_SHOULD_APPLY_PRUNED_DAY_RECORD_CASES: Array<{
+  name: string;
+  changed: boolean;
+  commitSucceeded: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "nothing was stale — no commit was even attempted, nothing to apply",
+    changed: false,
+    commitSucceeded: false,
+    expected: false,
+  },
+  {
+    name: "nothing was stale — irrelevant what commitSucceeded says, still nothing to apply",
+    changed: false,
+    commitSucceeded: true,
+    expected: false,
+  },
+  {
+    name: "pruned and the CAS-protected commit landed (committed or noop) — apply to React state",
+    changed: true,
+    commitSucceeded: true,
+    expected: true,
+  },
+  {
+    name: "REQUIRED (Codex finding) — pruned but the commit lost its CAS race to a concurrent same-profile write in another tab (status 'superseded') — must NOT apply the stale prune over the newer write",
+    changed: true,
+    commitSucceeded: false,
+    expected: false,
+  },
+];
+
+/**
  * Extracts a raw, untyped item's `dayId`, or undefined when it's missing,
  * non-string, or the entry itself isn't an object — used by
  * reconcilePlannerSnapshot() below to filter/discover days from the
