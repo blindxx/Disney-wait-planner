@@ -336,7 +336,13 @@ export default function SettingsPage() {
       `Delete profile "${current?.name ?? activeProfileId}"? All its stored data will be removed.`
     );
     if (!confirmed) return;
-    deleteProfile(activeProfileId);
+    // SH.4.1 Codex P1 follow-up (3rd round) — scope the local-delete/
+    // rediscovery-suppression marker to the currently authenticated account
+    // (or the shared unowned bucket when signed out), so this delete can
+    // never suppress a DIFFERENT account's own, distinct profile under the
+    // same grandfathered id on a shared browser — see deleteProfile's own
+    // doc in profileStorage.ts.
+    deleteProfile(activeProfileId, authenticatedUserId);
     const remaining = getProfiles();
     setProfiles(remaining);
     setActiveProfileIdState("default");

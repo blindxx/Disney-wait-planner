@@ -16,6 +16,7 @@
  */
 
 import { purgeProfileSyncState } from "./syncHelper";
+import { sanitizeProfileName } from "./syncIdentity";
 
 // ===== TYPES =====
 
@@ -30,144 +31,371 @@ const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
 const PROFILES_LIST_KEY = "dwp.profiles";
 
 /**
- * SH.4.1 (Codex P1 findings #2/#3, follow-up rounds) — durable, per-profile-id
+ * SH.4.1 (Codex follow-up rounds) — durable, per-`(accountKey, profileId)`
  * REGISTRY PROVENANCE, entirely separate from `dwp.profiles` (what a device
  * shows) and from syncHelper.ts's planner-content ownership marker
  * (`getLocalContentOwner`/`setLocalContentOwner`, which governs PLANNER DATA
  * for a shared browser, not this list). This is the minimum durable state
  * needed to answer two questions no single reconciliation round can answer
  * from the network response alone:
- *   - `owner`: which authenticated account has this device already
- *     associated this profile id with? Unset means "unowned" — a genuinely
- *     pre-SH.4/never-yet-reconciled legacy profile, safely adoptable by
- *     whichever account's reconciliation round reaches it first. Once set,
- *     it is NEVER reassigned to a different account by this device (see
- *     markProfileOwner) — this is what stops signing in as account B on a
- *     browser that already associated a profile id with account A from
- *     re-adopting/merging that id into B.
- *   - `locallyDeleted`: did this device's own explicit Delete action
- *     (deleteProfile below) remove this id? This is a device-local
- *     COMPATIBILITY SHIM ONLY, not a real tombstone — it does not touch the
- *     server's `user_profiles`/`user_planner` rows, so it cannot help a
- *     DIFFERENT device learn about the deletion. It exists purely so THIS
- *     device's own next registry reconciliation round doesn't immediately
- *     rediscover the id it was just told to forget, until SH.4.3 implements
- *     real server-side tombstones this device can also observe.
- *     ACCOUNT-SCOPED when read (Codex P1 follow-up, 2nd round) via `owner`:
- *     see getLocallyDeletedProfileIds's own doc — the flag itself stays a
- *     single per-id boolean (no per-account list), but is only ever HONORED
- *     for the account that owns the id, or for everyone when the id is
- *     still genuinely unowned. This is what stops account A's delete of a
- *     grandfathered id from hiding account B's own, distinct profile under
- *     that same literal id on a shared browser.
+ *   - `owned`: has THIS account's reconciliation confirmed that this
+ *     profile id belongs to it (per the server's own GET/PUT response)?
+ *   - `locallyDeleted`: did THIS account's session (or no session at all —
+ *     see UNOWNED_ACCOUNT_KEY below) explicitly Delete this id
+ *     (deleteProfile below) on this device? A device-local COMPATIBILITY
+ *     SHIM ONLY, not a real tombstone — it does not touch the server's
+ *     `user_profiles`/`user_planner` rows, so it cannot help a DIFFERENT
+ *     DEVICE learn about the deletion. It exists purely so THIS device's
+ *     own next registry reconciliation round doesn't immediately
+ *     rediscover the id it was just told to forget, until SH.4.3
+ *     implements real server-side tombstones this device can also observe.
+ *
+ * Codex P1 follow-up (3rd round) — keyed by `(profileId, accountKey)`, NOT
+ * by profileId alone: two different accounts can each independently record
+ * BOTH facts for the identical literal grandfathered profile id, without
+ * either one affecting the other. This replaces the prior shape
+ * (`{ [profileId]: { owner?: string; locallyDeleted?: boolean } }`, a
+ * single global slot per id), whose "owner" field could only ever name ONE
+ * account — a genuine second account with its own legitimate, distinct
+ * history under the same local id could never get its own ownership
+ * record, AND (Codex P1, this round) that same single-slot design broke
+ * delete suppression for that second account entirely, since a
+ * `locallyDeleted` flag recorded under one account's ownership was then
+ * unconditionally cross-referenced against whichever single owner
+ * happened to be recorded, permanently — the exact bug this reshaping
+ * fixes.
+ *
+ * `accountKey` is either a real authenticated userId, or the sentinel
+ * UNOWNED_ACCOUNT_KEY for a fact recorded while no account was
+ * authenticated (or migrated from the old single-slot shape's genuinely
+ * unowned case — see migrateProfileRegistryState) — an ambiguous case with
+ * no specific account to scope to, so it is treated the ORIGINAL way: it
+ * applies for whichever account reconciles the id next, exactly like a
+ * pre-SH.4 legacy profile with no owner at all always has.
+ *
  * Deliberately a flat, unbounded-growth-tolerant map (bounded in practice by
- * however many profile ids this device has ever touched — never pruned, no
- * revision/ledger, no conflict resolution) — this is provenance metadata,
- * not another planner-style sync engine.
+ * however many (profile id, account) pairs this device has ever touched —
+ * never pruned, no revision/ledger, no conflict resolution) — this is
+ * provenance metadata, not another planner-style sync engine.
  */
 const PROFILE_REGISTRY_STATE_KEY = "dwp.profileRegistryState";
 
-export type ProfileRegistryLocalState = {
-  owner?: string;
+/** Sentinel account key for a provenance fact recorded with no authenticated account. */
+export const UNOWNED_ACCOUNT_KEY = "__unowned__";
+
+export type ProfileRegistryAccountState = {
+  owned?: boolean;
   locallyDeleted?: boolean;
 };
 
-function readProfileRegistryState(): Record<string, ProfileRegistryLocalState> {
+/** `{ [profileId]: { [accountKey]: ProfileRegistryAccountState } }` */
+export type ProfileRegistryState = Record<string, Record<string, ProfileRegistryAccountState>>;
+
+/** Structural shape of a value under the OLD (pre-3rd-round) single-slot-per-id map. */
+type LegacyProfileRegistryEntry = { owner?: string; locallyDeleted?: boolean };
+
+function isLegacyEntry(value: unknown): value is LegacyProfileRegistryEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  // A NEW-shape value is an account map: every one of ITS OWN values is
+  // itself an object, never the literal keys "owner"/"locallyDeleted"
+  // holding a plain string/boolean. Realistic authenticated userIds (an
+  // adapter-issued numeric id, or an email address) can never collide with
+  // either literal key name, so this structural check reliably tells the
+  // two shapes apart.
+  const ownerIsScalar = v.owner === undefined || typeof v.owner === "string";
+  const deletedIsScalar = v.locallyDeleted === undefined || typeof v.locallyDeleted === "boolean";
+  const hasAnyLegacyField = v.owner !== undefined || v.locallyDeleted !== undefined;
+  return hasAnyLegacyField && ownerIsScalar && deletedIsScalar;
+}
+
+/**
+ * Migrates whatever shape is currently stored under PROFILE_REGISTRY_STATE_KEY
+ * into the current per-`(profileId, accountKey)` shape — READ-TIME
+ * normalization (mirrors this module's own bootstrapProfiles() legacy
+ * migration pattern), so existing Preview/production state from either
+ * pre-SH.4.1 (no key at all) or the prior single-slot-per-id round is read
+ * safely rather than stranded or misinterpreted. A legacy entry's `owner`
+ * (if any) becomes that SAME account's own `owned: true` fact; a legacy
+ * entry with NO owner (genuinely unowned/ambiguous) folds into
+ * UNOWNED_ACCOUNT_KEY, preserving the original "applies to whoever
+ * reconciles it next" behavior for that unambiguous case. Already-new-shape
+ * or unrecognized/malformed values pass through (re-validated field by
+ * field so a corrupted nested value can't crash a later read) or are
+ * dropped, matching this module's existing fail-safe philosophy elsewhere.
+ * Exported for direct DEV testing; not otherwise expected to be called
+ * outside readProfileRegistryState below.
+ *
+ * Run from Node:
+ *   import { DEV_MIGRATE_PROFILE_REGISTRY_STATE_CASES, migrateProfileRegistryState } from "@/lib/profileStorage";
+ *   DEV_MIGRATE_PROFILE_REGISTRY_STATE_CASES.forEach(c => {
+ *     const got = migrateProfileRegistryState(c.input);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function migrateProfileRegistryState(input: Record<string, unknown>): ProfileRegistryState {
+  const migrated: ProfileRegistryState = {};
+  for (const [profileId, value] of Object.entries(input)) {
+    if (isLegacyEntry(value)) {
+      const key = value.owner ?? UNOWNED_ACCOUNT_KEY;
+      const entry: ProfileRegistryAccountState = {};
+      if (value.owner) entry.owned = true;
+      if (value.locallyDeleted) entry.locallyDeleted = true;
+      migrated[profileId] = { [key]: entry };
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue; // malformed — drop
+    const byAccount: Record<string, ProfileRegistryAccountState> = {};
+    for (const [accountKey, accountValue] of Object.entries(value as Record<string, unknown>)) {
+      if (!accountValue || typeof accountValue !== "object" || Array.isArray(accountValue)) continue;
+      const v = accountValue as Record<string, unknown>;
+      const entry: ProfileRegistryAccountState = {};
+      if (v.owned === true) entry.owned = true;
+      if (v.locallyDeleted === true) entry.locallyDeleted = true;
+      if (Object.keys(entry).length > 0) byAccount[accountKey] = entry;
+    }
+    if (Object.keys(byAccount).length > 0) migrated[profileId] = byAccount;
+  }
+  return migrated;
+}
+
+export const DEV_MIGRATE_PROFILE_REGISTRY_STATE_CASES: Array<{
+  name: string;
+  input: Record<string, unknown>;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "legacy shape with owner + locallyDeleted — preserved under that account's own entry",
+    input: { family: { owner: "userA", locallyDeleted: true } },
+    expected: { family: { userA: { owned: true, locallyDeleted: true } } },
+  },
+  {
+    name: "legacy shape with only locallyDeleted (genuinely unowned) — folds into the shared unowned bucket",
+    input: { mom: { locallyDeleted: true } },
+    expected: { mom: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+  },
+  {
+    name: "legacy shape with only owner (no deletion) — preserved as that account's owned fact",
+    input: { mom: { owner: "userA" } },
+    expected: { mom: { userA: { owned: true } } },
+  },
+  {
+    name: "already new-shape input — passes through unchanged (idempotent)",
+    input: { family: { userA: { owned: true }, userB: { locallyDeleted: true } } },
+    expected: { family: { userA: { owned: true }, userB: { locallyDeleted: true } } },
+  },
+  {
+    name: "empty input — empty result",
+    input: {},
+    expected: {},
+  },
+  {
+    name: "malformed entry (not an object) — dropped, not crashed on",
+    input: { broken: "not-an-object" as unknown as Record<string, unknown> },
+    expected: {},
+  },
+];
+
+function readProfileRegistryState(): ProfileRegistryState {
   if (typeof window === "undefined") return {};
   try {
     const raw = localStorage.getItem(PROFILE_REGISTRY_STATE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return parsed as Record<string, ProfileRegistryLocalState>;
+    return migrateProfileRegistryState(parsed as Record<string, unknown>);
   } catch {
     return {};
   }
 }
 
-function writeProfileRegistryState(state: Record<string, ProfileRegistryLocalState>): void {
+function writeProfileRegistryState(state: ProfileRegistryState): void {
   try {
     localStorage.setItem(PROFILE_REGISTRY_STATE_KEY, JSON.stringify(state));
   } catch {}
 }
 
 /**
- * Durably associate `profileId` with `ownerUserId`'s account. Called by
- * profileRegistrySync.ts's reconciliation orchestrator once a round has
- * confirmed (via the server's own GET response, or a just-accepted PUT) that
- * an id belongs to the current account. NEVER reassigns an id already
- * durably owned by a DIFFERENT account — ownership, once claimed on this
- * device, is permanent from this device's point of view; re-stamping the
- * SAME owner is a harmless no-op. This is the guard that stops account B's
- * reconciliation from treating an A-owned id sitting in this browser's
- * `dwp.profiles` as adoptable.
+ * Pure state transition: durably associate `profileId` with `ownerUserId`'s
+ * account within `state`, returning the updated state (the SAME object
+ * reference when already recorded — idempotent, and lets callers skip an
+ * unnecessary write). Codex P1 follow-up (3rd round) — writes ONLY to
+ * `state[profileId][ownerUserId]`, never touching any OTHER account's own
+ * entry for the same profileId — this is what lets two different accounts
+ * each independently own the identical literal id.
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_PROFILE_OWNER_STAMP_CASES, applyProfileOwnerStamp } from "@/lib/profileStorage";
+ *   DEV_APPLY_PROFILE_OWNER_STAMP_CASES.forEach(c => {
+ *     let state = c.initialState;
+ *     for (const step of c.steps) state = applyProfileOwnerStamp(state, step.profileId, step.ownerUserId);
+ *     console.log(JSON.stringify(state) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function applyProfileOwnerStamp(
+  state: ProfileRegistryState,
+  profileId: string,
+  ownerUserId: string
+): ProfileRegistryState {
+  if (state[profileId]?.[ownerUserId]?.owned) return state;
+  return {
+    ...state,
+    [profileId]: {
+      ...state[profileId],
+      [ownerUserId]: { ...state[profileId]?.[ownerUserId], owned: true },
+    },
+  };
+}
+
+export const DEV_APPLY_PROFILE_OWNER_STAMP_CASES: Array<{
+  name: string;
+  initialState: ProfileRegistryState;
+  steps: Array<{ profileId: string; ownerUserId: string }>;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "authoritative server discovery stamps (userId, profileId) correctly",
+    initialState: {},
+    steps: [{ profileId: "family", ownerUserId: "userA" }],
+    expected: { family: { userA: { owned: true } } },
+  },
+  {
+    name: "Codex P1 follow-up #1 — A and B can both independently own the identical literal grandfathered id",
+    initialState: {},
+    steps: [
+      { profileId: "family", ownerUserId: "userA" },
+      { profileId: "family", ownerUserId: "userB" },
+    ],
+    expected: { family: { userA: { owned: true }, userB: { owned: true } } },
+  },
+  {
+    name: "re-stamping the same (profileId, userId) pair is idempotent and never disturbs another account's own entry",
+    initialState: { family: { userA: { owned: true }, userB: { owned: true, locallyDeleted: true } } },
+    steps: [{ profileId: "family", ownerUserId: "userA" }],
+    expected: { family: { userA: { owned: true }, userB: { owned: true, locallyDeleted: true } } },
+  },
+];
+
+/**
+ * Durably associate `profileId` with `ownerUserId`'s account — see
+ * applyProfileOwnerStamp's own doc for the pure transition this wraps.
+ * Called by profileRegistrySync.ts's reconciliation orchestrator once a
+ * round has confirmed (via an authoritative GET) that an id belongs to the
+ * current account.
  */
 export function markProfileOwner(profileId: string, ownerUserId: string): void {
   const state = readProfileRegistryState();
-  const existing = state[profileId];
-  if (existing?.owner === ownerUserId) return;
-  if (existing?.owner && existing.owner !== ownerUserId) return;
-  state[profileId] = { ...existing, owner: ownerUserId };
-  writeProfileRegistryState(state);
+  const updated = applyProfileOwnerStamp(state, profileId, ownerUserId);
+  if (updated !== state) writeProfileRegistryState(updated);
 }
 
 /**
- * Bulk read of every profile id this device has durably associated with an
- * account, as `{ [profileId]: ownerUserId }`. An id absent from this map has
- * never been claimed by any account — see markProfileOwner's own doc. Pass
- * this straight into profileRegistrySync.ts's computeProfilesToAdopt, which
- * treats it as plain input data (kept pure/DEV-testable there rather than
- * reading localStorage itself).
+ * Pure state transition: mark `profileId` as explicitly, locally deleted
+ * under `accountKey` (a real userId, or UNOWNED_ACCOUNT_KEY when no account
+ * was authenticated at delete time) within `state`, returning the updated
+ * state. Never touches any OTHER account's own entry for the same
+ * profileId — see this module's own doc above for why that is exactly the
+ * fix for account A's delete suppressing account B's distinct same-id
+ * profile.
  */
-export function getProfileOwners(): Record<string, string> {
-  const state = readProfileRegistryState();
-  const owners: Record<string, string> = {};
-  for (const [id, entry] of Object.entries(state)) {
-    if (entry?.owner) owners[id] = entry.owner;
+export function applyLocalDeletionMarker(
+  state: ProfileRegistryState,
+  profileId: string,
+  accountKey: string
+): ProfileRegistryState {
+  return {
+    ...state,
+    [profileId]: {
+      ...state[profileId],
+      [accountKey]: { ...state[profileId]?.[accountKey], locallyDeleted: true },
+    },
+  };
+}
+
+/**
+ * Pure state transition: clear every account's local-deletion marker for
+ * `profileId` (including the UNOWNED_ACCOUNT_KEY sentinel), preserving each
+ * account's own `owned` fact if any. Called when this exact id is
+ * explicitly recreated (createProfile below) — a deliberate new Create is
+ * this device's own signal that the id should be eligible for discovery/
+ * adoption again, regardless of which account (or none) had previously
+ * deleted it.
+ */
+export function clearLocalDeletionMarkers(state: ProfileRegistryState, profileId: string): ProfileRegistryState {
+  const byAccount = state[profileId];
+  if (!byAccount) return state;
+  let changed = false;
+  const updated: Record<string, ProfileRegistryAccountState> = {};
+  for (const [key, entry] of Object.entries(byAccount)) {
+    if (entry?.locallyDeleted) {
+      changed = true;
+      if (entry.owned) updated[key] = { owned: true };
+    } else {
+      updated[key] = entry;
+    }
   }
-  return owners;
+  if (!changed) return state;
+  const next = { ...state };
+  if (Object.keys(updated).length === 0) {
+    delete next[profileId];
+  } else {
+    next[profileId] = updated;
+  }
+  return next;
 }
 
-/**
- * Mark `profileId` as explicitly, locally deleted — see this const's module
- * doc above for the full compatibility-shim rationale. Internal to this
- * module; only deleteProfile() below should ever call this.
- */
-function markProfileLocallyDeleted(profileId: string): void {
+export const DEV_CLEAR_LOCAL_DELETION_MARKERS_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "recreate clears every account's deletion marker, preserving each account's owned fact",
+    state: {
+      family: { userA: { owned: true, locallyDeleted: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } },
+    },
+    profileId: "family",
+    expected: { family: { userA: { owned: true } } },
+  },
+  {
+    name: "no deletion marker present — state returned unchanged",
+    state: { family: { userA: { owned: true } } },
+    profileId: "family",
+    expected: { family: { userA: { owned: true } } },
+  },
+  {
+    name: "unknown profileId — state returned unchanged",
+    state: {},
+    profileId: "family",
+    expected: {},
+  },
+];
+
+function markProfileLocallyDeleted(profileId: string, accountKey: string): void {
   const state = readProfileRegistryState();
-  state[profileId] = { ...state[profileId], locallyDeleted: true };
-  writeProfileRegistryState(state);
+  writeProfileRegistryState(applyLocalDeletionMarker(state, profileId, accountKey));
 }
 
-/**
- * Clear a prior local-deletion marker for `profileId` — called when this
- * exact id is explicitly recreated (createProfile below), since a
- * deliberate new Create is this device's own signal that the id should be
- * eligible for discovery/adoption again. Ownership (if any) is deliberately
- * left untouched — only the local-delete shim is cleared. Internal to this
- * module; only createProfile() below should ever call this.
- */
 function clearLocalDeletionMarker(profileId: string): void {
   const state = readProfileRegistryState();
-  const existing = state[profileId];
-  if (!existing?.locallyDeleted) return;
-  state[profileId] = { owner: existing.owner };
-  writeProfileRegistryState(state);
+  const updated = clearLocalDeletionMarkers(state, profileId);
+  if (updated !== state) writeProfileRegistryState(updated);
 }
 
 /**
- * Pure filter: given the full per-id provenance state and the CURRENT
- * reconciling account, return the ids whose local-delete suppression
- * applies to that account. Codex P1 follow-up (2nd round) — ACCOUNT-SCOPED,
- * not global: a `locallyDeleted` id is only included when it has NO
- * recorded owner yet (a genuinely unowned/ambiguous legacy id — safe to
- * suppress for whoever reconciles it next, matching the ORIGINAL behavior
- * for that unambiguous case) OR when its owner IS `currentOwnerUserId`. An
- * id durably owned by a DIFFERENT account is never suppressed here, even if
- * THIS DEVICE'S single shared `dwp.profiles` list happens to carry that
- * same literal id for a grandfathered profile — deleting account A's
- * "family" must never hide account B's own, distinct "family" from B's own
- * reconciliation. Pure — takes the state as a parameter, so it stays
+ * Pure filter: given the full per-`(profileId, accountKey)` provenance
+ * state and the CURRENT reconciling account, return the ids whose
+ * local-delete suppression applies to that account — ACCOUNT-SCOPED: an id
+ * is suppressed for `currentOwnerUserId` only when THAT account's own entry
+ * says `locallyDeleted`, or the shared UNOWNED_ACCOUNT_KEY entry does (a
+ * genuinely ambiguous deletion — with no account, or predating this fix's
+ * migration — safe to suppress for whoever reconciles it next, matching
+ * the ORIGINAL behavior for that unambiguous case). A DIFFERENT account's
+ * OWN deletion of the identical literal id is never consulted here — that
+ * is exactly what stops account A's delete of a grandfathered id from
+ * hiding account B's own, distinct profile under that same literal id on a
+ * shared browser. Pure — takes the state as a parameter, so it stays
  * directly DEV-testable without a browser/localStorage.
  *
  * Run from Node:
@@ -178,13 +406,14 @@ function clearLocalDeletionMarker(profileId: string): void {
  *   });
  */
 export function selectLocallyDeletedIdsForAccount(
-  state: Record<string, ProfileRegistryLocalState>,
+  state: ProfileRegistryState,
   currentOwnerUserId: string
 ): Set<string> {
   const ids = new Set<string>();
-  for (const [id, entry] of Object.entries(state)) {
-    if (!entry?.locallyDeleted) continue;
-    if (entry.owner === undefined || entry.owner === currentOwnerUserId) {
+  for (const [id, byAccount] of Object.entries(state)) {
+    const mine = byAccount[currentOwnerUserId];
+    const unowned = byAccount[UNOWNED_ACCOUNT_KEY];
+    if (mine?.locallyDeleted || unowned?.locallyDeleted) {
       ids.add(id);
     }
   }
@@ -193,31 +422,48 @@ export function selectLocallyDeletedIdsForAccount(
 
 export const DEV_SELECT_LOCALLY_DELETED_FOR_ACCOUNT_CASES: Array<{
   name: string;
-  state: Record<string, ProfileRegistryLocalState>;
+  state: ProfileRegistryState;
   currentOwnerUserId: string;
   expected: string[];
 }> = [
   {
-    name: "genuinely unowned legacy id, locally deleted — suppressed for whoever reconciles it (unchanged original behavior)",
-    state: { mom: { locallyDeleted: true } },
+    name: "genuinely unowned legacy id, locally deleted (no account) — suppressed for whoever reconciles it (unchanged original behavior)",
+    state: { mom: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
     currentOwnerUserId: "userA",
     expected: ["mom"],
   },
   {
-    name: "Codex P1 follow-up #2 — A owns and deletes 'family'; A's OWN reconciliation still suppresses it",
-    state: { family: { owner: "userA", locallyDeleted: true } },
+    name: "A deletes A's own 'family' — A's OWN reconciliation still suppresses it",
+    state: { family: { userA: { owned: true, locallyDeleted: true } } },
     currentOwnerUserId: "userA",
     expected: ["family"],
   },
   {
-    name: "Codex P1 follow-up #2 — A owns and deletes 'family'; B's reconciliation (same grandfathered id, different account) is NOT suppressed",
-    state: { family: { owner: "userA", locallyDeleted: true } },
+    name: "Codex P1 follow-up (3rd round) — A deletes A's own 'family'; B's reconciliation (same grandfathered id, independent account) is NOT suppressed",
+    state: { family: { userA: { owned: true, locallyDeleted: true } } },
     currentOwnerUserId: "userB",
     expected: [],
   },
   {
+    name: "Codex P1 follow-up (3rd round) — B independently deletes B's own 'family'; A's reconciliation is NOT suppressed",
+    state: { family: { userB: { owned: true, locallyDeleted: true } } },
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "A and B have both independently deleted their own distinct 'family' — each suppresses only for themselves",
+    state: {
+      family: {
+        userA: { owned: true, locallyDeleted: true },
+        userB: { owned: true, locallyDeleted: true },
+      },
+    },
+    currentOwnerUserId: "userA",
+    expected: ["family"],
+  },
+  {
     name: "owned but not locally deleted — never suppressed regardless of account",
-    state: { mom: { owner: "userA" } },
+    state: { mom: { userA: { owned: true } } },
     currentOwnerUserId: "userA",
     expected: [],
   },
@@ -361,9 +607,15 @@ function uniqueId(base: string, existingIds: string[]): string {
 /**
  * Create a new profile with the given display name.
  * Generates a stable id, adds to the profiles list, and returns the new Profile.
+ *
+ * SH.4.1 Codex P2 follow-up — the name is sanitized (trimmed, truncated to
+ * MAX_PROFILE_NAME_LENGTH) via sanitizeProfileName rather than merely
+ * trimmed, so a profile created here can never later be silently rejected
+ * by /api/sync/profiles's server-side validation — see syncIdentity.ts's
+ * own doc for the shared constraint both boundaries now enforce.
  */
 export function createProfile(name: string): Profile {
-  const trimmed = name.trim() || "New Profile";
+  const trimmed = sanitizeProfileName(name) ?? "New Profile";
   const profiles = getProfiles();
   const existingIds = profiles.map((p) => p.id);
   const base = normalizeId(trimmed);
@@ -382,10 +634,14 @@ export function createProfile(name: string): Profile {
 
 /**
  * Rename an existing profile (name only — id stays stable).
- * No-op if the profile id does not exist.
+ * No-op if the profile id does not exist or the name is empty.
+ *
+ * SH.4.1 Codex P2 follow-up — sanitized via sanitizeProfileName (see
+ * createProfile's own doc) so a rename can never exceed the shared
+ * server-validated limit either.
  */
 export function renameProfile(id: string, name: string): void {
-  const trimmed = name.trim();
+  const trimmed = sanitizeProfileName(name);
   if (!trimmed) return;
   const profiles = getProfiles();
   const updated = profiles.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
@@ -396,8 +652,17 @@ export function renameProfile(id: string, name: string): void {
  * Delete a profile: removes it from the list and cleans up all its namespaced keys.
  * The last remaining profile cannot be deleted.
  * If the deleted profile was active, switches active to "default".
+ *
+ * `currentOwnerUserId` (SH.4.1 Codex P1 follow-up, 3rd round) — the
+ * authenticated account performing the delete, if any (pass the caller's
+ * own resolved `authenticatedUserId`; omit/null when signed out). Scopes
+ * the local-delete/rediscovery-suppression marker to that specific account
+ * (or the shared UNOWNED_ACCOUNT_KEY bucket when signed out) — see
+ * applyLocalDeletionMarker's own doc — so deleting a profile while signed
+ * in as one account can never suppress a DIFFERENT account's own, distinct
+ * profile under the same grandfathered id on a shared browser.
  */
-export function deleteProfile(id: string): void {
+export function deleteProfile(id: string, currentOwnerUserId: string | null = null): void {
   if (id === "default") return; // Default is protected from deletion via this path
   const profiles = getProfiles();
   if (profiles.length <= 1) return; // Cannot delete the last profile
@@ -435,15 +700,16 @@ export function deleteProfile(id: string): void {
   // any of those key shapes here.
   purgeProfileSyncState(id);
 
-  // SH.4.1 (Codex P1 finding #3, follow-up round) — mark this id as locally
-  // deleted so a subsequent registry reconciliation round
-  // (profileRegistrySync.ts's selectActiveServerProfiles) does not
-  // immediately rediscover/re-add it from the account's durable registry.
-  // This device's local delete does NOT touch the server's `user_profiles`
-  // row for this id (if any) — it remains active until SH.4.3 implements
-  // real server-side tombstones — nor any `user_planner` cloud planner data.
-  // See markProfileLocallyDeleted's own doc.
-  markProfileLocallyDeleted(id);
+  // SH.4.1 — mark this id as locally deleted, scoped to `currentOwnerUserId`
+  // (or the shared unowned bucket when signed out — see this function's own
+  // doc and applyLocalDeletionMarker's), so a subsequent registry
+  // reconciliation round (profileRegistrySync.ts's selectActiveServerProfiles)
+  // does not immediately rediscover/re-add it for THAT account, without
+  // affecting any other account's own same-id profile. This device's local
+  // delete does NOT touch the server's `user_profiles` row for this id (if
+  // any) — it remains active until SH.4.3 implements real server-side
+  // tombstones — nor any `user_planner` cloud planner data.
+  markProfileLocallyDeleted(id, currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY);
 
   // If the deleted profile was active, explicitly persist fallback to default.
   // Compare raw localStorage directly — getActiveProfileId() already applies

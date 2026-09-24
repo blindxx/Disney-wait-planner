@@ -25,8 +25,12 @@
  *   200: { registered: string[] } — ids that were newly inserted by THIS
  *        request (an id already known, active or tombstoned, is simply
  *        omitted from this list — not an error)
- *   400: invalid JSON, malformed body, an empty/oversized `profiles` array,
- *        or any entry with an invalid profileId/name
+ *   400: invalid JSON, a malformed body, or an empty/oversized `profiles`
+ *        array — i.e. the ENVELOPE itself is unusable. An individual entry
+ *        with an invalid profileId/name is instead silently skipped (Codex
+ *        P2 follow-up) rather than failing the whole request — see
+ *        parseAdoptBody's own doc — so this only returns 400 when NOTHING
+ *        in the array validates
  *   401: not signed in
  *   413: payload exceeds size limit
  *
@@ -51,7 +55,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession, type Session } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { getUserId, validateProfileId } from "@/lib/syncIdentity";
+import { getUserId, validateProfileId, validateProfileName } from "@/lib/syncIdentity";
 
 // This route depends on the signed-in user's auth session and the database
 // on every call — there is nothing cacheable/static about "the account's
@@ -71,15 +75,6 @@ const MAX_BODY_BYTES = 50_000;
 // Defensive cap — a real device's local profile list is expected to stay
 // tiny; this only bounds the cost of a single malformed/abusive request.
 const MAX_PROFILES_PER_REQUEST = 50;
-
-const MAX_NAME_LENGTH = 200;
-
-function validateName(raw: unknown): string | null {
-  if (typeof raw !== "string") return null;
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > MAX_NAME_LENGTH) return null;
-  return trimmed;
-}
 
 type ProfileRow = { profile_id: string; name: string; updated_at: Date; deleted_at: Date | null };
 
@@ -112,10 +107,23 @@ export async function GET(_req: NextRequest): Promise<NextResponse> {
 type AdoptEntry = { profileId: string; name: string };
 
 /**
- * Parses and validates the PUT body. Fails closed (returns null) on ANY
- * malformed entry rather than silently dropping it — mirrors
- * /api/sync/planner's philosophy of rejecting a request it can't fully
- * validate instead of partially applying it.
+ * Parses and validates the PUT body.
+ *
+ * STRUCTURAL problems fail the WHOLE request (returns null -> 400): invalid
+ * JSON, a missing/non-array `profiles` field, or an empty/oversized array.
+ * There is no reasonable partial interpretation of a malformed envelope.
+ *
+ * An INDIVIDUAL entry with an invalid profileId/name is instead silently
+ * SKIPPED rather than failing the whole batch (Codex P2 follow-up — this
+ * endpoint previously failed closed on the first bad entry, mirroring
+ * /api/sync/planner's philosophy; that philosophy fits planner's PUT, which
+ * writes ONE interdependent blob where a partial write could genuinely
+ * corrupt state, but does NOT fit this endpoint: every row here is an
+ * independent, conflict-free additive insert (`ON CONFLICT DO NOTHING` per
+ * row, in the same bulk statement), so one legacy/malformed/oversized entry
+ * has no reason to block registration of every OTHER, unrelated valid
+ * profile in the same adoption round). Returns null only when NOTHING in
+ * the array validates — there is nothing to insert either way.
  */
 function parseAdoptBody(raw: string): AdoptEntry[] | null {
   let parsed: unknown;
@@ -137,11 +145,11 @@ function parseAdoptBody(raw: string): AdoptEntry[] | null {
   const result: AdoptEntry[] = [];
   const seen = new Set<string>();
   for (const entry of rawProfiles) {
-    if (!entry || typeof entry !== "object") return null;
+    if (!entry || typeof entry !== "object") continue; // skip this entry only, not the batch
     const rawId = (entry as { profileId?: unknown }).profileId;
     const profileId = validateProfileId(typeof rawId === "string" ? rawId : null);
-    const name = validateName((entry as { name?: unknown }).name);
-    if (!profileId || !name) return null;
+    const name = validateProfileName((entry as { name?: unknown }).name);
+    if (!profileId || !name) continue; // skip this entry only, not the batch
     if (seen.has(profileId)) continue; // duplicate within one request — harmless, dedupe
     seen.add(profileId);
     result.push({ profileId, name });

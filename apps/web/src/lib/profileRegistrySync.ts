@@ -14,46 +14,59 @@
  * See the SH.4 architecture audit for the full rationale.
  *
  * SH.4.1 scope — additive legacy adoption only:
- *   - Local profiles unknown to the server, and not durably owned by a
- *     DIFFERENT account on this device, are pushed up (registered).
+ *   - Local profiles unknown to the CURRENT account's server registry are
+ *     pushed up (registered). Codex P1 follow-up (3rd round) — this is NO
+ *     LONGER cross-account exclusive: a local id already durably associated
+ *     with a DIFFERENT account on this device is still eligible for the
+ *     CURRENT account's own, independent adoption — see
+ *     profileStorage.ts's module doc for why the previous "one owner slot
+ *     per id, ever" model was itself the bug (it broke delete suppression
+ *     for a second account, and more fundamentally, two accounts CAN each
+ *     legitimately own their own distinct server row under the identical
+ *     literal grandfathered id — `user_profiles`' PK is `(user_id,
+ *     profile_id)`, so there is no server-side conflict between them).
  *   - Server profiles unknown locally, and neither tombstoned nor locally
- *     deleted on this device, are pulled down (discovered) — see
- *     profileStorage.ts's mergeProfilesAdditive/adoptServerProfiles for the
- *     local-merge half of this.
+ *     deleted BY THE CURRENT ACCOUNT on this device, are pulled down
+ *     (discovered) — see profileStorage.ts's mergeProfilesAdditive/
+ *     adoptServerProfiles for the local-merge half of this, and
+ *     selectLocallyDeletedIdsForAccount for the account-scoping.
  *   - A server-known id (active OR tombstoned) is never overwritten by a
  *     stale local copy: the server enforces this with a conflict-free
  *     `ON CONFLICT DO NOTHING` insert, and this module mirrors it by never
  *     including an already-known id (computeProfilesToAdopt) in the
  *     adopt-push list in the first place.
- *   - A tombstoned (deletedAt set) server profile, OR an id THIS DEVICE has
+ *   - A tombstoned (deletedAt set) server profile, OR an id THIS ACCOUNT has
  *     explicitly, locally deleted, is never pulled into the local list
  *     (selectActiveServerProfiles drops both). The local-delete case is a
- *     device-local compatibility shim only (profileStorage.ts's
- *     getLocallyDeletedProfileIds) — it does not touch the server's row, so
- *     other devices are unaffected — until SH.4.3 implements real
+ *     device-local, ACCOUNT-SCOPED compatibility shim only
+ *     (profileStorage.ts's getLocallyDeletedProfileIds) — it does not touch
+ *     the server's row, so other devices (or a different account on this
+ *     SAME device) are unaffected — until SH.4.3 implements real
  *     server-side tombstones. Full delete lifecycle/UI beyond that is
  *     SH.4.3 scope.
- *   - A local profile id already durably associated with a DIFFERENT
- *     account (profileStorage.ts's getProfileOwners) is NEVER proposed for
- *     adoption into the current account, even if the current account's
- *     registry doesn't know about it yet — this is what stops account A's
- *     profiles from bleeding into account B's registry merely because both
- *     signed into the same browser. An id with NO owner yet (the common
- *     case for every pre-SH.4 legacy profile) remains freely adoptable by
- *     whichever account reconciles it first.
+ *   - A name that would fail the server's own validation (currently:
+ *     empty, or longer than syncIdentity.ts's MAX_PROFILE_NAME_LENGTH) is
+ *     filtered out of the adopt-push list per-entry (filterAdoptableProfiles
+ *     — Codex P2 follow-up), rather than sent and rejected, or worse,
+ *     allowed to fail the WHOLE batch — see filterAdoptableProfiles' own
+ *     doc. New profiles created after this fix can never exceed the limit
+ *     in the first place (profileStorage.ts's createProfile/renameProfile
+ *     sanitize at the input boundary); this filter exists for legacy local
+ *     profiles that predate that fix.
  *   - Every round that reaches the server successfully durably stamps
  *     ownership (profileStorage.ts's markProfileOwner) for every id the
- *     server confirms belongs to this account. Codex P1 follow-up (2nd
- *     round) — this is NEVER decided from the PUT response's own
- *     `registered` field: a push whose response is lost or malformed may
- *     still have committed server-side, so whenever a push was attempted
- *     this round, ownership is instead decided from a fresh, AUTHORITATIVE
- *     re-GET performed right after it (see resolveAuthoritativeServerProfiles
- *     and reconcileProfileRegistry's own doc) — never from assuming the push
- *     failed just because its own response did. This closes the window
- *     where a commit that actually reached the server, but whose response
- *     didn't reach this client, would otherwise leave the id looking
- *     "unowned" and adoptable by a different account reconciling next.
+ *     server confirms belongs to this account, keyed by `(profileId,
+ *     userId)` — never affecting any other account's own entry for the
+ *     same id. Codex P1 follow-up (2nd round) — this is NEVER decided from
+ *     the PUT response's own `registered` field: a push whose response is
+ *     lost or malformed may still have committed server-side, so whenever a
+ *     push was attempted this round, ownership is instead decided from a
+ *     fresh, AUTHORITATIVE re-GET performed right after it (see
+ *     resolveAuthoritativeServerProfiles and reconcileProfileRegistry's own
+ *     doc) — never from assuming the push failed just because its own
+ *     response did. This closes the window where a commit that actually
+ *     reached the server, but whose response didn't reach this client,
+ *     would otherwise leave the id looking "unowned".
  *   - Renaming an id already known to the server is NOT propagated in
  *     either direction yet — SH.4.2 owns that policy. An id already present
  *     both locally and on the server keeps its LOCAL name untouched here.
@@ -87,10 +100,10 @@ import {
   type Profile,
   getProfiles,
   adoptServerProfiles,
-  getProfileOwners,
   markProfileOwner,
   getLocallyDeletedProfileIds,
 } from "./profileStorage";
+import { validateProfileName } from "./syncIdentity";
 
 // ===== TYPES =====
 
@@ -105,68 +118,69 @@ export type ServerProfileRecord = {
 // ===== PURE RECONCILIATION LOGIC =====
 
 /**
- * Given the full server registry (including tombstones) and this device's
- * current local profile list, compute the local profiles that should be
- * PUSHED to the server because it does not yet know about their id — by id
- * alone, regardless of tombstone state. A tombstoned id is already "known"
- * to the server and must never be re-adopted/resurrected via this path;
- * only an explicit, deliberate un-delete (not implemented in SH.4.1) may
- * ever clear a tombstone. A local id whose name differs from what the
- * server already has under the same id is likewise excluded — this
- * function only ever proposes ids the server has NEVER seen, never a
- * "correction" to one it has.
+ * Given the full server registry (including tombstones) FOR THE CURRENT
+ * ACCOUNT, and this device's current local profile list, compute the local
+ * profiles that should be PUSHED to that account's server registry because
+ * it does not yet know about their id — by id alone, regardless of
+ * tombstone state. A tombstoned id is already "known" to the server and
+ * must never be re-adopted/resurrected via this path; only an explicit,
+ * deliberate un-delete (not implemented in SH.4.1) may ever clear a
+ * tombstone. A local id whose name differs from what the server already
+ * has under the same id is likewise excluded — this function only ever
+ * proposes ids the server has NEVER seen, never a "correction" to one it
+ * has.
  *
- * `profileOwners` (profileStorage.ts's getProfileOwners()) is this device's
- * durable record of which account previously claimed each id. An id already
- * owned by a DIFFERENT account than `currentOwnerUserId` is excluded even
- * though the CURRENT account's server registry has never seen it — that is
- * exactly the case this guards against (an A-owned id must never be
- * proposed as though it were B's unowned legacy profile just because it
- * still sits in this browser's local list). An id with no entry in
- * `profileOwners` at all (the common case for a genuine pre-SH.4 legacy
- * profile) is treated as unowned and remains adoptable.
+ * Codex P1 follow-up (3rd round) — this function is intentionally
+ * ACCOUNT-AGNOSTIC beyond `serverProfiles` already being scoped to the
+ * caller's own account (by construction — every `GET /api/sync/profiles`
+ * only ever returns the authenticated account's own rows). It does NOT
+ * exclude a local id merely because a DIFFERENT account has separately
+ * claimed it on this device: `serverProfiles` is already authoritative for
+ * "does MY account know this id" (a failed GET aborts the whole
+ * reconciliation round before this function is ever called — see
+ * reconcileProfileRegistry — so `known` here is always complete and
+ * correct for the CURRENT account when this runs), and `user_profiles`'
+ * PK is `(user_id, profile_id)`, so a second account registering the
+ * identical literal id creates its own, entirely unrelated row — there is
+ * no server-side reason to block it. The PRIOR round's cross-account
+ * ownership exclusion was itself the bug this fixes (see
+ * profileStorage.ts's module doc): it silently gave whichever account
+ * reconciled an id FIRST a permanent, exclusive local claim to it, which
+ * both prevented a second account's own legitimate, distinct history under
+ * that id from ever registering AND broke that second account's own
+ * delete-suppression.
  *
- * Pure — takes every input as a parameter, including the ownership map, so
- * it stays directly DEV-testable without a browser/localStorage.
+ * Pure — takes every input as a parameter, so it stays directly
+ * DEV-testable without a browser/localStorage.
  *
  * Run from Node:
  *   import { DEV_COMPUTE_PROFILES_TO_ADOPT_CASES, computeProfilesToAdopt } from "@/lib/profileRegistrySync";
  *   DEV_COMPUTE_PROFILES_TO_ADOPT_CASES.forEach(c => {
- *     const got = computeProfilesToAdopt(c.serverProfiles, c.localProfiles, c.currentOwnerUserId, c.profileOwners);
+ *     const got = computeProfilesToAdopt(c.serverProfiles, c.localProfiles);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export function computeProfilesToAdopt(
   serverProfiles: ServerProfileRecord[],
-  localProfiles: Profile[],
-  currentOwnerUserId: string,
-  profileOwners: Record<string, string>
+  localProfiles: Profile[]
 ): Profile[] {
   const known = new Set(serverProfiles.map((p) => p.profileId));
-  return localProfiles.filter((p) => {
-    if (known.has(p.id)) return false;
-    const owner = profileOwners[p.id];
-    return owner === undefined || owner === currentOwnerUserId;
-  });
+  return localProfiles.filter((p) => !known.has(p.id));
 }
 
 export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
   name: string;
   serverProfiles: ServerProfileRecord[];
   localProfiles: Profile[];
-  currentOwnerUserId: string;
-  profileOwners: Record<string, string>;
   expected: Profile[];
 }> = [
   {
-    name: "empty server + existing local custom profiles, none owned — additive adoption of everything",
+    name: "empty server + existing local custom profiles — additive adoption of everything",
     serverProfiles: [],
     localProfiles: [
       { id: "default", name: "Default" },
       { id: "mom", name: "Mom" },
     ],
-    currentOwnerUserId: "userA",
-    profileOwners: {},
     expected: [
       { id: "default", name: "Default" },
       { id: "mom", name: "Mom" },
@@ -176,8 +190,6 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
     name: "grandfathered custom id preserved exactly in the push list — no id/name rewriting",
     serverProfiles: [],
     localProfiles: [{ id: "lindsay-2", name: "Lindsay" }],
-    currentOwnerUserId: "userA",
-    profileOwners: {},
     expected: [{ id: "lindsay-2", name: "Lindsay" }],
   },
   {
@@ -186,8 +198,6 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
       { profileId: "mom", name: "Mom", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
     ],
     localProfiles: [{ id: "mom", name: "Mommy (stale local copy)" }],
-    currentOwnerUserId: "userA",
-    profileOwners: { mom: "userA" },
     expected: [],
   },
   {
@@ -201,12 +211,10 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
       },
     ],
     localProfiles: [{ id: "mom", name: "Mom" }],
-    currentOwnerUserId: "userA",
-    profileOwners: { mom: "userA" },
     expected: [],
   },
   {
-    name: "mixed — only the genuinely unknown, unowned local id is proposed for adoption",
+    name: "mixed — only the genuinely unknown local id is proposed for adoption",
     serverProfiles: [
       { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
     ],
@@ -214,44 +222,90 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
       { id: "default", name: "Default" },
       { id: "lindsay", name: "Lindsay" },
     ],
-    currentOwnerUserId: "userA",
-    profileOwners: { default: "userA" },
     expected: [{ id: "lindsay", name: "Lindsay" }],
   },
   {
-    name: "Codex P1 #2 — A-owned local profile is never adopted into B's registry, even though B's own registry has never seen it",
+    name: "unowned legacy profile remains adoptable",
     serverProfiles: [],
-    localProfiles: [{ id: "family", name: "Family" }],
-    currentOwnerUserId: "userB",
-    profileOwners: { family: "userA" },
-    expected: [],
-  },
-  {
-    name: "genuinely unowned legacy profile remains adoptable even when OTHER local profiles are already owned by someone else",
-    serverProfiles: [],
-    localProfiles: [
-      { id: "family", name: "Family" },
-      { id: "legacy-trip", name: "Legacy Trip" },
-    ],
-    currentOwnerUserId: "userB",
-    profileOwners: { family: "userA" },
+    localProfiles: [{ id: "legacy-trip", name: "Legacy Trip" }],
     expected: [{ id: "legacy-trip", name: "Legacy Trip" }],
   },
   {
-    name: "a profile already owned by the CURRENT account remains adoptable (e.g. retrying a push the server never actually received)",
-    serverProfiles: [],
-    localProfiles: [{ id: "mom", name: "Mom" }],
-    currentOwnerUserId: "userA",
-    profileOwners: { mom: "userA" },
-    expected: [{ id: "mom", name: "Mom" }],
+    name: "Codex P1 follow-up (3rd round) — B can adopt B's own local 'family' even though A already owns 'family' on this same device/server-agnostic local list — B's OWN (empty) registry is what governs B's adoption, not A's prior claim",
+    serverProfiles: [], // B's own GET — B's account has never registered "family"
+    localProfiles: [{ id: "family", name: "Family" }],
+    expected: [{ id: "family", name: "Family" }],
+  },
+];
+
+/**
+ * Filters `candidates` down to entries whose name satisfies
+ * syncIdentity.ts's shared MAX_PROFILE_NAME_LENGTH constraint, dropping any
+ * individual entry that doesn't (Codex P2 follow-up) — never failing the
+ * whole batch over one legacy/malformed entry. Mirrors, client-side, the
+ * SAME per-entry skip behavior `/api/sync/profiles`'s PUT now applies
+ * server-side (parseAdoptBody in route.ts) — applying it here too means an
+ * oversized legacy entry doesn't even cost a wasted network round-trip
+ * before being dropped, and keeps this module's own adoption decision
+ * self-contained/verifiable independent of the server's own validation.
+ * New profiles created after this fix can never exceed the limit in the
+ * first place (profileStorage.ts's createProfile/renameProfile sanitize at
+ * the input boundary) — this filter exists for legacy local profiles that
+ * predate that fix and may already carry an oversized name.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_FILTER_ADOPTABLE_PROFILES_CASES, filterAdoptableProfiles } from "@/lib/profileRegistrySync";
+ *   DEV_FILTER_ADOPTABLE_PROFILES_CASES.forEach(c => {
+ *     const got = filterAdoptableProfiles(c.candidates);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function filterAdoptableProfiles(candidates: Profile[]): Profile[] {
+  return candidates.filter((p) => validateProfileName(p.name) !== null);
+}
+
+export const DEV_FILTER_ADOPTABLE_PROFILES_CASES: Array<{
+  name: string;
+  candidates: Profile[];
+  expected: Profile[];
+}> = [
+  {
+    name: "valid names continue unchanged",
+    candidates: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
+    expected: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
   },
   {
-    name: "Codex P1 follow-up #3 — an ambiguous PUT (response lost, picked up by the authoritative re-GET and stamped for A — see DEV_RESOLVE_AUTHORITATIVE_SERVER_PROFILES_CASES) cannot later be claimed by B",
-    serverProfiles: [],
-    localProfiles: [{ id: "family", name: "Family" }],
-    currentOwnerUserId: "userB",
-    profileOwners: { family: "userA" },
-    expected: [],
+    name: "Codex P2 follow-up — one oversized legacy profile is dropped, valid siblings in the same batch still adopt",
+    candidates: [
+      { id: "default", name: "Default" },
+      { id: "legacy-huge", name: "L".repeat(250) },
+      { id: "mom", name: "Mom" },
+    ],
+    expected: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
+  },
+  {
+    name: "a name at exactly the shared limit is still valid",
+    candidates: [{ id: "exact", name: "N".repeat(200) }],
+    expected: [{ id: "exact", name: "N".repeat(200) }],
+  },
+  {
+    name: "an empty/whitespace-only legacy name is also dropped, not just an oversized one",
+    candidates: [
+      { id: "blank", name: "   " },
+      { id: "mom", name: "Mom" },
+    ],
+    expected: [{ id: "mom", name: "Mom" }],
   },
 ];
 
@@ -618,8 +672,15 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
  * ownership/discovery for this round are both decided from THAT result
  * (resolveAuthoritativeServerProfiles), never from the push response. This
  * closes the window where a push that actually committed server-side, but
- * whose response was lost, would otherwise leave the id "unowned" and
- * adoptable by a different account reconciling next.
+ * whose response was lost, would otherwise leave the id "unowned".
+ *
+ * Codex P1/P2 follow-up (3rd round) — `computeProfilesToAdopt` no longer
+ * excludes a local id merely because a DIFFERENT account owns it on this
+ * device (see its own doc); `filterAdoptableProfiles` drops any individual
+ * candidate whose name fails the shared length constraint instead of
+ * letting it poison the whole push; and `getLocallyDeletedProfileIds(userId)`
+ * only ever suppresses discovery for ids THIS account (or no account) has
+ * locally deleted, never a different account's own same-id deletion.
  */
 export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
@@ -631,8 +692,7 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (!isCurrent() || initialServerProfiles === null) return;
 
   const localProfiles = getProfiles();
-  const profileOwners = getProfileOwners();
-  const toAdopt = computeProfilesToAdopt(initialServerProfiles, localProfiles, userId, profileOwners);
+  const toAdopt = filterAdoptableProfiles(computeProfilesToAdopt(initialServerProfiles, localProfiles));
 
   const pushAttempted = toAdopt.length > 0;
   let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
@@ -650,8 +710,10 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   );
 
   // Every id the server authoritatively confirms as this account's is
-  // durably stamped as owned by `userId` so a later round under a
-  // DIFFERENT account correctly refuses to re-adopt it (finding #2).
+  // durably stamped as owned by `userId` — keyed by (profileId, userId), so
+  // this NEVER disturbs any other account's own independent entry for the
+  // same literal id (Codex P1 follow-up, 3rd round — see
+  // profileStorage.ts's applyProfileOwnerStamp/module doc).
   for (const id of authoritativeServerProfiles.map((p) => p.profileId)) {
     markProfileOwner(id, userId);
   }
