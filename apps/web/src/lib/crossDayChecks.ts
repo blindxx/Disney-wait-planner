@@ -26,6 +26,15 @@ import {
   type ConfirmedDomainResult,
 } from "@/lib/syncPayload";
 import type { PlannerItemType } from "@/lib/plansTransfer";
+// SH.3.3 Codex follow-up — PARK_LABELS/PARK_TO_RESORT moved to their own
+// dependency-neutral module (see its own doc) so syncPayload.ts can consume
+// the same authoritative set without a circular import (syncPayload.ts is
+// itself a dependency of this file). Re-exported below so every existing
+// importer of PARK_LABELS/PARK_TO_RESORT from "./crossDayChecks" is
+// unaffected.
+import { PARK_LABELS, PARK_TO_RESORT } from "@/lib/parkMetadata";
+
+export { PARK_LABELS, PARK_TO_RESORT };
 
 export type { PlannerItemType };
 
@@ -1247,24 +1256,6 @@ function stripTrailingTimeForInference(name: string): string {
     .replace(/\s*\b\d{1,2}:\d{2}\s*$/, "")
     .trim();
 }
-
-export const PARK_LABELS: Record<ParkId, string> = {
-  disneyland: "Disneyland",
-  dca: "Disney California Adventure",
-  mk: "Magic Kingdom",
-  epcot: "EPCOT",
-  hs: "Hollywood Studios",
-  ak: "Animal Kingdom",
-};
-
-export const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
-  disneyland: "DLR",
-  dca: "DLR",
-  mk: "WDW",
-  epcot: "WDW",
-  hs: "WDW",
-  ak: "WDW",
-};
 
 export const RIDE_TO_PARK_DLR = new Map<string, string>();
 export const RIDE_TO_PARK_WDW = new Map<string, string>();

@@ -17,6 +17,8 @@ import {
   pickWinningItems,
   pruneOrphanedDayRecord,
   reconcilePlannerSnapshot,
+  PARK_LABELS,
+  PARK_TO_RESORT,
 } from "@/lib/crossDayChecks";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import {
@@ -89,25 +91,13 @@ const RESORT_LABELS: Record<ResortId, string> = {
   WDW: "Walt Disney World",
 };
 
-/** Friendly park name for the park-line on reservation cards. */
-const PARK_LABELS: Record<ParkId, string> = {
-  disneyland: "Disneyland",
-  dca: "Disney California Adventure",
-  mk: "Magic Kingdom",
-  epcot: "EPCOT",
-  hs: "Hollywood Studios",
-  ak: "Animal Kingdom",
-};
-
-/** Parks that belong to each resort — used to validate dayParks overrides. */
-const PARK_TO_RESORT: Partial<Record<string, ResortId>> = {
-  disneyland: "DLR",
-  dca: "DLR",
-  mk: "WDW",
-  epcot: "WDW",
-  hs: "WDW",
-  ak: "WDW",
-};
+// SH.3.3 Codex follow-up — PARK_LABELS/PARK_TO_RESORT (friendly park names /
+// resort membership, used to label reservation cards and validate dayParks
+// overrides) are the single maintained source of truth in parkMetadata.ts,
+// imported above via crossDayChecks.ts's re-export. This page previously
+// held its own independently-maintained copy of both literals — a THIRD
+// duplicate of the same authoritative set syncPayload.ts also duplicated —
+// which this follow-up eliminates.
 
 // ===== TYPES =====
 

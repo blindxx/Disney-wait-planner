@@ -56,6 +56,7 @@ import {
   reconcilePlannerSnapshot,
   resolveIdentityKey,
   PARK_TO_RESORT,
+  PARK_LABELS,
   RIDE_TO_PARK_DLR,
   RIDE_TO_PARK_WDW,
 } from "@/lib/crossDayChecks";
@@ -778,15 +779,11 @@ const RESORT_LABELS: Record<ResortId, string> = {
   WDW: "Walt Disney World",
 };
 
-/** Friendly park name for the park-line display on plan cards. */
-const PARK_LABELS: Record<ParkId, string> = {
-  disneyland: "Disneyland",
-  dca: "Disney California Adventure",
-  mk: "Magic Kingdom",
-  epcot: "EPCOT",
-  hs: "Hollywood Studios",
-  ak: "Animal Kingdom",
-};
+// SH.3.3 Codex follow-up — PARK_LABELS (friendly park name for the park-line
+// display on plan cards) is the single maintained source of truth in
+// parkMetadata.ts, imported above via crossDayChecks.ts's re-export — same
+// treatment PARK_TO_RESORT already got (see the comment below). This page
+// previously held its own independently-maintained copy of the literal.
 
 /** Ordered list of parks per resort — drives the park selector UI. */
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {

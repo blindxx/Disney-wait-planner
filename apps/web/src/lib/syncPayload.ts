@@ -17,6 +17,8 @@
  * (see plans/page.tsx and lightning/page.tsx pull handling).
  */
 
+import { PARK_TO_RESORT } from "@/lib/parkMetadata";
+
 // ===== TYPES =====
 
 export interface SyncedPlannerPayload {
@@ -64,21 +66,14 @@ const DAY_ID_RE = /^day-[1-9]\d*$/;
 // shape (full calendar rollover strictness is that local write path's own
 // job; this sanitizer only needs to reject grossly malformed cloud content).
 const DAY_META_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-// SH.3.3 — the single maintained source of truth for valid park IDs is
-// PARK_TO_RESORT (crossDayChecks.ts). It cannot be imported here directly:
-// crossDayChecks.ts itself imports from this module (capturePreFetchDomainSnapshot,
-// resolvePostFetchDomainBaseline, etc.), so importing it back would create a
-// circular dependency. This literal list duplicates PARK_TO_RESORT's keys for
-// the same reason DAY_ID_RE above duplicates plans/page.tsx's VALID_DAY_ID_RE —
-// keep in sync with PARK_TO_RESORT if the supported park set ever changes.
-const VALID_PARK_IDS: ReadonlySet<string> = new Set([
-  "disneyland",
-  "dca",
-  "mk",
-  "epcot",
-  "hs",
-  "ak",
-]);
+// SH.3.3 Codex follow-up — the single maintained source of truth for valid
+// park IDs is PARK_TO_RESORT, imported above from parkMetadata.ts. That
+// module has no dependency on this one or on crossDayChecks.ts (which DOES
+// import from this module — capturePreFetchDomainSnapshot,
+// resolvePostFetchDomainBaseline, etc.), so both this file and
+// crossDayChecks.ts can import PARK_TO_RESORT directly without creating a
+// circular dependency, and without either maintaining its own copy of the
+// key set (see parkMetadata.ts's own doc for the full rationale).
 
 /**
  * Normalize a raw value down to a valid ordered days[] array (preserving
@@ -180,8 +175,8 @@ export function sanitizeDayMeta(
  * whatever cloud/existing storage already holds); a genuinely empty `{}` is
  * a valid, meaningful INTENTIONAL clear (see SyncedPlannerPayload.dayParks'
  * own doc) and is always returned as a real empty record. Entries keyed by
- * an invalid day ID, or whose value isn't a known park ID (VALID_PARK_IDS —
- * see its own doc for why the supported-park-ID list is duplicated here),
+ * an invalid day ID, or whose value isn't a known park ID (membership in
+ * PARK_TO_RESORT — the authoritative set, imported from parkMetadata.ts),
  * are dropped rather than rejecting the whole record — same "sanitize, don't
  * reject" treatment sanitizeDayMeta() gives a malformed entry.
  */
@@ -190,7 +185,7 @@ export function sanitizeDayParks(raw: unknown): Record<string, string> | undefin
   const result: Record<string, string> = {};
   for (const [dayId, valueRaw] of Object.entries(raw as Record<string, unknown>)) {
     if (!DAY_ID_RE.test(dayId)) continue;
-    if (typeof valueRaw === "string" && VALID_PARK_IDS.has(valueRaw)) {
+    if (typeof valueRaw === "string" && valueRaw in PARK_TO_RESORT) {
       result[dayId] = valueRaw;
     }
   }
