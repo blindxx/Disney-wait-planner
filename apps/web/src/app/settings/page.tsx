@@ -36,7 +36,7 @@ import {
   deleteProfile,
   getActiveProfileKeys,
 } from "../../lib/profileStorage";
-import { reconcileProfileRegistry } from "../../lib/profileRegistrySync";
+import { reconcileProfileRegistry, setRegistryIdentity } from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -122,6 +122,18 @@ export default function SettingsPage() {
 
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
+  // SH.4.1 (Codex P1 finding #1, follow-up round) — the actual resolved
+  // identity, not just the auth STATUS string. Mirrors plans/page.tsx's own
+  // `authenticatedUserId` (same resolution order as getUserId() in
+  // api/sync/planner/route.ts / syncIdentity.ts) so the registry-
+  // reconciliation effect below re-runs whenever the SIGNED-IN USER changes
+  // — including an A -> B account switch that a next-auth session update
+  // could in principle deliver without `sessionStatus` itself ever leaving
+  // "authenticated" — not only on the coarser loading/authenticated
+  // transitions `sessionStatus` alone would catch.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const authenticatedUserId =
+    sessionStatus === "authenticated" ? ((session?.user as any)?.id ?? session?.user?.email ?? null) : null;
   const [emailInput, setEmailInput] = useState("");
   const [signInSent, setSignInSent] = useState(false);
   const [signInError, setSignInError] = useState("");
@@ -200,18 +212,33 @@ export default function SettingsPage() {
   // registered, and any account profiles this device hasn't seen yet get
   // additively discovered — never planner content, never
   // `dwp.activeProfile`. See profileRegistrySync.ts for the full contract.
+  //
+  // SH.4.1 (Codex P1 finding #1, follow-up round) — keyed on
+  // `authenticatedUserId` (the resolved identity), not `sessionStatus`
+  // alone, so an A -> B account switch always re-runs this effect even in
+  // the (rare, but possible with next-auth) case where `sessionStatus`
+  // itself never leaves "authenticated". setRegistryIdentity() is called
+  // FIRST, on every run (including the null/signed-out case) — that alone
+  // invalidates any still-in-flight round started under a previous identity
+  // (see isRegistryRunCurrent's own doc in profileRegistrySync.ts): such a
+  // round will stop at its next check, before issuing another request or
+  // writing to `dwp.profiles`/the ownership map, regardless of whether this
+  // component is still mounted or this effect instance's own `cancelled`
+  // flag has been set yet.
+  //
   // Best-effort and silent: reconcileProfileRegistry() never throws, and a
   // signed-out/loading session simply skips this round.
   useEffect(() => {
-    if (sessionStatus !== "authenticated") return;
+    setRegistryIdentity(authenticatedUserId);
+    if (!authenticatedUserId) return;
     let cancelled = false;
-    reconcileProfileRegistry().then(() => {
+    reconcileProfileRegistry(authenticatedUserId).then(() => {
       if (!cancelled) setProfiles(getProfiles());
     });
     return () => {
       cancelled = true;
     };
-  }, [sessionStatus]);
+  }, [authenticatedUserId]);
 
   // Mediate syncState → displayedSyncState with a minimum "syncing" display time.
   useEffect(() => {

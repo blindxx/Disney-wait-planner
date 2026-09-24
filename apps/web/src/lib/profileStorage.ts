@@ -29,6 +29,140 @@ export type Profile = {
 const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
 const PROFILES_LIST_KEY = "dwp.profiles";
 
+/**
+ * SH.4.1 (Codex P1 findings #2/#3, follow-up round) — durable, per-profile-id
+ * REGISTRY PROVENANCE, entirely separate from `dwp.profiles` (what a device
+ * shows) and from syncHelper.ts's planner-content ownership marker
+ * (`getLocalContentOwner`/`setLocalContentOwner`, which governs PLANNER DATA
+ * for a shared browser, not this list). This is the minimum durable state
+ * needed to answer two questions no single reconciliation round can answer
+ * from the network response alone:
+ *   - `owner`: which authenticated account has this device already
+ *     associated this profile id with? Unset means "unowned" — a genuinely
+ *     pre-SH.4/never-yet-reconciled legacy profile, safely adoptable by
+ *     whichever account's reconciliation round reaches it first. Once set,
+ *     it is NEVER reassigned to a different account by this device (see
+ *     markProfileOwner) — this is what stops signing in as account B on a
+ *     browser that already associated a profile id with account A from
+ *     re-adopting/merging that id into B.
+ *   - `locallyDeleted`: did this device's own explicit Delete action
+ *     (deleteProfile below) remove this id? This is a device-local
+ *     COMPATIBILITY SHIM ONLY, not a real tombstone — it does not touch the
+ *     server's `user_profiles`/`user_planner` rows, so it cannot help a
+ *     DIFFERENT device learn about the deletion. It exists purely so THIS
+ *     device's own next registry reconciliation round doesn't immediately
+ *     rediscover the id it was just told to forget, until SH.4.3 implements
+ *     real server-side tombstones this device can also observe.
+ * Deliberately a flat, unbounded-growth-tolerant map (bounded in practice by
+ * however many profile ids this device has ever touched — never pruned, no
+ * revision/ledger, no conflict resolution) — this is provenance metadata,
+ * not another planner-style sync engine.
+ */
+const PROFILE_REGISTRY_STATE_KEY = "dwp.profileRegistryState";
+
+type ProfileRegistryLocalState = {
+  owner?: string;
+  locallyDeleted?: boolean;
+};
+
+function readProfileRegistryState(): Record<string, ProfileRegistryLocalState> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(PROFILE_REGISTRY_STATE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed as Record<string, ProfileRegistryLocalState>;
+  } catch {
+    return {};
+  }
+}
+
+function writeProfileRegistryState(state: Record<string, ProfileRegistryLocalState>): void {
+  try {
+    localStorage.setItem(PROFILE_REGISTRY_STATE_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+/**
+ * Durably associate `profileId` with `ownerUserId`'s account. Called by
+ * profileRegistrySync.ts's reconciliation orchestrator once a round has
+ * confirmed (via the server's own GET response, or a just-accepted PUT) that
+ * an id belongs to the current account. NEVER reassigns an id already
+ * durably owned by a DIFFERENT account — ownership, once claimed on this
+ * device, is permanent from this device's point of view; re-stamping the
+ * SAME owner is a harmless no-op. This is the guard that stops account B's
+ * reconciliation from treating an A-owned id sitting in this browser's
+ * `dwp.profiles` as adoptable.
+ */
+export function markProfileOwner(profileId: string, ownerUserId: string): void {
+  const state = readProfileRegistryState();
+  const existing = state[profileId];
+  if (existing?.owner === ownerUserId) return;
+  if (existing?.owner && existing.owner !== ownerUserId) return;
+  state[profileId] = { ...existing, owner: ownerUserId };
+  writeProfileRegistryState(state);
+}
+
+/**
+ * Bulk read of every profile id this device has durably associated with an
+ * account, as `{ [profileId]: ownerUserId }`. An id absent from this map has
+ * never been claimed by any account — see markProfileOwner's own doc. Pass
+ * this straight into profileRegistrySync.ts's computeProfilesToAdopt, which
+ * treats it as plain input data (kept pure/DEV-testable there rather than
+ * reading localStorage itself).
+ */
+export function getProfileOwners(): Record<string, string> {
+  const state = readProfileRegistryState();
+  const owners: Record<string, string> = {};
+  for (const [id, entry] of Object.entries(state)) {
+    if (entry?.owner) owners[id] = entry.owner;
+  }
+  return owners;
+}
+
+/**
+ * Mark `profileId` as explicitly, locally deleted — see this const's module
+ * doc above for the full compatibility-shim rationale. Internal to this
+ * module; only deleteProfile() below should ever call this.
+ */
+function markProfileLocallyDeleted(profileId: string): void {
+  const state = readProfileRegistryState();
+  state[profileId] = { ...state[profileId], locallyDeleted: true };
+  writeProfileRegistryState(state);
+}
+
+/**
+ * Clear a prior local-deletion marker for `profileId` — called when this
+ * exact id is explicitly recreated (createProfile below), since a
+ * deliberate new Create is this device's own signal that the id should be
+ * eligible for discovery/adoption again. Ownership (if any) is deliberately
+ * left untouched — only the local-delete shim is cleared. Internal to this
+ * module; only createProfile() below should ever call this.
+ */
+function clearLocalDeletionMarker(profileId: string): void {
+  const state = readProfileRegistryState();
+  const existing = state[profileId];
+  if (!existing?.locallyDeleted) return;
+  state[profileId] = { owner: existing.owner };
+  writeProfileRegistryState(state);
+}
+
+/**
+ * Bulk read of every profile id this device has explicitly, locally
+ * deleted and not since recreated — see PROFILE_REGISTRY_STATE_KEY's module
+ * doc above. Pass this straight into profileRegistrySync.ts's
+ * selectActiveServerProfiles, which treats it as plain input data.
+ */
+export function getLocallyDeletedProfileIds(): Set<string> {
+  const state = readProfileRegistryState();
+  const ids = new Set<string>();
+  for (const [id, entry] of Object.entries(state)) {
+    if (entry?.locallyDeleted) ids.add(id);
+  }
+  return ids;
+}
+
 const DEFAULT_PROFILE: Profile = { id: "default", name: "Default" };
 
 /** Legacy single-user keys that get migrated into the Default namespace on first bootstrap. */
@@ -159,6 +293,13 @@ export function createProfile(name: string): Profile {
   const id = uniqueId(base, existingIds);
   const newProfile: Profile = { id, name: trimmed };
   writeProfiles([...profiles, newProfile]);
+  // SH.4.1 (Codex P1 finding #3, follow-up round) — an explicit, deliberate
+  // create always means this id should be eligible for discovery/adoption
+  // going forward, even if this exact id was locally deleted before: the
+  // only way uniqueId() above can return an id not already in `profiles` is
+  // if nothing currently in the list holds it, including a previously
+  // deleted same-named profile. See clearLocalDeletionMarker's own doc.
+  clearLocalDeletionMarker(id);
   return newProfile;
 }
 
@@ -216,6 +357,16 @@ export function deleteProfile(id: string): void {
   // and the exact shapes covered. Deliberately NOT duplicating knowledge of
   // any of those key shapes here.
   purgeProfileSyncState(id);
+
+  // SH.4.1 (Codex P1 finding #3, follow-up round) — mark this id as locally
+  // deleted so a subsequent registry reconciliation round
+  // (profileRegistrySync.ts's selectActiveServerProfiles) does not
+  // immediately rediscover/re-add it from the account's durable registry.
+  // This device's local delete does NOT touch the server's `user_profiles`
+  // row for this id (if any) — it remains active until SH.4.3 implements
+  // real server-side tombstones — nor any `user_planner` cloud planner data.
+  // See markProfileLocallyDeleted's own doc.
+  markProfileLocallyDeleted(id);
 
   // If the deleted profile was active, explicitly persist fallback to default.
   // Compare raw localStorage directly — getActiveProfileId() already applies
