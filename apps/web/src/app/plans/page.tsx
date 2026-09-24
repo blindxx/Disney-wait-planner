@@ -550,9 +550,18 @@ function dayDisplayLabel(dayId: string, meta: Record<string, DayMeta>, days: str
   return baseLabel;
 }
 
-function loadDayMeta(key: string): Record<string, DayMeta> {
+// Codex follow-up (P1, reviewed commit 0c45e32) — parsing/sanitization
+// extracted from loadDayMeta() below so it can be applied to EITHER a plain
+// canonical read (loadDayMeta's own contract, unchanged) OR the effective
+// DURABLE raw value (readLatestDurableValue() — canonical, or a surviving
+// newer local-edit fact when one exists) that the cloud-pull reconciliation
+// prune now uses instead. See that prune's own updated doc for why: pruning
+// against canonical-only bytes could compute a next value that DISCARDS a
+// still-unresolved newer edit fact's content, and commitLocalDomainRaw()'s
+// own baselineEditFactIds retirement (syncHelper.ts) would then durably
+// delete that fact in the SAME commit — permanently losing the edit.
+function parseDayMetaRaw(raw: string | null): Record<string, DayMeta> {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
@@ -577,6 +586,16 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
   } catch {
     return {};
   }
+}
+
+function loadDayMeta(key: string): Record<string, DayMeta> {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    return {};
+  }
+  return parseDayMetaRaw(raw);
 }
 
 // Codex follow-up (P2, reviewed commit 9942288) — routed through
@@ -941,10 +960,12 @@ function resolvePlannerCardMetadata(
 // inferDayPark moved to lib/crossDayChecks.ts (Phase 10.4.1) so it has a
 // single, shared implementation instead of a page-local duplicate.
 
-/** Load per-day park overrides from profile-scoped localStorage. */
-function loadDayParks(key: string): Record<string, string> {
+// Codex follow-up (P1, reviewed commit 0c45e32) — see parseDayMetaRaw()'s
+// own doc above for the full rationale: extracted so the cloud-pull
+// reconciliation prune can apply this exact sanitization to the effective
+// DURABLE raw value (readLatestDurableValue()) instead of canonical-only.
+function parseDayParksRaw(raw: string | null): Record<string, string> {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
@@ -959,6 +980,17 @@ function loadDayParks(key: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+/** Load per-day park overrides from profile-scoped localStorage. */
+function loadDayParks(key: string): Record<string, string> {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    return {};
+  }
+  return parseDayParksRaw(raw);
 }
 
 // Codex follow-up (P2, reviewed commit 9942288) — see saveDayMeta()'s own
@@ -977,9 +1009,12 @@ function saveDayParks(parks: Record<string, string>, key: string): void {
  * values are accepted, so corrupt/foreign data can never leak into
  * resolveDayPark or planner_context.
  */
-function loadDayAutoFallbacks(key: string): Record<string, string> {
+// Codex follow-up (P1, reviewed commit 0c45e32) — see parseDayMetaRaw()'s
+// own doc above for the full rationale: extracted so the cloud-pull
+// reconciliation prune can apply this exact sanitization to the effective
+// DURABLE raw value (readLatestDurableValue()) instead of canonical-only.
+function parseDayAutoFallbacksRaw(raw: string | null): Record<string, string> {
   try {
-    const raw = localStorage.getItem(key);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
@@ -993,6 +1028,16 @@ function loadDayAutoFallbacks(key: string): Record<string, string> {
   } catch {
     return {};
   }
+}
+
+function loadDayAutoFallbacks(key: string): Record<string, string> {
+  let raw: string | null;
+  try {
+    raw = localStorage.getItem(key);
+  } catch {
+    return {};
+  }
+  return parseDayAutoFallbacksRaw(raw);
 }
 
 // Codex follow-up (P2, reviewed commit 9942288) — see saveDayMeta()'s own
@@ -3196,6 +3241,39 @@ export default function PlansPage() {
         // staleness specifically (a different axis from the record's OWN
         // staleness, which the CAS already covers).
         //
+        // Codex follow-up (P1, reviewed commit 0c45e32) — "read durable
+        // annotation facts before pruning." Since the previous P2 follow-up,
+        // ordinary dayMeta/dayParks/dayAutoFallbacks writers publish a local-
+        // edit fact via commitLocalDomainRawSync() (saveDayMeta() etc.,
+        // above) — the SAME fact log commitLocalDomainRaw() (used by
+        // commitPrunedDayRecord below) already re-scans and, on a successful
+        // write, RETIRES (see its own baselineEditFactIds doc in
+        // syncHelper.ts). That retirement assumes the write it just
+        // committed durably embodies whatever those facts represented. But
+        // the prune's OWN "what to keep" computation still read canonical-
+        // only bytes (loadDayMeta()/loadDayParks()/loadDayAutoFallbacks()) —
+        // if a still-unresolved fact held content NEWER than stale canonical
+        // (the documented cross-tab hydration race — see
+        // readLatestDurableValue()'s own doc), the prune would compute its
+        // next value from the STALE canonical bytes, and
+        // commitLocalDomainRaw() would then retire that newer fact in the
+        // SAME commit as writing the stale, pruned value — permanently
+        // losing the real edit. The fix: compute each record's "current"
+        // input to pruneOrphanedDayRecord() from the EFFECTIVE DURABLE raw
+        // value — readLatestDurableValue(key), the same authority reader
+        // this page already uses for `items`/`days`/lightning everywhere
+        // else — parsed via the SAME sanitizer loadDayMeta()/loadDayParks()/
+        // loadDayAutoFallbacks() themselves now delegate to
+        // (parseDayMetaRaw()/parseDayParksRaw()/parseDayAutoFallbacksRaw(),
+        // see their own doc above), so a surviving newer fact's content is
+        // never silently dropped by this prune. The CAS token passed to
+        // commitPrunedDayRecord() below is UNCHANGED — still the literal
+        // CANONICAL key's raw bytes (`localStorage.getItem`), never the
+        // durable value — because commitLocalDomainRaw()'s own internal
+        // re-check compares against canonical bytes specifically; this is
+        // the same "two deliberately separate reads, one for CAS, one for
+        // the actual decision" split already used for `items`/`days` above.
+        //
         // Codex follow-up (reviewed commit a6ea487) — the original version of
         // this block did a plain read (via loadDayMeta/loadDayParks/
         // loadDayAutoFallbacks) → prune → unconditional localStorage.setItem,
@@ -3244,14 +3322,20 @@ export default function PlansPage() {
         if (!daysWriteFailed) {
           const dayMetaValidDays = loadEffectiveDurableDays(daysKeyRef.current);
           const dayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
-          const dayMetaPrune = pruneOrphanedDayRecord(loadDayMeta(dayMetaKeyRef.current), dayMetaValidDays);
+          const dayMetaPrune = pruneOrphanedDayRecord(
+            parseDayMetaRaw(readLatestDurableValue(dayMetaKeyRef.current)),
+            dayMetaValidDays
+          );
           const appliedDayMeta = await commitPrunedDayRecord(dayMetaKeyRef.current, dayMetaRaw, dayMetaPrune);
           if (!isPullCurrent()) return;
           if (appliedDayMeta) setDayMeta(appliedDayMeta);
 
           const dayParksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
           const dayParksRaw = localStorage.getItem(dayParksKeyRef.current);
-          const dayParksPrune = pruneOrphanedDayRecord(loadDayParks(dayParksKeyRef.current), dayParksValidDays);
+          const dayParksPrune = pruneOrphanedDayRecord(
+            parseDayParksRaw(readLatestDurableValue(dayParksKeyRef.current)),
+            dayParksValidDays
+          );
           const appliedDayParks = await commitPrunedDayRecord(dayParksKeyRef.current, dayParksRaw, dayParksPrune);
           if (!isPullCurrent()) return;
           if (appliedDayParks) setDayParks(appliedDayParks);
@@ -3259,7 +3343,7 @@ export default function PlansPage() {
           const dayAutoFallbacksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
           const dayAutoFallbacksRaw = localStorage.getItem(dayAutoFallbacksKeyRef.current);
           const dayAutoFallbacksPrune = pruneOrphanedDayRecord(
-            loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current),
+            parseDayAutoFallbacksRaw(readLatestDurableValue(dayAutoFallbacksKeyRef.current)),
             dayAutoFallbacksValidDays
           );
           const appliedDayAutoFallbacks = await commitPrunedDayRecord(
