@@ -579,10 +579,25 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
   }
 }
 
+// Codex follow-up (P2, reviewed commit 9942288) — routed through
+// commitLocalDomainRawSync (same primitive saveDays()/saveToStorage() use)
+// instead of a plain localStorage.setItem. An ordinary edit is still never
+// rejected (commitLocalDomainRawSync always treats it as the user's
+// freshest intent — see that function's own doc in syncHelper.ts), so
+// existing callers of saveDayMeta() see no behavior change. What changes is
+// that every ordinary write now ALSO publishes a durable, append-only
+// local-edit fact for this key — the SAME fact log commitLocalDomainRaw()
+// (used by the cloud-pull reconciliation prune below) already re-scans as
+// part of its own commit gate. Before this fix, an ordinary dayMeta edit
+// and the prune's CAS-protected write were on two different serialization
+// disciplines entirely (one unprotected, one lock+CAS-protected) with no
+// shared signal between them; a concurrent edit whose own canonical write
+// hadn't landed yet (but nothing else had changed) could still be missed by
+// the prune's raw-byte CAS alone. Publishing edit facts here closes that
+// gap using the exact mechanism SH.2 already built for plans/lightning/days
+// — no new concurrency primitive introduced.
 function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(meta));
-  } catch {}
+  commitLocalDomainRawSync(key, JSON.stringify(meta));
 }
 
 /**
@@ -946,9 +961,14 @@ function loadDayParks(key: string): Record<string, string> {
   }
 }
 
+// Codex follow-up (P2, reviewed commit 9942288) — see saveDayMeta()'s own
+// doc above for the full rationale: routed through commitLocalDomainRawSync
+// (same primitive saveDays()/saveDayMeta() use) so ordinary dayParks edits
+// publish the same local-edit-fact log commitLocalDomainRaw() (the cloud-
+// pull reconciliation prune) already re-scans as part of its commit gate.
 /** Persist per-day park overrides to profile-scoped localStorage. */
 function saveDayParks(parks: Record<string, string>, key: string): void {
-  try { localStorage.setItem(key, JSON.stringify(parks)); } catch {}
+  commitLocalDomainRawSync(key, JSON.stringify(parks));
 }
 
 /**
@@ -975,9 +995,13 @@ function loadDayAutoFallbacks(key: string): Record<string, string> {
   }
 }
 
+// Codex follow-up (P2, reviewed commit 9942288) — see saveDayMeta()'s own
+// doc above for the full rationale: routed through commitLocalDomainRawSync
+// so ordinary dayAutoFallbacks edits publish the same local-edit-fact log
+// commitLocalDomainRaw() (the cloud-pull reconciliation prune) re-scans.
 /** Persist per-day Auto fallbacks (Phase 10.4.1) to profile-scoped localStorage. */
 function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): void {
-  try { localStorage.setItem(key, JSON.stringify(fallbacks)); } catch {}
+  commitLocalDomainRawSync(key, JSON.stringify(fallbacks));
 }
 
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
@@ -3147,6 +3171,31 @@ export default function PlansPage() {
         // pruning against a winner that lost its own commit race would prune
         // against a value that never became authoritative.
         //
+        // Codex follow-up (P1, reviewed commit 9942288) — `winningDays` is
+        // frozen the moment THIS pull's own days-domain commit resolved,
+        // above. Each of the three commits below is independently awaited
+        // (real wall-clock time, e.g. Web Lock contention), during which
+        // another tab can legitimately Add/Duplicate a day — genuinely
+        // extending the authoritative `days` list to include a brand-new
+        // day with its own freshly-written dayMeta/dayParks entry. Pruning
+        // that entry against the now-stale `winningDays` would silently
+        // delete a legitimately just-created day's annotation, even though
+        // commitPrunedDayRecord()'s own CAS (below) cannot catch this case:
+        // the record's raw bytes it re-validates against were already read
+        // AFTER the concurrent write landed, so the CAS correctly sees no
+        // further change and lets the (already stale-computed) prune
+        // through. The fix: read the CURRENT authoritative local `days`
+        // value fresh, via loadEffectiveDurableDays() — the SAME helper this
+        // page already treats as authoritative for `days` everywhere else
+        // (mount hydration, the cross-tab `days` listener, this pull's own
+        // `currentDays` above) — immediately adjacent to each record's own
+        // raw read, instead of reusing one pull-start `winningDays` snapshot
+        // for all three. This mirrors the existing "separate, freshly-taken
+        // reads" discipline currentItemsRaw/currentDays/currentLightningRaw
+        // already use earlier in this pull, applied here to `days`
+        // staleness specifically (a different axis from the record's OWN
+        // staleness, which the CAS already covers).
+        //
         // Codex follow-up (reviewed commit a6ea487) — the original version of
         // this block did a plain read (via loadDayMeta/loadDayParks/
         // loadDayAutoFallbacks) → prune → unconditional localStorage.setItem,
@@ -3193,22 +3242,25 @@ export default function PlansPage() {
             : null;
         }
         if (!daysWriteFailed) {
+          const dayMetaValidDays = loadEffectiveDurableDays(daysKeyRef.current);
           const dayMetaRaw = localStorage.getItem(dayMetaKeyRef.current);
-          const dayMetaPrune = pruneOrphanedDayRecord(loadDayMeta(dayMetaKeyRef.current), winningDays);
+          const dayMetaPrune = pruneOrphanedDayRecord(loadDayMeta(dayMetaKeyRef.current), dayMetaValidDays);
           const appliedDayMeta = await commitPrunedDayRecord(dayMetaKeyRef.current, dayMetaRaw, dayMetaPrune);
           if (!isPullCurrent()) return;
           if (appliedDayMeta) setDayMeta(appliedDayMeta);
 
+          const dayParksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
           const dayParksRaw = localStorage.getItem(dayParksKeyRef.current);
-          const dayParksPrune = pruneOrphanedDayRecord(loadDayParks(dayParksKeyRef.current), winningDays);
+          const dayParksPrune = pruneOrphanedDayRecord(loadDayParks(dayParksKeyRef.current), dayParksValidDays);
           const appliedDayParks = await commitPrunedDayRecord(dayParksKeyRef.current, dayParksRaw, dayParksPrune);
           if (!isPullCurrent()) return;
           if (appliedDayParks) setDayParks(appliedDayParks);
 
+          const dayAutoFallbacksValidDays = loadEffectiveDurableDays(daysKeyRef.current);
           const dayAutoFallbacksRaw = localStorage.getItem(dayAutoFallbacksKeyRef.current);
           const dayAutoFallbacksPrune = pruneOrphanedDayRecord(
             loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current),
-            winningDays
+            dayAutoFallbacksValidDays
           );
           const appliedDayAutoFallbacks = await commitPrunedDayRecord(
             dayAutoFallbacksKeyRef.current,

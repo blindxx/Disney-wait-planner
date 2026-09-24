@@ -198,6 +198,13 @@ export const DEV_PRUNE_ORPHANED_DAY_RECORD_CASES: Array<{
     expectedResult: { "day-3": "Kept" },
     expectedChanged: false,
   },
+  {
+    name: "REQUIRED (Codex P1 finding, reviewed commit 9942288) — a day added by a CONCURRENT tab (Add/Duplicate Day) mid-pull, with its own freshly-written annotation entry: as long as the caller passes the CURRENT (freshly re-read) days list rather than a stale pull-start snapshot, the new day's entry is a valid member of validDayIds and must survive — never pruned merely because an earlier, now-stale days snapshot didn't yet know about it",
+    record: { "day-1": { label: "Arrival" }, "day-4": { label: "Just added by another tab" } },
+    validDayIds: ["day-1", "day-4"],
+    expectedResult: { "day-1": { label: "Arrival" }, "day-4": { label: "Just added by another tab" } },
+    expectedChanged: false,
+  },
 ];
 
 /**
