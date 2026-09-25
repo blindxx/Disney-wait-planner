@@ -52,7 +52,7 @@ import {
   isLocalContentForeign,
   selectPendingOpBatch,
   reconcilePendingOperations,
-  commitLocalDomainRawSync,
+  commitOrdinaryLocalEdit,
   commitDomainHydration,
   beginPullContext,
   isPullContextCurrent,
@@ -613,9 +613,15 @@ function loadEffectiveDurableLightningItems(key: string): LightningItem[] {
 // routes through the shared commitLocalDomainRawSync primitive (see its own
 // doc in syncHelper.ts) instead of a bare setItem: mirrors plans/page.tsx's
 // own saveToStorage exactly — see its doc there for the full rationale.
+//
+// SH.4.1a Codex P1 follow-up — now via commitOrdinaryLocalEdit()
+// (syncHelper.ts), which ALSO establishes this profile's local-content-
+// owner marker for the currently authenticated identity the instant this
+// write durably succeeds — see its own doc there, and plans/page.tsx's
+// mirrored saveToStorage comment, for the full rationale.
 function saveToStorage(items: LightningItem[], key: string = STORAGE_KEY): void {
   const schema: StoredSchema = { version: 1, items };
-  commitLocalDomainRawSync(key, JSON.stringify(schema));
+  commitOrdinaryLocalEdit(key, JSON.stringify(schema));
 }
 
 // ===== ID GENERATION =====

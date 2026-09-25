@@ -4522,6 +4522,227 @@ export function setSyncUserId(userId: string | null): void {
   currentPullEpoch += 1;
 }
 
+// ── Ordinary-edit local-content ownership (SH.4.1a Codex P1 follow-up) ──────
+//
+// Codex found: getLocalContentOwner()/setLocalContentOwner() (this module's
+// own DURABLE TRANSFER BOUNDARY, see setLocalContentOwner's own doc above)
+// was previously established ONLY at the end of a successful cloud PULL. An
+// authenticated user whose initial pull failed or was offline could still
+// durably persist ORDINARY local edits — items, days, dayMeta, dayParks,
+// Lightning selections, all via commitLocalDomainRawSync() above — while
+// this profile's owner marker stayed null indefinitely. A null marker is
+// trusted by ANY identity (evaluateLocalContentForeign()'s own "never
+// tagged" contract, which exists to preserve local-first adoption for a
+// profile that has genuinely never been authenticated-tagged before) — so
+// a DIFFERENT account signing into this same browser/profile later would
+// see the first user's own genuine, unsynced edits as non-foreign and
+// could view/trust them, exactly the exposure SH.4.1a's own render/edit
+// gate exists to prevent.
+//
+// FIX: commitOrdinaryLocalEdit() below is a thin wrapper every ordinary
+// planner-domain edit writer now calls INSTEAD of commitLocalDomainRawSync()
+// directly (Plans' items/days/dayMeta/dayParks/dayAutoFallbacks writers,
+// Lightning's items writer — see this round's own bounded-adjacency audit
+// for the exact call sites) — the ONE shared persistence boundary all of
+// them already funnel through, so ownership stamping is written once here
+// rather than duplicated at each page's own call sites. It calls the
+// EXISTING, unmodified commitLocalDomainRawSync() for the actual write,
+// then — ONLY when that write durably succeeded
+// (isLocalDomainCommitSuccess(status), never "failed") AND a REAL
+// authenticated identity performed it (currentSyncUserId !== null, this
+// module's own existing identity-tracking state — the SAME state
+// doPush()/registerUnloadSync() already trust to know who a push belongs
+// to, kept current by every caller's setSyncUserId()/setSyncProfileId()
+// calls) — calls setLocalContentOwner(currentSyncProfileId,
+// currentSyncUserId): the SAME primitive and SAME semantics the pull path
+// already uses, just a second, EARLIER opportunity to establish it. This
+// is not a new/competing ownership model — setLocalContentOwner's own
+// idempotent "same value" behavior means a pull that later succeeds and
+// re-confirms the identical (profileId, userId) pair is a harmless,
+// coherent no-op; "successful pull ownership behavior remains unchanged"
+// by this fix.
+//
+// `currentSyncUserId === null` (signed out, or session not yet resolved)
+// NEVER stamps — mirrors setLocalContentOwner's own existing no-op-on-null
+// guard and evaluateLocalContentForeign's own null-currentUserId contract:
+// a signed-out edit must never be attributed to an authenticated account,
+// preserving local-first signed-out semantics and genuinely-unowned
+// legacy-content adoption exactly as before this round.
+//
+// `status === "failed"` never stamps either — nothing durable changed, so
+// there is nothing to attribute; any existing marker (or its continued
+// absence) is left completely untouched, matching setLocalContentOwner's
+// own philosophy that ownership only ever follows a value actually
+// landing on disk.
+
+/**
+ * Pure predicate: should commitOrdinaryLocalEdit() (below) stamp local-
+ * content ownership for `currentUserId`? See this section's own header
+ * doc for the full rationale.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES, shouldStampOwnershipOnOrdinaryEdit } from "@/lib/syncHelper";
+ *   DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES.forEach(c => {
+ *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldStampOwnershipOnOrdinaryEdit(
+  status: LocalDomainSyncCommitStatus,
+  currentUserId: string | null
+): boolean {
+  return currentUserId !== null && isLocalDomainCommitSuccess(status);
+}
+
+export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
+  name: string;
+  status: LocalDomainSyncCommitStatus;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "a fully durable, fact-protected commit by an authenticated user stamps ownership",
+    status: "committed",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "committed-unprotected (one of the two persistence legs landed) still counts as durable — stamps ownership exactly like a fully-protected commit",
+    status: "committed-unprotected",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "a true noop (the durable value already matched) still stamps/reaffirms ownership — the bytes are durably this account's own either way",
+    status: "noop",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "failed local persistence never stamps ownership, even for an authenticated user — nothing durable changed, so there is nothing to attribute",
+    status: "failed",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "signed-out edit (currentUserId null) never stamps ownership, regardless of how the commit resolved",
+    status: "committed",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "session not yet resolved (currentUserId null, mirrors 'loading') never stamps ownership either — nothing here guesses an identity",
+    status: "committed",
+    currentUserId: null,
+    expected: false,
+  },
+];
+
+/**
+ * Pure simulation of the marker's value after one commitOrdinaryLocalEdit()
+ * attempt — composes shouldStampOwnershipOnOrdinaryEdit() with
+ * evaluateLocalContentForeign() (both already exported above) to model the
+ * exact end-to-end lifecycle DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES
+ * below exercises, without any real localStorage I/O.
+ *
+ * Run from Node:
+ *   import { DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES, simulateOwnerAfterOrdinaryEdit, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES.forEach(c => {
+ *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId);
+ *     const ok = ownerAfter === c.expectedOwnerAfter
+ *       && (c.checkForeignFor === undefined || evaluateLocalContentForeign(ownerAfter, c.checkForeignFor) === c.expectedForeignForChecked);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateOwnerAfterOrdinaryEdit(
+  ownerBefore: string | null,
+  status: LocalDomainSyncCommitStatus,
+  currentUserId: string | null
+): string | null {
+  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId) ? currentUserId : ownerBefore;
+}
+
+export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
+  name: string;
+  ownerBefore: string | null;
+  status: LocalDomainSyncCommitStatus;
+  currentUserId: string | null;
+  expectedOwnerAfter: string | null;
+  checkForeignFor?: string | null;
+  expectedForeignForChecked?: boolean;
+}> = [
+  {
+    name: "authenticated A edits after a failed/offline pull — durable local persistence ALONE (no successful pull at all) establishes A as owner",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "B then signs in after A's ordinary-edit-established ownership — A's bytes are foreign to B, even though no cloud pull for A ever succeeded",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userB",
+    expectedForeignForChecked: true,
+  },
+  {
+    name: "same-account later use remains local-first — A's own later edit against A's own already-established ownership is never foreign to A",
+    ownerBefore: "userA",
+    status: "committed",
+    currentUserId: "userA",
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userA",
+    expectedForeignForChecked: false,
+  },
+  {
+    name: "signed-out edit does not gain authenticated ownership — a null currentUserId leaves the (absent) marker exactly as it was",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: null,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "failed local persistence does not change ownership, even for an authenticated user",
+    ownerBefore: null,
+    status: "failed",
+    currentUserId: "userA",
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "failed local persistence leaves a PRE-EXISTING owner marker untouched too — never relabeled/cleared by a failed edit",
+    ownerBefore: "userA",
+    status: "failed",
+    currentUserId: "userB",
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "successful pull ownership behavior remains unchanged — a pull-established owner (existing DURABLE TRANSFER BOUNDARY path, untouched by this round) composes correctly with a LATER ordinary edit by the same account",
+    ownerBefore: "userA", // as if a successful pull already stamped this
+    status: "committed",
+    currentUserId: "userA",
+    expectedOwnerAfter: "userA",
+  },
+];
+
+/**
+ * The ONE shared boundary every ordinary planner-domain edit writer now
+ * calls instead of commitLocalDomainRawSync() directly — see this
+ * section's own header doc above for the full rationale. Applies uniformly
+ * to every synced domain (Plans' items/days/dayMeta/dayParks/
+ * dayAutoFallbacks, Lightning's items): none of them needs its own
+ * ownership-stamping logic, since all of them already funnel through this
+ * one function.
+ */
+export function commitOrdinaryLocalEdit(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
+  const status = commitLocalDomainRawSync(key, nextRaw);
+  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId)) {
+    setLocalContentOwner(currentSyncProfileId, currentSyncUserId as string);
+  }
+  return status;
+}
+
 // ── scheduleSync ──────────────────────────────────────────────────────────────
 
 /**

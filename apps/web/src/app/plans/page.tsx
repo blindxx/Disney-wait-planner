@@ -117,7 +117,7 @@ import {
   selectPendingOpBatch,
   reconcilePendingOperations,
   commitLocalDomainRaw,
-  commitLocalDomainRawSync,
+  commitOrdinaryLocalEdit,
   isLocalDomainCommitSuccess,
   commitDomainHydration,
   beginPullContext,
@@ -394,8 +394,16 @@ function loadEffectiveDurablePlanItems(key: string): PlanItem[] {
 // CONTRACT in syncHelper.ts's own doc for the full rationale. Callers that
 // DO need CAS-gated, conflict-aware commit (pull hydration) call
 // commitLocalDomainRaw directly instead.
+//
+// SH.4.1a Codex P1 follow-up — routes through commitOrdinaryLocalEdit()
+// (syncHelper.ts), a thin wrapper around commitLocalDomainRawSync() that
+// ALSO establishes this profile's local-content-owner marker for the
+// currently authenticated identity the instant this write durably
+// succeeds — see its own doc for the full rationale (this is what closes
+// the gap where an authenticated edit made during a failed/offline
+// initial pull previously left the owner marker null indefinitely).
 function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
-  commitLocalDomainRawSync(key, JSON.stringify({ version: SCHEMA_VERSION, items }));
+  commitOrdinaryLocalEdit(key, JSON.stringify({ version: SCHEMA_VERSION, items }));
 }
 
 // ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1 / 8.0.2) =====
@@ -620,7 +628,7 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
 // gap using the exact mechanism SH.2 already built for plans/lightning/days
 // — no new concurrency primitive introduced.
 function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(meta));
+  commitOrdinaryLocalEdit(key, JSON.stringify(meta));
 }
 
 /**
@@ -719,7 +727,7 @@ function loadEffectiveDurableDayParks(key: string): Record<string, string> {
 // same commitLocalDomainRawSync routing as saveToStorage above; see its own
 // doc there and in syncHelper.ts.
 function saveDays(days: string[], key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(days));
+  commitOrdinaryLocalEdit(key, JSON.stringify(days));
 }
 
 function loadActiveDayId(key: string): string {
@@ -1026,7 +1034,7 @@ function loadDayParks(key: string): Record<string, string> {
 // pull reconciliation prune) already re-scans as part of its commit gate.
 /** Persist per-day park overrides to profile-scoped localStorage. */
 function saveDayParks(parks: Record<string, string>, key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(parks));
+  commitOrdinaryLocalEdit(key, JSON.stringify(parks));
 }
 
 /**
@@ -1072,7 +1080,7 @@ function loadDayAutoFallbacks(key: string): Record<string, string> {
 // commitLocalDomainRaw() (the cloud-pull reconciliation prune) re-scans.
 /** Persist per-day Auto fallbacks (Phase 10.4.1) to profile-scoped localStorage. */
 function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(fallbacks));
+  commitOrdinaryLocalEdit(key, JSON.stringify(fallbacks));
 }
 
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
@@ -4270,7 +4278,7 @@ export default function PlansPage() {
           const llItems = (parsed as Record<string, unknown>).items as Array<{ dayId?: unknown }>;
           const nextLlItems = llItems.filter((it) => normalizeDayId(it?.dayId) !== dayId);
           if (nextLlItems.length !== llItems.length) {
-            commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
+            commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
             setLightningVersion((v) => v + 1);
           }
         }
@@ -4826,7 +4834,7 @@ export default function PlansPage() {
     // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
     // hidden day-scoped items survive into the next session (BUG C fix).
     const _lightningKey = buildNamespacedKey(_profileId, "lightning");
-    commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: [] }));
+    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: [] }));
   }
 
   function handleToggleSort(checked: boolean) {
@@ -5363,7 +5371,7 @@ export default function PlansPage() {
       dayId: normalizeDayId(it.dayId),
     }));
     const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-    commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
+    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);
