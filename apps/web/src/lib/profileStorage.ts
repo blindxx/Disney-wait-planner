@@ -391,6 +391,102 @@ export function getProfileIdsOwnedByOtherAccounts(currentOwnerUserId: string): S
 }
 
 /**
+ * Pure query: given the full provenance state and the CURRENT account,
+ * return the ids owned by another real account AND NOT also owned by
+ * `currentOwnerUserId`. This is DELIBERATELY a different question from
+ * `selectProfileIdsOwnedByOtherAccounts` above ("does anyone besides me own
+ * this"), which two-owner adoption/cleanup decisions correctly answer
+ * without regard to whether the current account ALSO owns the id — those
+ * decisions have an INDEPENDENT signal (adoption's own fresh `known` set
+ * from this round's GET; cleanup's need to protect ANY co-owner's data
+ * regardless of who is deleting) that already accounts for "is this
+ * already mine" on its own.
+ *
+ * Codex P1 follow-up (8th round) — VISIBILITY has no such independent
+ * signal: whether an id should be shown to `currentOwnerUserId` can ONLY be
+ * decided from this same provenance state, so it must explicitly check
+ * "and do I not also own it" itself, or an id BOTH accounts legitimately,
+ * independently own (profileStorage.ts's own module doc — two accounts can
+ * always independently own the identical literal id) would be wrongly
+ * hidden from an owner just because another account owns it too. This
+ * query exists ONLY for that visibility decision
+ * (selectHiddenProfileIdsForAccount below) — adoption/cleanup-safety must
+ * keep using selectProfileIdsOwnedByOtherAccounts unchanged.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_PROFILE_IDS_EXCLUSIVELY_OWNED_BY_OTHERS_CASES, selectProfileIdsExclusivelyOwnedByOthers } from "@/lib/profileStorage";
+ *   DEV_SELECT_PROFILE_IDS_EXCLUSIVELY_OWNED_BY_OTHERS_CASES.forEach(c => {
+ *     const got = [...selectProfileIdsExclusivelyOwnedByOthers(c.state, c.currentOwnerUserId)].sort();
+ *     console.log(JSON.stringify(got) === JSON.stringify([...c.expected].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectProfileIdsExclusivelyOwnedByOthers(
+  state: ProfileRegistryState,
+  currentOwnerUserId: string
+): Set<string> {
+  const ids = new Set<string>();
+  for (const [id, byAccount] of Object.entries(state)) {
+    if (byAccount[currentOwnerUserId]?.owned) continue; // I own it too — never hidden from me
+    const ownedByOther = Object.entries(byAccount).some(
+      ([accountKey, entry]) =>
+        accountKey !== currentOwnerUserId && accountKey !== UNOWNED_ACCOUNT_KEY && entry?.owned
+    );
+    if (ownedByOther) ids.add(id);
+  }
+  return ids;
+}
+
+export const DEV_SELECT_PROFILE_IDS_EXCLUSIVELY_OWNED_BY_OTHERS_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  currentOwnerUserId: string;
+  expected: string[];
+}> = [
+  {
+    name: "empty state — nothing exclusively owned by anyone",
+    state: {},
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+  {
+    name: "A owns 'family' only — exclusively owned by another account from B's perspective",
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: ["family"],
+  },
+  {
+    name: "the current account's OWN ownership is never counted as 'exclusively owned by another'",
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "Codex P1 follow-up (8th round) — A and B both independently own the identical literal id — NOT exclusively owned by another from EITHER one's own perspective",
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "same two-owner id from B's own perspective is equally not exclusively owned by another",
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+  {
+    name: "the shared unowned sentinel is never treated as a competing account",
+    state: { mom: { [UNOWNED_ACCOUNT_KEY]: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+  {
+    name: "only a deletion marker, no ownership — never counted as exclusively owned by another",
+    state: { mom: { userA: { locallyDeleted: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+];
+
+/**
  * Pure state transition: mark `profileId` as explicitly, locally deleted
  * under `accountKey` (a real userId, or UNOWNED_ACCOUNT_KEY when no account
  * was authenticated at delete time) within `state`, returning the updated
@@ -699,20 +795,128 @@ export const DEV_FILTER_VISIBLE_PROFILES_CASES: Array<{
 ];
 
 /**
+ * Pure computation: the full set of profile ids that must be HIDDEN from
+ * `currentOwnerUserId`'s effective view — the union of two INDEPENDENT
+ * reasons: `selectLocallyDeletedIdsForAccount`'s own account-scoped delete
+ * suppression, and `selectProfileIdsExclusivelyOwnedByOthers`'s cross-
+ * account ownership exclusion.
+ *
+ * Codex P1 follow-up (8th round) — `getVisibleProfiles` previously
+ * consulted ONLY the deletion-marker reason: an id sitting in the shared
+ * `dwp.profiles` list but durably owned ONLY by a DIFFERENT real account
+ * (e.g. discovered onto this device by that other account's own
+ * reconciliation, or grandfathered in some other way) was never filtered
+ * out for an account that never deleted it and never owned it either —
+ * account A could see, select, rename, or delete a profile that in fact
+ * belongs only to account B. Folding in
+ * `selectProfileIdsExclusivelyOwnedByOthers` (NOT the plain
+ * `selectProfileIdsOwnedByOtherAccounts` adoption/cleanup use — see that
+ * function's own doc for why visibility needs the "exclusively" variant)
+ * closes that leak: a genuinely unowned legacy profile (no owner entry for
+ * ANY real account) is never in the ownership-exclusion set, so it remains
+ * visible/selectable exactly as before — this is what keeps a pre-SH.4
+ * legacy profile safely adoptable; an id owned by BOTH
+ * `currentOwnerUserId` and another account also remains visible for
+ * `currentOwnerUserId`, since `selectProfileIdsExclusivelyOwnedByOthers`
+ * explicitly excludes an id the current account itself owns from its
+ * result, regardless of who else also owns it.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_HIDDEN_PROFILE_IDS_FOR_ACCOUNT_CASES, selectHiddenProfileIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_SELECT_HIDDEN_PROFILE_IDS_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = [...selectHiddenProfileIdsForAccount(c.state, c.currentOwnerUserId)].sort();
+ *     console.log(JSON.stringify(got) === JSON.stringify([...c.expected].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectHiddenProfileIdsForAccount(
+  state: ProfileRegistryState,
+  currentOwnerUserId: string
+): Set<string> {
+  const hidden = selectLocallyDeletedIdsForAccount(state, currentOwnerUserId);
+  for (const id of selectProfileIdsExclusivelyOwnedByOthers(state, currentOwnerUserId)) {
+    hidden.add(id);
+  }
+  return hidden;
+}
+
+export const DEV_SELECT_HIDDEN_PROFILE_IDS_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  currentOwnerUserId: string;
+  expected: string[];
+}> = [
+  {
+    name: "id locally deleted by A — hidden for A",
+    state: { mom: { userA: { owned: true, locallyDeleted: true } } },
+    currentOwnerUserId: "userA",
+    expected: ["mom"],
+  },
+  {
+    name: "Codex P1 follow-up (8th round) — an id owned ONLY by B is hidden from A even though A never deleted or owned it",
+    state: { family: { userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: ["family"],
+  },
+  {
+    name: "an id owned by A is visible to A even though an unrelated id is owned by B",
+    state: { family: { userA: { owned: true } }, mom: { userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: ["mom"],
+  },
+  {
+    name: "genuinely unowned legacy id — never hidden from anyone",
+    state: {},
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "an id owned by BOTH A and B remains visible to A",
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "signed-out viewer sees an id owned by a real account as hidden",
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: ["family"],
+  },
+  {
+    name: "signed-out viewer sees a genuinely unowned id as visible",
+    state: {},
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: [],
+  },
+  {
+    name: "an id hidden for BOTH reasons at once (A locally deleted it, AND B independently owns it) is hidden exactly once",
+    state: { mom: { userA: { locallyDeleted: true }, userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: ["mom"],
+  },
+];
+
+/**
  * Returns the EFFECTIVE profile list for `currentOwnerUserId` (a real
  * userId, or UNOWNED_ACCOUNT_KEY when signed out): every profile currently
- * in the shared local `dwp.profiles` list, except an id THIS account has
- * explicitly, locally deleted (getLocallyDeletedProfileIds/
- * filterVisibleProfiles above). This is a READ-ONLY, per-render view — it
- * never writes to `dwp.profiles`, so the underlying shared list (and
- * therefore any OTHER account's own same-id profile) is completely
- * unaffected; only what THIS call returns for display is filtered. Callers
- * displaying the profile picker (settings/page.tsx) should call this
- * instead of getProfiles() directly whenever an authenticated identity (or
- * its signed-out equivalent, UNOWNED_ACCOUNT_KEY) is known.
+ * in the shared local `dwp.profiles` list, except an id hidden from this
+ * account for either reason `selectHiddenProfileIdsForAccount` covers
+ * (this account's own local deletion, or durable ownership by a DIFFERENT
+ * real account). This is a READ-ONLY, per-render view — it never writes to
+ * `dwp.profiles`, so the underlying shared list (and therefore any OTHER
+ * account's own same-id profile) is completely unaffected; only what THIS
+ * call returns for display is filtered. Callers displaying the profile
+ * picker (settings/page.tsx) should call this instead of getProfiles()
+ * directly whenever an authenticated identity (or its signed-out
+ * equivalent, UNOWNED_ACCOUNT_KEY) is known — every UI action (select,
+ * rename, delete) that reads its candidate list FROM this function's
+ * result can never act on an id owned only by another account, since it
+ * simply never appears in the list handed to those handlers.
  */
 export function getVisibleProfiles(currentOwnerUserId: string): Profile[] {
-  return filterVisibleProfiles(getProfiles(), getLocallyDeletedProfileIds(currentOwnerUserId));
+  return filterVisibleProfiles(
+    getProfiles(),
+    selectHiddenProfileIdsForAccount(readProfileRegistryState(), currentOwnerUserId)
+  );
 }
 
 const DEFAULT_PROFILE: Profile = { id: "default", name: "Default" };
@@ -978,9 +1182,123 @@ export function renameProfile(id: string, name: string): void {
 }
 
 /**
- * Delete a profile: removes it from the list and cleans up all its namespaced keys.
- * The last remaining profile cannot be deleted.
- * If the deleted profile was active, switches active to "default".
+ * Pure decision: is it safe to DESTRUCTIVELY clean up `profileId`'s shared
+ * physical data — remove it from the shared `dwp.profiles` list, wipe its
+ * `dwp:{profileId}:*` namespaced keys, and purge its sync provenance — as
+ * part of `currentOwnerUserId`'s delete? Safe only when NO account OTHER
+ * than `currentOwnerUserId` durably, independently owns this literal id
+ * (`selectProfileIdsOwnedByOtherAccounts`) — i.e. `currentOwnerUserId` is
+ * either this id's sole owner or the id is genuinely unowned.
+ *
+ * Codex P1 follow-up (8th round) — two different accounts can each,
+ * independently, legitimately own the identical literal profile id on the
+ * SAME device (profileStorage.ts's module doc, applyProfileOwnerStamp),
+ * but that co-ownership is only ever a PROVENANCE fact — the shared
+ * `dwp.profiles` entry and its `dwp:{id}:*` namespaced planner/lightning/
+ * park-context data, plus its `dwp:sync:*`/`dwp:localEditFact:*` sync
+ * provenance (purgeProfileSyncState, syncHelper.ts), remain ONE PHYSICAL
+ * copy on this device, not one per owning account. deleteProfile
+ * previously ran that destructive cleanup unconditionally on every delete;
+ * when a second account legitimately co-owned the same id, deleting it as
+ * the first account would destroy the SECOND account's own local-first
+ * planner content, sync provenance, and any of its unsynced edits — data
+ * that account never asked to delete and has no way to recover, since none
+ * of it was ever synced away from B (that is the entire point of
+ * local-first: it may only ever exist in this one browser's localStorage).
+ * This predicate is what gates that: when it returns false, deleteProfile
+ * leaves ALL of that physical data completely untouched, and relies
+ * entirely on the existing account-scoped local-deletion marker
+ * (markProfileLocallyDeleted/selectHiddenProfileIdsForAccount) to hide the
+ * id from `currentOwnerUserId`'s own effective view going forward, without
+ * touching what the other, still-owning account sees or has stored.
+ *
+ * Run from Node:
+ *   import { DEV_IS_DESTRUCTIVE_PROFILE_CLEANUP_SAFE_CASES, isDestructiveProfileCleanupSafe } from "@/lib/profileStorage";
+ *   DEV_IS_DESTRUCTIVE_PROFILE_CLEANUP_SAFE_CASES.forEach(c => {
+ *     const got = isDestructiveProfileCleanupSafe(c.state, c.profileId, c.currentOwnerUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isDestructiveProfileCleanupSafe(
+  state: ProfileRegistryState,
+  profileId: string,
+  currentOwnerUserId: string
+): boolean {
+  return !selectProfileIdsOwnedByOtherAccounts(state, currentOwnerUserId).has(profileId);
+}
+
+export const DEV_IS_DESTRUCTIVE_PROFILE_CLEANUP_SAFE_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  currentOwnerUserId: string;
+  expected: boolean;
+}> = [
+  {
+    name: "A-only ownership + A delete — no other owner, safe to fully clean up shared data",
+    state: { family: { userA: { owned: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "Codex P1 follow-up (8th round) — A+B same-id ownership + A delete — B still owns it, NOT safe to destroy shared physical data",
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "symmetric case — B deleting while A also owns the identical literal id is equally not safe",
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userB",
+    expected: false,
+  },
+  {
+    name: "genuinely unowned legacy profile deletion — no one else has any claim, safe to fully clean up",
+    state: {},
+    profileId: "legacy-trip",
+    currentOwnerUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "signed-out deletion of a profile actually owned by a real account — protected, NOT safe",
+    state: { family: { userA: { owned: true } } },
+    profileId: "family",
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: false,
+  },
+  {
+    name: "signed-out deletion of a genuinely unowned profile — safe, matches pre-SH.4.1 behavior",
+    state: {},
+    profileId: "legacy-trip",
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: true,
+  },
+  {
+    name: "last remaining owner deletion — id was never actually shared (only this account's own ownership fact exists) — safe",
+    state: { family: { userA: { owned: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: true,
+  },
+];
+
+/**
+ * Delete a profile for `currentOwnerUserId`'s own view: always hides it
+ * from that account going forward (the account-scoped local-deletion
+ * marker below), and — ONLY when `isDestructiveProfileCleanupSafe` confirms
+ * no OTHER account still owns this literal id — also destructively removes
+ * it from the shared `dwp.profiles` list and wipes its namespaced/sync
+ * data. The last remaining VISIBLE profile cannot be deleted this way
+ * (callers gate the delete action on `getVisibleProfiles`'s own result, so
+ * `profiles.length` here reflects the raw shared list, which may still
+ * exceed 1 even when only one entry is visible to this account — that is
+ * fine, since a length-1 raw list can only ever mean the single remaining
+ * physical entry, safe or not, is the one this call is about).
+ * If the deleted profile was active for this device, switches active to
+ * "default".
  *
  * `currentOwnerUserId` (SH.4.1 Codex P1 follow-up, 3rd round) — the
  * authenticated account performing the delete, if any (pass the caller's
@@ -990,61 +1308,90 @@ export function renameProfile(id: string, name: string): void {
  * applyLocalDeletionMarker's own doc — so deleting a profile while signed
  * in as one account can never suppress a DIFFERENT account's own, distinct
  * profile under the same grandfathered id on a shared browser.
+ *
+ * Codex P1 follow-up (8th round) — see isDestructiveProfileCleanupSafe's
+ * own doc for why the destructive half of this (list removal + namespaced/
+ * sync-provenance wipe) must be conditional: two accounts can legitimately,
+ * independently own the identical literal id on this one device, but the
+ * physical data behind that id is ONE shared copy, not one per account.
  */
 export function deleteProfile(id: string, currentOwnerUserId: string | null = null): void {
   if (id === "default") return; // Default is protected from deletion via this path
   const profiles = getProfiles();
   if (profiles.length <= 1) return; // Cannot delete the last profile
 
-  const updated = profiles.filter((p) => p.id !== id);
-  writeProfiles(updated);
+  const scopeKey = currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY;
+  const destructiveCleanupSafe = isDestructiveProfileCleanupSafe(readProfileRegistryState(), id, scopeKey);
 
-  // Clean up all namespaced keys for the deleted profile.
-  // Iterate backwards so removals do not shift the indices of remaining keys.
-  try {
-    const prefix = `dwp:${id}:`;
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(prefix)) {
-        localStorage.removeItem(key);
+  if (destructiveCleanupSafe) {
+    const updated = profiles.filter((p) => p.id !== id);
+    writeProfiles(updated);
+
+    // Clean up all namespaced keys for the deleted profile.
+    // Iterate backwards so removals do not shift the indices of remaining keys.
+    try {
+      const prefix = `dwp:${id}:`;
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith(prefix)) {
+          localStorage.removeItem(key);
+        }
       }
-    }
-  } catch {}
+    } catch {}
 
-  // SH.2.1 P1 fix (Codex finding #1, this round) — the loop above only
-  // matches this profile's plain `dwp:{id}:{baseKey}` canonical keys (the
-  // shape this module itself owns — see the module doc above). It does NOT
-  // reach the sync layer's OWN per-profile key shapes (local-edit facts,
-  // confirmed facts, pending pushes, the local-content-owner marker — all
-  // namespaced `dwp:localEditFact:...`/`dwp:sync:...`, never `dwp:{id}:...`
-  // directly). Those are DURABLE, profile-owned sync state: left behind, a
-  // profile recreated with the SAME normalized id (normalizeId() is
-  // deterministic) could resurrect them — a leftover local-edit fact in
-  // particular can outrank the new, empty profile's canonical value the
-  // moment any sync/conflict decision reads durable local authority for
-  // that key. purgeProfileSyncState() (syncHelper.ts) is the shared purge
-  // for that entire key family — see its own doc, and
-  // isProfileOwnedSyncKey()'s doc in syncPayload.ts, for the full rationale
-  // and the exact shapes covered. Deliberately NOT duplicating knowledge of
-  // any of those key shapes here.
-  purgeProfileSyncState(id);
+    // SH.2.1 P1 fix (Codex finding #1, this round) — the loop above only
+    // matches this profile's plain `dwp:{id}:{baseKey}` canonical keys (the
+    // shape this module itself owns — see the module doc above). It does NOT
+    // reach the sync layer's OWN per-profile key shapes (local-edit facts,
+    // confirmed facts, pending pushes, the local-content-owner marker — all
+    // namespaced `dwp:localEditFact:...`/`dwp:sync:...`, never `dwp:{id}:...`
+    // directly). Those are DURABLE, profile-owned sync state: left behind, a
+    // profile recreated with the SAME normalized id (normalizeId() is
+    // deterministic) could resurrect them — a leftover local-edit fact in
+    // particular can outrank the new, empty profile's canonical value the
+    // moment any sync/conflict decision reads durable local authority for
+    // that key. purgeProfileSyncState() (syncHelper.ts) is the shared purge
+    // for that entire key family — see its own doc, and
+    // isProfileOwnedSyncKey()'s doc in syncPayload.ts, for the full rationale
+    // and the exact shapes covered. Deliberately NOT duplicating knowledge of
+    // any of those key shapes here.
+    purgeProfileSyncState(id);
+  }
+  // else: isDestructiveProfileCleanupSafe found another real account still,
+  // independently, owns this literal id on this device — the shared
+  // dwp.profiles entry, its dwp:{id}:* namespaced data, and its sync
+  // provenance all remain COMPLETELY untouched, so that account's own
+  // local-first planner content and any unsynced edits survive this delete
+  // intact. Only `scopeKey`'s own view of the id is suppressed, below.
 
-  // SH.4.1 — mark this id as locally deleted, scoped to `currentOwnerUserId`
-  // (or the shared unowned bucket when signed out — see this function's own
-  // doc and applyLocalDeletionMarker's), so a subsequent registry
-  // reconciliation round (profileRegistrySync.ts's selectActiveServerProfiles)
-  // does not immediately rediscover/re-add it for THAT account, without
-  // affecting any other account's own same-id profile. This device's local
-  // delete does NOT touch the server's `user_profiles` row for this id (if
-  // any) — it remains active until SH.4.3 implements real server-side
-  // tombstones — nor any `user_planner` cloud planner data.
-  markProfileLocallyDeleted(id, currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY);
+  // SH.4.1 — mark this id as locally deleted, scoped to `scopeKey` (a real
+  // userId, or the shared unowned bucket when signed out — see this
+  // function's own doc and applyLocalDeletionMarker's), so a subsequent
+  // registry reconciliation round
+  // (profileRegistrySync.ts's selectActiveServerProfiles) does not
+  // immediately rediscover/re-add it for THAT account, and so
+  // selectHiddenProfileIdsForAccount hides it from that account's own
+  // effective view immediately — without affecting any other account's own
+  // same-id profile. This device's local delete does NOT touch the
+  // server's `user_profiles` row for this id (if any) — it remains active
+  // until SH.4.3 implements real server-side tombstones — nor any
+  // `user_planner` cloud planner data.
+  markProfileLocallyDeleted(id, scopeKey);
 
-  // If the deleted profile was active, explicitly persist fallback to default.
-  // Compare raw localStorage directly — getActiveProfileId() already applies
-  // validation fallback, so by the time we call it the profile list no longer
-  // contains `id` and the helper returns "default" regardless, making the
-  // comparison always false and the setActiveProfileId() call unreachable.
+  // If the deleted profile was active, explicitly persist fallback to
+  // default. Compare raw localStorage directly rather than calling
+  // getActiveProfileId(), because the two cleanup branches above leave the
+  // raw list in different states: when destructive cleanup ran, `id` is
+  // already gone from `dwp.profiles`, so getActiveProfileId()'s own
+  // raw-list validation would already return "default" and a comparison
+  // against `id` would always be false; when it did NOT run (another
+  // account still owns `id`), `id` is still a perfectly valid raw-list
+  // entry for THAT account, so getActiveProfileId() would NOT fall back on
+  // its own even though `currentOwnerUserId`/`scopeKey` must no longer keep
+  // it active. Reading the raw pointer directly covers both cases
+  // uniformly: whenever it still equals `id`, this account's own active
+  // pointer must move to "default", regardless of whether the underlying
+  // entry itself survives for someone else.
   try {
     if (localStorage.getItem(ACTIVE_PROFILE_KEY) === id) {
       setActiveProfileId("default");
