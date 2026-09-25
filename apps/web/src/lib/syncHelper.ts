@@ -4574,66 +4574,137 @@ export function setSyncUserId(userId: string | null): void {
 // absence) is left completely untouched, matching setLocalContentOwner's
 // own philosophy that ownership only ever follows a value actually
 // landing on disk.
+//
+// Codex P1 follow-up (this round) — USER-ORIGINATED EDIT EVIDENCE. The
+// original version of this fix stamped ownership from ANY durably-
+// succeeding call, including "noop". That is unsafe: this exact function is
+// also the shared persistence boundary for MOUNT hydration, cross-tab
+// storage-listener re-sync, and pull-hydration's own React-state mirroring
+// — none of which are a genuine user edit. Concretely: A owns local planner
+// bytes; B signs in and those bytes are correctly withheld/foreign; B
+// navigates to a page that re-mounts and loads THE SAME still-on-disk A
+// bytes into React state; that mount's own auto-persist effect then calls
+// this function with those unchanged bytes; the underlying commit reports
+// "noop" (nothing to write, already durable); the PREVIOUS version of this
+// function stamped owner=B anyway, incorrectly clearing the foreign-content
+// guard the very next render.
+//
+// The root rule: local-content ownership may transfer from an authenticated
+// local action ONLY when there is evidence of a USER-ORIGINATED EDIT. Mount
+// hydration, persistence mirroring, normalization/self-heal rewrites, or
+// merely observing the same durable value must never establish ownership —
+// regardless of what isLocalDomainCommitSuccess(status) reports, and even
+// for a "committed" (not just "noop") status: a mount-time migration that
+// actually REWRITES bytes (e.g. a one-time dayId migration) is still not a
+// user edit. This is NOT a redefinition of "noop"/commit-status semantics
+// (those are unchanged and remain valid durable results for every other
+// caller of commitLocalDomainRawSync/isLocalDomainCommitSuccess) — it is a
+// SEPARATE, ADDITIONAL gate that only this ownership decision consults.
+//
+// Every call site of commitOrdinaryLocalEdit() now passes
+// `isUserOriginatedEdit` explicitly (required, no default) — the highest
+// sensible existing boundary for this distinction is each page's own
+// handler-vs-effect structure: a call made directly from a user-triggered
+// handler function (add/edit/delete/reorder/import/clear/restore — invoked
+// only from an onClick/onChange/onSubmit) passes `true`; a call made from a
+// mount effect, a cross-tab storage-listener resync, or React-state
+// mirroring of a pull's own already-committed hydration passes `false`. For
+// the one domain per page (Plans' `items`, Lightning's `items`) whose
+// persistence is centralized in a single generic
+// `useEffect(() => { ... }, [items, ...])` that fires for BOTH user edits
+// and hydration-driven state changes alike, each page tracks a small
+// `pendingNonUserItemsPersistRef` (set `true` immediately alongside the
+// FEW non-user setItems() calls — mount load, pull-hydration's own state
+// mirror, and, for Lightning, the cross-tab storage-listener resync — see
+// each page's own doc at those call sites) that the effect reads and
+// resets on every run, defaulting to `true` (never attribute a user edit
+// without positive evidence) until a genuine user handler's own setItems()
+// call leaves it `false`.
 
 /**
  * Pure predicate: should commitOrdinaryLocalEdit() (below) stamp local-
  * content ownership for `currentUserId`? See this section's own header
- * doc for the full rationale.
+ * doc for the full rationale, especially the USER-ORIGINATED EDIT EVIDENCE
+ * gate: `isUserOriginatedEdit` must be true IN ADDITION to durable success
+ * and a real authenticated identity — a mount/effect-driven persistence
+ * pass never stamps, no matter what `status` reports.
  *
  * Run from Node:
  *   import { DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES, shouldStampOwnershipOnOrdinaryEdit } from "@/lib/syncHelper";
  *   DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES.forEach(c => {
- *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId);
+ *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId, c.isUserOriginatedEdit);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export function shouldStampOwnershipOnOrdinaryEdit(
   status: LocalDomainSyncCommitStatus,
-  currentUserId: string | null
+  currentUserId: string | null,
+  isUserOriginatedEdit: boolean
 ): boolean {
-  return currentUserId !== null && isLocalDomainCommitSuccess(status);
+  return isUserOriginatedEdit && currentUserId !== null && isLocalDomainCommitSuccess(status);
 }
 
 export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
   name: string;
   status: LocalDomainSyncCommitStatus;
   currentUserId: string | null;
+  isUserOriginatedEdit: boolean;
   expected: boolean;
 }> = [
   {
-    name: "a fully durable, fact-protected commit by an authenticated user stamps ownership",
+    name: "a genuine authenticated user edit that durably commits stamps ownership",
     status: "committed",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
     expected: true,
   },
   {
-    name: "committed-unprotected (one of the two persistence legs landed) still counts as durable — stamps ownership exactly like a fully-protected commit",
+    name: "committed-unprotected (one of the two persistence legs landed) still counts as durable for a genuine user edit — stamps ownership exactly like a fully-protected commit",
     status: "committed-unprotected",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
     expected: true,
   },
   {
-    name: "a true noop (the durable value already matched) still stamps/reaffirms ownership — the bytes are durably this account's own either way",
+    name: "a genuine user edit whose resulting durable value happens to be unchanged (status 'noop') still stamps — the call path itself already proves explicit user intent, so this is NOT the same 'noop' the mount/effect case must suppress; see this file's own header doc for why the gate is on isUserOriginatedEdit, never on status alone",
     status: "noop",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
     expected: true,
   },
   {
-    name: "failed local persistence never stamps ownership, even for an authenticated user — nothing durable changed, so there is nothing to attribute",
-    status: "failed",
-    currentUserId: "userA",
+    name: "mount/effect persistence returning 'noop' over B-navigated-onto A-owned identical bytes never stamps, regardless of durable success",
+    status: "noop",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
     expected: false,
   },
   {
-    name: "signed-out edit (currentUserId null) never stamps ownership, regardless of how the commit resolved",
+    name: "mount/effect persistence that durably 'committed' (e.g. a one-time migration rewrite) still never stamps — the ROOT RULE excludes normalization/self-heal rewrites too, not only noop",
+    status: "committed",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    expected: false,
+  },
+  {
+    name: "failed local persistence never stamps ownership, even for a genuine authenticated user edit — nothing durable changed, so there is nothing to attribute",
+    status: "failed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expected: false,
+  },
+  {
+    name: "signed-out edit (currentUserId null) never stamps ownership, even if it were somehow marked user-originated",
     status: "committed",
     currentUserId: null,
+    isUserOriginatedEdit: true,
     expected: false,
   },
   {
     name: "session not yet resolved (currentUserId null, mirrors 'loading') never stamps ownership either — nothing here guesses an identity",
     status: "committed",
     currentUserId: null,
+    isUserOriginatedEdit: true,
     expected: false,
   },
 ];
@@ -4648,7 +4719,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
  * Run from Node:
  *   import { DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES, simulateOwnerAfterOrdinaryEdit, evaluateLocalContentForeign } from "@/lib/syncHelper";
  *   DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES.forEach(c => {
- *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId);
+ *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId, c.isUserOriginatedEdit);
  *     const ok = ownerAfter === c.expectedOwnerAfter
  *       && (c.checkForeignFor === undefined || evaluateLocalContentForeign(ownerAfter, c.checkForeignFor) === c.expectedForeignForChecked);
  *     console.log(ok ? "✓" : "✗ FAIL", c.name);
@@ -4657,9 +4728,10 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
 export function simulateOwnerAfterOrdinaryEdit(
   ownerBefore: string | null,
   status: LocalDomainSyncCommitStatus,
-  currentUserId: string | null
+  currentUserId: string | null,
+  isUserOriginatedEdit: boolean
 ): string | null {
-  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId) ? currentUserId : ownerBefore;
+  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId, isUserOriginatedEdit) ? currentUserId : ownerBefore;
 }
 
 export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
@@ -4667,31 +4739,45 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
   ownerBefore: string | null;
   status: LocalDomainSyncCommitStatus;
   currentUserId: string | null;
+  isUserOriginatedEdit: boolean;
   expectedOwnerAfter: string | null;
   checkForeignFor?: string | null;
   expectedForeignForChecked?: boolean;
 }> = [
   {
-    name: "authenticated A edits after a failed/offline pull — durable local persistence ALONE (no successful pull at all) establishes A as owner",
+    name: "authenticated A edits after a failed/offline pull — durable local persistence from a genuine user edit (no successful pull at all) establishes A as owner",
     ownerBefore: null,
     status: "committed",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
     expectedOwnerAfter: "userA",
   },
   {
-    name: "B then signs in after A's ordinary-edit-established ownership — A's bytes are foreign to B, even though no cloud pull for A ever succeeded",
-    ownerBefore: null,
-    status: "committed",
-    currentUserId: "userA",
+    name: "B navigates/mounts over A-owned identical bytes — mount persistence reports 'noop', but since this is NOT a user-originated edit, no ownership transfer occurs; A's bytes remain correctly foreign to B",
+    ownerBefore: "userA",
+    status: "noop",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
     expectedOwnerAfter: "userA",
     checkForeignFor: "userB",
     expectedForeignForChecked: true,
   },
   {
-    name: "same-account later use remains local-first — A's own later edit against A's own already-established ownership is never foreign to A",
+    name: "B then signs in after A's genuine ordinary-edit-established ownership — A's bytes are foreign to B, even though no cloud pull for A ever succeeded",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userB",
+    expectedForeignForChecked: true,
+  },
+  {
+    name: "same-account later use remains local-first — A's own later genuine edit against A's own already-established ownership is never foreign to A",
     ownerBefore: "userA",
     status: "committed",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
     expectedOwnerAfter: "userA",
     checkForeignFor: "userA",
     expectedForeignForChecked: false,
@@ -4701,27 +4787,39 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     ownerBefore: null,
     status: "committed",
     currentUserId: null,
+    isUserOriginatedEdit: true,
     expectedOwnerAfter: null,
   },
   {
-    name: "failed local persistence does not change ownership, even for an authenticated user",
+    name: "failed persistence does not change ownership, even for a genuine authenticated user edit",
     ownerBefore: null,
     status: "failed",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
     expectedOwnerAfter: null,
   },
   {
-    name: "failed local persistence leaves a PRE-EXISTING owner marker untouched too — never relabeled/cleared by a failed edit",
+    name: "failed persistence leaves a PRE-EXISTING owner marker untouched too — never relabeled/cleared by a failed edit",
     ownerBefore: "userA",
     status: "failed",
     currentUserId: "userB",
+    isUserOriginatedEdit: true,
     expectedOwnerAfter: "userA",
   },
   {
-    name: "successful pull ownership behavior remains unchanged — a pull-established owner (existing DURABLE TRANSFER BOUNDARY path, untouched by this round) composes correctly with a LATER ordinary edit by the same account",
+    name: "successful pull ownership path unchanged — a pull-established owner (existing DURABLE TRANSFER BOUNDARY path, untouched by this round) composes correctly with a LATER genuine ordinary edit by the same account",
     ownerBefore: "userA", // as if a successful pull already stamped this
     status: "committed",
     currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "mount persistence's own React-state mirror of a JUST-SUCCEEDED pull's hydration (isUserOriginatedEdit false, status noop since hydration already wrote the bytes) never stamps from THIS call — ownership for that case was already, correctly, established by the pull's own dedicated setLocalContentOwner call, not by this generic effect",
+    ownerBefore: "userA",
+    status: "noop",
+    currentUserId: "userA",
+    isUserOriginatedEdit: false,
     expectedOwnerAfter: "userA",
   },
 ];
@@ -4734,10 +4832,23 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
  * dayAutoFallbacks, Lightning's items): none of them needs its own
  * ownership-stamping logic, since all of them already funnel through this
  * one function.
+ *
+ * `isUserOriginatedEdit` is REQUIRED (no default) — every call site must
+ * explicitly declare whether it represents a genuine user action or a
+ * mount/effect/hydration-mirroring persistence pass; see this section's own
+ * header doc for the exact boundary each page uses to decide. Ownership is
+ * stamped only when this is true, in addition to durable success and a real
+ * authenticated identity (shouldStampOwnershipOnOrdinaryEdit above) — the
+ * underlying write itself (commitLocalDomainRawSync) is completely
+ * unaffected by this flag; it only ever gates the ownership side-effect.
  */
-export function commitOrdinaryLocalEdit(key: string, nextRaw: string): LocalDomainSyncCommitStatus {
+export function commitOrdinaryLocalEdit(
+  key: string,
+  nextRaw: string,
+  isUserOriginatedEdit: boolean
+): LocalDomainSyncCommitStatus {
   const status = commitLocalDomainRawSync(key, nextRaw);
-  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId)) {
+  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId, isUserOriginatedEdit)) {
     setLocalContentOwner(currentSyncProfileId, currentSyncUserId as string);
   }
   return status;

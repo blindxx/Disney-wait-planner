@@ -402,8 +402,18 @@ function loadEffectiveDurablePlanItems(key: string): PlanItem[] {
 // succeeds — see its own doc for the full rationale (this is what closes
 // the gap where an authenticated edit made during a failed/offline
 // initial pull previously left the owner marker null indefinitely).
-function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
-  commitOrdinaryLocalEdit(key, JSON.stringify({ version: SCHEMA_VERSION, items }));
+//
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` is REQUIRED
+// (no default): ownership is stamped only when this call represents a
+// genuine user-originated edit, never a mount/effect-driven persistence
+// pass over already-hydrated (possibly foreign) bytes — see
+// commitOrdinaryLocalEdit's own doc in syncHelper.ts for the full USER-
+// ORIGINATED EDIT EVIDENCE rationale. The two callers of this function
+// that persist non-user state (the mount effect's own migration self-heal,
+// and the generic auto-persist effect when it fires from a hydration-
+// driven `items` change rather than a user edit) pass `false`.
+function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify({ version: SCHEMA_VERSION, items }), isUserEdit);
 }
 
 // ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1 / 8.0.2) =====
@@ -627,8 +637,10 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
 // the prune's raw-byte CAS alone. Publishing edit facts here closes that
 // gap using the exact mechanism SH.2 already built for plans/lightning/days
 // — no new concurrency primitive introduced.
-function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
-  commitOrdinaryLocalEdit(key, JSON.stringify(meta));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale.
+function saveDayMeta(meta: Record<string, DayMeta>, key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(meta), isUserEdit);
 }
 
 /**
@@ -726,8 +738,11 @@ function loadEffectiveDurableDayParks(key: string): Record<string, string> {
 // SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
 // same commitLocalDomainRawSync routing as saveToStorage above; see its own
 // doc there and in syncHelper.ts.
-function saveDays(days: string[], key: string): void {
-  commitOrdinaryLocalEdit(key, JSON.stringify(days));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale. The mount effect's
+// own self-heal merge (below) is the one non-user caller of this function.
+function saveDays(days: string[], key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(days), isUserEdit);
 }
 
 function loadActiveDayId(key: string): string {
@@ -1033,8 +1048,10 @@ function loadDayParks(key: string): Record<string, string> {
 // publish the same local-edit-fact log commitLocalDomainRaw() (the cloud-
 // pull reconciliation prune) already re-scans as part of its commit gate.
 /** Persist per-day park overrides to profile-scoped localStorage. */
-function saveDayParks(parks: Record<string, string>, key: string): void {
-  commitOrdinaryLocalEdit(key, JSON.stringify(parks));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale.
+function saveDayParks(parks: Record<string, string>, key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(parks), isUserEdit);
 }
 
 /**
@@ -1079,8 +1096,10 @@ function loadDayAutoFallbacks(key: string): Record<string, string> {
 // so ordinary dayAutoFallbacks edits publish the same local-edit-fact log
 // commitLocalDomainRaw() (the cloud-pull reconciliation prune) re-scans.
 /** Persist per-day Auto fallbacks (Phase 10.4.1) to profile-scoped localStorage. */
-function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): void {
-  commitOrdinaryLocalEdit(key, JSON.stringify(fallbacks));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale.
+function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(fallbacks), isUserEdit);
 }
 
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
@@ -1120,6 +1139,19 @@ export default function PlansPage() {
   // DIFFERENT account signing into this same local profile slot read (and
   // build on) the PREVIOUS account's confirmed planner state.
   const activeUserIdRef = useRef<string | null>(null);
+  // SH.4.1a Codex P1 follow-up (this round) — USER-ORIGINATED EDIT EVIDENCE.
+  // `items` is persisted by ONE generic effect (below) that fires for BOTH
+  // genuine user edits (add/delete/move/clear/etc. — every one of which
+  // only ever calls setItems(), relying on that effect to persist) AND
+  // non-user React-state changes (this component's own initial mount load,
+  // and a successful pull's own hydration mirroring already-committed
+  // bytes into `items` state) — see commitOrdinaryLocalEdit's own doc in
+  // syncHelper.ts for why the latter must never stamp local-content
+  // ownership. Defaults to `true` (never attribute a user edit without
+  // positive evidence): set `true` immediately alongside the FEW non-user
+  // setItems() calls (mount load below; the pull effect's own hydration
+  // mirror), and consumed + reset by the auto-persist effect on every run.
+  const pendingNonUserItemsPersistRef = useRef(true);
   // Phase 8.0 — per-profile day storage key refs
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   const daysKeyRef = useRef("dwp:default:days");
@@ -2209,14 +2241,20 @@ export default function PlansPage() {
     const rawLoaded = loadEffectiveDurablePlanItems(planKeyRef.current);
     const loaded = migrateDayIds(rawLoaded);
     if (loaded !== rawLoaded) {
-      // Migration ran — persist migrated items so next load is clean.
-      saveToStorage(loaded, planKeyRef.current);
+      // Migration ran — persist migrated items so next load is clean. Not a
+      // user edit — a one-time mount-time normalization rewrite.
+      saveToStorage(loaded, planKeyRef.current, false);
     }
     // Record how many items existed at mount. The post-import effect uses this
     // to distinguish ordinary page revisits (pre-existing plans) from true
     // import-triggered events where inference is allowed.
     initialItemCountRef.current = loaded.length;
     if (loaded.length > 0) reseedNextId(loaded);
+    // SH.4.1a Codex P1 follow-up — this is the initial mount load, never a
+    // user edit; the generic auto-persist effect below must not attribute
+    // ownership for the persistence pass this triggers. See
+    // pendingNonUserItemsPersistRef's own doc above.
+    pendingNonUserItemsPersistRef.current = true;
     setItems(loaded);
 
     // Phase 8.0 — Load days list and active day for this profile.
@@ -2238,7 +2276,7 @@ export default function PlansPage() {
     const extraDayIds = itemDayIds.filter((id) => !storedDays.includes(id)).sort(daySort);
     const mergedDays = extraDayIds.length > 0 ? [...storedDays, ...extraDayIds] : storedDays;
     if (mergedDays.join(",") !== storedDays.join(",")) {
-      saveDays(mergedDays, daysKeyRef.current);
+      saveDays(mergedDays, daysKeyRef.current, false);
     }
     const validActiveDayId = mergedDays.includes(storedActiveDayId)
       ? storedActiveDayId
@@ -2424,9 +2462,21 @@ export default function PlansPage() {
   // pull effect below determines "did items change locally" by comparing a
   // fresh read against itemsBaselineRef, not by consulting a flag this
   // effect would have set.
+  //
+  // SH.4.1a Codex P1 follow-up (this round) — this effect fires for EVERY
+  // `items` change, whether from a genuine user edit (every editing handler
+  // only ever calls setItems(), relying on this effect to persist) or from
+  // a non-user React-state change (mount load, pull hydration mirroring —
+  // see pendingNonUserItemsPersistRef's own doc above). Consuming (and
+  // resetting) that ref here, on every run, is what lets this SAME effect
+  // correctly attribute ownership for a genuine edit while never doing so
+  // for a mount/hydration-driven persistence pass over the exact same
+  // `items` state.
   useEffect(() => {
     if (!initialized) return;
-    saveToStorage(items, planKeyRef.current);
+    const isUserEdit = !pendingNonUserItemsPersistRef.current;
+    pendingNonUserItemsPersistRef.current = false;
+    saveToStorage(items, planKeyRef.current, isUserEdit);
   }, [items, initialized]);
 
   // Schedule a debounced cloud push after every items, days, OR dayMeta
@@ -3437,6 +3487,14 @@ export default function PlansPage() {
         // that did NOT actually survive onto disk.
         if (primaryPersistSucceeded && JSON.stringify(winningPlanItems) !== JSON.stringify(itemsRef.current)) {
           reseedNextId(winningPlanItems);
+          // SH.4.1a Codex P1 follow-up — this mirrors bytes commitDomainHydration
+          // ABOVE already durably committed via the CAS-protected hydration
+          // path into React state; it is not a user edit, and ownership for a
+          // successful pull is already established by this pull's own
+          // dedicated setLocalContentOwner call further below. The generic
+          // auto-persist effect this setItems() triggers must not attribute
+          // ownership for it. See pendingNonUserItemsPersistRef's own doc.
+          pendingNonUserItemsPersistRef.current = true;
           setItems(winningPlanItems);
         }
         if (itemsCloudWon) {
@@ -4023,7 +4081,7 @@ export default function PlansPage() {
     // equivalent, but this keeps a reordered `days` list intact).
     const nextDays = [...days, candidate];
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
     setActiveDayId(candidate);
     saveActiveDayId(candidate, _activeDayKey);
   }
@@ -4054,7 +4112,7 @@ export default function PlansPage() {
     const nextDays = [...days];
     [nextDays[idx], nextDays[targetIdx]] = [nextDays[targetIdx], nextDays[idx]];
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
   }
 
   // Phase 8.4 — resolve the effective park for a given day.
@@ -4104,7 +4162,7 @@ export default function PlansPage() {
       delete next[dayId]; // "" = Auto: remove override
     }
     setDayParks(next);
-    saveDayParks(next, _dayParksKey);
+    saveDayParks(next, _dayParksKey, true);
     if (parkId) {
       // Manual — sync both park and resort from the chosen park.
       const manualResort = PARK_TO_RESORT[parkId] as ResortId;
@@ -4133,7 +4191,7 @@ export default function PlansPage() {
         dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
         const nextAutoFallbacks = { ...dayAutoFallbacks, [dayId]: clearedOverride };
         setDayAutoFallbacks(nextAutoFallbacks);
-        saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+        saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
         const fallbackResort = PARK_TO_RESORT[clearedOverride] as ResortId;
         setSelectedResort(fallbackResort);
         try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
@@ -4183,7 +4241,7 @@ export default function PlansPage() {
       };
     }
     setDayMeta(nextMeta);
-    saveDayMeta(nextMeta, _dayMetaKey);
+    saveDayMeta(nextMeta, _dayMetaKey, true);
     closeModal();
   }
 
@@ -4221,26 +4279,26 @@ export default function PlansPage() {
     // Remove from days list (no reindexing)
     const nextDays = days.filter((d) => d !== dayId);
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
     // Remove day metadata entry
     const nextMeta = { ...dayMeta };
     delete nextMeta[dayId];
     setDayMeta(nextMeta);
-    saveDayMeta(nextMeta, _dayMetaKey);
+    saveDayMeta(nextMeta, _dayMetaKey, true);
     // Phase 8.4 — remove day park override for removed day
     const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     const nextDayParks = { ...dayParks };
     delete nextDayParks[dayId];
     setDayParks(nextDayParks);
-    saveDayParks(nextDayParks, _dayParksKey);
+    saveDayParks(nextDayParks, _dayParksKey, true);
     // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
     const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     delete nextAutoFallbacks[dayId];
     setDayAutoFallbacks(nextAutoFallbacks);
-    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
     // Phase 11.0 — Remove Day must also drop Lightning entries scoped to the
     // removed day; otherwise they survive in localStorage (and get pushed to
     // cloud sync) with no owning day left to display them against. This page
@@ -4278,7 +4336,8 @@ export default function PlansPage() {
           const llItems = (parsed as Record<string, unknown>).items as Array<{ dayId?: unknown }>;
           const nextLlItems = llItems.filter((it) => normalizeDayId(it?.dayId) !== dayId);
           if (nextLlItems.length !== llItems.length) {
-            commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
+            // Genuine user edit (Remove Day) — see saveToStorage's own doc above.
+            commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }), true);
             setLightningVersion((v) => v + 1);
           }
         }
@@ -4382,14 +4441,14 @@ export default function PlansPage() {
     // Phase 11.2 — append at the end of the persisted order; never re-sort.
     const nextDays = [...days, newDayId];
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
     setItems((prev) => [...prev, ...copiedItems]);
     setDayMeta(nextMeta);
-    saveDayMeta(nextMeta, _dayMetaKey);
+    saveDayMeta(nextMeta, _dayMetaKey, true);
     setDayParks(nextDayParks);
-    saveDayParks(nextDayParks, _dayParksKey);
+    saveDayParks(nextDayParks, _dayParksKey, true);
     setDayAutoFallbacks(nextAutoFallbacks);
-    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
 
     // Make the duplicate active.
     setActiveDayId(newDayId);
@@ -4417,7 +4476,7 @@ export default function PlansPage() {
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     delete nextAutoFallbacks[target];
     setDayAutoFallbacks(nextAutoFallbacks);
-    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
     setClearDayTargetId(null);
   }
 
@@ -4792,21 +4851,21 @@ export default function PlansPage() {
     dayMetaKeyRef.current = _dayMetaKey;
     const resetDays = ["day-1"];
     setDays(resetDays);
-    saveDays(resetDays, _daysKey);
+    saveDays(resetDays, _daysKey, true);
     setActiveDayId("day-1");
     saveActiveDayId("day-1", _activeDayKey);
     setDayMeta({});
-    saveDayMeta({}, _dayMetaKey);
+    saveDayMeta({}, _dayMetaKey, true);
     // Phase 8.4 — Clear All resets all day park overrides
     const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     setDayParks({});
-    saveDayParks({}, _dayParksKey);
+    saveDayParks({}, _dayParksKey, true);
     // Phase 9.6 backup gap fix — Clear All also resets per-day auto fallbacks.
     const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     setDayAutoFallbacks({});
-    saveDayAutoFallbacks({}, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks({}, _dayAutoFallbacksKey, true);
     // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
     // fresh, so both the inference gate and the stored session context must be
     // cleared. Without this, a subsequent import is blocked on two levels:
@@ -4834,7 +4893,8 @@ export default function PlansPage() {
     // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
     // hidden day-scoped items survive into the next session (BUG C fix).
     const _lightningKey = buildNamespacedKey(_profileId, "lightning");
-    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: [] }));
+    // Genuine user edit (Clear All) — see saveToStorage's own doc above.
+    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: [] }), true);
   }
 
   function handleToggleSort(checked: boolean) {
@@ -5047,7 +5107,7 @@ export default function PlansPage() {
       // Phase 10.4.1 — also persisted (mirrors the restore-flow write above).
       const nextAutoFallbacks = { ...dayAutoFallbacks, [targetDayId]: fallbackParkId };
       setDayAutoFallbacks(nextAutoFallbacks);
-      saveDayAutoFallbacks(nextAutoFallbacks, dayAutoFallbacksKeyRef.current);
+      saveDayAutoFallbacks(nextAutoFallbacks, dayAutoFallbacksKeyRef.current, true);
       effectiveResort = fallbackResort;
     }
     const typeResort = effectiveResort ?? selectedResort;
@@ -5357,11 +5417,11 @@ export default function PlansPage() {
     reseedNextId(restoredPlans);
     setItems(autoSortEnabled ? sortPlanItems(restoredPlans) : restoredPlans);
     setDays(restoredDays);
-    saveDays(restoredDays, daysKeyRef.current);
+    saveDays(restoredDays, daysKeyRef.current, true);
     setActiveDayId(restoredActiveDayId);
     saveActiveDayId(restoredActiveDayId, activeDayKeyRef.current);
     setDayMeta(restoredDayMeta);
-    saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
+    saveDayMeta(restoredDayMeta, dayMetaKeyRef.current, true);
     // Phase 8.3.2 — Full restore replaces Lightning from backup payload.
     // data.lightning is present on new backups (fully replaces current state).
     // data.lightning is absent on old backups — fall back to empty so no
@@ -5371,7 +5431,8 @@ export default function PlansPage() {
       dayId: normalizeDayId(it.dayId),
     }));
     const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
+    // Genuine user edit (confirmed backup restore) — see saveToStorage's own doc above.
+    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }), true);
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);
@@ -5384,7 +5445,7 @@ export default function PlansPage() {
     setPendingDayImportItems(null);
     setDayImportError("");
     setDayParks(restoredDayParks);
-    saveDayParks(restoredDayParks, dayParksKeyRef.current);
+    saveDayParks(restoredDayParks, dayParksKeyRef.current, true);
 
     // Phase 9.6 backup gap fix — restore per-day auto fallbacks for Auto days.
     // Only accept days that: (a) are in the restored set, (b) are NOT in
@@ -5409,7 +5470,7 @@ export default function PlansPage() {
     }
     setDayAutoFallbacks(restoredAutoFallbacks);
     dayAutoFallbacksKeyRef.current = buildNamespacedKey(activeProfileIdRef.current, "dayAutoFallbacks");
-    saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current);
+    saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current, true);
   }
 
   // Phase 10.4.2 — active day's resolved park for render, computed once so

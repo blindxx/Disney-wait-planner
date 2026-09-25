@@ -619,9 +619,16 @@ function loadEffectiveDurableLightningItems(key: string): LightningItem[] {
 // owner marker for the currently authenticated identity the instant this
 // write durably succeeds — see its own doc there, and plans/page.tsx's
 // mirrored saveToStorage comment, for the full rationale.
-function saveToStorage(items: LightningItem[], key: string = STORAGE_KEY): void {
+//
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` is REQUIRED (no
+// default): ownership is stamped only when this call represents a genuine
+// user-originated edit, never a mount/effect-driven persistence pass over
+// already-hydrated (possibly foreign) bytes — see commitOrdinaryLocalEdit's
+// own doc in syncHelper.ts and plans/page.tsx's mirrored saveToStorage
+// comment for the full USER-ORIGINATED EDIT EVIDENCE rationale.
+function saveToStorage(items: LightningItem[], key: string = STORAGE_KEY, isUserEdit: boolean): void {
   const schema: StoredSchema = { version: 1, items };
-  commitOrdinaryLocalEdit(key, JSON.stringify(schema));
+  commitOrdinaryLocalEdit(key, JSON.stringify(schema), isUserEdit);
 }
 
 // ===== ID GENERATION =====
@@ -748,6 +755,14 @@ export default function LightningPage() {
   // reads/writes. Mirrors plans/page.tsx exactly — see its own detailed
   // doc for the full rationale.
   const activeUserIdRef = useRef<string | null>(null);
+  // SH.4.1a Codex P1 follow-up (this round) — USER-ORIGINATED EDIT EVIDENCE.
+  // Mirrors plans/page.tsx's own pendingNonUserItemsPersistRef exactly — see
+  // its detailed doc there for the full rationale. `items` here is
+  // persisted by ONE generic effect that fires for both genuine user edits
+  // and non-user React-state changes (mount load, pull hydration mirroring,
+  // AND — unique to this page — the cross-tab storage-listener resync).
+  // Defaults to `true`; set `true` alongside each non-user setItems() call.
+  const pendingNonUserItemsPersistRef = useRef(true);
   // Phase 8.3 — per-profile activeDayId key. Phase 9.4 — the day picker on this
   // page now also writes this key (handleSelectDay), shared with My Plans.
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
@@ -1244,6 +1259,9 @@ export default function LightningPage() {
     // canonical read, so mount-time rendering can never regress behind a
     // surviving local-edit fact.
     const loadedItems = loadEffectiveDurableLightningItems(lightningKeyRef.current);
+    // SH.4.1a Codex P1 follow-up — initial mount load, never a user edit.
+    // See pendingNonUserItemsPersistRef's own doc above.
+    pendingNonUserItemsPersistRef.current = true;
     setItems(loadedItems);
     // SH.2 architecture — capture this page's own FALLBACK baselines from
     // the values just loaded above. This is only a STARTING assumption for
@@ -1287,9 +1305,19 @@ export default function LightningPage() {
   // no ref-marking needed here: a pull's own fresh read of localStorage at
   // resolution time (see the pull effect below) already reflects whatever
   // this effect just wrote, compared against the stable itemsBaselineRef.
+  //
+  // SH.4.1a Codex P1 follow-up (this round) — this effect fires for EVERY
+  // `items` change, whether from a genuine user edit or a non-user React-
+  // state change (mount load, pull hydration mirroring, cross-tab storage-
+  // listener resync — see pendingNonUserItemsPersistRef's own doc above).
+  // Consuming (and resetting) that ref here is what lets this SAME effect
+  // correctly attribute ownership for a genuine edit while never doing so
+  // for a mount/hydration/cross-tab-driven persistence pass.
   useEffect(() => {
     if (!loaded) return;
-    saveToStorage(items, lightningKeyRef.current);
+    const isUserEdit = !pendingNonUserItemsPersistRef.current;
+    pendingNonUserItemsPersistRef.current = false;
+    saveToStorage(items, lightningKeyRef.current, isUserEdit);
   }, [items, loaded]);
 
   // Schedule a debounced cloud push after every items change, but only once
@@ -1928,6 +1956,10 @@ export default function LightningPage() {
         // confirmed unnecessary) AND the winning result actually differs
         // from what's already rendered.
         if (primaryPersistSucceeded && JSON.stringify(winningLightningItems) !== JSON.stringify(itemsRef.current)) {
+          // SH.4.1a Codex P1 follow-up — mirrors already-committed hydration
+          // bytes into React state; not a user edit. See
+          // pendingNonUserItemsPersistRef's own doc above.
+          pendingNonUserItemsPersistRef.current = true;
           setItems(winningLightningItems);
         }
         if (itemsCloudWon) {
@@ -2497,6 +2529,11 @@ export default function LightningPage() {
       // stale-canonical-outranks-a-durable-fact shape every other SH.2.1
       // round has closed, left open at this one remaining consumer.
       if (e.key === lightningKeyRef.current) {
+        // SH.4.1a Codex P1 follow-up — this reloads a value ANOTHER tab just
+        // wrote (this tab's own writes never trigger a 'storage' event); it
+        // is a resync, not this tab's own user edit. See
+        // pendingNonUserItemsPersistRef's own doc above.
+        pendingNonUserItemsPersistRef.current = true;
         setItems(loadEffectiveDurableLightningItems(lightningKeyRef.current));
       }
       // SH.2 architecture — no confirmed-snapshot listener here (removed —
