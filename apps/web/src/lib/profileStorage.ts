@@ -290,6 +290,107 @@ export function markProfileOwner(profileId: string, ownerUserId: string): void {
 }
 
 /**
+ * Pure query: given the full per-`(profileId, accountKey)` provenance state
+ * and the CURRENT reconciling account, return the ids durably owned by AT
+ * LEAST ONE account OTHER than `currentOwnerUserId`. The shared
+ * UNOWNED_ACCOUNT_KEY sentinel is never counted as "another account" here —
+ * it represents no specific account at all, never a competing claim.
+ *
+ * Codex P1 follow-up (6th round) — restores the ownership check
+ * computeProfilesToAdopt (profileRegistrySync.ts) uses to decide adoption
+ * eligibility. The 3rd-round rewrite removed that check on the reasoning
+ * that a fresh, authoritative GET already tells the CURRENT account
+ * everything it needs — true for "is this already mine", but not for "is
+ * this SOMEONE ELSE's": account A's local reconciliation can stamp
+ * `family: {userA:{owned:true}}` in this device's SHARED provenance store,
+ * and when account B later signs into the SAME browser, B's own GET
+ * legitimately returns nothing for "family" (B has never registered it) —
+ * without this check, B's reconciliation would then treat the local
+ * "family" entry as an ordinary unowned legacy profile and adopt it as
+ * B's own, even though it durably belongs to A. This is NOT a return to
+ * the old single-owner-per-id model: the underlying state is still keyed
+ * per `(profileId, accountKey)`, and an id already owned by BOTH accounts
+ * (each independently, via its own prior successful reconciliation) simply
+ * has both entries — this query only ever asks "besides me, does anyone
+ * else own it", never rejecting or overwriting either account's own fact.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_PROFILE_IDS_OWNED_BY_OTHER_ACCOUNTS_CASES, selectProfileIdsOwnedByOtherAccounts } from "@/lib/profileStorage";
+ *   DEV_SELECT_PROFILE_IDS_OWNED_BY_OTHER_ACCOUNTS_CASES.forEach(c => {
+ *     const got = [...selectProfileIdsOwnedByOtherAccounts(c.state, c.currentOwnerUserId)].sort();
+ *     console.log(JSON.stringify(got) === JSON.stringify([...c.expected].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectProfileIdsOwnedByOtherAccounts(
+  state: ProfileRegistryState,
+  currentOwnerUserId: string
+): Set<string> {
+  const ids = new Set<string>();
+  for (const [id, byAccount] of Object.entries(state)) {
+    const ownedByOther = Object.entries(byAccount).some(
+      ([accountKey, entry]) =>
+        accountKey !== currentOwnerUserId && accountKey !== UNOWNED_ACCOUNT_KEY && entry?.owned
+    );
+    if (ownedByOther) ids.add(id);
+  }
+  return ids;
+}
+
+export const DEV_SELECT_PROFILE_IDS_OWNED_BY_OTHER_ACCOUNTS_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  currentOwnerUserId: string;
+  expected: string[];
+}> = [
+  {
+    name: "empty state — nothing owned by anyone",
+    state: {},
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+  {
+    name: "Codex P1 follow-up (6th round) — A owns 'family'; from B's perspective, 'family' is owned by another account",
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: ["family"],
+  },
+  {
+    name: "the current account's OWN ownership is never counted as 'another account'",
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: [],
+  },
+  {
+    name: "two accounts each independently own the identical literal id — this low-level query truthfully reports userB also owns 'family'; the 'two accounts remain supported' guarantee is enforced one level up by computeProfilesToAdopt's own `known` check, not by hiding this fact here",
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: ["family"],
+  },
+  {
+    name: "the shared unowned sentinel is never treated as a competing account, even if (hypothetically) marked owned",
+    state: { mom: { [UNOWNED_ACCOUNT_KEY]: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+  {
+    name: "only a deletion marker, no ownership — never counted as 'owned by another account'",
+    state: { mom: { userA: { locallyDeleted: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
+  },
+];
+
+/**
+ * Bulk read of every profile id durably owned by an account OTHER than
+ * `currentOwnerUserId` — see selectProfileIdsOwnedByOtherAccounts's own doc.
+ * Pass this straight into profileRegistrySync.ts's computeProfilesToAdopt,
+ * which treats it as plain input data.
+ */
+export function getProfileIdsOwnedByOtherAccounts(currentOwnerUserId: string): Set<string> {
+  return selectProfileIdsOwnedByOtherAccounts(readProfileRegistryState(), currentOwnerUserId);
+}
+
+/**
  * Pure state transition: mark `profileId` as explicitly, locally deleted
  * under `accountKey` (a real userId, or UNOWNED_ACCOUNT_KEY when no account
  * was authenticated at delete time) within `state`, returning the updated

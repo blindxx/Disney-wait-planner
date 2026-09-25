@@ -262,7 +262,21 @@ export default function SettingsPage() {
   // `activeProfileId` state) immediately reflect the corrected value too.
   useEffect(() => {
     setRegistryIdentity(authenticatedUserId);
-    if (!authenticatedUserId) return;
+    if (!authenticatedUserId) {
+      // SH.4.1 Codex P2 follow-up (6th round) — signing out must NOT just
+      // invalidate the network identity guard above and stop: without
+      // recomputing local state here, Settings would keep showing the
+      // PREVIOUS authenticated account's effective profile list/active id
+      // (whatever the last authenticated render left in React state) until
+      // something else happened to re-render it. This branch is purely
+      // local (no fetch/registry network activity while signed out) —
+      // `visibilityOwnerKey` already resolves to UNOWNED_ACCOUNT_KEY here
+      // since `authenticatedUserId` is null.
+      ensureActiveProfileVisible(visibilityOwnerKey);
+      setActiveProfileIdState(getActiveProfileId());
+      setProfiles(getVisibleProfiles(visibilityOwnerKey));
+      return;
+    }
     ensureActiveProfileVisible(authenticatedUserId);
     setActiveProfileIdState(getActiveProfileId());
     setProfiles(getVisibleProfiles(authenticatedUserId));

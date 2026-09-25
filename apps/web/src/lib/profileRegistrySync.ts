@@ -14,17 +14,26 @@
  * See the SH.4 architecture audit for the full rationale.
  *
  * SH.4.1 scope — additive legacy adoption only:
- *   - Local profiles unknown to the CURRENT account's server registry are
- *     pushed up (registered). Codex P1 follow-up (3rd round) — this is NO
- *     LONGER cross-account exclusive: a local id already durably associated
- *     with a DIFFERENT account on this device is still eligible for the
- *     CURRENT account's own, independent adoption — see
- *     profileStorage.ts's module doc for why the previous "one owner slot
- *     per id, ever" model was itself the bug (it broke delete suppression
- *     for a second account, and more fundamentally, two accounts CAN each
- *     legitimately own their own distinct server row under the identical
- *     literal grandfathered id — `user_profiles`' PK is `(user_id,
- *     profile_id)`, so there is no server-side conflict between them).
+ *   - Local profiles unknown to the CURRENT account's server registry, and
+ *     not durably owned by a DIFFERENT account on this device
+ *     (computeProfilesToAdopt's `ownedByOtherAccountIds` parameter —
+ *     profileStorage.ts's getProfileIdsOwnedByOtherAccounts), are pushed up
+ *     (registered). Codex P1 follow-up (6th round) — the 3rd round removed
+ *     this cross-account check, reasoning that a fresh, authoritative GET
+ *     already tells the current account everything it needs to know about
+ *     its OWN registrations; that reasoning covers "is this already mine"
+ *     but not "is this SOMEONE ELSE's" — without it, account A's local
+ *     ownership stamp for "family" on a shared browser did nothing to stop
+ *     account B, signing in later with an empty registry, from adopting
+ *     that same local id as B's own. Restoring the check is NOT a return to
+ *     the old single-owner-per-id model (profileStorage.ts's module doc):
+ *     provenance stays keyed per `(profileId, accountKey)`, and an id two
+ *     accounts each independently, authoritatively own (via their own past
+ *     successful reconciliations) simply carries both entries side by side
+ *     — this only ever asks "besides me, does someone else already own it",
+ *     never rejecting or overwriting either account's own fact. A
+ *     genuinely unowned id (the common case for a pre-SH.4 legacy profile)
+ *     remains freely adoptable by whichever account reconciles it first.
  *   - Server profiles unknown locally, and neither tombstoned nor locally
  *     deleted BY THE CURRENT ACCOUNT on this device, are pulled down
  *     (discovered) — see profileStorage.ts's mergeProfilesAdditive/
@@ -111,6 +120,7 @@ import {
   adoptServerProfiles,
   markProfileOwner,
   getLocallyDeletedProfileIds,
+  getProfileIdsOwnedByOtherAccounts,
 } from "./profileStorage";
 import { validateProfileName, MAX_PROFILES_PER_ADOPTION_REQUEST } from "./syncIdentity";
 
@@ -128,36 +138,36 @@ export type ServerProfileRecord = {
 
 /**
  * Given the full server registry (including tombstones) FOR THE CURRENT
- * ACCOUNT, and this device's current local profile list, compute the local
- * profiles that should be PUSHED to that account's server registry because
- * it does not yet know about their id — by id alone, regardless of
- * tombstone state. A tombstoned id is already "known" to the server and
- * must never be re-adopted/resurrected via this path; only an explicit,
- * deliberate un-delete (not implemented in SH.4.1) may ever clear a
- * tombstone. A local id whose name differs from what the server already
- * has under the same id is likewise excluded — this function only ever
- * proposes ids the server has NEVER seen, never a "correction" to one it
- * has.
+ * ACCOUNT, this device's current local profile list, and the ids durably
+ * owned by a DIFFERENT account (profileStorage.ts's
+ * getProfileIdsOwnedByOtherAccounts), compute the local profiles that
+ * should be PUSHED to the current account's server registry.
  *
- * Codex P1 follow-up (3rd round) — this function is intentionally
- * ACCOUNT-AGNOSTIC beyond `serverProfiles` already being scoped to the
- * caller's own account (by construction — every `GET /api/sync/profiles`
- * only ever returns the authenticated account's own rows). It does NOT
- * exclude a local id merely because a DIFFERENT account has separately
- * claimed it on this device: `serverProfiles` is already authoritative for
- * "does MY account know this id" (a failed GET aborts the whole
- * reconciliation round before this function is ever called — see
- * reconcileProfileRegistry — so `known` here is always complete and
- * correct for the CURRENT account when this runs), and `user_profiles`'
- * PK is `(user_id, profile_id)`, so a second account registering the
- * identical literal id creates its own, entirely unrelated row — there is
- * no server-side reason to block it. The PRIOR round's cross-account
- * ownership exclusion was itself the bug this fixes (see
- * profileStorage.ts's module doc): it silently gave whichever account
- * reconciled an id FIRST a permanent, exclusive local claim to it, which
- * both prevented a second account's own legitimate, distinct history under
- * that id from ever registering AND broke that second account's own
- * delete-suppression.
+ * A local id is excluded when EITHER:
+ *   - it is already known to the CURRENT account's own server registry
+ *     (`known`, from `serverProfiles`) — regardless of tombstone state: a
+ *     tombstoned id is already "known" and must never be re-adopted/
+ *     resurrected via this path; only an explicit, deliberate un-delete
+ *     (not implemented in SH.4.1) may ever clear a tombstone. A local id
+ *     whose name differs from what the server already has under the same
+ *     id is likewise excluded — this function only ever proposes ids the
+ *     CURRENT account's server has NEVER seen, never a "correction" to one
+ *     it has; OR
+ *   - it is durably owned by a DIFFERENT account (`ownedByOtherAccountIds`)
+ *     — Codex P1 follow-up (6th round), restoring a check the 3rd round
+ *     removed. See this module's own header doc and
+ *     profileStorage.ts's selectProfileIdsOwnedByOtherAccounts for the full
+ *     rationale: a fresh GET only ever proves "is this mine", never "is
+ *     this someone else's", so it cannot by itself prevent account B from
+ *     adopting a local id account A has already durably claimed on this
+ *     same device.
+ *
+ * A genuinely unowned id (absent from BOTH `known` and
+ * `ownedByOtherAccountIds`) remains freely adoptable — this is what keeps
+ * every pre-SH.4 legacy profile adoptable by whichever account reconciles
+ * it first, and what lets an id already owned by the CURRENT account
+ * (which would normally already be in `known` too) proceed without being
+ * second-guessed by its own ownership record.
  *
  * Pure — takes every input as a parameter, so it stays directly
  * DEV-testable without a browser/localStorage.
@@ -165,31 +175,34 @@ export type ServerProfileRecord = {
  * Run from Node:
  *   import { DEV_COMPUTE_PROFILES_TO_ADOPT_CASES, computeProfilesToAdopt } from "@/lib/profileRegistrySync";
  *   DEV_COMPUTE_PROFILES_TO_ADOPT_CASES.forEach(c => {
- *     const got = computeProfilesToAdopt(c.serverProfiles, c.localProfiles);
+ *     const got = computeProfilesToAdopt(c.serverProfiles, c.localProfiles, c.ownedByOtherAccountIds);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export function computeProfilesToAdopt(
   serverProfiles: ServerProfileRecord[],
-  localProfiles: Profile[]
+  localProfiles: Profile[],
+  ownedByOtherAccountIds: ReadonlySet<string>
 ): Profile[] {
   const known = new Set(serverProfiles.map((p) => p.profileId));
-  return localProfiles.filter((p) => !known.has(p.id));
+  return localProfiles.filter((p) => !known.has(p.id) && !ownedByOtherAccountIds.has(p.id));
 }
 
 export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
   name: string;
   serverProfiles: ServerProfileRecord[];
   localProfiles: Profile[];
+  ownedByOtherAccountIds: Set<string>;
   expected: Profile[];
 }> = [
   {
-    name: "empty server + existing local custom profiles — additive adoption of everything",
+    name: "empty server + existing local custom profiles, none owned by anyone else — additive adoption of everything",
     serverProfiles: [],
     localProfiles: [
       { id: "default", name: "Default" },
       { id: "mom", name: "Mom" },
     ],
+    ownedByOtherAccountIds: new Set(),
     expected: [
       { id: "default", name: "Default" },
       { id: "mom", name: "Mom" },
@@ -199,6 +212,7 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
     name: "grandfathered custom id preserved exactly in the push list — no id/name rewriting",
     serverProfiles: [],
     localProfiles: [{ id: "lindsay-2", name: "Lindsay" }],
+    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "lindsay-2", name: "Lindsay" }],
   },
   {
@@ -207,6 +221,7 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
       { profileId: "mom", name: "Mom", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
     ],
     localProfiles: [{ id: "mom", name: "Mommy (stale local copy)" }],
+    ownedByOtherAccountIds: new Set(),
     expected: [],
   },
   {
@@ -220,10 +235,11 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
       },
     ],
     localProfiles: [{ id: "mom", name: "Mom" }],
+    ownedByOtherAccountIds: new Set(),
     expected: [],
   },
   {
-    name: "mixed — only the genuinely unknown local id is proposed for adoption",
+    name: "mixed — only the genuinely unknown, unowned local id is proposed for adoption",
     serverProfiles: [
       { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
     ],
@@ -231,24 +247,54 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
       { id: "default", name: "Default" },
       { id: "lindsay", name: "Lindsay" },
     ],
+    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "lindsay", name: "Lindsay" }],
   },
   {
-    name: "unowned legacy profile remains adoptable",
+    name: "genuinely unowned legacy profile remains adoptable by its first account",
     serverProfiles: [],
     localProfiles: [{ id: "legacy-trip", name: "Legacy Trip" }],
+    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "legacy-trip", name: "Legacy Trip" }],
   },
   {
-    name: "Codex P1 follow-up (3rd round) — B can adopt B's own local 'family' even though A already owns 'family' on this same device/server-agnostic local list — B's OWN (empty) registry is what governs B's adoption, not A's prior claim",
+    name: "Codex P1 follow-up (6th round) — an A-owned local profile is NOT adopted into B merely because B's own server registry lacks that id",
     serverProfiles: [], // B's own GET — B's account has never registered "family"
     localProfiles: [{ id: "family", name: "Family" }],
+    ownedByOtherAccountIds: new Set(["family"]), // durably owned by account A
+    expected: [],
+  },
+  {
+    name: "current-account-owned/same-id state remains valid — an id owned by ME (never in ownedByOtherAccountIds) stays adoptable even if not yet reflected in this round's own GET",
+    serverProfiles: [],
+    localProfiles: [{ id: "family", name: "Family" }],
+    ownedByOtherAccountIds: new Set(), // "family" is MY OWN ownership, so it is never in this set — see selectProfileIdsOwnedByOtherAccounts
     expected: [{ id: "family", name: "Family" }],
+  },
+  {
+    name: "two accounts with independently authoritative same-id profiles remain supported — an id already known to MY OWN server registry is excluded via `known`, unaffected by another account's own separate ownership of the identical literal id",
+    serverProfiles: [
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ], // this account's OWN server row for "family"
+    localProfiles: [{ id: "family", name: "Family" }],
+    ownedByOtherAccountIds: new Set(["family"]), // a DIFFERENT account also, independently, owns "family"
+    expected: [],
+  },
+  {
+    name: "unowned legacy profile remains adoptable even when a DIFFERENT local id is owned by another account",
+    serverProfiles: [],
+    localProfiles: [
+      { id: "family", name: "Family" },
+      { id: "legacy-trip", name: "Legacy Trip" },
+    ],
+    ownedByOtherAccountIds: new Set(["family"]),
+    expected: [{ id: "legacy-trip", name: "Legacy Trip" }],
   },
   {
     name: "Codex P1 follow-up (4th round, bounded adjacency) — an id A deleted locally must never be silently re-adopted for A just because B's unrelated discovery re-added it to the shared list; reconcileProfileRegistry pre-filters it out of `localProfiles` via filterVisibleProfiles before this function ever runs, so it is simply absent here, exactly as this case models",
     serverProfiles: [], // A's own account has never registered "family"
     localProfiles: [{ id: "default", name: "Default" }], // "family" already excluded upstream — see reconcileProfileRegistry
+    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "default", name: "Default" }],
   },
 ];
@@ -835,6 +881,83 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
 }
 
 /**
+ * Performs the FINAL, commit-time merge of a reconciliation round:
+ * re-reads this account's CURRENT local-deletion markers via
+ * `readLocallyDeletedIds` — never a value captured earlier in the round,
+ * before the PUT/GET awaits — and merges `authoritativeServerProfiles`
+ * into the local list through `mergeIntoLocal` using that fresh read.
+ *
+ * Codex P2 follow-up (6th round) — a reconciliation round's PUT/GET awaits
+ * can take long enough for another tab (same account, same browser) to
+ * explicitly delete a profile in between. Reusing a `locallyDeletedIds`
+ * snapshot captured BEFORE those awaits at commit time would silently
+ * override that newer, durable local fact — re-adding a profile the user
+ * just told this exact browser to forget. Factoring the read out behind
+ * `readLocallyDeletedIds` (rather than inlining a `getLocallyDeletedProfileIds`
+ * call directly in reconcileProfileRegistry) makes the "read happens HERE,
+ * at commit time, never earlier" contract directly testable: a fake
+ * `readLocallyDeletedIds` can return different values depending on when
+ * it's invoked, proving this function only ever acts on whatever it
+ * returns AT THE MOMENT this runs, never a value from outer scope.
+ *
+ * Run from Node:
+ *   import { DEV_COMMIT_DISCOVERED_PROFILES_CASES, commitDiscoveredProfiles } from "@/lib/profileRegistrySync";
+ *   DEV_COMMIT_DISCOVERED_PROFILES_CASES.forEach(c => {
+ *     let merged = null;
+ *     commitDiscoveredProfiles(c.authoritativeServerProfiles, () => c.locallyDeletedIdsAtCommitTime, (candidates) => { merged = candidates; });
+ *     console.log(JSON.stringify(merged) === JSON.stringify(c.expectedMerged) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function commitDiscoveredProfiles(
+  authoritativeServerProfiles: ServerProfileRecord[],
+  readLocallyDeletedIds: () => ReadonlySet<string>,
+  mergeIntoLocal: (candidates: Profile[]) => void
+): void {
+  const locallyDeletedIds = readLocallyDeletedIds();
+  mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
+}
+
+export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
+  name: string;
+  authoritativeServerProfiles: ServerProfileRecord[];
+  locallyDeletedIdsAtCommitTime: Set<string>;
+  expectedMerged: Profile[];
+}> = [
+  {
+    name: "Codex P2 follow-up (6th round) — a same-account deletion that landed in another tab DURING the round's awaits is honored at commit time, preventing rediscovery/re-add",
+    authoritativeServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    locallyDeletedIdsAtCommitTime: new Set(["family"]),
+    expectedMerged: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "no deletion at commit time — both profiles merged normally",
+    authoritativeServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    locallyDeletedIdsAtCommitTime: new Set(),
+    expectedMerged: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+  },
+  {
+    name: "Codex P2 follow-up (6th round) — a stale pre-await snapshot (simulated here as an empty set closed over separately) is never consulted; only whatever readLocallyDeletedIds() returns at call time decides the outcome",
+    authoritativeServerProfiles: [
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    // The "stale" pre-await state would have been empty (no deletion yet
+    // when the round started); this case's readLocallyDeletedIds (see the
+    // runner) ignores that and returns the NEWER commit-time set instead.
+    locallyDeletedIdsAtCommitTime: new Set(["family"]),
+    expectedMerged: [],
+  },
+];
+
+/**
  * Runs one round of registry reconciliation for `userId`, the authenticated
  * identity the caller has ALREADY bound via setRegistryIdentity(userId)
  * (called synchronously, immediately before this) — refuses to run at all
@@ -855,13 +978,25 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
  * closes the window where a push that actually committed server-side, but
  * whose response was lost, would otherwise leave the id "unowned".
  *
- * Codex P1/P2 follow-up (3rd round) — `computeProfilesToAdopt` no longer
- * excludes a local id merely because a DIFFERENT account owns it on this
- * device (see its own doc); `filterAdoptableProfiles` drops any individual
- * candidate whose name fails the shared length constraint instead of
- * letting it poison the whole push; and `getLocallyDeletedProfileIds(userId)`
- * only ever suppresses discovery for ids THIS account (or no account) has
- * locally deleted, never a different account's own same-id deletion.
+ * Codex P1/P2 follow-up (3rd round) — `filterAdoptableProfiles` drops any
+ * individual candidate whose name fails the shared length constraint
+ * instead of letting it poison the whole push; and
+ * `getLocallyDeletedProfileIds(userId)` only ever suppresses discovery for
+ * ids THIS account (or no account) has locally deleted, never a different
+ * account's own same-id deletion.
+ *
+ * Codex P1 follow-up (6th round) — `computeProfilesToAdopt` EXCLUDES a
+ * local id durably owned by a DIFFERENT account
+ * (getProfileIdsOwnedByOtherAccounts(userId), computed fresh each round) —
+ * restored after the 3rd round removed it; see computeProfilesToAdopt's own
+ * doc and this module's header doc for why that removal was itself a bug.
+ *
+ * Codex P2 follow-up (6th round) — the FINAL discovery/local-merge step
+ * (commitDiscoveredProfiles) re-reads `getLocallyDeletedProfileIds(userId)`
+ * at commit time, immediately before merging — NEVER the snapshot captured
+ * earlier in this function, before the PUT/GET awaits below. A same-account
+ * deletion made in another tab while those awaits are in flight must win
+ * over this now-stale round's view; see commitDiscoveredProfiles's own doc.
  *
  * Codex P2 follow-up (4th round) — the adopt-list is split into batches of
  * at most MAX_PROFILES_PER_ADOPTION_REQUEST (batchProfilesForAdoption)
@@ -886,21 +1021,27 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const initialServerProfiles = await fetchServerProfiles();
   if (!isCurrent() || initialServerProfiles === null) return;
 
-  // Codex P1 follow-up (4th round, bounded adjacency) — computed ONCE and
-  // used for BOTH sides of this round: filtering discovery (below, as
-  // before) AND filtering the ADOPTION candidates here. Without this
-  // second use, an id `userId` explicitly deleted locally, but which
-  // reappears in the shared `dwp.profiles` list only because a DIFFERENT
-  // account's own unrelated discovery re-added it (adoptServerProfiles is
-  // account-agnostic — it just merges into the one shared list), would
-  // look to computeProfilesToAdopt like a brand-new, never-registered local
-  // profile and get silently PUSHED as newly `userId`'s own — resurrecting
-  // exactly what this account just deleted, the same failure class as the
-  // display-visibility bug this round fixes, just on the push side instead
-  // of the pull side.
+  // Codex P1 follow-up (4th round, bounded adjacency) — this snapshot feeds
+  // BOTH the ADOPTION candidates below and (as a starting point only — see
+  // the commit-time re-read further down) the discovery/merge decision.
+  // Without filtering adoption candidates too, an id `userId` explicitly
+  // deleted locally, but which reappears in the shared `dwp.profiles` list
+  // only because a DIFFERENT account's own unrelated discovery re-added it
+  // (adoptServerProfiles is account-agnostic — it just merges into the one
+  // shared list), would look to computeProfilesToAdopt like a brand-new,
+  // never-registered local profile and get silently PUSHED as newly
+  // `userId`'s own — resurrecting exactly what this account just deleted.
   const locallyDeletedIds = getLocallyDeletedProfileIds(userId);
   const localProfiles = filterVisibleProfiles(getProfiles(), locallyDeletedIds);
-  const toAdopt = filterAdoptableProfiles(computeProfilesToAdopt(initialServerProfiles, localProfiles));
+  // Codex P1 follow-up (6th round) — ids durably owned by a DIFFERENT
+  // account must never be proposed for this account's adoption, even
+  // though this account's own (empty, for a never-before-seen id) GET
+  // response alone can't tell the two cases apart — see
+  // computeProfilesToAdopt's own doc.
+  const ownedByOtherAccountIds = getProfileIdsOwnedByOtherAccounts(userId);
+  const toAdopt = filterAdoptableProfiles(
+    computeProfilesToAdopt(initialServerProfiles, localProfiles, ownedByOtherAccountIds)
+  );
   const batches = batchProfilesForAdoption(toAdopt);
 
   const pushAttempted = batches.length > 0;
@@ -927,5 +1068,15 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     markProfileOwner(id, userId);
   }
 
-  adoptServerProfiles(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
+  // Codex P2 follow-up (6th round) — deliberately NOT `locallyDeletedIds`
+  // (the snapshot captured above, before this round's PUT/GET awaits):
+  // commitDiscoveredProfiles re-reads this account's deletion markers
+  // fresh, right now, so a same-account deletion made in another tab while
+  // those awaits were in flight is what actually decides this merge — see
+  // commitDiscoveredProfiles's own doc.
+  commitDiscoveredProfiles(
+    authoritativeServerProfiles,
+    () => getLocallyDeletedProfileIds(userId),
+    adoptServerProfiles
+  );
 }
