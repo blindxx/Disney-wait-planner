@@ -162,12 +162,28 @@ export default function SettingsPage() {
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
-    // Bootstrap profiles system and load profile state
+    // Bootstrap profiles system — account-agnostic structural setup
+    // (guarantees Default exists, migrates legacy keys) that must always
+    // run on mount regardless of session status.
     bootstrapProfiles();
     const profileKeys = getActiveProfileKeys();
     profileKeysRef.current = profileKeys;
-    setProfiles(getVisibleProfiles(visibilityOwnerKey));
-    setActiveProfileIdState(getActiveProfileId());
+    // Codex P1 follow-up (11th round) — profiles/activeProfileId are
+    // DELIBERATELY NOT populated here anymore. This is a ONE-TIME (`[]`
+    // deps) effect, so it would otherwise bake in whatever
+    // `visibilityOwnerKey` happened to resolve to on the very FIRST
+    // render — typically UNOWNED_ACCOUNT_KEY, since useSession() starts in
+    // "loading" before next-auth's own session fetch resolves — and
+    // project the signed-out/local-first view (with usable profile
+    // controls) before authentication has actually resolved one way or the
+    // other. Leaving `profiles` at its initial empty array here means the
+    // entire Profiles section (gated on `profiles.length > 0` in the JSX
+    // below) simply does not render — no picker, no Add/Rename/Delete
+    // controls — until the registry-reconciliation effect below populates
+    // it for a DEFINITE, resolved session status (authenticated or
+    // explicitly unauthenticated); that effect now explicitly refuses to
+    // do anything at all while `sessionStatus === "loading"` — see its own
+    // doc.
 
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
@@ -260,7 +276,32 @@ export default function SettingsPage() {
   // (`activeProfileId`) is re-synced right after, so the UI and every
   // handler below (handleRenameProfile/handleDeleteProfile, which read the
   // `activeProfileId` state) immediately reflect the corrected value too.
+  //
+  // Codex P1 follow-up (11th round) — `sessionStatus === "loading"` is an
+  // UNRESOLVED identity state, distinct from BOTH "authenticated" and
+  // "unauthenticated": it means next-auth has not yet determined whether
+  // anyone is signed in at all. Previously this effect derived
+  // `authenticatedUserId` as `null` during loading (identical to genuinely
+  // signed out — see that value's own derivation above) and branched on
+  // `!authenticatedUserId` alone, so it projected the FULL signed-out/
+  // UNOWNED local-first view — including making Add/Rename/Delete/switch
+  // controls usable (the Profiles section renders once `profiles.length >
+  // 0`) — before authentication had actually resolved one way or the
+  // other. A user could interact with profile controls scoped to
+  // UNOWNED_ACCOUNT_KEY during that brief unresolved window even though
+  // they turned out to already be signed in, or vice versa. The guard
+  // below makes "loading" a genuine no-op: no registry identity
+  // transition, no local profiles/activeProfileId recomputation, and
+  // (critically) no ensureActiveProfileVisible call — so `dwp.activeProfile`
+  // and every deletion/provenance marker this effect could otherwise touch
+  // stay completely untouched while identity is unresolved. Because
+  // `authenticatedUserId` is `null` in BOTH the loading and unauthenticated
+  // cases, `sessionStatus` itself must be in this effect's dependency
+  // array — otherwise a loading -> unauthenticated transition (identical
+  // `authenticatedUserId` value on both sides) would never re-run this
+  // effect, and the signed-out view would never actually get projected.
   useEffect(() => {
+    if (sessionStatus === "loading") return;
     setRegistryIdentity(authenticatedUserId);
     if (!authenticatedUserId) {
       // SH.4.1 Codex P2 follow-up (6th round) — signing out must NOT just
@@ -293,7 +334,7 @@ export default function SettingsPage() {
       cancelled = true;
       setRegistryIdentity(null);
     };
-  }, [authenticatedUserId]);
+  }, [sessionStatus, authenticatedUserId]);
 
   // Mediate syncState → displayedSyncState with a minimum "syncing" display time.
   useEffect(() => {

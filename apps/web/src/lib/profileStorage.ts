@@ -1494,6 +1494,155 @@ function uniqueId(base: string, existingIds: string[]): string {
 }
 
 /**
+ * Pure decision: when `profileId` already exists physically in raw
+ * `dwp.profiles`, is it a RETAINED HIDDEN entry that `currentOwnerUserId`'s
+ * explicit create may RECLAIM outright (reuse the existing id, no `-2`
+ * suffix) — rather than an ordinary collision that must still be suffixed?
+ *
+ * Codex P2 follow-up (11th round) — deleteProfile's own
+ * isDestructiveProfileCleanupSafe (8th round) can leave a raw
+ * `dwp.profiles` entry PHYSICALLY PRESENT after a delete, specifically
+ * because destructively wiping it would have destroyed some OTHER real
+ * account's still-owned data: the id stays in the list, but the deleting
+ * scope's own local-deletion marker (often the shared UNOWNED_ACCOUNT_KEY
+ * bucket, for a signed-out delete) hides it from view
+ * (selectHiddenProfileIdsForAccount). Without this check, createProfile's
+ * existing `uniqueId()` step sees that retained raw id in `existingIds`
+ * and treats it as an ORDINARY collision — silently diverting to `-2`
+ * instead of ever running the intended reclaim transition
+ * (clearLocalDeletionMarkersForRecreate) against the id the user actually
+ * meant to recreate, leaving it permanently hidden and the `-2` sibling as
+ * a confusing, unrelated duplicate.
+ *
+ * Reclaimable requires BOTH:
+ *   - the shared UNOWNED_ACCOUNT_KEY bucket itself has explicitly, locally
+ *     deleted this id (`state[profileId]?.[UNOWNED_ACCOUNT_KEY]?.locallyDeleted`)
+ *     — the SPECIFIC ambiguous, ownerless signal a signed-out delete
+ *     leaves behind, and the only signal this reclaim path acts on
+ *     (mirrors exactly what clearLocalDeletionMarkersForRecreate itself
+ *     already knows how to consume). This alone already implies the id is
+ *     hidden for `currentOwnerUserId` — selectLocallyDeletedIdsForAccount
+ *     suppresses an id for EVERY account whenever the shared unowned
+ *     bucket has deleted it, regardless of whether that account already
+ *     owns it; AND
+ *   - NO account OTHER than `currentOwnerUserId` currently, exclusively
+ *     owns this id (`selectProfileIdsExclusivelyOwnedByOthers` — the SAME
+ *     "excludes my own ownership" variant getVisibleProfiles itself uses,
+ *     deliberately NOT the plain selectProfileIdsOwnedByOtherAccounts
+ *     adoption/cleanup-safety uses). This is what makes reclaim actually
+ *     WORK: if some different real account B still exclusively owns the
+ *     id, clearing the shared marker would NOT make it visible to
+ *     `currentOwnerUserId` anyway (B's own exclusive ownership would still
+ *     hide it, and the pre-existing cross-account adoption exclusion — 6th
+ *     round — would still block `currentOwnerUserId` from ever registering
+ *     it), so reclaiming the literal id would only create an invisible,
+ *     unsyncable zombie under B's id instead of `currentOwnerUserId`'s own
+ *     new profile. That is exactly the "another account's exclusively-
+ *     owned ... profile must not be silently claimed" case: ordinary
+ *     `-2` suffixing is correct here. An id `currentOwnerUserId` already,
+ *     independently owns (alone or alongside another co-owner) is NEVER
+ *     excluded by this check — see selectProfileIdsExclusivelyOwnedByOthers's
+ *     own doc.
+ *
+ * Reclaiming itself never rewrites the existing entry's id or its stored
+ * name/planner data — see createProfile's own doc for exactly what a
+ * reclaim does (skip appending a new `dwp.profiles` row; only consume
+ * deletion markers via clearLocalDeletionMarkersForRecreate). Keeps
+ * `default` semantics unchanged: deleteProfile can never mark `default`
+ * deleted at all, so `default` can never satisfy the first condition.
+ *
+ * Run from Node:
+ *   import { DEV_IS_RETAINED_HIDDEN_ID_RECLAIMABLE_CASES, isRetainedHiddenIdReclaimable } from "@/lib/profileStorage";
+ *   DEV_IS_RETAINED_HIDDEN_ID_RECLAIMABLE_CASES.forEach(c => {
+ *     const got = isRetainedHiddenIdReclaimable(c.state, c.profileId, c.currentOwnerUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isRetainedHiddenIdReclaimable(
+  state: ProfileRegistryState,
+  profileId: string,
+  currentOwnerUserId: string
+): boolean {
+  const unownedDeleted = state[profileId]?.[UNOWNED_ACCOUNT_KEY]?.locallyDeleted === true;
+  if (!unownedDeleted) return false;
+  return !selectProfileIdsExclusivelyOwnedByOthers(state, currentOwnerUserId).has(profileId);
+}
+
+export const DEV_IS_RETAINED_HIDDEN_ID_RECLAIMABLE_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  currentOwnerUserId: string;
+  expected: boolean;
+}> = [
+  {
+    name: "Codex P2 follow-up (11th round) — A already durably owns 'family' herself; a stray shared unowned deletion marker hides it, but reclaim is safe since no OTHER account is involved",
+    state: { family: { userA: { owned: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "Codex P2 follow-up (11th round) — genuinely unowned 'family', retained with only a shared unowned marker — reclaimable for A, who is not blocked by any other owner",
+    state: { family: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "Codex P2 follow-up (11th round) — 'family' is exclusively owned by a DIFFERENT real account B; even with a shared unowned marker present, NOT reclaimable — reclaiming would only produce an invisible zombie under B's still-exclusive ownership",
+    state: { family: { userB: { owned: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "Codex P2 follow-up (11th round) — 'family' is co-owned by BOTH A and B; A's own independent co-ownership is never blocked by B's separate co-ownership, so it remains reclaimable for A",
+    state: {
+      family: { userA: { owned: true }, userB: { owned: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } },
+    },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "another account's exclusively-owned id with NO shared unowned marker at all — not reclaimable (ordinary exclusively-other-owned profile; must not be silently claimed)",
+    state: { family: { userB: { owned: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "genuinely unowned id with no markers at all — not reclaimable (nothing to reclaim; an ordinary, unrelated collision uses normal suffix behavior)",
+    state: {},
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "signed-out creator reclaims her own earlier signed-out delete of a genuinely unowned id",
+    state: { family: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: true,
+  },
+  {
+    name: "signed-out creator reclaim is blocked when a real account B exclusively owns the id",
+    state: { family: { userB: { owned: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: false,
+  },
+  {
+    name: "the canonical 'default' id is never reclaimable — deleteProfile can never mark it deleted at all, so it never satisfies the shared-unowned-marker precondition",
+    state: {},
+    profileId: "default",
+    currentOwnerUserId: "userA",
+    expected: false,
+  },
+];
+
+/**
  * Create a new profile with the given display name.
  * Generates a stable id, adds to the profiles list, and returns the new Profile.
  *
@@ -1524,12 +1673,44 @@ function uniqueId(base: string, existingIds: string[]): string {
  * DIFFERENT real account's own marker for the identical id is still never
  * touched. A signed-out create/recreate is unaffected — it still only ever
  * clears the shared bucket's own marker, exactly as before this fix.
+ *
+ * Codex P2 follow-up (11th round) — the id-SELECTION step itself is fixed
+ * too: previously, whenever the literal generated `base` id already
+ * existed in raw `dwp.profiles` — including a RETAINED HIDDEN entry the
+ * 8th round's isDestructiveProfileCleanupSafe deliberately left behind —
+ * uniqueId() always treated it as an ordinary collision and suffixed to
+ * `-2`, so the 10th round's own reclaim transition above ran against the
+ * WRONG id (the brand-new `-2` sibling) and never touched the id the user
+ * actually meant to recreate. See isRetainedHiddenIdReclaimable's own doc
+ * for the exact eligibility rule this now checks FIRST: when the raw
+ * `base` id is reclaimable for this create's scope, the EXISTING entry is
+ * reused outright — no new `dwp.profiles` row is appended, and neither its
+ * id nor its currently stored name is ever rewritten — and only the
+ * deletion-marker reclaim transition below runs against it. An id that is
+ * merely an ORDINARY collision (this account's own existing profile, a
+ * genuinely unowned/visible legacy id, or another account's exclusively-
+ * owned, non-reclaimable profile) is completely unaffected and still
+ * suffixes exactly as before.
  */
 export function createProfile(name: string, currentOwnerUserId: string | null = null): Profile {
   const trimmed = sanitizeProfileName(name) ?? "New Profile";
+  const scopeKey = currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY;
   const profiles = getProfiles();
   const existingIds = profiles.map((p) => p.id);
   const base = normalizeId(trimmed);
+
+  if (existingIds.includes(base) && isRetainedHiddenIdReclaimable(readProfileRegistryState(), base, scopeKey)) {
+    // Reclaim: reuse the existing physical entry exactly as stored — never
+    // append a duplicate row, never rewrite its id or name (see this
+    // function's own doc and isRetainedHiddenIdReclaimable's for why the
+    // shared-name representation is deliberately left untouched here,
+    // matching the co-owned-profile architecture this module already
+    // supports elsewhere).
+    const existing = profiles.find((p) => p.id === base)!;
+    clearLocalDeletionMarker(base, scopeKey);
+    return existing;
+  }
+
   const id = uniqueId(base, existingIds);
   const newProfile: Profile = { id, name: trimmed };
   writeProfiles([...profiles, newProfile]);
@@ -1545,7 +1726,7 @@ export function createProfile(name: string, currentOwnerUserId: string | null = 
   // clearLocalDeletionMarker/clearLocalDeletionMarkersForRecreate's own doc
   // for why a DIFFERENT account's own suppression of the identical literal
   // id must never be cleared by this.
-  clearLocalDeletionMarker(id, currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY);
+  clearLocalDeletionMarker(id, scopeKey);
   return newProfile;
 }
 
