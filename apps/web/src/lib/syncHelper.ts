@@ -777,7 +777,7 @@ Reviewers should check any changes affecting:
  * never left "authenticated" the whole time.
  */
 
-import { buildNamespacedKey } from "./profileStorage";
+import { buildNamespacedKey, resolveAccountScopedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
@@ -2805,7 +2805,7 @@ function recordConfirmedFactBody(
   // independently bounds this store's growth on every future write
   // regardless of whether this cross-store pass ever fires for it.
   try {
-    const domainKey = domainCanonicalKey(profileId, domain);
+    const domainKey = domainCanonicalKey(userId, profileId, domain);
     let currentCanonicalValue: unknown = null;
     try {
       const currentRaw = readLatestDurableValue(domainKey);
@@ -3724,15 +3724,26 @@ export function listPendingOps(userId: string, profileId: string): string[] {
 }
 
 /**
- * SH.2.3 — the canonical localStorage key for a synced domain, keyed only
- * by profileId (matches buildPayloadFromStorage's own reads) — used to
- * locate a domain's local-edit-fact keyspace (localEditFactPrefix below)
- * when capturing or re-checking a pending operation's own per-domain
- * evidence. `ConfirmedDomainName` and the payload's own domain field names
+ * SH.2.3 — the canonical localStorage key for a synced domain (matches
+ * buildPayloadFromStorage's own reads) — used to locate a domain's
+ * local-edit-fact keyspace (localEditFactPrefix below) when capturing or
+ * re-checking a pending operation's own per-domain evidence.
+ * `ConfirmedDomainName` and the payload's own domain field names
  * ("plans"/"lightning"/"days") are deliberately identical strings.
+ *
+ * SH.4.1 Plans slice — `userId` routes "plans"/"days"/"dayMeta"/"dayParks"
+ * through resolveAccountScopedKey() (the account-qualified shape once
+ * authenticated, unchanged legacy shape signed out), mirroring wherever
+ * this domain's OWN canonical value now actually lives — this function's
+ * whole purpose is to locate that SAME physical keyspace, so it must track
+ * it exactly. "lightning" deliberately stays on buildNamespacedKey()
+ * unconditionally: Lightning's own migration is a separate, later slice,
+ * and Lightning's page code still only ever writes its canonical value (and
+ * therefore its edit-facts) under the legacy key.
  */
-function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): string {
-  return buildNamespacedKey(profileId, domain);
+function domainCanonicalKey(userId: string | null, profileId: string, domain: ConfirmedDomainName): string {
+  if (domain === "lightning") return buildNamespacedKey(profileId, domain);
+  return resolveAccountScopedKey(userId, profileId, domain);
 }
 
 /**
@@ -3777,34 +3788,46 @@ function getKnownBaseRevision(userId: string, profileId: string): number {
  * reconcilePendingOperations() later tell "this operation's own now-resolved
  * content" apart from "a genuine local edit made after it" — never from the
  * full content itself.
+ *
+ * SH.4.1 Plans slice — `userId` (both callers already require a non-null
+ * userId to reach this point — see addPendingOp's own doc) is threaded
+ * straight through to domainCanonicalKey() so this operation's own
+ * edit-fact-frontier snapshot is taken from the SAME physical keyspace
+ * buildPayloadFromStorage() just read `payload` from, never a stale
+ * legacy-shape snapshot for a domain that has since moved to the
+ * account-qualified key.
  */
-function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload): PendingOpRecord["domains"] {
+function buildPendingOpDomains(
+  userId: string,
+  profileId: string,
+  payload: SyncedPlannerPayload
+): PendingOpRecord["domains"] {
   const domains: PendingOpRecord["domains"] = {
     plans: {
       digest: canonicalDigest(payload.plans),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "plans"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "plans"))),
     },
     lightning: {
       digest: canonicalDigest(payload.lightning),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "lightning"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "lightning"))),
     },
   };
   if (payload.days !== undefined) {
     domains.days = {
       digest: canonicalDigest(payload.days),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "days"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "days"))),
     };
   }
   if (payload.dayMeta !== undefined) {
     domains.dayMeta = {
       digest: canonicalDigest(payload.dayMeta),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayMeta"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayMeta"))),
     };
   }
   if (payload.dayParks !== undefined) {
     domains.dayParks = {
       digest: canonicalDigest(payload.dayParks),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayParks"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayParks"))),
     };
   }
   return domains;
@@ -4135,7 +4158,7 @@ export async function reconcilePendingOperations(
       for (const domain of CONFIRMED_DOMAIN_NAMES) {
         const evidence = record.domains[domain];
         if (!evidence) continue;
-        const key = domainCanonicalKey(profileId, domain);
+        const key = domainCanonicalKey(userId, profileId, domain);
         const currentEditFactKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
         // Read via the SAME normalization buildPayloadFromStorage() used to
         // produce `evidence.digest` in the first place (parseLocalDatasetEntry
@@ -5261,7 +5284,7 @@ export function registerUnloadSync(): () => void {
     // LATER session's ordinary doPush()/beacon to pick up and push
     // (correctly evidenced) once storage pressure clears.
     if (userId) {
-      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(userId, profileId, payload));
       if (!registered) return;
     }
     const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
@@ -5326,13 +5349,18 @@ function parseLocalDatasetEntry(
  * sanitizes whatever is returned here down to valid canonical day IDs (or
  * omits the field entirely), so this only needs to hand it the raw parsed
  * value, not pre-validate it.
+ *
+ * SH.4.1 Plans slice — `userId` routes this read through
+ * resolveAccountScopedKey(), mirroring wherever Plans' own daysKeyRef
+ * currently targets (see buildPayloadFromStorage's own doc for why this
+ * must track it exactly).
  */
-function readLocalDaysOrder(profileId: string): unknown[] | undefined {
+function readLocalDaysOrder(userId: string | null, profileId: string): unknown[] | undefined {
   try {
     // Codex P1 fix (17th round) — reads the newest DURABLE edit for the
     // days key, not merely whatever the canonical key currently holds; see
     // readLatestDurableValue()'s own doc above.
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "days"));
+    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "days"));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed : undefined;
@@ -5352,10 +5380,12 @@ function readLocalDaysOrder(profileId: string): unknown[] | undefined {
  * an intentionally-empty `{}` (e.g. after Clear All) — is handed through
  * as-is for buildSyncedPlannerPayload()'s own sanitizeDayMeta() to validate,
  * exactly as this function's days[] counterpart does not pre-validate either.
+ *
+ * SH.4.1 Plans slice — same `userId` routing as readLocalDaysOrder() above.
  */
-function readLocalDayMeta(profileId: string): unknown {
+function readLocalDayMeta(userId: string | null, profileId: string): unknown {
   try {
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayMeta"));
+    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "dayMeta"));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -5374,10 +5404,12 @@ function readLocalDayMeta(profileId: string): unknown {
  * a genuinely parsed plain object — INCLUDING an intentionally-empty `{}`
  * (e.g. after Clear All) — is handed through as-is for
  * buildSyncedPlannerPayload()'s own sanitizeDayParks() to validate.
+ *
+ * SH.4.1 Plans slice — same `userId` routing as readLocalDaysOrder() above.
  */
-function readLocalDayParks(profileId: string): unknown {
+function readLocalDayParks(userId: string | null, profileId: string): unknown {
   try {
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayParks"));
+    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "dayParks"));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -5409,6 +5441,26 @@ function readLocalDayParks(profileId: string): unknown {
  * hydration write into a pushed "local edit" while it remains unresolved;
  * the next successful pull's own commitDomainHydration() call resolves it
  * normally.
+ *
+ * SH.4.1 Plans slice — "plans"/"days"/"dayMeta"/"dayParks" now route
+ * through resolveAccountScopedKey(userId, profileId, baseKey): the
+ * account-qualified key once `userId` is a real authenticated user, the
+ * unchanged legacy key when signed out. This is NOT a new protection added
+ * to doPush()/registerUnloadSync() specifically — both already required and
+ * threaded a real `userId` through this exact function for the pre-existing
+ * hasIncompleteHydrationApplyIntent() gate above; this only makes the READ
+ * itself track the SAME physical location Plans' own auth-transition effect
+ * has already retargeted its refs (and, before that, adopted any legacy
+ * value) to — see profileStorage.ts's resolveAccountScopedKey()/
+ * adoptLegacyProfileValueIfSafe() docs. Without this, doPush() would keep
+ * reading a frozen legacy-key snapshot forever once Plans stops writing
+ * there, silently breaking authenticated sync — and registerUnloadSync()'s
+ * beacon, sharing this same function, would send that same stale snapshot
+ * on tab close instead of the user's actual latest edit. "lightning"
+ * deliberately keeps reading buildNamespacedKey() unconditionally:
+ * Lightning's own migration is a separate, later slice, and Lightning's
+ * page code still only ever writes its canonical value under the legacy
+ * key.
  */
 function buildPayloadFromStorage(profileId: string, userId: string | null): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
@@ -5422,7 +5474,7 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // is guaranteed to reflect the user's true latest edit even in the rare
     // window where a concurrent hydration race has transiently clobbered
     // the canonical key itself.
-    const plansRaw = readLatestDurableValue(buildNamespacedKey(profileId, "plans"));
+    const plansRaw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "plans"));
     const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
 
     const plans = parseLocalDatasetEntry(plansRaw);
@@ -5432,9 +5484,9 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // push potentially empty data over valid cloud state.
     if (plans === null || lightning === null) return null;
 
-    const days = readLocalDaysOrder(profileId);
-    const dayMeta = readLocalDayMeta(profileId);
-    const dayParks = readLocalDayParks(profileId);
+    const days = readLocalDaysOrder(userId, profileId);
+    const dayMeta = readLocalDayMeta(userId, profileId);
+    const dayParks = readLocalDayParks(userId, profileId);
     return buildSyncedPlannerPayload(plans, lightning, days, dayMeta, dayParks);
   } catch {
     return null;
@@ -5741,7 +5793,7 @@ async function doPush(): Promise<void> {
   // further edit, or by this same profile's next mount/pull cycle) simply
   // retries once storage pressure clears — no new retry machinery needed.
   if (userId) {
-    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(userId, profileId, payload));
     if (!registered) {
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");

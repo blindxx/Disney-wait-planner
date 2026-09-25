@@ -1632,6 +1632,66 @@ export function adoptLegacyProfileValueIfSafe(userId: string, profileId: string,
   }
 }
 
+/**
+ * SH.4.1 Plans slice — the single PURE key-resolution seam a consumer opts
+ * a specific base key into once it is ready to become identity-aware:
+ * `dwp:{userId}:{profileId}:{baseKey}` when `userId` is a real authenticated
+ * user, or the unchanged, existing `dwp:{profileId}:{baseKey}` shape when
+ * signed out (`userId === null`). This is deliberately just the branch
+ * itself — it never calls adoptLegacyProfileValueIfSafe() and never touches
+ * localStorage — so a hot path that resolves a domain's key on every call
+ * (e.g. a debounced push) is not repeatedly re-checking/re-copying legacy
+ * bytes it has already safely adopted once. Callers that are establishing a
+ * NEW qualified-key target for the first time (e.g. Plans' own auth-
+ * transition effect, retargeting its refs for a just-resolved identity)
+ * must call adoptLegacyProfileValueIfSafe(userId, profileId, baseKey)
+ * themselves BEFORE calling this — see that function's own doc — so the
+ * adoption copy (if any) exists before this ever resolves to the qualified
+ * key. NOT a blanket switch: a domain not yet migrated to this architecture
+ * (e.g. Lightning's own "lightning" base key, deferred to its own slice)
+ * simply keeps calling buildNamespacedKey() directly instead of this.
+ *
+ * Run from Node:
+ *   import { DEV_RESOLVE_ACCOUNT_SCOPED_KEY_CASES, resolveAccountScopedKey } from "@/lib/profileStorage";
+ *   DEV_RESOLVE_ACCOUNT_SCOPED_KEY_CASES.forEach(c => {
+ *     const got = resolveAccountScopedKey(c.userId, c.profileId, c.baseKey);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function resolveAccountScopedKey(userId: string | null, profileId: string, baseKey: string): string {
+  return userId ? buildAccountQualifiedKey(userId, profileId, baseKey) : buildNamespacedKey(profileId, baseKey);
+}
+
+export const DEV_RESOLVE_ACCOUNT_SCOPED_KEY_CASES: Array<{
+  name: string;
+  userId: string | null;
+  profileId: string;
+  baseKey: string;
+  expected: string;
+}> = [
+  {
+    name: "authenticated => account-qualified shape",
+    userId: "userA",
+    profileId: "lindsay",
+    baseKey: "plans",
+    expected: "dwp:userA:lindsay:plans",
+  },
+  {
+    name: "signed out (null userId) => unchanged legacy shape",
+    userId: null,
+    profileId: "lindsay",
+    baseKey: "plans",
+    expected: "dwp:lindsay:plans",
+  },
+  {
+    name: "authenticated, default profile => account-qualified shape, no special-casing of 'default'",
+    userId: "userA",
+    profileId: "default",
+    baseKey: "days",
+    expected: "dwp:userA:default:days",
+  },
+];
+
 // ===== PROFILE LIST HELPERS =====
 
 /**

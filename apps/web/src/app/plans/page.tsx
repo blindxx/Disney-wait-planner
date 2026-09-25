@@ -100,7 +100,15 @@ import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveAttractionIdentityKey } from "@/lib/legacyAttractions";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
+import {
+  bootstrapProfiles,
+  getActiveProfileKeys,
+  getActiveProfile,
+  getActiveProfileId,
+  buildNamespacedKey,
+  resolveAccountScopedKey,
+  adoptLegacyProfileValueIfSafe,
+} from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
@@ -2198,6 +2206,115 @@ export default function PlansPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized, items, days, dayParks, lightningVersion]);
 
+  /**
+   * SH.4.1 Plans slice — wires this page's OWN Plans-owned domains (items/
+   * "plans", "days", "activeDayId", "dayMeta", "dayParks",
+   * "dayAutoFallbacks" — NOT "lightning", NOT "selectedResort"/
+   * "selectedPark", which stay on the unqualified profile-scoped shape
+   * because they are shared with Lightning/wait-times, neither of which is
+   * migrated by this slice) to the account-qualified local-storage
+   * architecture (profileStorage.ts's buildAccountQualifiedKey/
+   * decideLegacyKeyAdoption/adoptLegacyProfileValueIfSafe, SH.4.1d).
+   *
+   * The mount effect below is this page's AUTH-INDEPENDENT initialization
+   * (`[]` deps, always runs before `sessionStatus` first resolves — see its
+   * own doc) and therefore can never itself know whether to target the
+   * qualified or legacy shape; it always loads from the existing unqualified
+   * shape, exactly as before this slice. This function is what corrects that
+   * once identity is actually known: called from the auth-transition effect
+   * below whenever the RESOLVED identity has genuinely changed since the
+   * last time it ran (never unconditionally — an unrelated re-run of that
+   * effect, e.g. a staleRetryTick retry with the SAME identity, must not
+   * re-read disk and clobber whatever is currently rendered with a
+   * redundant reload of the exact same content).
+   *
+   * `userId` is the just-resolved identity: a real authenticated userId, or
+   * null on sign-out/still-signed-out. For each domain:
+   *   1. When authenticated, adoptLegacyProfileValueIfSafe(userId, profileId,
+   *      baseKey) runs FIRST — safe legacy adoption before this (or any)
+   *      qualified key is ever targeted/read. Skipped entirely when signed
+   *      out; there is no qualified key to adopt into.
+   *   2. The ref is retargeted via resolveAccountScopedKey() — the
+   *      account-qualified key once authenticated, or the unchanged legacy
+   *      key signed out (including the sign-OUT direction: an authenticated
+   *      session ending must retarget every ref back to the legacy shape so
+   *      signed-out behavior is genuinely unchanged, not merely "unchanged
+   *      until the first sign-in of this mount").
+   *   3. Rendered state + this page's own fallback baselines are re-hydrated
+   *      from the (possibly new) target, mirroring the mount effect's own
+   *      load exactly (same loaders, same shape) — never a partial update
+   *      that would leave `items`/`days`/etc. reflecting the PREVIOUS
+   *      identity's bytes while future persists/pull comparisons already
+   *      target the new key. Marked as a non-user persist (never a mid-
+   *      transition user edit) via pendingNonUserItemsPersistRef, mirroring
+   *      the mount effect's own load exactly.
+   *
+   * This function's own read/write of each domain is itself entirely
+   * within ONE identity at a time — every key it targets and every value it
+   * loads in a single call is resolved from the SAME `userId`, never a mix
+   * of the outgoing and incoming identity's keys within this one pass.
+   */
+  function retargetPlansStorageIdentity(userId: string | null): void {
+    const profileId = activeProfileIdRef.current;
+    if (userId) {
+      adoptLegacyProfileValueIfSafe(userId, profileId, "plans");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "days");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "activeDayId");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "dayMeta");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "dayParks");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "dayAutoFallbacks");
+    }
+    planKeyRef.current = resolveAccountScopedKey(userId, profileId, "plans");
+    daysKeyRef.current = resolveAccountScopedKey(userId, profileId, "days");
+    activeDayKeyRef.current = resolveAccountScopedKey(userId, profileId, "activeDayId");
+    dayMetaKeyRef.current = resolveAccountScopedKey(userId, profileId, "dayMeta");
+    dayParksKeyRef.current = resolveAccountScopedKey(userId, profileId, "dayParks");
+    dayAutoFallbacksKeyRef.current = resolveAccountScopedKey(userId, profileId, "dayAutoFallbacks");
+
+    // Re-hydrate rendered state + this page's own fallback baselines from
+    // the (possibly new) target — mirrors the mount effect's own load
+    // exactly (loadEffectiveDurable*/loadActiveDayId/loadDayAutoFallbacks,
+    // never a canonical-only read, for the same cross-tab-hydration-race
+    // reason the mount effect's own load uses them).
+    const rawLoaded = loadEffectiveDurablePlanItems(planKeyRef.current);
+    const loaded = migrateDayIds(rawLoaded);
+    if (loaded !== rawLoaded) {
+      // Migration ran — persist migrated items so next load is clean. Not a
+      // user edit — a one-time retarget-time normalization rewrite.
+      saveToStorage(loaded, planKeyRef.current, false);
+    }
+    if (loaded.length > 0) reseedNextId(loaded);
+    pendingNonUserItemsPersistRef.current = true;
+    setItems(loaded);
+    itemsBaselineRef.current = loaded;
+
+    const storedDays = loadEffectiveDurableDays(daysKeyRef.current);
+    const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
+    const itemDayIds = [...new Set(loaded.map((it) => it.dayId))];
+    const extraDayIds = itemDayIds.filter((id) => !storedDays.includes(id)).sort(daySort);
+    const mergedDays = extraDayIds.length > 0 ? [...storedDays, ...extraDayIds] : storedDays;
+    if (mergedDays.join(",") !== storedDays.join(",")) {
+      saveDays(mergedDays, daysKeyRef.current, false);
+    }
+    const validActiveDayId = mergedDays.includes(storedActiveDayId) ? storedActiveDayId : mergedDays[0];
+    if (validActiveDayId !== storedActiveDayId) {
+      saveActiveDayId(validActiveDayId, activeDayKeyRef.current);
+    }
+    setDays(mergedDays);
+    setActiveDayId(validActiveDayId);
+    daysBaselineRef.current = mergedDays;
+
+    const loadedDayMeta = loadEffectiveDurableDayMeta(dayMetaKeyRef.current);
+    setDayMeta(loadedDayMeta);
+    dayMetaBaselineRef.current = loadedDayMeta;
+
+    const loadedDayParks = loadEffectiveDurableDayParks(dayParksKeyRef.current);
+    setDayParks(loadedDayParks);
+    dayParksBaselineRef.current = loadedDayParks;
+
+    setDayAutoFallbacks(loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current));
+  }
+
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
   // that newly created items never collide with hydrated ones (avoids React key
@@ -2553,6 +2670,19 @@ export default function PlansPage() {
       // syncHelper.ts) — never leave a stale withhold from a prior
       // authenticated account applied while signed out.
       setLocalContentWithheld(false);
+      // SH.4.1 Plans slice — retarget this page's own Plans-domain key refs
+      // (+ re-hydrate rendered state) back to the unqualified/legacy shape
+      // ONLY when THIS mount had previously retargeted them to a real
+      // authenticated identity (activeUserIdRef.current still names it,
+      // since it is otherwise never reset outside the authenticated branch
+      // below). A mount that was NEVER authenticated (activeUserIdRef.current
+      // already null) must not redundantly re-read/re-render — its refs
+      // already are, and always were, the unqualified shape. See
+      // retargetPlansStorageIdentity's own doc above.
+      if (activeUserIdRef.current !== null) {
+        activeUserIdRef.current = null;
+        retargetPlansStorageIdentity(null);
+      }
       return;
     }
     // authenticated
@@ -2624,8 +2754,26 @@ export default function PlansPage() {
     // simulateLocalContentOwnershipAfterHydration()'s own DEV cases in
     // syncHelper.ts for the exact reverse-transition contract this mirrors.
     setLocalContentWithheld(contentOwnershipMismatch);
+    // SH.4.1 Plans slice — capture the identity this page's OWN key refs
+    // currently target BEFORE activeUserIdRef is overwritten below, so the
+    // retarget call just after can tell "this transition actually changes
+    // which physical keys are correct" apart from an unrelated re-run of
+    // this same effect (e.g. a staleRetryTick retry) under the SAME
+    // already-resolved identity — see retargetPlansStorageIdentity's own
+    // doc above for why re-running it unconditionally would be wrong.
+    const previousUserId = activeUserIdRef.current;
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
+    // SH.4.1 Plans slice — safe legacy adoption + key retarget + render-
+    // state re-hydration for the identity THIS transition establishes, run
+    // BEFORE anything below (beginPullContext/buildPreFetchPullBaseline)
+    // ever reads this page's own domain keys — required so this pull's own
+    // pre-fetch disk snapshot is taken from the CORRECT (account-qualified)
+    // location for an authenticated identity, never the legacy key the
+    // mount effect optimistically loaded from before identity was known.
+    if (previousUserId !== resolvedUserId) {
+      retargetPlansStorageIdentity(resolvedUserId);
+    }
     // Cancel any pending debounced push before starting the cloud pull so a
     // queued stale PUT cannot fire during the initial pull window.
     cancelScheduledSync();
@@ -4065,8 +4213,8 @@ export default function PlansPage() {
     // Phase 8.0.10 — resolve profile keys at write time so a profile switch
     // between mount and this click always targets the correct namespace.
     const _profileId = getActiveProfileId();
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
 
@@ -4103,7 +4251,7 @@ export default function PlansPage() {
     // this page's `days` state actually reflects, causing Move Up/Down to
     // write the wrong profile's days key.
     const _profileId = activeProfileIdRef.current;
-    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
     daysKeyRef.current = _daysKey;
     const idx = days.indexOf(dayId);
     if (idx === -1) return;
@@ -4152,7 +4300,7 @@ export default function PlansPage() {
     // Reject unknown park IDs silently; empty string ("") = Auto (clear override).
     if (parkId && !isValidParkId(parkId)) return;
     const _profileId = getActiveProfileId();
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     const clearedOverride = dayParks[dayId]; // captured before deletion, for the Auto branch below
     const next = { ...dayParks };
@@ -4187,7 +4335,7 @@ export default function PlansPage() {
         // has no plans of its own. Same dayAutoFallbacks map the backup
         // restore flow populates; resolveDayPark's inference step (2) still
         // overrides this the moment real plan content resolves a park.
-        const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+        const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
         dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
         const nextAutoFallbacks = { ...dayAutoFallbacks, [dayId]: clearedOverride };
         setDayAutoFallbacks(nextAutoFallbacks);
@@ -4229,7 +4377,7 @@ export default function PlansPage() {
       return;
     }
     const _profileId = getActiveProfileId();
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
     dayMetaKeyRef.current = _dayMetaKey;
     const nextMeta = { ...dayMeta };
     if (!trimmedLabel && !trimmedDate) {
@@ -4268,9 +4416,9 @@ export default function PlansPage() {
     if (dayId === "day-1") return;   // Day 1 is a permanent base day
     if (days.length <= 1) return;   // Cannot remove the last day
     const _profileId = activeProfileIdRef.current;
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
     dayMetaKeyRef.current = _dayMetaKey;
@@ -4286,14 +4434,14 @@ export default function PlansPage() {
     setDayMeta(nextMeta);
     saveDayMeta(nextMeta, _dayMetaKey, true);
     // Phase 8.4 — remove day park override for removed day
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     const nextDayParks = { ...dayParks };
     delete nextDayParks[dayId];
     setDayParks(nextDayParks);
     saveDayParks(nextDayParks, _dayParksKey, true);
     // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     delete nextAutoFallbacks[dayId];
@@ -4367,11 +4515,11 @@ export default function PlansPage() {
   // global active-profile read.
   function handleDuplicateDay(sourceDayId: string) {
     const _profileId = activeProfileIdRef.current;
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
     dayMetaKeyRef.current = _dayMetaKey;
@@ -4471,7 +4619,7 @@ export default function PlansPage() {
     // All); without this, the cleared fallback survived in localStorage and
     // could resurface after a reload or in a planner_context snapshot.
     const _profileId = getActiveProfileId();
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     delete nextAutoFallbacks[target];
@@ -4843,9 +4991,9 @@ export default function PlansPage() {
     setRemoveConfirmDayId(null);
     // Phase 8.1 — full reset: revert to one empty Day 1, clear all day metadata.
     const _profileId = getActiveProfileId();
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
     dayMetaKeyRef.current = _dayMetaKey;
@@ -4857,12 +5005,12 @@ export default function PlansPage() {
     setDayMeta({});
     saveDayMeta({}, _dayMetaKey, true);
     // Phase 8.4 — Clear All resets all day park overrides
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     setDayParks({});
     saveDayParks({}, _dayParksKey, true);
     // Phase 9.6 backup gap fix — Clear All also resets per-day auto fallbacks.
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     setDayAutoFallbacks({});
     saveDayAutoFallbacks({}, _dayAutoFallbacksKey, true);
@@ -5469,7 +5617,7 @@ export default function PlansPage() {
       }
     }
     setDayAutoFallbacks(restoredAutoFallbacks);
-    dayAutoFallbacksKeyRef.current = buildNamespacedKey(activeProfileIdRef.current, "dayAutoFallbacks");
+    dayAutoFallbacksKeyRef.current = resolveAccountScopedKey(activeUserIdRef.current, activeProfileIdRef.current, "dayAutoFallbacks");
     saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current, true);
   }
 
@@ -6553,7 +6701,7 @@ export default function PlansPage() {
                   aria-pressed={isActive}
                   onClick={() => {
                     // Phase 8.0.10 — resolve active-day key at click time.
-                    const _activeDayKey = buildNamespacedKey(getActiveProfileId(), "activeDayId");
+                    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, getActiveProfileId(), "activeDayId");
                     activeDayKeyRef.current = _activeDayKey;
                     setActiveDayId(dayId);
                     saveActiveDayId(dayId, _activeDayKey);
