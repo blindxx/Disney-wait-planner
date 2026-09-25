@@ -57,6 +57,83 @@ const PROFILES_LIST_KEY = "dwp.profiles";
  */
 const CANONICAL_SHARED_PROFILE_ID = "default";
 
+// ===== LOCAL MUTATION SERIALIZATION (Codex P1 follow-up, 12th round) =====
+//
+// Two independent findings on this exact HEAD were both, at root, the SAME
+// class of bug: a read-modify-write of one of this module's two shared JSON
+// blobs (`dwp.profileRegistryState`, `dwp.profiles`) is NOT atomic across
+// tabs — `localStorage.getItem()` and `localStorage.setItem()` are separate
+// synchronous calls to the SAME shared, cross-process storage backend, and
+// nothing fences them together. A write from another tab landing in the gap
+// between THIS tab's own read and write is silently clobbered the instant
+// this tab's write lands, even though that other tab's fact is newer:
+//   - a registry-state stamp (markProfileOwner, on reconciliation success)
+//     racing a deletion marker (markProfileLocallyDeleted/
+//     clearLocalDeletionMarker, on a local delete/recreate) — Codex P1
+//     finding #2;
+//   - server-profile adoption's own read/merge/write of `dwp.profiles`
+//     (adoptServerProfiles) racing a local create/rename/delete
+//     (createProfile/renameProfile/deleteProfile) — Codex P1 finding #3.
+//
+// FIX: reuse the EXACT technique syncHelper.ts's own
+// withLocalDomainCommitLock() established for SH.2 planner-content commits
+// — the Web Locks API (navigator.locks.request()), one lock name per
+// canonical key, so unrelated critical sections never contend with each
+// other. This is NOT imported from syncHelper.ts directly and reimplemented
+// locally instead: profileRegistrySync.ts's own module doc is explicit that
+// registry reconciliation and planner sync run completely independently and
+// "neither calls into the other" — pulling a private planner-sync helper
+// into this module (or vice versa) would break that established boundary
+// for no benefit, when the underlying mechanism is trivial to reproduce
+// exactly for this module's own two keys.
+//
+// GRANULARITY — one lock per canonical key (mirrors
+// localDomainCommitLockName()'s own per-key choice), not one lock for both:
+// a registry-provenance stamp and a profiles-list mutation touch two
+// unrelated pieces of storage and must never wait on each other.
+//
+// FALLBACK (no Web Locks) — runs the critical section directly, exactly
+// like withLocalDomainCommitLock()'s own "ordinary commit" fallback, NOT
+// commitLocalDomainRaw()'s fail-closed CAS fallback. This is a deliberate,
+// documented choice, not an oversight: "do not silently weaken correctness"
+// means never regressing BELOW the current baseline — and "run directly,
+// no cross-tab serialization" IS the exact behavior every browser already
+// has today, on this exact HEAD, for every one of these writers. Failing
+// closed (skipping the mutation entirely) on a Locks-less browser would be
+// a REGRESSION from that baseline — SH.4.1's registry provenance is
+// explicitly documented elsewhere in this module as a best-effort,
+// self-healing local shim ("not a planner-style sync engine... no
+// revision/ledger, no conflict resolution"), never a byte-exact CAS against
+// planner content, so it does not need commitLocalDomainRaw()'s stricter
+// fail-closed guarantee to stay correct in spirit: a lost update on a
+// Locks-less browser heals itself on the NEXT reconciliation round exactly
+// as it always has, while every modern browser (Web Locks has been broadly
+// supported since 2022) gets genuine, additive cross-tab protection.
+const PROFILE_REGISTRY_STATE_LOCK_NAME = "dwp:profileRegistryState";
+const PROFILES_LIST_LOCK_NAME = "dwp:profiles";
+
+/** True only when the Web Locks API is actually present and callable — mirrors syncHelper.ts's own hasLocalDomainSerialization(). */
+function hasLocalMutationSerialization(): boolean {
+  const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+  return !!locks && typeof locks.request === "function";
+}
+
+/**
+ * Runs `fn` (a synchronous read-decide-write over ONE canonical key)
+ * serialized against every other caller contending for the SAME
+ * `lockName`, via the Web Locks API — mirrors syncHelper.ts's own
+ * withLocalDomainCommitLock(), adapted for a synchronous critical section
+ * (this module's writes involve no network I/O, so `fn` never itself needs
+ * to `await` anything). See this section's own header doc for the
+ * fallback's rationale.
+ */
+function withLocalMutationLock<T>(lockName: string, fn: () => T): Promise<T> {
+  if (hasLocalMutationSerialization()) {
+    return navigator.locks.request(lockName, () => fn()).then((v) => v);
+  }
+  return Promise.resolve(fn());
+}
+
 /**
  * SH.4.1 (Codex follow-up rounds) — durable, per-`(accountKey, profileId)`
  * REGISTRY PROVENANCE, entirely separate from `dwp.profiles` (what a device
@@ -309,11 +386,24 @@ export const DEV_APPLY_PROFILE_OWNER_STAMP_CASES: Array<{
  * Called by profileRegistrySync.ts's reconciliation orchestrator once a
  * round has confirmed (via an authoritative GET) that an id belongs to the
  * current account.
+ *
+ * Codex P1 follow-up (12th round) — the read-modify-write is now serialized
+ * against every other `dwp.profileRegistryState` writer via
+ * withLocalMutationLock (see this module's own "LOCAL MUTATION
+ * SERIALIZATION" section doc): a cross-tab deletion marker
+ * (markProfileLocallyDeleted/clearLocalDeletionMarker) committed while this
+ * call was reading/deciding can no longer be silently overwritten by this
+ * call's own (now stale) write, since the two can no longer interleave.
+ * Async as a direct consequence — see reconcileProfileRegistry's own doc
+ * for how its identity/epoch guard now re-validates around this new await
+ * boundary.
  */
-export function markProfileOwner(profileId: string, ownerUserId: string): void {
-  const state = readProfileRegistryState();
-  const updated = applyProfileOwnerStamp(state, profileId, ownerUserId);
-  if (updated !== state) writeProfileRegistryState(updated);
+export function markProfileOwner(profileId: string, ownerUserId: string): Promise<void> {
+  return withLocalMutationLock(PROFILE_REGISTRY_STATE_LOCK_NAME, () => {
+    const state = readProfileRegistryState();
+    const updated = applyProfileOwnerStamp(state, profileId, ownerUserId);
+    if (updated !== state) writeProfileRegistryState(updated);
+  });
 }
 
 /**
@@ -674,9 +764,20 @@ export const DEV_CLEAR_LOCAL_DELETION_MARKER_FOR_ACCOUNT_CASES: Array<{
   },
 ];
 
-function markProfileLocallyDeleted(profileId: string, accountKey: string): void {
-  const state = readProfileRegistryState();
-  writeProfileRegistryState(applyLocalDeletionMarker(state, profileId, accountKey));
+/**
+ * Codex P1 follow-up (12th round) — serialized against every other
+ * `dwp.profileRegistryState` writer (markProfileOwner, clearLocalDeletionMarker)
+ * via withLocalMutationLock, for the same reason markProfileOwner's own doc
+ * gives: a cross-tab ownership stamp landing while THIS call was reading/
+ * deciding can no longer be silently overwritten by this call's own (now
+ * stale) write — both facts survive regardless of which one actually runs
+ * first once serialized.
+ */
+function markProfileLocallyDeleted(profileId: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PROFILE_REGISTRY_STATE_LOCK_NAME, () => {
+    const state = readProfileRegistryState();
+    writeProfileRegistryState(applyLocalDeletionMarker(state, profileId, accountKey));
+  });
 }
 
 /**
@@ -878,11 +979,95 @@ export const DEV_RECREATE_VISIBILITY_CASES: Array<{
   },
 ];
 
-function clearLocalDeletionMarker(profileId: string, accountKey: string): void {
-  const state = readProfileRegistryState();
-  const updated = clearLocalDeletionMarkersForRecreate(state, profileId, accountKey);
-  if (updated !== state) writeProfileRegistryState(updated);
+/**
+ * Codex P1 follow-up (12th round) — serialized against every other
+ * `dwp.profileRegistryState` writer via withLocalMutationLock; see
+ * markProfileLocallyDeleted's own doc immediately above for the identical
+ * rationale (this is the SAME lock name, so the two can never interleave
+ * with each other either).
+ */
+function clearLocalDeletionMarker(profileId: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PROFILE_REGISTRY_STATE_LOCK_NAME, () => {
+    const state = readProfileRegistryState();
+    const updated = clearLocalDeletionMarkersForRecreate(state, profileId, accountKey);
+    if (updated !== state) writeProfileRegistryState(updated);
+  });
 }
+
+/**
+ * Regression proof for Codex P1 findings #2/#3 on `dwp.profileRegistryState`:
+ * applyProfileOwnerStamp (an ownership stamp, from reconciliation) and
+ * applyLocalDeletionMarker (a deletion marker, from a local delete) are the
+ * two pure transitions markProfileOwner/markProfileLocallyDeleted wrap in
+ * withLocalMutationLock. Serializing their read-modify-write via that lock
+ * means whichever one actually executes SECOND always starts from the
+ * FIRST one's already-written result (never a stale read from before it) —
+ * so the two orders below (owner-then-delete, simulating the ownership
+ * stamp landing first; delete-then-owner, simulating the deletion marker
+ * landing first) must both converge on the SAME final state, and that
+ * state must retain BOTH facts. Before this round's fix — a plain
+ * unserialized read-modify-write on each side — whichever call's OWN
+ * (stale) read happened to be based on state from BEFORE the other's
+ * write would silently clobber it on write, so the two orders would
+ * instead diverge, and whichever ran second would always win outright,
+ * losing the first entirely.
+ *
+ * Run from Node (compare with a KEY-ORDER-INDEPENDENT canonical stringify,
+ * not a plain JSON.stringify equality: the two orderings below build each
+ * account's entry via object spreads in the OPPOSITE sequence — e.g.
+ * `{...{owned:true}, locallyDeleted:true}` vs.
+ * `{...{locallyDeleted:true}, owned:true}` — so a naive JSON.stringify
+ * comparison can report a false mismatch on two objects that are, by any
+ * semantic/structural measure, identical):
+ *   import { DEV_CONCURRENT_OWNERSHIP_AND_DELETION_MARKER_CASES, applyProfileOwnerStamp, applyLocalDeletionMarker } from "@/lib/profileStorage";
+ *   const canon = (v) => (v && typeof v === "object" && !Array.isArray(v))
+ *     ? Object.keys(v).sort().reduce((acc, k) => ((acc[k] = canon(v[k])), acc), {})
+ *     : v;
+ *   DEV_CONCURRENT_OWNERSHIP_AND_DELETION_MARKER_CASES.forEach(c => {
+ *     const ownerFirst = applyLocalDeletionMarker(
+ *       applyProfileOwnerStamp(c.initialState, c.profileId, c.ownerUserId), c.profileId, c.deletingAccountKey
+ *     );
+ *     const deleteFirst = applyProfileOwnerStamp(
+ *       applyLocalDeletionMarker(c.initialState, c.profileId, c.deletingAccountKey), c.profileId, c.ownerUserId
+ *     );
+ *     const expected = JSON.stringify(canon(c.expected));
+ *     const ok = JSON.stringify(canon(ownerFirst)) === expected && JSON.stringify(canon(deleteFirst)) === expected;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONCURRENT_OWNERSHIP_AND_DELETION_MARKER_CASES: Array<{
+  name: string;
+  initialState: ProfileRegistryState;
+  profileId: string;
+  ownerUserId: string;
+  deletingAccountKey: string;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "Codex P1 follow-up (12th round) — A's own ownership stamp and A's own deletion marker: both orders converge on the same state, retaining both facts (a deletion marker committed by another tab survives a concurrent ownership stamp, and vice versa)",
+    initialState: {},
+    profileId: "family",
+    ownerUserId: "userA",
+    deletingAccountKey: "userA",
+    expected: { family: { userA: { owned: true, locallyDeleted: true } } },
+  },
+  {
+    name: "Codex P1 follow-up (12th round) — B's reconciliation stamps ownership while, in another tab, A locally deletes the identical grandfathered id: both orders preserve BOTH accounts' independent facts, never one clobbering the other",
+    initialState: {},
+    profileId: "family",
+    ownerUserId: "userB",
+    deletingAccountKey: "userA",
+    expected: { family: { userB: { owned: true }, userA: { locallyDeleted: true } } },
+  },
+  {
+    name: "signed-out delete (shared UNOWNED_ACCOUNT_KEY marker) racing an authenticated account's own ownership stamp for the same id: both survive regardless of ordering",
+    initialState: {},
+    profileId: "family",
+    ownerUserId: "userA",
+    deletingAccountKey: UNOWNED_ACCOUNT_KEY,
+    expected: { family: { userA: { owned: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+  },
+];
 
 /**
  * Pure filter: given the full per-`(profileId, accountKey)` provenance
@@ -1398,6 +1583,17 @@ export const DEV_RESOLVE_ACTIVE_PROFILE_FOR_VISIBLE_LIST_CASES: Array<{
  * once signed out, confirming it validates against the signed-out
  * EFFECTIVE local list, not against authenticated ownership provenance.
  *
+ * Codex P1 follow-up (12th round) — this SAME pipeline is now also the
+ * body of the GLOBAL auth-transition guard (see
+ * components/SessionProviderWrapper.tsx's own doc) that runs on every
+ * resolved session-status change, on EVERY page, not only Settings —
+ * closing Codex finding #1: an A -> B auth switch while Plans/Lightning/
+ * Tom (none of which had their own active-profile correction) is mounted
+ * previously left B's `dwp.activeProfile` pointer on A's own, now-hidden
+ * profile until the user happened to visit Settings. The cases below model
+ * exactly that transition (an authenticated account switch, not merely
+ * sign-out) through this same composed pipeline.
+ *
  * Run from Node:
  *   import { DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES, selectHiddenProfileIdsForAccount, filterVisibleProfiles, resolveActiveProfileForVisibleList } from "@/lib/profileStorage";
  *   DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES.forEach(c => {
@@ -1435,6 +1631,28 @@ export const DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES: Array<{
     currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
     activeId: "family",
     expected: "default",
+  },
+  {
+    name: "Codex P1 follow-up (12th round) — A's active profile is exclusively A's own; when B authenticates (an A -> B switch OUTSIDE Settings, e.g. while Plans/Lightning/Tom is mounted), B's activeProfile falls back to default rather than staying on A's hidden profile — the exact scenario the global auth-transition guard closes",
+    profiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: "userB",
+    activeId: "family",
+    expected: "default",
+  },
+  {
+    name: "Codex P1 follow-up (12th round) — A's active profile remains valid for A when the SAME account resolves again (no spurious correction on an A -> A no-op transition)",
+    profiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: "userA",
+    activeId: "family",
+    expected: "family",
   },
 ];
 
@@ -1691,43 +1909,61 @@ export const DEV_IS_RETAINED_HIDDEN_ID_RECLAIMABLE_CASES: Array<{
  * genuinely unowned/visible legacy id, or another account's exclusively-
  * owned, non-reclaimable profile) is completely unaffected and still
  * suffixes exactly as before.
+ *
+ * Codex P1 follow-up (12th round) — the `dwp.profiles` read-decide-write
+ * (reading `existingIds`, deciding reclaim vs. new-id, and the resulting
+ * write) is now one atomic critical section, serialized via
+ * withLocalMutationLock against every OTHER `dwp.profiles` writer
+ * (renameProfile, deleteProfile, adoptServerProfiles): a concurrent
+ * server-profile adoption round committing between this call's OWN read
+ * and write can no longer be silently overwritten by this call's (now
+ * stale) merged list — see adoptServerProfiles's own doc for the
+ * symmetric half of this fix. Async as a direct, unavoidable consequence
+ * of using the Web Locks API for that critical section — every caller
+ * (Settings' handleAddProfile) already awaits it.
  */
-export function createProfile(name: string, currentOwnerUserId: string | null = null): Profile {
+export async function createProfile(name: string, currentOwnerUserId: string | null = null): Promise<Profile> {
   const trimmed = sanitizeProfileName(name) ?? "New Profile";
   const scopeKey = currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY;
-  const profiles = getProfiles();
-  const existingIds = profiles.map((p) => p.id);
-  const base = normalizeId(trimmed);
 
-  if (existingIds.includes(base) && isRetainedHiddenIdReclaimable(readProfileRegistryState(), base, scopeKey)) {
-    // Reclaim: reuse the existing physical entry exactly as stored — never
-    // append a duplicate row, never rewrite its id or name (see this
-    // function's own doc and isRetainedHiddenIdReclaimable's for why the
-    // shared-name representation is deliberately left untouched here,
-    // matching the co-owned-profile architecture this module already
-    // supports elsewhere).
-    const existing = profiles.find((p) => p.id === base)!;
-    clearLocalDeletionMarker(base, scopeKey);
-    return existing;
-  }
+  const outcome = await withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
+    const profiles = getProfiles();
+    const existingIds = profiles.map((p) => p.id);
+    const base = normalizeId(trimmed);
 
-  const id = uniqueId(base, existingIds);
-  const newProfile: Profile = { id, name: trimmed };
-  writeProfiles([...profiles, newProfile]);
-  // SH.4.1 (Codex P1 finding #3, follow-up round) — an explicit, deliberate
-  // create always means this id should be eligible for discovery/adoption
-  // going forward FOR THIS ACCOUNT, even if this exact id was locally
-  // deleted by it before: the only way uniqueId() above can return an id
-  // not already in `profiles` is if nothing currently in the list holds it,
-  // including a previously deleted same-named profile. Scoped to
-  // `currentOwnerUserId` (Codex P1 follow-up, 5th round), and — when
-  // `currentOwnerUserId` is a real account — ALSO reclaiming the shared
-  // unowned bucket's own marker (Codex P2 follow-up, 10th round) — see
-  // clearLocalDeletionMarker/clearLocalDeletionMarkersForRecreate's own doc
-  // for why a DIFFERENT account's own suppression of the identical literal
-  // id must never be cleared by this.
-  clearLocalDeletionMarker(id, scopeKey);
-  return newProfile;
+    if (existingIds.includes(base) && isRetainedHiddenIdReclaimable(readProfileRegistryState(), base, scopeKey)) {
+      // Reclaim: reuse the existing physical entry exactly as stored —
+      // never append a duplicate row, never rewrite its id or name (see
+      // this function's own doc and isRetainedHiddenIdReclaimable's for
+      // why the shared-name representation is deliberately left untouched
+      // here, matching the co-owned-profile architecture this module
+      // already supports elsewhere).
+      const existing = profiles.find((p) => p.id === base)!;
+      return existing;
+    }
+
+    const id = uniqueId(base, existingIds);
+    const newProfile: Profile = { id, name: trimmed };
+    writeProfiles([...profiles, newProfile]);
+    return newProfile;
+  });
+
+  // clearLocalDeletionMarker acquires the SEPARATE registry-state lock —
+  // deliberately outside the `dwp.profiles` critical section above (no
+  // nested cross-lock hold) — and operates on `outcome.id`, a value
+  // already fixed and durably written to `dwp.profiles` by this point
+  // either way (reclaimed or newly created). SH.4.1 (Codex P1 finding #3,
+  // follow-up round) — an explicit, deliberate create always means this id
+  // should be eligible for discovery/adoption going forward FOR THIS
+  // ACCOUNT, even if this exact id was locally deleted by it before.
+  // Scoped to `currentOwnerUserId` (Codex P1 follow-up, 5th round), and —
+  // when `currentOwnerUserId` is a real account — ALSO reclaiming the
+  // shared unowned bucket's own marker (Codex P2 follow-up, 10th round) —
+  // see clearLocalDeletionMarker/clearLocalDeletionMarkersForRecreate's own
+  // doc for why a DIFFERENT account's own suppression of the identical
+  // literal id must never be cleared by this.
+  await clearLocalDeletionMarker(outcome.id, scopeKey);
+  return outcome;
 }
 
 /**
@@ -1737,13 +1973,22 @@ export function createProfile(name: string, currentOwnerUserId: string | null = 
  * SH.4.1 Codex P2 follow-up — sanitized via sanitizeProfileName (see
  * createProfile's own doc) so a rename can never exceed the shared
  * server-validated limit either.
+ *
+ * Codex P1 follow-up (12th round) — the read-modify-write is now serialized
+ * against every other `dwp.profiles` writer via withLocalMutationLock, so a
+ * concurrent server-profile adoption round can no longer silently restore
+ * the pre-rename name by committing a merge built from a stale read taken
+ * before this rename landed — see adoptServerProfiles's own doc. Async as a
+ * direct consequence; Settings' handleRenameProfile already awaits it.
  */
-export function renameProfile(id: string, name: string): void {
+export function renameProfile(id: string, name: string): Promise<void> {
   const trimmed = sanitizeProfileName(name);
-  if (!trimmed) return;
-  const profiles = getProfiles();
-  const updated = profiles.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
-  writeProfiles(updated);
+  if (!trimmed) return Promise.resolve();
+  return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
+    const profiles = getProfiles();
+    const updated = profiles.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
+    writeProfiles(updated);
+  });
 }
 
 /**
@@ -1887,55 +2132,75 @@ export const DEV_IS_DESTRUCTIVE_PROFILE_CLEANUP_SAFE_CASES: Array<{
  * sync-provenance wipe) must be conditional: two accounts can legitimately,
  * independently own the identical literal id on this one device, but the
  * physical data behind that id is ONE shared copy, not one per account.
+ *
+ * Codex P1 follow-up (12th round) — the `dwp.profiles` read-decide-write
+ * (reading the raw list, deciding destructive-safe-or-not, and the
+ * resulting conditional write) is now one atomic critical section,
+ * serialized via withLocalMutationLock against every OTHER `dwp.profiles`
+ * writer (createProfile, renameProfile, adoptServerProfiles) — the same
+ * fix adoptServerProfiles's own doc describes, from the delete side. Async
+ * as a direct, unavoidable consequence; Settings' handleDeleteProfile
+ * already awaits it. The registry-state marker write below
+ * (markProfileLocallyDeleted) is a SEPARATE, subsequent lock acquisition
+ * (a different key, `dwp.profileRegistryState`) — deliberately not nested
+ * inside the `dwp.profiles` critical section, since the two never need to
+ * be atomic WITH EACH OTHER, only each internally consistent against its
+ * own other writers.
  */
-export function deleteProfile(id: string, currentOwnerUserId: string | null = null): void {
+export async function deleteProfile(id: string, currentOwnerUserId: string | null = null): Promise<void> {
   if (id === "default") return; // Default is protected from deletion via this path
-  const profiles = getProfiles();
-  if (profiles.length <= 1) return; // Cannot delete the last profile
-
   const scopeKey = currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY;
-  const destructiveCleanupSafe = isDestructiveProfileCleanupSafe(readProfileRegistryState(), id, scopeKey);
 
-  if (destructiveCleanupSafe) {
-    const updated = profiles.filter((p) => p.id !== id);
-    writeProfiles(updated);
+  const proceeded = await withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
+    const profiles = getProfiles();
+    if (profiles.length <= 1) return false; // Cannot delete the last profile
 
-    // Clean up all namespaced keys for the deleted profile.
-    // Iterate backwards so removals do not shift the indices of remaining keys.
-    try {
-      const prefix = `dwp:${id}:`;
-      for (let i = localStorage.length - 1; i >= 0; i--) {
-        const key = localStorage.key(i);
-        if (key && key.startsWith(prefix)) {
-          localStorage.removeItem(key);
+    const destructiveCleanupSafe = isDestructiveProfileCleanupSafe(readProfileRegistryState(), id, scopeKey);
+
+    if (destructiveCleanupSafe) {
+      const updated = profiles.filter((p) => p.id !== id);
+      writeProfiles(updated);
+
+      // Clean up all namespaced keys for the deleted profile.
+      // Iterate backwards so removals do not shift the indices of remaining keys.
+      try {
+        const prefix = `dwp:${id}:`;
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith(prefix)) {
+            localStorage.removeItem(key);
+          }
         }
-      }
-    } catch {}
+      } catch {}
 
-    // SH.2.1 P1 fix (Codex finding #1, this round) — the loop above only
-    // matches this profile's plain `dwp:{id}:{baseKey}` canonical keys (the
-    // shape this module itself owns — see the module doc above). It does NOT
-    // reach the sync layer's OWN per-profile key shapes (local-edit facts,
-    // confirmed facts, pending pushes, the local-content-owner marker — all
-    // namespaced `dwp:localEditFact:...`/`dwp:sync:...`, never `dwp:{id}:...`
-    // directly). Those are DURABLE, profile-owned sync state: left behind, a
-    // profile recreated with the SAME normalized id (normalizeId() is
-    // deterministic) could resurrect them — a leftover local-edit fact in
-    // particular can outrank the new, empty profile's canonical value the
-    // moment any sync/conflict decision reads durable local authority for
-    // that key. purgeProfileSyncState() (syncHelper.ts) is the shared purge
-    // for that entire key family — see its own doc, and
-    // isProfileOwnedSyncKey()'s doc in syncPayload.ts, for the full rationale
-    // and the exact shapes covered. Deliberately NOT duplicating knowledge of
-    // any of those key shapes here.
-    purgeProfileSyncState(id);
-  }
-  // else: isDestructiveProfileCleanupSafe found another real account still,
-  // independently, owns this literal id on this device — the shared
-  // dwp.profiles entry, its dwp:{id}:* namespaced data, and its sync
-  // provenance all remain COMPLETELY untouched, so that account's own
-  // local-first planner content and any unsynced edits survive this delete
-  // intact. Only `scopeKey`'s own view of the id is suppressed, below.
+      // SH.2.1 P1 fix (Codex finding #1, this round) — the loop above only
+      // matches this profile's plain `dwp:{id}:{baseKey}` canonical keys (the
+      // shape this module itself owns — see the module doc above). It does NOT
+      // reach the sync layer's OWN per-profile key shapes (local-edit facts,
+      // confirmed facts, pending pushes, the local-content-owner marker — all
+      // namespaced `dwp:localEditFact:...`/`dwp:sync:...`, never `dwp:{id}:...`
+      // directly). Those are DURABLE, profile-owned sync state: left behind, a
+      // profile recreated with the SAME normalized id (normalizeId() is
+      // deterministic) could resurrect them — a leftover local-edit fact in
+      // particular can outrank the new, empty profile's canonical value the
+      // moment any sync/conflict decision reads durable local authority for
+      // that key. purgeProfileSyncState() (syncHelper.ts) is the shared purge
+      // for that entire key family — see its own doc, and
+      // isProfileOwnedSyncKey()'s doc in syncPayload.ts, for the full rationale
+      // and the exact shapes covered. Deliberately NOT duplicating knowledge of
+      // any of those key shapes here.
+      purgeProfileSyncState(id);
+    }
+    // else: isDestructiveProfileCleanupSafe found another real account still,
+    // independently, owns this literal id on this device — the shared
+    // dwp.profiles entry, its dwp:{id}:* namespaced data, and its sync
+    // provenance all remain COMPLETELY untouched, so that account's own
+    // local-first planner content and any unsynced edits survive this delete
+    // intact. Only `scopeKey`'s own view of the id is suppressed, below.
+    return true;
+  });
+
+  if (!proceeded) return; // last remaining profile — nothing was deleted
 
   // SH.4.1 — mark this id as locally deleted, scoped to `scopeKey` (a real
   // userId, or the shared unowned bucket when signed out — see this
@@ -1949,7 +2214,7 @@ export function deleteProfile(id: string, currentOwnerUserId: string | null = nu
   // server's `user_profiles` row for this id (if any) — it remains active
   // until SH.4.3 implements real server-side tombstones — nor any
   // `user_planner` cloud planner data.
-  markProfileLocallyDeleted(id, scopeKey);
+  await markProfileLocallyDeleted(id, scopeKey);
 
   // If the deleted profile was active, explicitly persist fallback to
   // default. Compare raw localStorage directly rather than calling
@@ -2130,6 +2395,97 @@ export const DEV_MERGE_PROFILES_ADDITIVE_CASES: Array<{
 ];
 
 /**
+ * Regression proof for Codex P1 finding #3: adoptServerProfiles must merge
+ * against `dwp.profiles`' CURRENT, authoritative state at commit time —
+ * never a snapshot captured earlier — or a concurrent local create/rename/
+ * delete lands in the gap and is silently lost the moment the merge (built
+ * from the stale snapshot) is written back. Each case below runs
+ * mergeProfilesAdditive TWICE against the SAME server candidates: once
+ * against `freshLocalAtCommitTime` (what withLocalMutationLock's critical
+ * section now actually reads, via getProfiles(), immediately before
+ * writing — this round's fix) and once against `staleLocalSnapshot` (what
+ * an EARLIER, pre-fix read captured before the concurrent local change
+ * landed) — proving the fresh read preserves the concurrent local decision
+ * while the stale one would have silently discarded/reverted it had it
+ * been written back instead.
+ *
+ * Run from Node:
+ *   import { DEV_ADOPT_SERVER_PROFILES_COMMIT_TIME_MERGE_CASES, mergeProfilesAdditive } from "@/lib/profileStorage";
+ *   DEV_ADOPT_SERVER_PROFILES_COMMIT_TIME_MERGE_CASES.forEach(c => {
+ *     const fresh = mergeProfilesAdditive(c.freshLocalAtCommitTime, c.serverCandidates);
+ *     const stale = mergeProfilesAdditive(c.staleLocalSnapshot, c.serverCandidates);
+ *     const ok = JSON.stringify(fresh) === JSON.stringify(c.expectedFromFreshRead)
+ *       && JSON.stringify(stale) === JSON.stringify(c.expectedFromStaleSnapshotWouldHaveBeen);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_ADOPT_SERVER_PROFILES_COMMIT_TIME_MERGE_CASES: Array<{
+  name: string;
+  staleLocalSnapshot: Profile[];
+  freshLocalAtCommitTime: Profile[];
+  serverCandidates: Profile[];
+  expectedFromFreshRead: Profile[];
+  expectedFromStaleSnapshotWouldHaveBeen: Profile[];
+}> = [
+  {
+    name: "Codex P1 follow-up (12th round) — server adoption racing a concurrent LOCAL CREATE: a commit-time read preserves the new local profile; a stale snapshot would have silently dropped it",
+    staleLocalSnapshot: [{ id: "default", name: "Default" }],
+    freshLocalAtCommitTime: [
+      { id: "default", name: "Default" },
+      { id: "vacation2026", name: "Vacation 2026" },
+    ],
+    serverCandidates: [{ id: "mom", name: "Mom" }],
+    expectedFromFreshRead: [
+      { id: "default", name: "Default" },
+      { id: "vacation2026", name: "Vacation 2026" },
+      { id: "mom", name: "Mom" },
+    ],
+    expectedFromStaleSnapshotWouldHaveBeen: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
+  },
+  {
+    name: "Codex P1 follow-up (12th round) — server adoption racing a concurrent LOCAL RENAME: a commit-time read preserves the renamed name; a stale snapshot would have restored the old name",
+    staleLocalSnapshot: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family (old name)" },
+    ],
+    freshLocalAtCommitTime: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "The Smiths (renamed)" },
+    ],
+    serverCandidates: [{ id: "family", name: "Family (server's own stale copy)" }],
+    expectedFromFreshRead: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "The Smiths (renamed)" },
+    ],
+    expectedFromStaleSnapshotWouldHaveBeen: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family (old name)" },
+    ],
+  },
+  {
+    name: "Codex P1 follow-up (12th round) — server adoption racing a concurrent LOCAL DELETE: a commit-time read never resurrects the deleted profile; a stale snapshot would have written it back",
+    staleLocalSnapshot: [
+      { id: "default", name: "Default" },
+      { id: "old-trip", name: "Old Trip" },
+    ],
+    freshLocalAtCommitTime: [{ id: "default", name: "Default" }],
+    serverCandidates: [{ id: "mom", name: "Mom" }],
+    expectedFromFreshRead: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom" },
+    ],
+    expectedFromStaleSnapshotWouldHaveBeen: [
+      { id: "default", name: "Default" },
+      { id: "old-trip", name: "Old Trip" },
+      { id: "mom", name: "Mom" },
+    ],
+  },
+];
+
+/**
  * Persist the additive merge of `serverProfiles` into the local
  * `dwp.profiles` list and return the resulting list. `serverProfiles` is
  * expected to already be filtered to ACTIVE/non-tombstoned rows by the
@@ -2138,10 +2494,32 @@ export const DEV_MERGE_PROFILES_ADDITIVE_CASES: Array<{
  * merge in". Never removes, renames, or reorders an existing local entry;
  * only ever appends ids this device didn't already know about. Only writes
  * to localStorage when the merge actually adds something.
+ *
+ * Codex P1 follow-up (12th round) — Codex finding #3: this read-merge-write
+ * previously read `getProfiles()` and, in the same synchronous tick, wrote
+ * `merged` back with no cross-tab fencing between the two — a concurrent
+ * local create/rename/delete (this SAME tab cannot interleave with itself,
+ * being single-threaded and fully synchronous, but a DIFFERENT tab
+ * absolutely can, in the real-world gap between this call's own
+ * `localStorage.getItem`/`setItem` pair) landing in that gap would be
+ * silently overwritten the instant this call's own (now stale) `merged`
+ * list was written back — restoring a stale name over a concurrent rename,
+ * resurrecting a concurrently deleted profile, or simply dropping a
+ * concurrently created one, depending on what raced. The read-merge-write
+ * is now one atomic critical section, serialized via withLocalMutationLock
+ * against every OTHER `dwp.profiles` writer (createProfile, renameProfile,
+ * deleteProfile): `getProfiles()` inside the lock is always the CURRENT,
+ * authoritative local state at commit time, never a snapshot captured
+ * earlier — whichever writer actually runs first once serialized, the
+ * other always merges on top of it, so no concurrent local decision is
+ * ever lost. Async as a direct, unavoidable consequence;
+ * profileRegistrySync.ts's commitDiscoveredProfiles already awaits it.
  */
-export function adoptServerProfiles(serverProfiles: Profile[]): Profile[] {
-  const local = getProfiles();
-  const merged = mergeProfilesAdditive(local, serverProfiles);
-  if (merged.length !== local.length) writeProfiles(merged);
-  return merged;
+export function adoptServerProfiles(serverProfiles: Profile[]): Promise<Profile[]> {
+  return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
+    const local = getProfiles();
+    const merged = mergeProfilesAdditive(local, serverProfiles);
+    if (merged.length !== local.length) writeProfiles(merged);
+    return merged;
+  });
 }

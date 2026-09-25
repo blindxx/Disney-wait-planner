@@ -395,7 +395,15 @@ export default function SettingsPage() {
     location.reload();
   }
 
-  function handleAddProfile() {
+  // Codex P1 follow-up (12th round) — createProfile/renameProfile/
+  // deleteProfile all became async in profileStorage.ts: their
+  // `dwp.profiles` read-modify-write is now serialized via the Web Locks
+  // API against every other writer of that same key (see profileStorage.ts's
+  // own "LOCAL MUTATION SERIALIZATION" section doc), closing a lost-update
+  // race against server-profile adoption running concurrently. These
+  // handlers simply await the result before continuing — mirrors
+  // handleSendSignInLink's own existing async-handler pattern below.
+  async function handleAddProfile() {
     const name = window.prompt("New profile name:");
     if (!name || !name.trim()) return;
     // SH.4.1 Codex P1 follow-up (5th round) — scope the deletion-marker
@@ -403,7 +411,7 @@ export default function SettingsPage() {
     // (or the shared unowned bucket when signed out), so creating/
     // recreating this id can never clear a DIFFERENT account's own
     // suppression for the same literal id — see createProfile's own doc.
-    const profile = createProfile(name, authenticatedUserId);
+    const profile = await createProfile(name, authenticatedUserId);
     setProfiles(getVisibleProfiles(visibilityOwnerKey));
     // Switch to the newly created profile immediately
     setActiveProfileIdInStorage(profile.id);
@@ -411,16 +419,16 @@ export default function SettingsPage() {
     location.reload();
   }
 
-  function handleRenameProfile() {
+  async function handleRenameProfile() {
     const current = profiles.find((p) => p.id === activeProfileId);
     if (!current) return;
     const name = window.prompt("Rename profile:", current.name);
     if (!name || !name.trim()) return;
-    renameProfile(activeProfileId, name);
+    await renameProfile(activeProfileId, name);
     setProfiles(getVisibleProfiles(visibilityOwnerKey));
   }
 
-  function handleDeleteProfile() {
+  async function handleDeleteProfile() {
     if (profiles.length <= 1 || activeProfileId === "default") return;
     const current = profiles.find((p) => p.id === activeProfileId);
     const confirmed = window.confirm(
@@ -433,7 +441,7 @@ export default function SettingsPage() {
     // never suppress a DIFFERENT account's own, distinct profile under the
     // same grandfathered id on a shared browser — see deleteProfile's own
     // doc in profileStorage.ts.
-    deleteProfile(activeProfileId, authenticatedUserId);
+    await deleteProfile(activeProfileId, authenticatedUserId);
     const remaining = getVisibleProfiles(visibilityOwnerKey);
     setProfiles(remaining);
     setActiveProfileIdState("default");
@@ -677,7 +685,7 @@ export default function SettingsPage() {
           </select>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <button
-              onClick={handleAddProfile}
+              onClick={() => void handleAddProfile()}
               style={{
                 flex: "1 1 auto",
                 padding: "10px 12px",
@@ -694,7 +702,7 @@ export default function SettingsPage() {
               Add Profile
             </button>
             <button
-              onClick={handleRenameProfile}
+              onClick={() => void handleRenameProfile()}
               style={{
                 flex: "1 1 auto",
                 padding: "10px 12px",
@@ -711,7 +719,7 @@ export default function SettingsPage() {
               Rename
             </button>
             <button
-              onClick={handleDeleteProfile}
+              onClick={() => void handleDeleteProfile()}
               disabled={profiles.length <= 1 || activeProfileId === "default"}
               style={{
                 flex: "1 1 auto",

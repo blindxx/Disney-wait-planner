@@ -536,6 +536,93 @@ export const DEV_SEND_ADOPTION_BATCHES_CASES: Array<{
 ];
 
 /**
+ * Stamps ownership for each id in `profileIds`, checking `isCurrent()`
+ * BEFORE every stamp (never attempting one once identity has gone stale)
+ * and AGAIN immediately after each stamp's own write resolves — mirrors
+ * sendAdoptionBatches's own stale-check-before-and-after pattern exactly,
+ * one level down.
+ *
+ * Codex P1 follow-up (12th round) — this loop's own body was previously
+ * fully synchronous (a plain `for` calling markProfileOwner directly, no
+ * `await` at all), so there was no gap for identity to go stale mid-loop.
+ * profileStorage.ts's markProfileOwner is now an async, lock-acquiring
+ * write (Codex P1 finding #2's fix — see its own doc), which introduces a
+ * genuine await boundary per id: identity CAN advance while a call is
+ * queued waiting for the registry-state lock (another tab's own
+ * reconciliation activity, or this same tab's own concurrent registry
+ * work, currently holding it). Factoring the loop out here, exactly like
+ * sendAdoptionBatches, makes the stale-check-before-and-after behavior
+ * directly testable with a fake `stampOwner`/`isCurrent`, without any real
+ * storage or Web Locks I/O. Returns true only if every id was stamped
+ * while still current; false the moment staleness is detected, at which
+ * point no further ids are stamped — reconcileProfileRegistry re-checks
+ * `isCurrent()` itself immediately after calling this, exactly like it
+ * already does after sendAdoptionBatches.
+ *
+ * Run from Node (needs a `for...of` + `await`, like sendAdoptionBatches's
+ * own runner):
+ *   import { DEV_STAMP_OWNERSHIP_FOR_IDS_CASES, stampOwnershipForIds } from "@/lib/profileRegistrySync";
+ *   for (const c of DEV_STAMP_OWNERSHIP_FOR_IDS_CASES) {
+ *     const stamped = [];
+ *     let stampedCount = 0;
+ *     const isCurrent = () => c.staleAtIndex === null || stampedCount < c.staleAtIndex;
+ *     const result = await stampOwnershipForIds(c.profileIds, "userA", isCurrent, async (id) => { stamped.push(id); stampedCount++; });
+ *     const ok = result === c.expectedReturn && JSON.stringify(stamped) === JSON.stringify(c.expectedStampedIds);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   }
+ */
+export async function stampOwnershipForIds(
+  profileIds: string[],
+  ownerUserId: string,
+  isCurrent: () => boolean,
+  stampOwner: (id: string, ownerUserId: string) => Promise<void>
+): Promise<boolean> {
+  for (const id of profileIds) {
+    if (!isCurrent()) return false;
+    await stampOwner(id, ownerUserId);
+    if (!isCurrent()) return false;
+  }
+  return true;
+}
+
+export const DEV_STAMP_OWNERSHIP_FOR_IDS_CASES: Array<{
+  name: string;
+  profileIds: string[];
+  staleAtIndex: number | null;
+  expectedStampedIds: string[];
+  expectedReturn: boolean;
+}> = [
+  {
+    name: "all ids stamped while identity remains current",
+    profileIds: ["family", "mom"],
+    staleAtIndex: null,
+    expectedStampedIds: ["family", "mom"],
+    expectedReturn: true,
+  },
+  {
+    name: "Codex P1 follow-up (12th round) — identity goes stale between stamps (e.g. while awaiting the registry-state lock) — a later id is never stamped",
+    profileIds: ["family", "mom", "trip2026"],
+    staleAtIndex: 1,
+    expectedStampedIds: ["family"],
+    expectedReturn: false,
+  },
+  {
+    name: "already stale before the first id — nothing is stamped",
+    profileIds: ["family"],
+    staleAtIndex: 0,
+    expectedStampedIds: [],
+    expectedReturn: false,
+  },
+  {
+    name: "no ids to stamp — trivially returns true without calling stampOwner",
+    profileIds: [],
+    staleAtIndex: null,
+    expectedStampedIds: [],
+    expectedReturn: true,
+  },
+];
+
+/**
  * Given the server registry, return the ACTIVE (non-tombstoned) profiles,
  * excluding any id this device has explicitly, locally deleted
  * (`locallyDeletedIds` — profileStorage.ts's getLocallyDeletedProfileIds(),
@@ -916,21 +1003,29 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
  * it's invoked, proving this function only ever acts on whatever it
  * returns AT THE MOMENT this runs, never a value from outer scope.
  *
- * Run from Node:
+ * Codex P1 follow-up (12th round) — `mergeIntoLocal` is now awaited:
+ * profileStorage.ts's adoptServerProfiles (the real-world `mergeIntoLocal`
+ * every caller passes) became an async, lock-acquiring read-merge-write as
+ * part of Codex finding #3's fix (see its own doc) — this function simply
+ * propagates that await so its own caller (reconcileProfileRegistry) can
+ * correctly sequence whatever runs after it.
+ *
+ * Run from Node (needs `await`, unlike this file's non-async DEV_*
+ * runners, since this function is itself async):
  *   import { DEV_COMMIT_DISCOVERED_PROFILES_CASES, commitDiscoveredProfiles } from "@/lib/profileRegistrySync";
- *   DEV_COMMIT_DISCOVERED_PROFILES_CASES.forEach(c => {
+ *   for (const c of DEV_COMMIT_DISCOVERED_PROFILES_CASES) {
  *     let merged = null;
- *     commitDiscoveredProfiles(c.authoritativeServerProfiles, () => c.locallyDeletedIdsAtCommitTime, (candidates) => { merged = candidates; });
+ *     await commitDiscoveredProfiles(c.authoritativeServerProfiles, () => c.locallyDeletedIdsAtCommitTime, (candidates) => { merged = candidates; });
  *     console.log(JSON.stringify(merged) === JSON.stringify(c.expectedMerged) ? "✓" : "✗ FAIL", c.name);
- *   });
+ *   }
  */
-export function commitDiscoveredProfiles(
+export async function commitDiscoveredProfiles(
   authoritativeServerProfiles: ServerProfileRecord[],
   readLocallyDeletedIds: () => ReadonlySet<string>,
-  mergeIntoLocal: (candidates: Profile[]) => void
-): void {
+  mergeIntoLocal: (candidates: Profile[]) => void | Promise<void | Profile[]>
+): Promise<void> {
   const locallyDeletedIds = readLocallyDeletedIds();
-  mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
+  await mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
 }
 
 export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
@@ -1027,6 +1122,24 @@ export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
  * stale, or a network error) is handled identically to the single-batch
  * case — resolveAuthoritativeServerProfiles decides what's real from that
  * one authoritative snapshot, never from assuming any batch succeeded.
+ *
+ * Codex P1 follow-up (12th round) — the ownership-stamping loop and the
+ * final commit are now each preceded by their own `isCurrent()` check
+ * (stampOwnershipForIds's own internal before/after checks, plus an
+ * explicit check before commitDiscoveredProfiles), exactly mirroring the
+ * pattern already established around sendAdoptionBatches above: both
+ * markProfileOwner and adoptServerProfiles became async, lock-acquiring
+ * writes as part of this round's local-mutation-serialization fix (Codex
+ * findings #2/#3 — see profileStorage.ts's own "LOCAL MUTATION
+ * SERIALIZATION" section doc), introducing genuinely new await boundaries
+ * that did not exist when this tail of the function was fully synchronous.
+ * An identity/profile transition landing in one of those new gaps (this
+ * same tab's own Settings sign-out/switch, or another tab's) is caught by
+ * the SAME re-check discipline every other await in this function already
+ * uses, so it stops before any further stale write — never a stronger,
+ * fail-closed guarantee than the rest of this function already provides
+ * (one already-in-flight write may still land, exactly like an in-flight
+ * network request already could; see sendAdoptionBatches's own doc).
  */
 export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
@@ -1080,9 +1193,25 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // this NEVER disturbs any other account's own independent entry for the
   // same literal id (Codex P1 follow-up, 3rd round — see
   // profileStorage.ts's applyProfileOwnerStamp/module doc).
-  for (const id of authoritativeServerProfiles.map((p) => p.profileId)) {
-    markProfileOwner(id, userId);
-  }
+  //
+  // Codex P1 follow-up (12th round) — markProfileOwner is now an async,
+  // lock-acquiring write (finding #2's fix, serialized against a
+  // concurrent local deletion marker on `dwp.profileRegistryState` — see
+  // its own doc), a genuine NEW await boundary per id that did not exist
+  // when this loop was fully synchronous. stampOwnershipForIds
+  // re-checks `isCurrent()` before and after every single stamp — the SAME
+  // stale-check-before-and-after discipline sendAdoptionBatches already
+  // applies per batch, one level down — so identity going stale while a
+  // stamp is queued on the registry-state lock stops any FURTHER stamp
+  // from being attempted.
+  if (!isCurrent()) return;
+  await stampOwnershipForIds(
+    authoritativeServerProfiles.map((p) => p.profileId),
+    userId,
+    isCurrent,
+    markProfileOwner
+  );
+  if (!isCurrent()) return;
 
   // Codex P2 follow-up (6th round) — deliberately NOT `locallyDeletedIds`
   // (the snapshot captured above, before this round's PUT/GET awaits):
@@ -1090,7 +1219,15 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // fresh, right now, so a same-account deletion made in another tab while
   // those awaits were in flight is what actually decides this merge — see
   // commitDiscoveredProfiles's own doc.
-  commitDiscoveredProfiles(
+  //
+  // Codex P1 follow-up (12th round) — adoptServerProfiles (passed here as
+  // `mergeIntoLocal`) is now itself async — finding #3's fix serializes its
+  // read-merge-write of `dwp.profiles` against every other local writer
+  // (createProfile/renameProfile/deleteProfile) via the SAME kind of lock,
+  // so a concurrent local create/rename/delete can never be lost to a
+  // stale reconciliation snapshot. commitDiscoveredProfiles's own await of
+  // `mergeIntoLocal` propagates that here.
+  await commitDiscoveredProfiles(
     authoritativeServerProfiles,
     () => getLocallyDeletedProfileIds(userId),
     adoptServerProfiles
