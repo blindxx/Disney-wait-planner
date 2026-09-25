@@ -203,27 +203,10 @@ import {
   mergePlannerDomains,
   parseSyncedPlannerPayload,
 } from "@/lib/syncPayload";
+import { getUserId, validateProfileId } from "@/lib/syncIdentity";
 
 // 1 MB hard limit; realistic planner payloads are well under 100 KB.
 const MAX_BODY_BYTES = 1_000_000;
-
-// Profile IDs are normalized on the client (lowercase, alphanumeric + dash, ≤32 chars).
-// We accept a slightly broader pattern to tolerate any edge cases, capped at 64 chars.
-const PROFILE_ID_RE = /^[a-z0-9][a-z0-9_\-]{0,62}[a-z0-9]$|^[a-z0-9]$/;
-
-function getUserId(session: Session | null): string | null {
-  if (!session?.user) return null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (session.user as any).id ?? session.user.email ?? null;
-}
-
-function validateProfileId(raw: string | null): string | null {
-  if (!raw) return null;
-  const trimmed = raw.trim();
-  if (!trimmed || trimmed.length > 64) return null;
-  if (!PROFILE_ID_RE.test(trimmed)) return null;
-  return trimmed;
-}
 
 /**
  * Lightweight validation for an OPTIONAL client-supplied opId — accepts any

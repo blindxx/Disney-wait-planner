@@ -777,7 +777,7 @@ Reviewers should check any changes affecting:
  * never left "authenticated" the whole time.
  */
 
-import { buildNamespacedKey } from "./profileStorage";
+import { buildNamespacedKey, resolveAccountScopedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
@@ -1912,6 +1912,350 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
   } catch {}
 }
 
+// ── Account-aware local content ownership (SH.4.1a) ─────────────────────────
+//
+// SH.4.1 (Codex architecture checkpoint, exact HEAD ed2e3ce5) — finding #2:
+// two accounts can legitimately, independently own the identical literal
+// grandfathered profileId (profileStorage.ts's own module doc,
+// applyProfileOwnerStamp), but this profile's physical planner bytes
+// (`dwp:{profileId}:*`) remain ONE PHYSICAL COPY, not one per owning
+// account — SH.4.1a deliberately keeps it that way (no account-qualified
+// storage; see this round's own task scope) and instead makes the EXISTING
+// getLocalContentOwner()/setLocalContentOwner() marker do the account-aware
+// job it was always positioned to do: it already durably tracks EXACTLY ONE
+// identity per profileId (the identity whose most recent successful pull
+// established/confirmed today's physical bytes), which is precisely the
+// `(profileId, current-owning-account)` pair a single shared copy can ever
+// have at once — two accounts cannot BOTH currently own the live bytes,
+// only the registry PROVENANCE (a different, already per-`(profileId,
+// accountKey)` concern) supports true co-ownership.
+//
+// What was missing was not the marker's shape but WHERE it gets consulted:
+// each page's own auth-transition pull effect already reads it to decide
+// whether the pull's OWN conflict/merge logic may trust local bytes as a
+// candidate (`contentOwnershipMismatch`, computed inline at each call site
+// below) — but nothing consulted it BEFORE that pull resolves, so the
+// ordinary synchronous mount-time render (loading local bytes straight into
+// React state, well before any auth-transition effect even runs) could
+// still show — and the page's own edit affordances could still let a user
+// modify — a profile's leftover bytes that in fact belong to a DIFFERENT,
+// already-known account. isLocalContentForeign() below is the ONE shared
+// predicate every consuming page now calls, synchronously, to decide
+// whether this profile's CURRENTLY STORED bytes are safe to render/edit for
+// `currentUserId` at all, independent of and prior to any pull outcome.
+//
+// evaluateLocalContentForeign() is split out as the pure core (no
+// localStorage read) purely so it is directly DEV-testable, mirroring this
+// module's/profileStorage.ts's own established pure-core-plus-thin-I/O-
+// wrapper convention.
+
+/**
+ * Pure core of isLocalContentForeign() below. `owner` is whatever
+ * getLocalContentOwner(profileId) currently returns; `currentUserId` is the
+ * identity asking to render/edit/trust this profile's local content right
+ * now (a real authenticated userId, or `null` for signed-out/not-yet-
+ * resolved).
+ *
+ * `currentUserId === null` NEVER reports foreign content — signed-out mode
+ * is local-first by design (see profileStorage.ts's own module doc on
+ * signed-out visibility: "no authenticated account to protect against")
+ * and a session that hasn't resolved yet has no known identity to compare
+ * with at all, so the decision is deferred rather than guessed; callers
+ * re-evaluate once `currentUserId` actually resolves one way or the other,
+ * exactly like every existing auth-transition effect already does for
+ * `sessionStatus`.
+ *
+ * `owner === null` (never tagged — a fresh profile, or one that has never
+ * been authenticated-tagged before) is trusted for ANY identity — this is
+ * what preserves local-first adoption for anonymous → first sign-in, and
+ * for a fresh profile's very first authenticated use.
+ *
+ * Only a marker naming a DIFFERENT, KNOWN identity is foreign.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES.forEach(c => {
+ *     const got = evaluateLocalContentForeign(c.owner, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateLocalContentForeign(owner: string | null, currentUserId: string | null): boolean {
+  if (currentUserId === null) return false;
+  return owner !== null && owner !== currentUserId;
+}
+
+export const DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES: Array<{
+  name: string;
+  owner: string | null;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "same-account use — this identity's own prior ownership is never foreign to itself",
+    owner: "userA",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "A/B same-id isolation — B must never trust A's physical planner bytes as its own merely because both accounts share this literal profileId",
+    owner: "userA",
+    currentUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "never tagged — trusted for a fresh profile's first authenticated use, or anonymous -> first sign-in (no prior identity to conflict with)",
+    owner: null,
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "signed-out session (currentUserId null) is never foreign, regardless of a real account's prior ownership — signed-out mode stays fully local-first",
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "session not yet resolved (currentUserId null, mirrors 'loading') — deferred, never guessed as foreign",
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "reverse transition — B's content is now marked owned by B; A switching back must see it as foreign until A's own pull re-establishes ownership",
+    owner: "userB",
+    currentUserId: "userA",
+    expected: true,
+  },
+];
+
+/**
+ * I/O wrapper: reads `profileId`'s current content-owner marker and applies
+ * evaluateLocalContentForeign() above. Call this synchronously, BEFORE
+ * trusting/rendering/editing a profile's local planner content for
+ * `currentUserId` — see this section's own header doc for the full
+ * rationale and each call site (Plans/Lightning's auth-transition effect,
+ * Tom's planner-context build) for how the result gates that page.
+ */
+export function isLocalContentForeign(profileId: string, currentUserId: string | null): boolean {
+  return evaluateLocalContentForeign(getLocalContentOwner(profileId), currentUserId);
+}
+
+// ── Session-loading-safe planner-context omission (SH.4.1a exact-HEAD finding #1) ──
+//
+// Codex found that Tom's own `authenticatedUserId` derivation
+// (`sessionStatus === "authenticated" ? getUserId(session) : null`)
+// collapses BOTH `sessionStatus === "loading"` (identity genuinely
+// unresolved) and `sessionStatus === "unauthenticated"` (identity resolved
+// to "no one") to the same `null` value — and evaluateLocalContentForeign()
+// deliberately treats a null currentUserId as "never foreign", which is
+// correct for the resolved signed-out case (local-first, no competing
+// identity) but WRONG while still "loading": a question submitted before
+// the session resolves could still send a DIFFERENT, about-to-be-revealed
+// account's stale local planner content, since nothing yet vouches for
+// whose content this device's active profile actually holds.
+//
+// evaluateOmitPlannerContext() below is the pure core of that fix:
+// `sessionIsLoading` is checked FIRST and unconditionally forces omission,
+// never falling through to the ownership comparison for that state — the
+// same "simply omit rather than guess" contract every other optional
+// planner_context field already follows, applied to an unresolved identity
+// instead of a confirmed-foreign one. Once the session resolves one way or
+// the other, this defers entirely to the existing, unchanged
+// evaluateLocalContentForeign() contract.
+
+/**
+ * Pure core: should planner_context be omitted from a Tom request right
+ * now? See this section's own header doc for the full rationale.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES, evaluateOmitPlannerContext } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES.forEach(c => {
+ *     const got = evaluateOmitPlannerContext(c.sessionIsLoading, c.owner, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateOmitPlannerContext(
+  sessionIsLoading: boolean,
+  owner: string | null,
+  currentUserId: string | null
+): boolean {
+  if (sessionIsLoading) return true;
+  return evaluateLocalContentForeign(owner, currentUserId);
+}
+
+export const DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES: Array<{
+  name: string;
+  sessionIsLoading: boolean;
+  owner: string | null;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "Tom loading state omits planner context outright, even with no ownership marker at all",
+    sessionIsLoading: true,
+    owner: null,
+    currentUserId: null,
+    expected: true,
+  },
+  {
+    name: "Tom loading state omits planner context even when the marker would otherwise look same-account-safe once resolved — identity is not yet known, so nothing can vouch for it yet",
+    sessionIsLoading: true,
+    owner: "userA",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "explicit unauthenticated (resolved, NOT loading) Tom behavior is unchanged — signed-out local-first still includes planner context",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "authenticated same-account Tom context still works once the session has resolved and the marker is not foreign",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "resolved authenticated session with a foreign marker still omits — the pre-existing SH.4.1a gate is unchanged by this fix",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: "userB",
+    expected: true,
+  },
+];
+
+/**
+ * I/O wrapper: the ONE function Tom's own send-question flow calls — see
+ * evaluateOmitPlannerContext()'s own doc above for the full contract.
+ */
+export function shouldOmitPlannerContextForProfile(
+  sessionIsLoading: boolean,
+  profileId: string,
+  currentUserId: string | null
+): boolean {
+  if (sessionIsLoading) return true;
+  return isLocalContentForeign(profileId, currentUserId);
+}
+
+/** The ways a hydration attempt following a foreign-content detection can resolve. */
+export type LocalContentHydrationOutcome = "success" | "failed" | "slow" | "cancelled";
+
+/**
+ * Pure timeline model of the ONE rule every consuming page's pull effect
+ * follows (see getLocalContentOwner's own DURABLE TRANSFER BOUNDARY doc
+ * above, unchanged by SH.4.1a): the content-owner marker — and therefore
+ * whether content stays withheld — is updated ONLY on "success" (a pull
+ * that genuinely resolved, wasn't superseded, and whose own hydration/day
+ * writes durably succeeded). "failed" (the request itself failed/threw),
+ * "slow" (still in flight — this identity's own pull has not yet resolved
+ * one way or the other), and "cancelled" (superseded by a newer transition
+ * before it resolved) all leave the marker — and therefore the foreign
+ * verdict — EXACTLY as it was: withheld content is never deleted or
+ * relabeled by anything short of this identity's own successful, coherent
+ * hydration.
+ *
+ * This mirrors, at the ownership-marker level, the exact discipline each
+ * page's real `.then()` callback already applies to
+ * setLocalContentOwner()'s own call site (only reached once `cancelled` is
+ * false, `isPullCurrent()` still holds, and hydration succeeded) — kept
+ * here as a pure function so that discipline is directly DEV-testable
+ * without a browser, a fetch mock, or React.
+ *
+ * Run from Node:
+ *   import { DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES, simulateLocalContentOwnershipAfterHydration, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES.forEach(c => {
+ *     const withheldBefore = evaluateLocalContentForeign(c.ownerBeforeHydration, c.currentUserId);
+ *     const after = simulateLocalContentOwnershipAfterHydration(c.ownerBeforeHydration, c.currentUserId, c.outcome);
+ *     const ok = withheldBefore === c.expectedWithheldBefore
+ *       && after.ownerAfter === c.expectedOwnerAfter
+ *       && after.withheldAfter === c.expectedWithheldAfter;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateLocalContentOwnershipAfterHydration(
+  ownerBeforeHydration: string | null,
+  currentUserId: string,
+  outcome: LocalContentHydrationOutcome
+): { ownerAfter: string | null; withheldAfter: boolean } {
+  if (outcome === "success") {
+    return { ownerAfter: currentUserId, withheldAfter: false };
+  }
+  // failed / slow / cancelled — never relabels ownership; the foreign
+  // verdict is therefore unchanged, since nothing about the marker moved.
+  return {
+    ownerAfter: ownerBeforeHydration,
+    withheldAfter: evaluateLocalContentForeign(ownerBeforeHydration, currentUserId),
+  };
+}
+
+export const DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES: Array<{
+  name: string;
+  ownerBeforeHydration: string | null;
+  currentUserId: string;
+  outcome: LocalContentHydrationOutcome;
+  expectedWithheldBefore: boolean;
+  expectedOwnerAfter: string | null;
+  expectedWithheldAfter: boolean;
+}> = [
+  {
+    name: "successful hydration establishes the current account as the safe local-content owner and lifts withholding",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "success",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userB",
+    expectedWithheldAfter: false,
+  },
+  {
+    name: "failed hydration — foreign content stays withheld; the marker is never deleted or relabeled",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "failed",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "slow hydration (not yet resolved) — identical to failed until it actually resolves one way or the other",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "slow",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "cancelled hydration (superseded by a newer transition before it resolved) — leaves this attempt's marker exactly as it was, never relabeling",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "cancelled",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "ordinary same-account hydration — never withheld at any point, before or after",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userA",
+    outcome: "success",
+    expectedWithheldBefore: false,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: false,
+  },
+  {
+    name: "architecture-checkpoint scenario G — ordinary same-account profile switch to a DIFFERENT profileId previously owned by another account: this profile's own marker (independent of whichever profile was active before the switch) is correctly foreign for the switching account until ITS OWN pull for this profileId succeeds",
+    ownerBeforeHydration: "userB",
+    currentUserId: "userA",
+    outcome: "success",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: false,
+  },
+];
+
 // ── Shared stable-prefix key snapshot (SH.2, Codex P1, 15th round) ──────────────
 
 /**
@@ -2461,7 +2805,7 @@ function recordConfirmedFactBody(
   // independently bounds this store's growth on every future write
   // regardless of whether this cross-store pass ever fires for it.
   try {
-    const domainKey = domainCanonicalKey(profileId, domain);
+    const domainKey = domainCanonicalKey(userId, profileId, domain);
     let currentCanonicalValue: unknown = null;
     try {
       const currentRaw = readLatestDurableValue(domainKey);
@@ -3380,15 +3724,26 @@ export function listPendingOps(userId: string, profileId: string): string[] {
 }
 
 /**
- * SH.2.3 — the canonical localStorage key for a synced domain, keyed only
- * by profileId (matches buildPayloadFromStorage's own reads) — used to
- * locate a domain's local-edit-fact keyspace (localEditFactPrefix below)
- * when capturing or re-checking a pending operation's own per-domain
- * evidence. `ConfirmedDomainName` and the payload's own domain field names
+ * SH.2.3 — the canonical localStorage key for a synced domain (matches
+ * buildPayloadFromStorage's own reads) — used to locate a domain's
+ * local-edit-fact keyspace (localEditFactPrefix below) when capturing or
+ * re-checking a pending operation's own per-domain evidence.
+ * `ConfirmedDomainName` and the payload's own domain field names
  * ("plans"/"lightning"/"days") are deliberately identical strings.
+ *
+ * SH.4.1 Plans slice — `userId` routes "plans"/"days"/"dayMeta"/"dayParks"
+ * through resolveAccountScopedKey() (the account-qualified shape once
+ * authenticated, unchanged legacy shape signed out), mirroring wherever
+ * this domain's OWN canonical value now actually lives — this function's
+ * whole purpose is to locate that SAME physical keyspace, so it must track
+ * it exactly. "lightning" deliberately stays on buildNamespacedKey()
+ * unconditionally: Lightning's own migration is a separate, later slice,
+ * and Lightning's page code still only ever writes its canonical value (and
+ * therefore its edit-facts) under the legacy key.
  */
-function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): string {
-  return buildNamespacedKey(profileId, domain);
+function domainCanonicalKey(userId: string | null, profileId: string, domain: ConfirmedDomainName): string {
+  if (domain === "lightning") return buildNamespacedKey(profileId, domain);
+  return resolveAccountScopedKey(userId, profileId, domain);
 }
 
 /**
@@ -3433,34 +3788,46 @@ function getKnownBaseRevision(userId: string, profileId: string): number {
  * reconcilePendingOperations() later tell "this operation's own now-resolved
  * content" apart from "a genuine local edit made after it" — never from the
  * full content itself.
+ *
+ * SH.4.1 Plans slice — `userId` (both callers already require a non-null
+ * userId to reach this point — see addPendingOp's own doc) is threaded
+ * straight through to domainCanonicalKey() so this operation's own
+ * edit-fact-frontier snapshot is taken from the SAME physical keyspace
+ * buildPayloadFromStorage() just read `payload` from, never a stale
+ * legacy-shape snapshot for a domain that has since moved to the
+ * account-qualified key.
  */
-function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload): PendingOpRecord["domains"] {
+function buildPendingOpDomains(
+  userId: string,
+  profileId: string,
+  payload: SyncedPlannerPayload
+): PendingOpRecord["domains"] {
   const domains: PendingOpRecord["domains"] = {
     plans: {
       digest: canonicalDigest(payload.plans),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "plans"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "plans"))),
     },
     lightning: {
       digest: canonicalDigest(payload.lightning),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "lightning"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "lightning"))),
     },
   };
   if (payload.days !== undefined) {
     domains.days = {
       digest: canonicalDigest(payload.days),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "days"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "days"))),
     };
   }
   if (payload.dayMeta !== undefined) {
     domains.dayMeta = {
       digest: canonicalDigest(payload.dayMeta),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayMeta"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayMeta"))),
     };
   }
   if (payload.dayParks !== undefined) {
     domains.dayParks = {
       digest: canonicalDigest(payload.dayParks),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayParks"))),
+      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayParks"))),
     };
   }
   return domains;
@@ -3791,7 +4158,7 @@ export async function reconcilePendingOperations(
       for (const domain of CONFIRMED_DOMAIN_NAMES) {
         const evidence = record.domains[domain];
         if (!evidence) continue;
-        const key = domainCanonicalKey(profileId, domain);
+        const key = domainCanonicalKey(userId, profileId, domain);
         const currentEditFactKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
         // Read via the SAME normalization buildPayloadFromStorage() used to
         // produce `evidence.digest` in the first place (parseLocalDatasetEntry
@@ -4176,6 +4543,338 @@ export function setSyncUserId(userId: string | null): void {
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncUserId = userId;
   currentPullEpoch += 1;
+}
+
+// ── Ordinary-edit local-content ownership (SH.4.1a Codex P1 follow-up) ──────
+//
+// Codex found: getLocalContentOwner()/setLocalContentOwner() (this module's
+// own DURABLE TRANSFER BOUNDARY, see setLocalContentOwner's own doc above)
+// was previously established ONLY at the end of a successful cloud PULL. An
+// authenticated user whose initial pull failed or was offline could still
+// durably persist ORDINARY local edits — items, days, dayMeta, dayParks,
+// Lightning selections, all via commitLocalDomainRawSync() above — while
+// this profile's owner marker stayed null indefinitely. A null marker is
+// trusted by ANY identity (evaluateLocalContentForeign()'s own "never
+// tagged" contract, which exists to preserve local-first adoption for a
+// profile that has genuinely never been authenticated-tagged before) — so
+// a DIFFERENT account signing into this same browser/profile later would
+// see the first user's own genuine, unsynced edits as non-foreign and
+// could view/trust them, exactly the exposure SH.4.1a's own render/edit
+// gate exists to prevent.
+//
+// FIX: commitOrdinaryLocalEdit() below is a thin wrapper every ordinary
+// planner-domain edit writer now calls INSTEAD of commitLocalDomainRawSync()
+// directly (Plans' items/days/dayMeta/dayParks/dayAutoFallbacks writers,
+// Lightning's items writer — see this round's own bounded-adjacency audit
+// for the exact call sites) — the ONE shared persistence boundary all of
+// them already funnel through, so ownership stamping is written once here
+// rather than duplicated at each page's own call sites. It calls the
+// EXISTING, unmodified commitLocalDomainRawSync() for the actual write,
+// then — ONLY when that write durably succeeded
+// (isLocalDomainCommitSuccess(status), never "failed") AND a REAL
+// authenticated identity performed it (currentSyncUserId !== null, this
+// module's own existing identity-tracking state — the SAME state
+// doPush()/registerUnloadSync() already trust to know who a push belongs
+// to, kept current by every caller's setSyncUserId()/setSyncProfileId()
+// calls) — calls setLocalContentOwner(currentSyncProfileId,
+// currentSyncUserId): the SAME primitive and SAME semantics the pull path
+// already uses, just a second, EARLIER opportunity to establish it. This
+// is not a new/competing ownership model — setLocalContentOwner's own
+// idempotent "same value" behavior means a pull that later succeeds and
+// re-confirms the identical (profileId, userId) pair is a harmless,
+// coherent no-op; "successful pull ownership behavior remains unchanged"
+// by this fix.
+//
+// `currentSyncUserId === null` (signed out, or session not yet resolved)
+// NEVER stamps — mirrors setLocalContentOwner's own existing no-op-on-null
+// guard and evaluateLocalContentForeign's own null-currentUserId contract:
+// a signed-out edit must never be attributed to an authenticated account,
+// preserving local-first signed-out semantics and genuinely-unowned
+// legacy-content adoption exactly as before this round.
+//
+// `status === "failed"` never stamps either — nothing durable changed, so
+// there is nothing to attribute; any existing marker (or its continued
+// absence) is left completely untouched, matching setLocalContentOwner's
+// own philosophy that ownership only ever follows a value actually
+// landing on disk.
+//
+// Codex P1 follow-up (this round) — USER-ORIGINATED EDIT EVIDENCE. The
+// original version of this fix stamped ownership from ANY durably-
+// succeeding call, including "noop". That is unsafe: this exact function is
+// also the shared persistence boundary for MOUNT hydration, cross-tab
+// storage-listener re-sync, and pull-hydration's own React-state mirroring
+// — none of which are a genuine user edit. Concretely: A owns local planner
+// bytes; B signs in and those bytes are correctly withheld/foreign; B
+// navigates to a page that re-mounts and loads THE SAME still-on-disk A
+// bytes into React state; that mount's own auto-persist effect then calls
+// this function with those unchanged bytes; the underlying commit reports
+// "noop" (nothing to write, already durable); the PREVIOUS version of this
+// function stamped owner=B anyway, incorrectly clearing the foreign-content
+// guard the very next render.
+//
+// The root rule: local-content ownership may transfer from an authenticated
+// local action ONLY when there is evidence of a USER-ORIGINATED EDIT. Mount
+// hydration, persistence mirroring, normalization/self-heal rewrites, or
+// merely observing the same durable value must never establish ownership —
+// regardless of what isLocalDomainCommitSuccess(status) reports, and even
+// for a "committed" (not just "noop") status: a mount-time migration that
+// actually REWRITES bytes (e.g. a one-time dayId migration) is still not a
+// user edit. This is NOT a redefinition of "noop"/commit-status semantics
+// (those are unchanged and remain valid durable results for every other
+// caller of commitLocalDomainRawSync/isLocalDomainCommitSuccess) — it is a
+// SEPARATE, ADDITIONAL gate that only this ownership decision consults.
+//
+// Every call site of commitOrdinaryLocalEdit() now passes
+// `isUserOriginatedEdit` explicitly (required, no default) — the highest
+// sensible existing boundary for this distinction is each page's own
+// handler-vs-effect structure: a call made directly from a user-triggered
+// handler function (add/edit/delete/reorder/import/clear/restore — invoked
+// only from an onClick/onChange/onSubmit) passes `true`; a call made from a
+// mount effect, a cross-tab storage-listener resync, or React-state
+// mirroring of a pull's own already-committed hydration passes `false`. For
+// the one domain per page (Plans' `items`, Lightning's `items`) whose
+// persistence is centralized in a single generic
+// `useEffect(() => { ... }, [items, ...])` that fires for BOTH user edits
+// and hydration-driven state changes alike, each page tracks a small
+// `pendingNonUserItemsPersistRef` (set `true` immediately alongside the
+// FEW non-user setItems() calls — mount load, pull-hydration's own state
+// mirror, and, for Lightning, the cross-tab storage-listener resync — see
+// each page's own doc at those call sites) that the effect reads and
+// resets on every run, defaulting to `true` (never attribute a user edit
+// without positive evidence) until a genuine user handler's own setItems()
+// call leaves it `false`.
+
+/**
+ * Pure predicate: should commitOrdinaryLocalEdit() (below) stamp local-
+ * content ownership for `currentUserId`? See this section's own header
+ * doc for the full rationale, especially the USER-ORIGINATED EDIT EVIDENCE
+ * gate: `isUserOriginatedEdit` must be true IN ADDITION to durable success
+ * and a real authenticated identity — a mount/effect-driven persistence
+ * pass never stamps, no matter what `status` reports.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES, shouldStampOwnershipOnOrdinaryEdit } from "@/lib/syncHelper";
+ *   DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES.forEach(c => {
+ *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId, c.isUserOriginatedEdit);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldStampOwnershipOnOrdinaryEdit(
+  status: LocalDomainSyncCommitStatus,
+  currentUserId: string | null,
+  isUserOriginatedEdit: boolean
+): boolean {
+  return isUserOriginatedEdit && currentUserId !== null && isLocalDomainCommitSuccess(status);
+}
+
+export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
+  name: string;
+  status: LocalDomainSyncCommitStatus;
+  currentUserId: string | null;
+  isUserOriginatedEdit: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "a genuine authenticated user edit that durably commits stamps ownership",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expected: true,
+  },
+  {
+    name: "committed-unprotected (one of the two persistence legs landed) still counts as durable for a genuine user edit — stamps ownership exactly like a fully-protected commit",
+    status: "committed-unprotected",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expected: true,
+  },
+  {
+    name: "a genuine user edit whose resulting durable value happens to be unchanged (status 'noop') still stamps — the call path itself already proves explicit user intent, so this is NOT the same 'noop' the mount/effect case must suppress; see this file's own header doc for why the gate is on isUserOriginatedEdit, never on status alone",
+    status: "noop",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expected: true,
+  },
+  {
+    name: "mount/effect persistence returning 'noop' over B-navigated-onto A-owned identical bytes never stamps, regardless of durable success",
+    status: "noop",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    expected: false,
+  },
+  {
+    name: "mount/effect persistence that durably 'committed' (e.g. a one-time migration rewrite) still never stamps — the ROOT RULE excludes normalization/self-heal rewrites too, not only noop",
+    status: "committed",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    expected: false,
+  },
+  {
+    name: "failed local persistence never stamps ownership, even for a genuine authenticated user edit — nothing durable changed, so there is nothing to attribute",
+    status: "failed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expected: false,
+  },
+  {
+    name: "signed-out edit (currentUserId null) never stamps ownership, even if it were somehow marked user-originated",
+    status: "committed",
+    currentUserId: null,
+    isUserOriginatedEdit: true,
+    expected: false,
+  },
+  {
+    name: "session not yet resolved (currentUserId null, mirrors 'loading') never stamps ownership either — nothing here guesses an identity",
+    status: "committed",
+    currentUserId: null,
+    isUserOriginatedEdit: true,
+    expected: false,
+  },
+];
+
+/**
+ * Pure simulation of the marker's value after one commitOrdinaryLocalEdit()
+ * attempt — composes shouldStampOwnershipOnOrdinaryEdit() with
+ * evaluateLocalContentForeign() (both already exported above) to model the
+ * exact end-to-end lifecycle DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES
+ * below exercises, without any real localStorage I/O.
+ *
+ * Run from Node:
+ *   import { DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES, simulateOwnerAfterOrdinaryEdit, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES.forEach(c => {
+ *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId, c.isUserOriginatedEdit);
+ *     const ok = ownerAfter === c.expectedOwnerAfter
+ *       && (c.checkForeignFor === undefined || evaluateLocalContentForeign(ownerAfter, c.checkForeignFor) === c.expectedForeignForChecked);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateOwnerAfterOrdinaryEdit(
+  ownerBefore: string | null,
+  status: LocalDomainSyncCommitStatus,
+  currentUserId: string | null,
+  isUserOriginatedEdit: boolean
+): string | null {
+  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId, isUserOriginatedEdit) ? currentUserId : ownerBefore;
+}
+
+export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
+  name: string;
+  ownerBefore: string | null;
+  status: LocalDomainSyncCommitStatus;
+  currentUserId: string | null;
+  isUserOriginatedEdit: boolean;
+  expectedOwnerAfter: string | null;
+  checkForeignFor?: string | null;
+  expectedForeignForChecked?: boolean;
+}> = [
+  {
+    name: "authenticated A edits after a failed/offline pull — durable local persistence from a genuine user edit (no successful pull at all) establishes A as owner",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "B navigates/mounts over A-owned identical bytes — mount persistence reports 'noop', but since this is NOT a user-originated edit, no ownership transfer occurs; A's bytes remain correctly foreign to B",
+    ownerBefore: "userA",
+    status: "noop",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userB",
+    expectedForeignForChecked: true,
+  },
+  {
+    name: "B then signs in after A's genuine ordinary-edit-established ownership — A's bytes are foreign to B, even though no cloud pull for A ever succeeded",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userB",
+    expectedForeignForChecked: true,
+  },
+  {
+    name: "same-account later use remains local-first — A's own later genuine edit against A's own already-established ownership is never foreign to A",
+    ownerBefore: "userA",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userA",
+    expectedForeignForChecked: false,
+  },
+  {
+    name: "signed-out edit does not gain authenticated ownership — a null currentUserId leaves the (absent) marker exactly as it was",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: null,
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "failed persistence does not change ownership, even for a genuine authenticated user edit",
+    ownerBefore: null,
+    status: "failed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "failed persistence leaves a PRE-EXISTING owner marker untouched too — never relabeled/cleared by a failed edit",
+    ownerBefore: "userA",
+    status: "failed",
+    currentUserId: "userB",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "successful pull ownership path unchanged — a pull-established owner (existing DURABLE TRANSFER BOUNDARY path, untouched by this round) composes correctly with a LATER genuine ordinary edit by the same account",
+    ownerBefore: "userA", // as if a successful pull already stamped this
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "mount persistence's own React-state mirror of a JUST-SUCCEEDED pull's hydration (isUserOriginatedEdit false, status noop since hydration already wrote the bytes) never stamps from THIS call — ownership for that case was already, correctly, established by the pull's own dedicated setLocalContentOwner call, not by this generic effect",
+    ownerBefore: "userA",
+    status: "noop",
+    currentUserId: "userA",
+    isUserOriginatedEdit: false,
+    expectedOwnerAfter: "userA",
+  },
+];
+
+/**
+ * The ONE shared boundary every ordinary planner-domain edit writer now
+ * calls instead of commitLocalDomainRawSync() directly — see this
+ * section's own header doc above for the full rationale. Applies uniformly
+ * to every synced domain (Plans' items/days/dayMeta/dayParks/
+ * dayAutoFallbacks, Lightning's items): none of them needs its own
+ * ownership-stamping logic, since all of them already funnel through this
+ * one function.
+ *
+ * `isUserOriginatedEdit` is REQUIRED (no default) — every call site must
+ * explicitly declare whether it represents a genuine user action or a
+ * mount/effect/hydration-mirroring persistence pass; see this section's own
+ * header doc for the exact boundary each page uses to decide. Ownership is
+ * stamped only when this is true, in addition to durable success and a real
+ * authenticated identity (shouldStampOwnershipOnOrdinaryEdit above) — the
+ * underlying write itself (commitLocalDomainRawSync) is completely
+ * unaffected by this flag; it only ever gates the ownership side-effect.
+ */
+export function commitOrdinaryLocalEdit(
+  key: string,
+  nextRaw: string,
+  isUserOriginatedEdit: boolean
+): LocalDomainSyncCommitStatus {
+  const status = commitLocalDomainRawSync(key, nextRaw);
+  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId, isUserOriginatedEdit)) {
+    setLocalContentOwner(currentSyncProfileId, currentSyncUserId as string);
+  }
+  return status;
 }
 
 // ── scheduleSync ──────────────────────────────────────────────────────────────
@@ -4585,7 +5284,7 @@ export function registerUnloadSync(): () => void {
     // LATER session's ordinary doPush()/beacon to pick up and push
     // (correctly evidenced) once storage pressure clears.
     if (userId) {
-      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(userId, profileId, payload));
       if (!registered) return;
     }
     const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
@@ -4650,13 +5349,18 @@ function parseLocalDatasetEntry(
  * sanitizes whatever is returned here down to valid canonical day IDs (or
  * omits the field entirely), so this only needs to hand it the raw parsed
  * value, not pre-validate it.
+ *
+ * SH.4.1 Plans slice — `userId` routes this read through
+ * resolveAccountScopedKey(), mirroring wherever Plans' own daysKeyRef
+ * currently targets (see buildPayloadFromStorage's own doc for why this
+ * must track it exactly).
  */
-function readLocalDaysOrder(profileId: string): unknown[] | undefined {
+function readLocalDaysOrder(userId: string | null, profileId: string): unknown[] | undefined {
   try {
     // Codex P1 fix (17th round) — reads the newest DURABLE edit for the
     // days key, not merely whatever the canonical key currently holds; see
     // readLatestDurableValue()'s own doc above.
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "days"));
+    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "days"));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed : undefined;
@@ -4676,10 +5380,12 @@ function readLocalDaysOrder(profileId: string): unknown[] | undefined {
  * an intentionally-empty `{}` (e.g. after Clear All) — is handed through
  * as-is for buildSyncedPlannerPayload()'s own sanitizeDayMeta() to validate,
  * exactly as this function's days[] counterpart does not pre-validate either.
+ *
+ * SH.4.1 Plans slice — same `userId` routing as readLocalDaysOrder() above.
  */
-function readLocalDayMeta(profileId: string): unknown {
+function readLocalDayMeta(userId: string | null, profileId: string): unknown {
   try {
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayMeta"));
+    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "dayMeta"));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -4698,10 +5404,12 @@ function readLocalDayMeta(profileId: string): unknown {
  * a genuinely parsed plain object — INCLUDING an intentionally-empty `{}`
  * (e.g. after Clear All) — is handed through as-is for
  * buildSyncedPlannerPayload()'s own sanitizeDayParks() to validate.
+ *
+ * SH.4.1 Plans slice — same `userId` routing as readLocalDaysOrder() above.
  */
-function readLocalDayParks(profileId: string): unknown {
+function readLocalDayParks(userId: string | null, profileId: string): unknown {
   try {
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayParks"));
+    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "dayParks"));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -4733,6 +5441,26 @@ function readLocalDayParks(profileId: string): unknown {
  * hydration write into a pushed "local edit" while it remains unresolved;
  * the next successful pull's own commitDomainHydration() call resolves it
  * normally.
+ *
+ * SH.4.1 Plans slice — "plans"/"days"/"dayMeta"/"dayParks" now route
+ * through resolveAccountScopedKey(userId, profileId, baseKey): the
+ * account-qualified key once `userId` is a real authenticated user, the
+ * unchanged legacy key when signed out. This is NOT a new protection added
+ * to doPush()/registerUnloadSync() specifically — both already required and
+ * threaded a real `userId` through this exact function for the pre-existing
+ * hasIncompleteHydrationApplyIntent() gate above; this only makes the READ
+ * itself track the SAME physical location Plans' own auth-transition effect
+ * has already retargeted its refs (and, before that, adopted any legacy
+ * value) to — see profileStorage.ts's resolveAccountScopedKey()/
+ * adoptLegacyProfileValueIfSafe() docs. Without this, doPush() would keep
+ * reading a frozen legacy-key snapshot forever once Plans stops writing
+ * there, silently breaking authenticated sync — and registerUnloadSync()'s
+ * beacon, sharing this same function, would send that same stale snapshot
+ * on tab close instead of the user's actual latest edit. "lightning"
+ * deliberately keeps reading buildNamespacedKey() unconditionally:
+ * Lightning's own migration is a separate, later slice, and Lightning's
+ * page code still only ever writes its canonical value under the legacy
+ * key.
  */
 function buildPayloadFromStorage(profileId: string, userId: string | null): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
@@ -4746,7 +5474,7 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // is guaranteed to reflect the user's true latest edit even in the rare
     // window where a concurrent hydration race has transiently clobbered
     // the canonical key itself.
-    const plansRaw = readLatestDurableValue(buildNamespacedKey(profileId, "plans"));
+    const plansRaw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "plans"));
     const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
 
     const plans = parseLocalDatasetEntry(plansRaw);
@@ -4756,9 +5484,9 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // push potentially empty data over valid cloud state.
     if (plans === null || lightning === null) return null;
 
-    const days = readLocalDaysOrder(profileId);
-    const dayMeta = readLocalDayMeta(profileId);
-    const dayParks = readLocalDayParks(profileId);
+    const days = readLocalDaysOrder(userId, profileId);
+    const dayMeta = readLocalDayMeta(userId, profileId);
+    const dayParks = readLocalDayParks(userId, profileId);
     return buildSyncedPlannerPayload(plans, lightning, days, dayMeta, dayParks);
   } catch {
     return null;
@@ -5065,7 +5793,7 @@ async function doPush(): Promise<void> {
   // further edit, or by this same profile's next mount/pull cycle) simply
   // retries once storage pressure clears — no new retry machinery needed.
   if (userId) {
-    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(userId, profileId, payload));
     if (!registered) {
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
