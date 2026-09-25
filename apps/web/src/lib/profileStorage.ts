@@ -679,9 +679,208 @@ function markProfileLocallyDeleted(profileId: string, accountKey: string): void 
   writeProfileRegistryState(applyLocalDeletionMarker(state, profileId, accountKey));
 }
 
+/**
+ * Pure state transition: the FULL deletion-marker consumption an explicit
+ * create/recreate of `profileId` performs for `currentOwnerUserId` — an
+ * EXPLICIT RECLAIM TRANSITION, not a general weakening of deletion
+ * suppression. Composes clearLocalDeletionMarkerForAccount twice: once for
+ * `currentOwnerUserId`'s own marker (unchanged from the 5th round's fix),
+ * and — ONLY when `currentOwnerUserId` is a REAL authenticated account, not
+ * the shared UNOWNED_ACCOUNT_KEY sentinel itself — a SECOND time for that
+ * shared UNOWNED_ACCOUNT_KEY bucket's own marker.
+ *
+ * Codex P2 follow-up (10th round) — a profile deleted while SIGNED OUT
+ * records its marker under UNOWNED_ACCOUNT_KEY (deleteProfile's own
+ * `currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY` scoping), which
+ * selectLocallyDeletedIdsForAccount deliberately also suppresses for every
+ * authenticated account's OWN reconciliation (a genuinely ambiguous,
+ * ownerless deletion is treated the ORIGINAL way — safe to suppress for
+ * whoever reconciles it next — see that function's own doc). That
+ * suppression previously OUTLIVED an authenticated account explicitly
+ * creating/recreating the exact same id: account A deliberately typing
+ * "Family" back in only ever cleared A's OWN (nonexistent, since A never
+ * owned or deleted it before) marker, leaving the shared unowned marker
+ * fully intact — so A's brand-new profile was immediately re-suppressed
+ * from A's own effective visible list (selectHiddenProfileIdsForAccount)
+ * and from A's own adoption candidates (reconcileProfileRegistry's
+ * `filterVisibleProfiles(getProfiles(), locallyDeletedIds)`), the instant
+ * it was created — a zombie profile physically present in `dwp.profiles`
+ * but permanently invisible and unsyncable for the very account that just
+ * created it.
+ *
+ * An authenticated account's explicit create is exactly the deliberate
+ * signal that resolves that original ambiguity for good: it is what makes
+ * this reclaim safe to apply to the SHARED bucket, not just the creating
+ * account's own slot. A DIFFERENT real account's (B's, C's, etc.) own
+ * deletion marker for the identical literal id is NEVER touched here —
+ * clearLocalDeletionMarkerForAccount's own single-account write guarantee
+ * is unchanged, so this composition can only ever affect
+ * `currentOwnerUserId`'s own slot and the shared unowned slot, nothing
+ * else. A SIGNED-OUT create/recreate (`currentOwnerUserId ===
+ * UNOWNED_ACCOUNT_KEY`) is unaffected by this change: the two clears
+ * collapse into the exact same single clear as before (there is no
+ * separate "shared bucket" to additionally reclaim when the creator IS the
+ * shared bucket), matching this module's own pre-existing signed-out
+ * create behavior exactly.
+ *
+ * Ownership provenance is never touched: each underlying
+ * clearLocalDeletionMarkerForAccount call preserves that account's own
+ * `owned` fact if any (converting `{owned:true, locallyDeleted:true}` to
+ * `{owned:true}` rather than deleting the entry), for both the creating
+ * account's slot and the shared unowned slot.
+ *
+ * Run from Node:
+ *   import { DEV_CLEAR_LOCAL_DELETION_MARKERS_FOR_RECREATE_CASES, clearLocalDeletionMarkersForRecreate } from "@/lib/profileStorage";
+ *   DEV_CLEAR_LOCAL_DELETION_MARKERS_FOR_RECREATE_CASES.forEach(c => {
+ *     const got = clearLocalDeletionMarkersForRecreate(c.state, c.profileId, c.currentOwnerUserId);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function clearLocalDeletionMarkersForRecreate(
+  state: ProfileRegistryState,
+  profileId: string,
+  currentOwnerUserId: string
+): ProfileRegistryState {
+  let next = clearLocalDeletionMarkerForAccount(state, profileId, currentOwnerUserId);
+  if (currentOwnerUserId !== UNOWNED_ACCOUNT_KEY) {
+    next = clearLocalDeletionMarkerForAccount(next, profileId, UNOWNED_ACCOUNT_KEY);
+  }
+  return next;
+}
+
+export const DEV_CLEAR_LOCAL_DELETION_MARKERS_FOR_RECREATE_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  currentOwnerUserId: string;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "Codex P2 follow-up (10th round) — signed-out delete then A's authenticated recreate: the shared unowned marker is consumed even though A never had a marker of her own",
+    state: { family: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: {},
+  },
+  {
+    name: "Codex P2 follow-up (10th round) — A's own marker AND the shared unowned marker are both consumed by A's recreate, preserving A's owned fact",
+    state: {
+      family: {
+        userA: { owned: true, locallyDeleted: true },
+        [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true },
+      },
+    },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: { family: { userA: { owned: true } } },
+  },
+  {
+    name: "Codex P2 follow-up (10th round) — B's own deletion marker for the identical literal id survives A's recreation untouched",
+    state: {
+      family: {
+        userB: { owned: true, locallyDeleted: true },
+        [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true },
+      },
+    },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: { family: { userB: { owned: true, locallyDeleted: true } } },
+  },
+  {
+    name: "Codex P2 follow-up (10th round) — ownership provenance for a completely different id is never disturbed by this composed clear",
+    state: {
+      family: {
+        userA: { owned: true, locallyDeleted: true },
+        [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true },
+      },
+      mom: { userA: { owned: true } },
+    },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: {
+      family: { userA: { owned: true } },
+      mom: { userA: { owned: true } },
+    },
+  },
+  {
+    name: "Codex P2 follow-up (10th round) — a signed-out recreate clears ONLY the shared unowned marker, exactly as before this fix — a real account's own marker for the identical id is left untouched",
+    state: {
+      family: {
+        [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true },
+        userA: { owned: true, locallyDeleted: true },
+      },
+    },
+    profileId: "family",
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: { family: { userA: { owned: true, locallyDeleted: true } } },
+  },
+  {
+    name: "no deletion markers present at all — state returned unchanged",
+    state: { family: { userA: { owned: true } } },
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: { family: { userA: { owned: true } } },
+  },
+  {
+    name: "unknown profileId — state returned unchanged",
+    state: {},
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    expected: {},
+  },
+];
+
+/**
+ * Composed end-to-end regression scenario: a signed-out delete followed by
+ * an authenticated account's explicit recreate must leave the profile
+ * VISIBLE to that account (selectHiddenProfileIdsForAccount's own
+ * effective-visibility check) — not merely have its raw provenance marker
+ * cleared in isolation. Exercises the exact real-world sequence
+ * deleteProfile (signed out) -> createProfile (authenticated) ->
+ * getVisibleProfiles (authenticated) runs.
+ *
+ * Codex P2 follow-up (10th round) — this is the precise scenario the fix
+ * targets: before it, `expectedHidden` for the first case below would have
+ * been `true` (a zombie, permanently invisible profile) instead of `false`.
+ *
+ * Run from Node:
+ *   import { DEV_RECREATE_VISIBILITY_CASES, applyLocalDeletionMarker, clearLocalDeletionMarkersForRecreate, selectHiddenProfileIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_RECREATE_VISIBILITY_CASES.forEach(c => {
+ *     let state = applyLocalDeletionMarker({}, c.profileId, c.deletedByAccountKey);
+ *     state = clearLocalDeletionMarkersForRecreate(state, c.profileId, c.recreatedByAccountKey);
+ *     const got = selectHiddenProfileIdsForAccount(state, c.checkVisibilityForAccountKey).has(c.profileId);
+ *     console.log(got === c.expectedHidden ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RECREATE_VISIBILITY_CASES: Array<{
+  name: string;
+  profileId: string;
+  deletedByAccountKey: string;
+  recreatedByAccountKey: string;
+  checkVisibilityForAccountKey: string;
+  expectedHidden: boolean;
+}> = [
+  {
+    name: "Codex P2 follow-up (10th round) — signed-out delete -> A's authenticated recreate -> profile immediately visible to A",
+    profileId: "family",
+    deletedByAccountKey: UNOWNED_ACCOUNT_KEY,
+    recreatedByAccountKey: "userA",
+    checkVisibilityForAccountKey: "userA",
+    expectedHidden: false,
+  },
+  {
+    name: "signed-out delete -> signed-out recreate -> still visible while signed out (unaffected by this fix)",
+    profileId: "family",
+    deletedByAccountKey: UNOWNED_ACCOUNT_KEY,
+    recreatedByAccountKey: UNOWNED_ACCOUNT_KEY,
+    checkVisibilityForAccountKey: UNOWNED_ACCOUNT_KEY,
+    expectedHidden: false,
+  },
+];
+
 function clearLocalDeletionMarker(profileId: string, accountKey: string): void {
   const state = readProfileRegistryState();
-  const updated = clearLocalDeletionMarkerForAccount(state, profileId, accountKey);
+  const updated = clearLocalDeletionMarkersForRecreate(state, profileId, accountKey);
   if (updated !== state) writeProfileRegistryState(updated);
 }
 
@@ -1312,6 +1511,19 @@ function uniqueId(base: string, existingIds: string[]): string {
  * UNOWNED_ACCOUNT_KEY bucket when signed out), so creating/recreating id X
  * can never clear a DIFFERENT account's own suppression for that same
  * literal id.
+ *
+ * Codex P2 follow-up (10th round) — when `currentOwnerUserId` is a REAL
+ * authenticated account, this ALSO consumes the shared UNOWNED_ACCOUNT_KEY
+ * bucket's own marker for id X (clearLocalDeletionMarkersForRecreate's own
+ * doc) — an explicit reclaim transition: a deletion recorded while signed
+ * out is genuinely ambiguous/ownerless, and an authenticated account's own
+ * deliberate create is exactly the signal that resolves it, so the
+ * recreated profile is immediately visible to THAT account and eligible
+ * for normal registry adoption again, rather than staying invisibly
+ * suppressed by a signed-out marker nobody can otherwise clear. A
+ * DIFFERENT real account's own marker for the identical id is still never
+ * touched. A signed-out create/recreate is unaffected — it still only ever
+ * clears the shared bucket's own marker, exactly as before this fix.
  */
 export function createProfile(name: string, currentOwnerUserId: string | null = null): Profile {
   const trimmed = sanitizeProfileName(name) ?? "New Profile";
@@ -1327,8 +1539,10 @@ export function createProfile(name: string, currentOwnerUserId: string | null = 
   // deleted by it before: the only way uniqueId() above can return an id
   // not already in `profiles` is if nothing currently in the list holds it,
   // including a previously deleted same-named profile. Scoped to
-  // `currentOwnerUserId` only (Codex P1 follow-up, 5th round) — see
-  // clearLocalDeletionMarker/clearLocalDeletionMarkerForAccount's own doc
+  // `currentOwnerUserId` (Codex P1 follow-up, 5th round), and — when
+  // `currentOwnerUserId` is a real account — ALSO reclaiming the shared
+  // unowned bucket's own marker (Codex P2 follow-up, 10th round) — see
+  // clearLocalDeletionMarker/clearLocalDeletionMarkersForRecreate's own doc
   // for why a DIFFERENT account's own suppression of the identical literal
   // id must never be cleared by this.
   clearLocalDeletionMarker(id, currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY);
