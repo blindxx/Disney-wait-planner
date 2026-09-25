@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { SessionProvider, useSession } from "next-auth/react";
-import { ensureActiveProfileVisible, UNOWNED_ACCOUNT_KEY } from "@/lib/profileStorage";
+import {
+  ensureActiveProfileVisible,
+  shouldReloadForActiveProfileCorrection,
+  UNOWNED_ACCOUNT_KEY,
+} from "@/lib/profileStorage";
 import { getUserId } from "@/lib/syncIdentity";
 
 /**
@@ -48,14 +52,40 @@ import { getUserId } from "@/lib/syncIdentity";
  * identity transition, never where it is stored, who can read it, or the
  * planner-sync/account-namespace storage model itself (unchanged — see
  * AGENTS.md and syncHelper.ts's own module doc).
+ *
+ * SH.4.1d Codex P1 follow-up — "Retarget mounted pages after correcting the
+ * active profile." Correcting `dwp.activeProfile` here is not, by itself,
+ * enough: Plans/Lightning/Tom each capture their own profile-scoped refs,
+ * localStorage keys, and sync identity (activeProfileIdRef, planKeyRef,
+ * daysKeyRef, currentSyncProfileId, …) exactly once, at mount, and have no
+ * effect of their own that re-derives them on a LATER transition — so a
+ * mounted page's sync/pull/hydration/write path could otherwise go on
+ * combining the OLD profile id with identity/provenance now scoped to the
+ * corrected profile. `hasResolvedOnceRef` distinguishes this page load's
+ * very first resolved transition (no reload needed — see
+ * shouldReloadForActiveProfileCorrection's own doc for why) from a genuine
+ * later account switch, where a correction forces the SAME full reload
+ * every OTHER `dwp.activeProfile` writer in this codebase already performs
+ * immediately after changing it (settings/page.tsx's own switch/create/
+ * delete handlers) — the one, already-proven-safe mechanism this codebase
+ * uses to retarget a mounted page to a corrected profile, applied here at
+ * the shared boundary every page mounts under instead of separately inside
+ * each page. This is fail-closed: nothing continues running against the
+ * stale profile identity past the reload.
  */
 function ActiveProfileAuthGuard(): null {
   const { data: session, status: sessionStatus } = useSession();
   const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
+  const hasResolvedOnceRef = useRef(false);
 
   useEffect(() => {
     if (sessionStatus === "loading") return;
-    ensureActiveProfileVisible(authenticatedUserId ?? UNOWNED_ACCOUNT_KEY);
+    const isFirstResolvedTransition = !hasResolvedOnceRef.current;
+    hasResolvedOnceRef.current = true;
+    const corrected = ensureActiveProfileVisible(authenticatedUserId ?? UNOWNED_ACCOUNT_KEY);
+    if (shouldReloadForActiveProfileCorrection(isFirstResolvedTransition, corrected)) {
+      window.location.reload();
+    }
   }, [sessionStatus, authenticatedUserId]);
 
   return null;

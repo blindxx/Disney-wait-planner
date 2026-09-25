@@ -1873,12 +1873,113 @@ export const DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES: Array<{
  * remains exactly as device-local as before — this only changes what value
  * it may be corrected TO during an account transition, never where it is
  * stored or who can read it.
+ *
+ * SH.4.1d Codex P1 follow-up — returns whether a correction actually
+ * happened, so a caller can decide whether any ALREADY-MOUNTED page needs
+ * to retarget (see shouldReloadForActiveProfileCorrection below and
+ * components/SessionProviderWrapper.tsx's own doc). Existing callers
+ * (settings/page.tsx) that ignore the return value are unaffected.
  */
-export function ensureActiveProfileVisible(currentOwnerUserId: string): void {
+export function ensureActiveProfileVisible(currentOwnerUserId: string): boolean {
   const activeId = getActiveProfileId();
   const resolved = resolveActiveProfileForVisibleList(activeId, getVisibleProfiles(currentOwnerUserId));
-  if (resolved !== activeId) setActiveProfileId(resolved);
+  if (resolved === activeId) return false;
+  setActiveProfileId(resolved);
+  return true;
 }
+
+/**
+ * Pure decision: after ensureActiveProfileVisible(currentOwnerUserId) has
+ * just run for a RESOLVED session-status transition, must every mounted
+ * page be forced to retarget to the corrected active profile (via a full
+ * reload)?
+ *
+ * SH.4.1d Codex P1 follow-up — "Retarget mounted pages after correcting the
+ * active profile." Root cause: components/SessionProviderWrapper.tsx's
+ * ActiveProfileAuthGuard can correct the device-local `dwp.activeProfile`
+ * pointer on any resolved auth transition, but Plans/Lightning/Tom each
+ * capture their own profile-scoped refs, localStorage keys, and sync
+ * identity (activeProfileIdRef, planKeyRef, daysKeyRef, currentSyncProfileId
+ * via setSyncProfileId, …) exactly once — at mount — and never re-derive
+ * them on a LATER transition while they stay mounted. Left uncorrected, a
+ * mounted page's own pull/hydration/write/key-resolution path can go on
+ * combining the OLD profile id with sync identity and provenance now
+ * scoped to the corrected profile.
+ *
+ * This decision deliberately does NOT hot-retarget each mounted consumer's
+ * own refs/keys/sync state individually (a bespoke, page-specific patch
+ * repeated three times, and easy to leave a fourth future consumer out of).
+ * Every OTHER writer of `dwp.activeProfile` in this codebase already
+ * answers "how does a mounted page pick up a newly-corrected active
+ * profile" the same way — settings/page.tsx's own switch/create/delete
+ * handlers all call `location.reload()` immediately after changing it, since
+ * a mounted page's cached profile-scoped state cannot otherwise be trusted
+ * to unwind itself safely mid-session. This reuses that SAME, already-
+ * proven mechanism at the one shared boundary every page mounts under
+ * (SessionProviderWrapper), rather than adding a new one — the highest
+ * shared boundary available, and a fail-closed one: a forced reload can
+ * never leave any pull/hydration/write/key resolution running against a
+ * stale identity.
+ *
+ * `isFirstResolvedTransition` guards the ordinary mount case: on a page's
+ * very first resolved session status (the "loading" -> resolved edge every
+ * page goes through once per load), any correction
+ * ensureActiveProfileVisible makes has already landed BEFORE every mounted
+ * page's own mount effect first reads `dwp.activeProfile` (this guard
+ * renders before `{children}`, so its effect fires first in the same
+ * commit — see SessionProviderWrapper.tsx's own doc). Reloading on that
+ * edge would be pure noise — an unconditional flash reload on every first
+ * load whenever a session's stored active profile happens to need
+ * correcting — for a case that is already handled correctly with no reload
+ * at all. Only a correction on a SUBSEQUENT transition (a real account
+ * switch while pages are already mounted and may already have
+ * rendered/cached the pre-correction profile) needs one.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_RELOAD_FOR_ACTIVE_PROFILE_CORRECTION_CASES, shouldReloadForActiveProfileCorrection } from "@/lib/profileStorage";
+ *   DEV_SHOULD_RELOAD_FOR_ACTIVE_PROFILE_CORRECTION_CASES.forEach(c => {
+ *     const got = shouldReloadForActiveProfileCorrection(c.isFirstResolvedTransition, c.activeProfileWasCorrected);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldReloadForActiveProfileCorrection(
+  isFirstResolvedTransition: boolean,
+  activeProfileWasCorrected: boolean
+): boolean {
+  return !isFirstResolvedTransition && activeProfileWasCorrected;
+}
+
+export const DEV_SHOULD_RELOAD_FOR_ACTIVE_PROFILE_CORRECTION_CASES: Array<{
+  name: string;
+  isFirstResolvedTransition: boolean;
+  activeProfileWasCorrected: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "ordinary first load (loading -> resolved) with a correction — no reload; every mounted page's own mount effect already reads the corrected value, since this guard's effect runs first in the same commit",
+    isFirstResolvedTransition: true,
+    activeProfileWasCorrected: true,
+    expected: false,
+  },
+  {
+    name: "ordinary first load, nothing to correct — no reload",
+    isFirstResolvedTransition: true,
+    activeProfileWasCorrected: false,
+    expected: false,
+  },
+  {
+    name: "SH.4.1d Codex P1 — a LATER account-switch transition that corrects the pointer while Plans/Lightning/Tom is already mounted — reload required so every mounted page retargets to the corrected profile",
+    isFirstResolvedTransition: false,
+    activeProfileWasCorrected: true,
+    expected: true,
+  },
+  {
+    name: "a later transition that resolves to the same already-visible active profile — nothing changed, no reload",
+    isFirstResolvedTransition: false,
+    activeProfileWasCorrected: false,
+    expected: false,
+  },
+];
 
 // ===== PROFILE CRUD =====
 
