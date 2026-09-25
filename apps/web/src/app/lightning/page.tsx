@@ -48,8 +48,8 @@ import {
   getConfirmedState,
   hasHydrationProvenanceMatch,
   hasSurvivingEditFact,
-  getLocalContentOwner,
   setLocalContentOwner,
+  isLocalContentForeign,
   selectPendingOpBatch,
   reconcilePendingOperations,
   commitLocalDomainRawSync,
@@ -1150,6 +1150,13 @@ export default function LightningPage() {
   // Gate: prevents scheduleSync() from running until the initial cloud pull
   // resolves. Same semantics as plans/page.tsx syncReady.
   const [syncReady, setSyncReady] = useState(false);
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. Mirrors
+  // plans/page.tsx's own state of the same name exactly — see its detailed
+  // doc there for the full rationale. True only while this profile's
+  // physical planner bytes are known (isLocalContentForeign() in
+  // syncHelper.ts) to belong to a DIFFERENT, already-known authenticated
+  // account.
+  const [localContentWithheld, setLocalContentWithheld] = useState(false);
   // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
   // plans/page.tsx's own staleRetryTick/staleRetryPendingRef exactly — see
   // their doc there for the full rationale (required case 6: Plans and
@@ -1304,6 +1311,9 @@ export default function LightningPage() {
     if (sessionStatus === "unauthenticated") {
       setSyncUserId(null);
       setSyncReady(true);
+      // SH.4.1a — mirrors plans/page.tsx exactly: signed-out mode has no
+      // competing authenticated identity to withhold content from.
+      setLocalContentWithheld(false);
       return;
     }
     // authenticated
@@ -1325,9 +1335,11 @@ export default function LightningPage() {
     // in syncHelper.ts and plans/page.tsx's mirrored comment. It happens at
     // the END of this pull's `.then()` below, only once the pull genuinely
     // resolved AND its own hydration/day writes succeeded.
-    const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
-    const contentOwnershipMismatch =
-      priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
+    const contentOwnershipMismatch = isLocalContentForeign(activeProfileIdRef.current, resolvedUserId);
+    // SH.4.1a — mirrors plans/page.tsx exactly: synchronize the render/edit
+    // gate to this transition's own fresh verdict immediately, before the
+    // pull below starts. See plans/page.tsx's own detailed doc.
+    setLocalContentWithheld(contentOwnershipMismatch);
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     cancelScheduledSync();
@@ -2249,6 +2261,10 @@ export default function LightningPage() {
           primaryPersistSucceeded
         ) {
           setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
+          // SH.4.1a — mirrors plans/page.tsx exactly: the ONE point a
+          // foreign withhold may be lifted, gated by the same three-part
+          // condition as the ownership-marker write above.
+          setLocalContentWithheld(false);
         }
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
@@ -2829,6 +2845,22 @@ export default function LightningPage() {
     } else {
       setEndError("");
     }
+  }
+
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. Mirrors
+  // plans/page.tsx's own gate exactly, placed after every hook above — see
+  // its detailed doc there for the full rationale, including why
+  // `items`/`days`/`dayMeta`/`dayParks` React state is deliberately left
+  // completely untouched (this page's own persist effect at line ~1287
+  // would otherwise immediately overwrite this profile's actual stored
+  // bytes with an empty value).
+  if (localContentWithheld) {
+    return (
+      <div style={{ maxWidth: 560, margin: "0 auto", padding: "2rem 1rem", textAlign: "center" }}>
+        <p>Verifying your account&rsquo;s saved data for this profile&hellip;</p>
+        <p style={{ color: "#6b7280", fontSize: "0.9rem" }}>This only takes a moment.</p>
+      </div>
+    );
   }
 
   return (

@@ -1912,6 +1912,250 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
   } catch {}
 }
 
+// ── Account-aware local content ownership (SH.4.1a) ─────────────────────────
+//
+// SH.4.1 (Codex architecture checkpoint, exact HEAD ed2e3ce5) — finding #2:
+// two accounts can legitimately, independently own the identical literal
+// grandfathered profileId (profileStorage.ts's own module doc,
+// applyProfileOwnerStamp), but this profile's physical planner bytes
+// (`dwp:{profileId}:*`) remain ONE PHYSICAL COPY, not one per owning
+// account — SH.4.1a deliberately keeps it that way (no account-qualified
+// storage; see this round's own task scope) and instead makes the EXISTING
+// getLocalContentOwner()/setLocalContentOwner() marker do the account-aware
+// job it was always positioned to do: it already durably tracks EXACTLY ONE
+// identity per profileId (the identity whose most recent successful pull
+// established/confirmed today's physical bytes), which is precisely the
+// `(profileId, current-owning-account)` pair a single shared copy can ever
+// have at once — two accounts cannot BOTH currently own the live bytes,
+// only the registry PROVENANCE (a different, already per-`(profileId,
+// accountKey)` concern) supports true co-ownership.
+//
+// What was missing was not the marker's shape but WHERE it gets consulted:
+// each page's own auth-transition pull effect already reads it to decide
+// whether the pull's OWN conflict/merge logic may trust local bytes as a
+// candidate (`contentOwnershipMismatch`, computed inline at each call site
+// below) — but nothing consulted it BEFORE that pull resolves, so the
+// ordinary synchronous mount-time render (loading local bytes straight into
+// React state, well before any auth-transition effect even runs) could
+// still show — and the page's own edit affordances could still let a user
+// modify — a profile's leftover bytes that in fact belong to a DIFFERENT,
+// already-known account. isLocalContentForeign() below is the ONE shared
+// predicate every consuming page now calls, synchronously, to decide
+// whether this profile's CURRENTLY STORED bytes are safe to render/edit for
+// `currentUserId` at all, independent of and prior to any pull outcome.
+//
+// evaluateLocalContentForeign() is split out as the pure core (no
+// localStorage read) purely so it is directly DEV-testable, mirroring this
+// module's/profileStorage.ts's own established pure-core-plus-thin-I/O-
+// wrapper convention.
+
+/**
+ * Pure core of isLocalContentForeign() below. `owner` is whatever
+ * getLocalContentOwner(profileId) currently returns; `currentUserId` is the
+ * identity asking to render/edit/trust this profile's local content right
+ * now (a real authenticated userId, or `null` for signed-out/not-yet-
+ * resolved).
+ *
+ * `currentUserId === null` NEVER reports foreign content — signed-out mode
+ * is local-first by design (see profileStorage.ts's own module doc on
+ * signed-out visibility: "no authenticated account to protect against")
+ * and a session that hasn't resolved yet has no known identity to compare
+ * with at all, so the decision is deferred rather than guessed; callers
+ * re-evaluate once `currentUserId` actually resolves one way or the other,
+ * exactly like every existing auth-transition effect already does for
+ * `sessionStatus`.
+ *
+ * `owner === null` (never tagged — a fresh profile, or one that has never
+ * been authenticated-tagged before) is trusted for ANY identity — this is
+ * what preserves local-first adoption for anonymous → first sign-in, and
+ * for a fresh profile's very first authenticated use.
+ *
+ * Only a marker naming a DIFFERENT, KNOWN identity is foreign.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES.forEach(c => {
+ *     const got = evaluateLocalContentForeign(c.owner, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateLocalContentForeign(owner: string | null, currentUserId: string | null): boolean {
+  if (currentUserId === null) return false;
+  return owner !== null && owner !== currentUserId;
+}
+
+export const DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES: Array<{
+  name: string;
+  owner: string | null;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "same-account use — this identity's own prior ownership is never foreign to itself",
+    owner: "userA",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "A/B same-id isolation — B must never trust A's physical planner bytes as its own merely because both accounts share this literal profileId",
+    owner: "userA",
+    currentUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "never tagged — trusted for a fresh profile's first authenticated use, or anonymous -> first sign-in (no prior identity to conflict with)",
+    owner: null,
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "signed-out session (currentUserId null) is never foreign, regardless of a real account's prior ownership — signed-out mode stays fully local-first",
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "session not yet resolved (currentUserId null, mirrors 'loading') — deferred, never guessed as foreign",
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "reverse transition — B's content is now marked owned by B; A switching back must see it as foreign until A's own pull re-establishes ownership",
+    owner: "userB",
+    currentUserId: "userA",
+    expected: true,
+  },
+];
+
+/**
+ * I/O wrapper: reads `profileId`'s current content-owner marker and applies
+ * evaluateLocalContentForeign() above. Call this synchronously, BEFORE
+ * trusting/rendering/editing a profile's local planner content for
+ * `currentUserId` — see this section's own header doc for the full
+ * rationale and each call site (Plans/Lightning's auth-transition effect,
+ * Tom's planner-context build) for how the result gates that page.
+ */
+export function isLocalContentForeign(profileId: string, currentUserId: string | null): boolean {
+  return evaluateLocalContentForeign(getLocalContentOwner(profileId), currentUserId);
+}
+
+/** The ways a hydration attempt following a foreign-content detection can resolve. */
+export type LocalContentHydrationOutcome = "success" | "failed" | "slow" | "cancelled";
+
+/**
+ * Pure timeline model of the ONE rule every consuming page's pull effect
+ * follows (see getLocalContentOwner's own DURABLE TRANSFER BOUNDARY doc
+ * above, unchanged by SH.4.1a): the content-owner marker — and therefore
+ * whether content stays withheld — is updated ONLY on "success" (a pull
+ * that genuinely resolved, wasn't superseded, and whose own hydration/day
+ * writes durably succeeded). "failed" (the request itself failed/threw),
+ * "slow" (still in flight — this identity's own pull has not yet resolved
+ * one way or the other), and "cancelled" (superseded by a newer transition
+ * before it resolved) all leave the marker — and therefore the foreign
+ * verdict — EXACTLY as it was: withheld content is never deleted or
+ * relabeled by anything short of this identity's own successful, coherent
+ * hydration.
+ *
+ * This mirrors, at the ownership-marker level, the exact discipline each
+ * page's real `.then()` callback already applies to
+ * setLocalContentOwner()'s own call site (only reached once `cancelled` is
+ * false, `isPullCurrent()` still holds, and hydration succeeded) — kept
+ * here as a pure function so that discipline is directly DEV-testable
+ * without a browser, a fetch mock, or React.
+ *
+ * Run from Node:
+ *   import { DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES, simulateLocalContentOwnershipAfterHydration, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES.forEach(c => {
+ *     const withheldBefore = evaluateLocalContentForeign(c.ownerBeforeHydration, c.currentUserId);
+ *     const after = simulateLocalContentOwnershipAfterHydration(c.ownerBeforeHydration, c.currentUserId, c.outcome);
+ *     const ok = withheldBefore === c.expectedWithheldBefore
+ *       && after.ownerAfter === c.expectedOwnerAfter
+ *       && after.withheldAfter === c.expectedWithheldAfter;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateLocalContentOwnershipAfterHydration(
+  ownerBeforeHydration: string | null,
+  currentUserId: string,
+  outcome: LocalContentHydrationOutcome
+): { ownerAfter: string | null; withheldAfter: boolean } {
+  if (outcome === "success") {
+    return { ownerAfter: currentUserId, withheldAfter: false };
+  }
+  // failed / slow / cancelled — never relabels ownership; the foreign
+  // verdict is therefore unchanged, since nothing about the marker moved.
+  return {
+    ownerAfter: ownerBeforeHydration,
+    withheldAfter: evaluateLocalContentForeign(ownerBeforeHydration, currentUserId),
+  };
+}
+
+export const DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES: Array<{
+  name: string;
+  ownerBeforeHydration: string | null;
+  currentUserId: string;
+  outcome: LocalContentHydrationOutcome;
+  expectedWithheldBefore: boolean;
+  expectedOwnerAfter: string | null;
+  expectedWithheldAfter: boolean;
+}> = [
+  {
+    name: "successful hydration establishes the current account as the safe local-content owner and lifts withholding",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "success",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userB",
+    expectedWithheldAfter: false,
+  },
+  {
+    name: "failed hydration — foreign content stays withheld; the marker is never deleted or relabeled",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "failed",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "slow hydration (not yet resolved) — identical to failed until it actually resolves one way or the other",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "slow",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "cancelled hydration (superseded by a newer transition before it resolved) — leaves this attempt's marker exactly as it was, never relabeling",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "cancelled",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "ordinary same-account hydration — never withheld at any point, before or after",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userA",
+    outcome: "success",
+    expectedWithheldBefore: false,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: false,
+  },
+  {
+    name: "architecture-checkpoint scenario G — ordinary same-account profile switch to a DIFFERENT profileId previously owned by another account: this profile's own marker (independent of whichever profile was active before the switch) is correctly foreign for the switching account until ITS OWN pull for this profileId succeeds",
+    ownerBeforeHydration: "userB",
+    currentUserId: "userA",
+    outcome: "success",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: false,
+  },
+];
+
 // ── Shared stable-prefix key snapshot (SH.2, Codex P1, 15th round) ──────────────
 
 /**

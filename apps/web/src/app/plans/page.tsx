@@ -112,8 +112,8 @@ import {
   getConfirmedState,
   hasHydrationProvenanceMatch,
   hasSurvivingEditFact,
-  getLocalContentOwner,
   setLocalContentOwner,
+  isLocalContentForeign,
   selectPendingOpBatch,
   reconcilePendingOperations,
   commitLocalDomainRaw,
@@ -1628,6 +1628,19 @@ export default function PlansPage() {
   // while the GET /api/sync/plans request is in-flight. Set true after pull
   // completes (authenticated path) or immediately (unauthenticated path).
   const [syncReady, setSyncReady] = useState(false);
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. True only
+  // while this profile's physical planner bytes are known (via
+  // syncHelper.ts's isLocalContentForeign(), the account-aware wrapper
+  // around getLocalContentOwner()) to belong to a DIFFERENT, already-known
+  // authenticated account — never merely because a pull hasn't resolved
+  // yet (the ordinary same-account/offline/signed-out case leaves this
+  // false throughout, exactly as before this round). See the auth-
+  // transition effect below for where this is set, and the render guard
+  // near this component's own return for how it's consumed: while true,
+  // this page renders a placeholder instead of the loaded items/days, and
+  // never persists any edit over the withheld bytes (see the placeholder's
+  // own doc for why no persist effect can run while it's showing).
+  const [localContentWithheld, setLocalContentWithheld] = useState(false);
   // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. A pull that
   // rejects its OWN response as stale (SH.2.1 P2's revision bound — see
   // UnusableDomain's own doc below) previously just returned, leaving
@@ -2476,6 +2489,12 @@ export default function PlansPage() {
       // pull's context, not just reset local UI state.
       setSyncUserId(null);
       setSyncReady(true);
+      // SH.4.1a — signed-out mode is local-first by design and has no
+      // competing authenticated identity to withhold content FROM (mirrors
+      // isLocalContentForeign()'s own null-currentUserId contract in
+      // syncHelper.ts) — never leave a stale withhold from a prior
+      // authenticated account applied while signed out.
+      setLocalContentWithheld(false);
       return;
     }
     // authenticated
@@ -2533,9 +2552,20 @@ export default function PlansPage() {
     // own. See getLocalContentOwner()'s own doc in syncHelper.ts for the
     // exact three-part condition; the write itself happens at the END of
     // this pull's `.then()` below, only once all three hold.
-    const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
-    const contentOwnershipMismatch =
-      priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
+    const contentOwnershipMismatch = isLocalContentForeign(activeProfileIdRef.current, resolvedUserId);
+    // SH.4.1a — synchronize the RENDER/EDIT gate to this transition's own
+    // fresh verdict immediately, BEFORE the pull below even starts: this is
+    // what actually withholds a foreign profile's already-loaded local
+    // bytes (the mount effect's synchronous read runs independently of,
+    // and before, this effect) rather than only gating the pull's own
+    // conflict/merge decision the way `contentOwnershipMismatch` already
+    // did before this round. Always re-synchronized (not merely set to
+    // true) so a REVERSE transition back to an identity this profile's
+    // marker already names correctly lifts a stale withhold from an
+    // earlier transition in the SAME mount — see
+    // simulateLocalContentOwnershipAfterHydration()'s own DEV cases in
+    // syncHelper.ts for the exact reverse-transition contract this mirrors.
+    setLocalContentWithheld(contentOwnershipMismatch);
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
     // Cancel any pending debounced push before starting the cloud pull so a
@@ -3798,6 +3828,13 @@ export default function PlansPage() {
           primaryPersistSucceeded
         ) {
           setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
+          // SH.4.1a — this is the ONE point a foreign withhold may ever be
+          // lifted: the same three-part "safe to establish ownership"
+          // condition guarding the ownership-marker write above. A
+          // failed/slow/cancelled pull never reaches this block, so a
+          // withheld profile's content stays withheld — never deleted or
+          // relabeled — until this identity's OWN coherent hydration lands.
+          setLocalContentWithheld(false);
         }
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
@@ -5371,6 +5408,39 @@ export default function PlansPage() {
   // the park selector and wait-overlay label agree; null (unresolved) is a
   // valid, expected state for an Auto day with no park context of its own.
   const activeDayPark = ready ? resolveDayPark(activeDayId) : null;
+
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. Placed
+  // after every hook above (this early return never skips a hook call) and
+  // before the ordinary render below: while `localContentWithheld` is true,
+  // this profile's physical planner bytes are known to belong to a
+  // DIFFERENT, already-known authenticated account (see
+  // isLocalContentForeign()'s own doc in syncHelper.ts), so nothing below —
+  // the items list, the Add/Edit forms, day management, import/export —
+  // is reachable at all. `items`/`days`/`dayMeta`/`dayParks` React state is
+  // deliberately left completely UNTOUCHED here (never blanked/reset):
+  // this page's own persist effect (`saveToStorage(items, ...)`, keyed on
+  // `[items, initialized]`) would otherwise immediately overwrite this
+  // profile's actual stored bytes with an empty value the instant this
+  // gate cleared `items` — destroying the very content this gate exists to
+  // protect. A short-lived flash of the loaded (possibly foreign) content
+  // during the gap between this component's first paint and this effect's
+  // first run is an accepted, unavoidable consequence of local-first
+  // rendering (session identity is never known synchronously at mount —
+  // the SAME trade-off the SH.4.1 active-profile correction already makes);
+  // what this gate guarantees is that no further render or edit can ever
+  // build on it once identity is known.
+  if (localContentWithheld) {
+    // Deliberately inline-styled, not the .plans-container/.empty-state
+    // classes used below: those are defined inside the <style> tag that is
+    // part of the NORMAL render this early return replaces, so they would
+    // never actually apply here.
+    return (
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "2rem 1rem", textAlign: "center" }}>
+        <p>Verifying your account&rsquo;s saved data for this profile&hellip;</p>
+        <p style={{ color: "#6b7280", fontSize: "0.9rem" }}>This only takes a moment.</p>
+      </div>
+    );
+  }
 
   return (
     <>
