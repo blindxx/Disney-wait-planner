@@ -169,6 +169,15 @@ export type ServerProfileRecord = {
  * (which would normally already be in `known` too) proceed without being
  * second-guessed by its own ownership record.
  *
+ * Codex P1 follow-up (9th round) — the canonical shared `default` id can
+ * never appear in `ownedByOtherAccountIds` in the first place
+ * (profileStorage.ts's CANONICAL_SHARED_PROFILE_ID exemption in
+ * selectProfileIdsOwnedByOtherAccounts/getProfileIdsOwnedByOtherAccounts),
+ * so this function needs no `default`-specific branch of its own: a local
+ * `default` entry stays adoptable purely because the caller never hands it
+ * an ownership exclusion for that id, exactly like a genuinely unowned
+ * legacy profile.
+ *
  * Pure — takes every input as a parameter, so it stays directly
  * DEV-testable without a browser/localStorage.
  *
@@ -289,6 +298,13 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
     ],
     ownedByOtherAccountIds: new Set(["family"]),
     expected: [{ id: "legacy-trip", name: "Legacy Trip" }],
+  },
+  {
+    name: "Codex P1 follow-up (9th round) — A already owns the canonical 'default' id, but B's own empty registry can still adopt/register B's own 'default': profileStorage.ts's getProfileIdsOwnedByOtherAccounts never includes 'default', so ownedByOtherAccountIds is empty for it here regardless of A's ownership",
+    serverProfiles: [], // B's own GET — B's account has never registered anything yet
+    localProfiles: [{ id: "default", name: "Default" }],
+    ownedByOtherAccountIds: new Set(), // "default" is exempt — see selectProfileIdsOwnedByOtherAccounts
+    expected: [{ id: "default", name: "Default" }],
   },
   {
     name: "Codex P1 follow-up (4th round, bounded adjacency) — an id A deleted locally must never be silently re-adopted for A just because B's unrelated discovery re-added it to the shared list; reconcileProfileRegistry pre-filters it out of `localProfiles` via filterVisibleProfiles before this function ever runs, so it is simply absent here, exactly as this case models",

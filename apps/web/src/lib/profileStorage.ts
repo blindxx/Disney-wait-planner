@@ -31,6 +31,33 @@ const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
 const PROFILES_LIST_KEY = "dwp.profiles";
 
 /**
+ * The canonical "always exists" profile id (see DEFAULT_PROFILE further
+ * below) is a SPECIAL SHARED LOGICAL id, not an ordinary user-created
+ * profile: every fresh device and every freshly authenticated account
+ * automatically has it (getProfiles()'s own default-presence guarantee;
+ * bootstrapProfiles()), so every account independently, legitimately
+ * "creates" the identical literal id `default` by definition — there is no
+ * meaningful sense in which one account's registration of `default` is a
+ * competing claim against another account's own.
+ *
+ * Codex P1 follow-up (9th round) — the ordinary cross-account ownership
+ * exclusion (selectProfileIdsOwnedByOtherAccounts/
+ * selectProfileIdsExclusivelyOwnedByOthers below) exists to protect a
+ * DELIBERATELY created/registered profile from being silently claimed by a
+ * different account that never created it. Applying that SAME protection
+ * to `default` backfired: once account A's reconciliation registered
+ * `default` (which it always eventually does, since `default` always
+ * exists locally), account B signing in later with an empty registry saw
+ * `default` as "owned by another account" — blocked from B's own adoption
+ * forever, AND hidden from B's effective profile list, even though B
+ * never had any way to avoid colliding with the universal `default` id in
+ * the first place. `default` is exempted from both of those exclusion
+ * queries specifically for this reason; every OTHER profile id keeps the
+ * exact same cross-account exclusion semantics as before.
+ */
+const CANONICAL_SHARED_PROFILE_ID = "default";
+
+/**
  * SH.4.1 (Codex follow-up rounds) — durable, per-`(accountKey, profileId)`
  * REGISTRY PROVENANCE, entirely separate from `dwp.profiles` (what a device
  * shows) and from syncHelper.ts's planner-content ownership marker
@@ -314,6 +341,17 @@ export function markProfileOwner(profileId: string, ownerUserId: string): void {
  * has both entries — this query only ever asks "besides me, does anyone
  * else own it", never rejecting or overwriting either account's own fact.
  *
+ * Codex P1 follow-up (9th round) — the canonical shared id
+ * (CANONICAL_SHARED_PROFILE_ID, `"default"`) is exempt: it is never
+ * included in this result no matter who else has registered it, since
+ * every account independently, legitimately creates that identical literal
+ * id by definition — see CANONICAL_SHARED_PROFILE_ID's own doc. This is
+ * what stops account B's adoption round (computeProfilesToAdopt, via
+ * getProfileIdsOwnedByOtherAccounts) from being permanently blocked from
+ * registering B's own `default` merely because account A's reconciliation
+ * happened to register it first. Every OTHER profile id keeps the exact
+ * same exclusion semantics as before this exemption.
+ *
  * Run from Node:
  *   import { DEV_SELECT_PROFILE_IDS_OWNED_BY_OTHER_ACCOUNTS_CASES, selectProfileIdsOwnedByOtherAccounts } from "@/lib/profileStorage";
  *   DEV_SELECT_PROFILE_IDS_OWNED_BY_OTHER_ACCOUNTS_CASES.forEach(c => {
@@ -327,6 +365,7 @@ export function selectProfileIdsOwnedByOtherAccounts(
 ): Set<string> {
   const ids = new Set<string>();
   for (const [id, byAccount] of Object.entries(state)) {
+    if (id === CANONICAL_SHARED_PROFILE_ID) continue; // every account may independently own `default`
     const ownedByOther = Object.entries(byAccount).some(
       ([accountKey, entry]) =>
         accountKey !== currentOwnerUserId && accountKey !== UNOWNED_ACCOUNT_KEY && entry?.owned
@@ -353,6 +392,12 @@ export const DEV_SELECT_PROFILE_IDS_OWNED_BY_OTHER_ACCOUNTS_CASES: Array<{
     state: { family: { userA: { owned: true } } },
     currentOwnerUserId: "userB",
     expected: ["family"],
+  },
+  {
+    name: "Codex P1 follow-up (9th round) — A owns the canonical 'default' id; it is NEVER counted as owned by another account, so B's own empty registry can still adopt/register B's own 'default'",
+    state: { default: { userA: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
   },
   {
     name: "the current account's OWN ownership is never counted as 'another account'",
@@ -413,6 +458,14 @@ export function getProfileIdsOwnedByOtherAccounts(currentOwnerUserId: string): S
  * (selectHiddenProfileIdsForAccount below) — adoption/cleanup-safety must
  * keep using selectProfileIdsOwnedByOtherAccounts unchanged.
  *
+ * Codex P1 follow-up (9th round) — the canonical shared id
+ * (CANONICAL_SHARED_PROFILE_ID, `"default"`) is exempt here too, for the
+ * same reason selectProfileIdsOwnedByOtherAccounts exempts it: every
+ * account independently, legitimately creates the identical literal
+ * `default` id, so account A registering it must never hide it from
+ * account B's own effective profile list. Every OTHER profile id keeps
+ * the exact same exclusive-ownership hiding semantics as before.
+ *
  * Run from Node:
  *   import { DEV_SELECT_PROFILE_IDS_EXCLUSIVELY_OWNED_BY_OTHERS_CASES, selectProfileIdsExclusivelyOwnedByOthers } from "@/lib/profileStorage";
  *   DEV_SELECT_PROFILE_IDS_EXCLUSIVELY_OWNED_BY_OTHERS_CASES.forEach(c => {
@@ -426,6 +479,7 @@ export function selectProfileIdsExclusivelyOwnedByOthers(
 ): Set<string> {
   const ids = new Set<string>();
   for (const [id, byAccount] of Object.entries(state)) {
+    if (id === CANONICAL_SHARED_PROFILE_ID) continue; // every account may independently own `default`
     if (byAccount[currentOwnerUserId]?.owned) continue; // I own it too — never hidden from me
     const ownedByOther = Object.entries(byAccount).some(
       ([accountKey, entry]) =>
@@ -453,6 +507,12 @@ export const DEV_SELECT_PROFILE_IDS_EXCLUSIVELY_OWNED_BY_OTHERS_CASES: Array<{
     state: { family: { userA: { owned: true } } },
     currentOwnerUserId: "userB",
     expected: ["family"],
+  },
+  {
+    name: "Codex P1 follow-up (9th round) — A owns the canonical 'default' id; it never hides 'default' from B's own effective list",
+    state: { default: { userA: { owned: true } } },
+    currentOwnerUserId: "userB",
+    expected: [],
   },
   {
     name: "the current account's OWN ownership is never counted as 'exclusively owned by another'",
@@ -821,6 +881,27 @@ export const DEV_FILTER_VISIBLE_PROFILES_CASES: Array<{
  * explicitly excludes an id the current account itself owns from its
  * result, regardless of who else also owns it.
  *
+ * Codex P1 follow-up (9th round) — SIGNED-OUT MODE (`currentOwnerUserId ===
+ * UNOWNED_ACCOUNT_KEY`) never applies the cross-account ownership exclusion
+ * at all, only the local-deletion reason. The 8th round's fix above
+ * introduced a regression: once ANY real authenticated account had, at some
+ * point, registered ownership of a profile that was created and used on
+ * this very device (an entirely ordinary, expected outcome of this
+ * device's OWN prior reconciliation rounds), signing back out made that
+ * profile look "exclusively owned by another account" from the signed-out
+ * viewpoint and hid it — even though its local data
+ * (`dwp:{id}:plans`/`lightning`/etc.) is still fully intact on-device and
+ * nothing else is contending for it. Cross-account ownership exclusion
+ * exists ONLY to keep two DIFFERENT SIGNED-IN accounts sharing one browser
+ * from seeing each other's exclusively-owned profiles — it has no meaning
+ * when nobody is signed in: with no authenticated account to protect
+ * against, every profile physically present in `dwp.profiles` belongs to
+ * whoever is using this device right now, exactly like pre-SH.4
+ * local-first behavior. Local-deletion suppression (this account's own, or
+ * the shared UNOWNED_ACCOUNT_KEY bucket's) still fully applies while
+ * signed out — that reason is unrelated to authenticated ownership and is
+ * exactly the pre-SH.4.1 signed-out delete behavior.
+ *
  * Run from Node:
  *   import { DEV_SELECT_HIDDEN_PROFILE_IDS_FOR_ACCOUNT_CASES, selectHiddenProfileIdsForAccount } from "@/lib/profileStorage";
  *   DEV_SELECT_HIDDEN_PROFILE_IDS_FOR_ACCOUNT_CASES.forEach(c => {
@@ -833,6 +914,11 @@ export function selectHiddenProfileIdsForAccount(
   currentOwnerUserId: string
 ): Set<string> {
   const hidden = selectLocallyDeletedIdsForAccount(state, currentOwnerUserId);
+  // Codex P1 follow-up (9th round) — signed-out mode retains full local-first
+  // access to whatever this device's profile list already contains: no
+  // authenticated account is present to protect FROM, so authenticated
+  // ownership provenance is never a reason to hide a local profile here.
+  if (currentOwnerUserId === UNOWNED_ACCOUNT_KEY) return hidden;
   for (const id of selectProfileIdsExclusivelyOwnedByOthers(state, currentOwnerUserId)) {
     hidden.add(id);
   }
@@ -876,15 +962,43 @@ export const DEV_SELECT_HIDDEN_PROFILE_IDS_FOR_ACCOUNT_CASES: Array<{
     expected: [],
   },
   {
-    name: "signed-out viewer sees an id owned by a real account as hidden",
+    name: "Codex P1 follow-up (9th round) — signed-out view RETAINS a profile previously registered by a real authenticated account on this device (no authenticated-ownership exclusion while signed out — this REVERSES the 8th round's own now-fixed regression)",
     state: { family: { userA: { owned: true } } },
     currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
-    expected: ["family"],
+    expected: [],
   },
   {
     name: "signed-out viewer sees a genuinely unowned id as visible",
     state: {},
     currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: [],
+  },
+  {
+    name: "Codex P1 follow-up (9th round) — signed-out profile picker never becomes empty solely because every local profile has SOME authenticated ownership provenance: all three ids, each owned by a different past authenticated account, remain fully visible",
+    state: {
+      family: { userA: { owned: true } },
+      mom: { userB: { owned: true } },
+      trip2024: { userA: { owned: true }, userB: { owned: true } },
+    },
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: [],
+  },
+  {
+    name: "Codex P1 follow-up (9th round) — signed-out mode still honors its OWN (unowned-bucket) local-deletion marker — that reason is unrelated to authenticated ownership and is unaffected by this fix",
+    state: { family: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true }, userA: { owned: true } } },
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    expected: ["family"],
+  },
+  {
+    name: "Codex P1 follow-up (9th round) — signing back in as A restores account-scoped authenticated visibility rules: the SAME id owned only by B is hidden again once A is authenticated",
+    state: { family: { userB: { owned: true } } },
+    currentOwnerUserId: "userA",
+    expected: ["family"],
+  },
+  {
+    name: "the canonical 'default' id owned by A is never hidden from B (visibility exemption applies through this composed function too)",
+    state: { default: { userA: { owned: true } } },
+    currentOwnerUserId: "userB",
     expected: [],
   },
   {
@@ -1070,6 +1184,62 @@ export const DEV_RESOLVE_ACTIVE_PROFILE_FOR_VISIBLE_LIST_CASES: Array<{
 ];
 
 /**
+ * Composed end-to-end regression scenarios for the exact pipeline
+ * ensureActiveProfileVisible(currentOwnerUserId) runs (selectHiddenProfileIdsForAccount
+ * -> filterVisibleProfiles -> resolveActiveProfileForVisibleList), covering
+ * the sign-out active-profile guarantee that no single one of those pure
+ * functions' own DEV cases exercises end-to-end.
+ *
+ * Codex P1 follow-up (9th round) — before this round's fix, a device's own
+ * previously-active profile — one this device created and has been using,
+ * which some past authenticated session happened to register — would have
+ * been force-corrected back to "default" the instant its account signed
+ * out, even though nothing else on this device is contending for it and
+ * its local data is fully intact. activeProfile stays exactly where it was
+ * once signed out, confirming it validates against the signed-out
+ * EFFECTIVE local list, not against authenticated ownership provenance.
+ *
+ * Run from Node:
+ *   import { DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES, selectHiddenProfileIdsForAccount, filterVisibleProfiles, resolveActiveProfileForVisibleList } from "@/lib/profileStorage";
+ *   DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES.forEach(c => {
+ *     const visible = filterVisibleProfiles(c.profiles, selectHiddenProfileIdsForAccount(c.state, c.currentOwnerUserId));
+ *     const got = resolveActiveProfileForVisibleList(c.activeId, visible);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_SIGNED_OUT_ACTIVE_PROFILE_CASES: Array<{
+  name: string;
+  profiles: Profile[];
+  state: ProfileRegistryState;
+  currentOwnerUserId: string;
+  activeId: string;
+  expected: string;
+}> = [
+  {
+    name: "Codex P1 follow-up (9th round) — signed-out activeProfile stays on this device's own active profile, even though a real account previously registered it",
+    profiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    state: { family: { userA: { owned: true } } },
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    activeId: "family",
+    expected: "family",
+  },
+  {
+    name: "signed-out activeProfile still falls back to default when the active id was genuinely, locally deleted while signed out (unrelated to ownership, unaffected by this fix)",
+    profiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    state: { family: { [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true }, userA: { owned: true } } },
+    currentOwnerUserId: UNOWNED_ACCOUNT_KEY,
+    activeId: "family",
+    expected: "default",
+  },
+];
+
+/**
  * Validates the currently stored active profile id against
  * `currentOwnerUserId`'s EFFECTIVE visible profile list (getVisibleProfiles)
  * — NOT the raw shared `dwp.profiles` getActiveProfileId() itself checks —
@@ -1218,6 +1388,14 @@ export function renameProfile(id: string, name: string): void {
  *     const got = isDestructiveProfileCleanupSafe(c.state, c.profileId, c.currentOwnerUserId);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
+ *
+ * Note (Codex P1 follow-up, 9th round): this reuses
+ * selectProfileIdsOwnedByOtherAccounts, which is now also the function that
+ * exempts the canonical `default` id from cross-account ownership exclusion
+ * (see CANONICAL_SHARED_PROFILE_ID's own doc) — so this predicate would
+ * likewise report "safe" for `profileId === "default"` regardless of other
+ * owners. That is never actually reachable: deleteProfile unconditionally
+ * refuses to delete `default` before this predicate is ever consulted.
  */
 export function isDestructiveProfileCleanupSafe(
   state: ProfileRegistryState,
