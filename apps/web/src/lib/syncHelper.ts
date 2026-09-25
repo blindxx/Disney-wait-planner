@@ -2040,6 +2040,106 @@ export function isLocalContentForeign(profileId: string, currentUserId: string |
   return evaluateLocalContentForeign(getLocalContentOwner(profileId), currentUserId);
 }
 
+// ── Session-loading-safe planner-context omission (SH.4.1a exact-HEAD finding #1) ──
+//
+// Codex found that Tom's own `authenticatedUserId` derivation
+// (`sessionStatus === "authenticated" ? getUserId(session) : null`)
+// collapses BOTH `sessionStatus === "loading"` (identity genuinely
+// unresolved) and `sessionStatus === "unauthenticated"` (identity resolved
+// to "no one") to the same `null` value — and evaluateLocalContentForeign()
+// deliberately treats a null currentUserId as "never foreign", which is
+// correct for the resolved signed-out case (local-first, no competing
+// identity) but WRONG while still "loading": a question submitted before
+// the session resolves could still send a DIFFERENT, about-to-be-revealed
+// account's stale local planner content, since nothing yet vouches for
+// whose content this device's active profile actually holds.
+//
+// evaluateOmitPlannerContext() below is the pure core of that fix:
+// `sessionIsLoading` is checked FIRST and unconditionally forces omission,
+// never falling through to the ownership comparison for that state — the
+// same "simply omit rather than guess" contract every other optional
+// planner_context field already follows, applied to an unresolved identity
+// instead of a confirmed-foreign one. Once the session resolves one way or
+// the other, this defers entirely to the existing, unchanged
+// evaluateLocalContentForeign() contract.
+
+/**
+ * Pure core: should planner_context be omitted from a Tom request right
+ * now? See this section's own header doc for the full rationale.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES, evaluateOmitPlannerContext } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES.forEach(c => {
+ *     const got = evaluateOmitPlannerContext(c.sessionIsLoading, c.owner, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateOmitPlannerContext(
+  sessionIsLoading: boolean,
+  owner: string | null,
+  currentUserId: string | null
+): boolean {
+  if (sessionIsLoading) return true;
+  return evaluateLocalContentForeign(owner, currentUserId);
+}
+
+export const DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES: Array<{
+  name: string;
+  sessionIsLoading: boolean;
+  owner: string | null;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "Tom loading state omits planner context outright, even with no ownership marker at all",
+    sessionIsLoading: true,
+    owner: null,
+    currentUserId: null,
+    expected: true,
+  },
+  {
+    name: "Tom loading state omits planner context even when the marker would otherwise look same-account-safe once resolved — identity is not yet known, so nothing can vouch for it yet",
+    sessionIsLoading: true,
+    owner: "userA",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "explicit unauthenticated (resolved, NOT loading) Tom behavior is unchanged — signed-out local-first still includes planner context",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "authenticated same-account Tom context still works once the session has resolved and the marker is not foreign",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "resolved authenticated session with a foreign marker still omits — the pre-existing SH.4.1a gate is unchanged by this fix",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: "userB",
+    expected: true,
+  },
+];
+
+/**
+ * I/O wrapper: the ONE function Tom's own send-question flow calls — see
+ * evaluateOmitPlannerContext()'s own doc above for the full contract.
+ */
+export function shouldOmitPlannerContextForProfile(
+  sessionIsLoading: boolean,
+  profileId: string,
+  currentUserId: string | null
+): boolean {
+  if (sessionIsLoading) return true;
+  return isLocalContentForeign(profileId, currentUserId);
+}
+
 /** The ways a hydration attempt following a foreign-content detection can resolve. */
 export type LocalContentHydrationOutcome = "success" | "failed" | "slow" | "cancelled";
 

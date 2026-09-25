@@ -313,6 +313,13 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
     ownedByOtherAccountIds: new Set(),
     expected: [{ id: "default", name: "Default" }],
   },
+  {
+    name: "SH.4.1a Codex P1 follow-up (exact-HEAD finding #2) — B signs in and reconciles BEFORE A's own reconciliation ever ran: A's createProfile now stamps ownership immediately at creation time (profileStorage.ts's own doc), so B's reconciliation already sees 'family' as owned by another account and excludes it, even though A's server-side registry row may not exist yet either",
+    serverProfiles: [], // B's own GET — B's account has never registered "family"
+    localProfiles: [{ id: "family", name: "Family" }], // physically present on this shared device from A's own local create
+    ownedByOtherAccountIds: new Set(["family"]), // stamped immediately by A's createProfile, not by a completed reconciliation
+    expected: [],
+  },
 ];
 
 /**

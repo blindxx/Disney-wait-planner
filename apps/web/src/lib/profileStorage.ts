@@ -1921,6 +1921,63 @@ export const DEV_IS_RETAINED_HIDDEN_ID_RECLAIMABLE_CASES: Array<{
  * symmetric half of this fix. Async as a direct, unavoidable consequence
  * of using the Web Locks API for that critical section — every caller
  * (Settings' handleAddProfile) already awaits it.
+ *
+ * Codex P1 follow-up (SH.4.1a exact-HEAD finding #2) — IMMEDIATE
+ * AUTHENTICATED CREATE PROVENANCE. Before this round, a profile created
+ * while authenticated became visible/adoptable in the shared
+ * `dwp.profiles` list immediately, but this device's own local ownership
+ * provenance (`dwp.profileRegistryState`) for `(outcome.id,
+ * currentOwnerUserId)` was only ever established LATER, whenever
+ * profileRegistrySync.ts's reconcileProfileRegistry next ran and the
+ * server confirmed it — a network round trip that may be delayed,
+ * offline, or fail outright. If a DIFFERENT account (B) signed into this
+ * same browser and reconciled during that gap, B's own
+ * getProfileIdsOwnedByOtherAccounts("family") read an EMPTY registry
+ * entry for this id (A's own claim not yet stamped) and could freely
+ * treat it as genuinely unowned legacy state — adopting/registering it as
+ * B's own, exactly the cross-account exposure this module's own
+ * (profileId, accountKey) provenance model exists to prevent.
+ *
+ * The fix reuses the EXACT existing provenance primitive
+ * (markProfileOwner/applyProfileOwnerStamp — the SAME call
+ * reconcileProfileRegistry itself makes once the server confirms
+ * ownership) rather than inventing a parallel "locally created" concept:
+ * an authenticated account's own deliberate, local create/reclaim is
+ * already a strong enough signal to protect against cross-account
+ * adoption for the SAME reason server confirmation is — nothing
+ * downstream (selectProfileIdsOwnedByOtherAccounts,
+ * selectProfileIdsExclusivelyOwnedByOthers, isDestructiveProfileCleanupSafe)
+ * distinguishes "confirmed by the server" from "confirmed by this
+ * device's own authenticated creator" once `owned: true` is set — both
+ * are simply this account's own durable claim. applyProfileOwnerStamp's
+ * own idempotent no-op-when-already-owned guard is exactly what makes a
+ * LATER, real reconciliation round's own markProfileOwner call for the
+ * same (id, account) pair a safe, conflict-free no-op re-confirmation —
+ * there is nothing here for that later round to normalize or reconcile
+ * against; it simply agrees.
+ *
+ * Deliberately gated on `currentOwnerUserId !== null`: a SIGNED-OUT
+ * create (`scopeKey === UNOWNED_ACCOUNT_KEY`) never stamps ownership —
+ * UNOWNED_ACCOUNT_KEY is, by this module's own established contract
+ * (selectProfileIdsOwnedByOtherAccounts/
+ * selectProfileIdsExclusivelyOwnedByOthers), never treated as a competing
+ * account even if it WERE marked owned, so stamping it would have zero
+ * protective effect while being semantically misleading — signed-out
+ * created legacy profiles remain exactly as freely adoptable as before
+ * this round, matching the established local-first legacy rules.
+ *
+ * Sequenced as the FIRST post-`dwp.profiles`-lock step (immediately
+ * before the pre-existing clearLocalDeletionMarker call, itself a
+ * separate, sequential lock acquisition on `dwp.profileRegistryState` —
+ * no new locking architecture, and no nesting across the two locks) so
+ * the highest-stakes protection (cross-account adoption/visibility) is
+ * established with the smallest possible gap after the id becomes
+ * visible. A true zero-width guarantee across the two independently
+ * locked keys is out of scope here (that is SH.4.1c's cross-key
+ * atomicity work) — what this closes is the SUSTAINED gap the exact-HEAD
+ * finding describes (registry API unavailable/offline, or simply not yet
+ * run), not a single synchronous function's own back-to-back lock
+ * acquisitions.
  */
 export async function createProfile(name: string, currentOwnerUserId: string | null = null): Promise<Profile> {
   const trimmed = sanitizeProfileName(name) ?? "New Profile";
@@ -1948,6 +2005,15 @@ export async function createProfile(name: string, currentOwnerUserId: string | n
     return newProfile;
   });
 
+  // SH.4.1a (Codex P1 follow-up, exact-HEAD finding #2) — see this
+  // function's own doc above for the full rationale. Runs before
+  // clearLocalDeletionMarker below so the cross-account protection lands
+  // as early as possible after `outcome.id` became visible in
+  // `dwp.profiles` above. A no-op for a signed-out create/reclaim.
+  if (currentOwnerUserId !== null) {
+    await markProfileOwner(outcome.id, currentOwnerUserId);
+  }
+
   // clearLocalDeletionMarker acquires the SEPARATE registry-state lock —
   // deliberately outside the `dwp.profiles` critical section above (no
   // nested cross-lock hold) — and operates on `outcome.id`, a value
@@ -1965,6 +2031,145 @@ export async function createProfile(name: string, currentOwnerUserId: string | n
   await clearLocalDeletionMarker(outcome.id, scopeKey);
   return outcome;
 }
+
+/**
+ * Composed end-to-end regression scenarios for createProfile's new
+ * IMMEDIATE AUTHENTICATED CREATE PROVENANCE behavior (see its own doc
+ * above) — proving the exact contract using the SAME pure state
+ * transitions/queries createProfile itself now calls
+ * (applyProfileOwnerStamp, selectProfileIdsOwnedByOtherAccounts,
+ * selectHiddenProfileIdsForAccount), without any real localStorage/Web
+ * Locks I/O, mirroring this module's own established composed-scenario
+ * convention (see DEV_RECREATE_VISIBILITY_CASES above).
+ *
+ * Each case threads `steps`, applied in order, starting from `{}` (an
+ * empty registry — modeling "the registry API was never reached, or has
+ * not yet been reached, for this id"):
+ *   - `{ kind: "authenticatedCreate", profileId, ownerUserId }` — models
+ *     createProfile's own new markProfileOwner call for a REAL
+ *     authenticated creator (never applied for a signed-out create — see
+ *     the "signed-out-created legacy profile" case below, which simply
+ *     omits this step entirely).
+ *   - `{ kind: "reconcile", profileId, ownerUserId }` — models a LATER,
+ *     real reconcileProfileRegistry round's own markProfileOwner call
+ *     once the server actually confirms the same (id, account) pair.
+ *
+ * Run from Node:
+ *   import { DEV_IMMEDIATE_CREATE_PROVENANCE_CASES, applyProfileOwnerStamp, selectProfileIdsOwnedByOtherAccounts, selectHiddenProfileIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_IMMEDIATE_CREATE_PROVENANCE_CASES.forEach(c => {
+ *     let state = {};
+ *     for (const step of c.steps) state = applyProfileOwnerStamp(state, step.profileId, step.ownerUserId);
+ *     const ownedByOtherFromCheckingUserId = [...selectProfileIdsOwnedByOtherAccounts(state, c.checkingUserId)].sort();
+ *     const hiddenFromCheckingUserId = [...selectHiddenProfileIdsForAccount(state, c.checkingUserId)].sort();
+ *     const ok = JSON.stringify(state) === JSON.stringify(c.expectedState)
+ *       && JSON.stringify(ownedByOtherFromCheckingUserId) === JSON.stringify([...c.expectedOwnedByOtherFromCheckingUserId].sort())
+ *       && JSON.stringify(hiddenFromCheckingUserId) === JSON.stringify([...c.expectedHiddenFromCheckingUserId].sort());
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_IMMEDIATE_CREATE_PROVENANCE_CASES: Array<{
+  name: string;
+  steps: Array<{ kind: "authenticatedCreate" | "reconcile"; profileId: string; ownerUserId: string }>;
+  checkingUserId: string;
+  expectedState: ProfileRegistryState;
+  expectedOwnedByOtherFromCheckingUserId: string[];
+  expectedHiddenFromCheckingUserId: string[];
+}> = [
+  {
+    name: "authenticated A creates a profile while the registry API is unavailable — A's provenance exists locally immediately, with no network call involved",
+    steps: [{ kind: "authenticatedCreate", profileId: "family", ownerUserId: "userA" }],
+    checkingUserId: "userA",
+    expectedState: { family: { userA: { owned: true } } },
+    expectedOwnedByOtherFromCheckingUserId: [],
+    expectedHiddenFromCheckingUserId: [],
+  },
+  {
+    name: "B signs in before A's reconciliation ever ran — A's immediate create provenance alone is enough to block B from adopting or even seeing the profile",
+    steps: [{ kind: "authenticatedCreate", profileId: "family", ownerUserId: "userA" }],
+    checkingUserId: "userB",
+    expectedState: { family: { userA: { owned: true } } },
+    expectedOwnedByOtherFromCheckingUserId: ["family"],
+    expectedHiddenFromCheckingUserId: ["family"],
+  },
+  {
+    name: "A later reconciles successfully — the server's own confirmation re-stamps the SAME (id, account) pair, a safe no-op that leaves ownership exactly as coherent as the immediate local claim already made it",
+    steps: [
+      { kind: "authenticatedCreate", profileId: "family", ownerUserId: "userA" },
+      { kind: "reconcile", profileId: "family", ownerUserId: "userA" },
+    ],
+    checkingUserId: "userA",
+    expectedState: { family: { userA: { owned: true } } },
+    expectedOwnedByOtherFromCheckingUserId: [],
+    expectedHiddenFromCheckingUserId: [],
+  },
+  {
+    name: "signed-out create never stamps ownership at all (createProfile only calls markProfileOwner for a REAL authenticated creator) — the profile remains genuinely unowned legacy state, freely adoptable under the established local-first legacy rules",
+    steps: [],
+    checkingUserId: "userB",
+    expectedState: {},
+    expectedOwnedByOtherFromCheckingUserId: [],
+    expectedHiddenFromCheckingUserId: [],
+  },
+];
+
+/**
+ * Composed end-to-end regression scenario: the RECREATE path (an id
+ * retained-hidden behind a deletion marker, reclaimed by an explicit
+ * authenticated create) preserves clearLocalDeletionMarkersForRecreate's
+ * own, already-established marker semantics UNCHANGED, while ALSO now
+ * gaining the new immediate ownership stamp from createProfile's own doc
+ * above — proving the two coexist without conflict. Threads the exact
+ * same real-world sequence createProfile itself runs for a reclaim:
+ * applyLocalDeletionMarker (a prior delete) -> clearLocalDeletionMarkersForRecreate
+ * (the pre-existing reclaim transition, unmodified by this round) ->
+ * applyProfileOwnerStamp (the NEW immediate-provenance step, for a real
+ * authenticated recreator only).
+ *
+ * Run from Node:
+ *   import { DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES, applyLocalDeletionMarker, clearLocalDeletionMarkersForRecreate, applyProfileOwnerStamp, selectHiddenProfileIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES.forEach(c => {
+ *     let state = applyLocalDeletionMarker({}, c.profileId, c.deletedByAccountKey);
+ *     state = clearLocalDeletionMarkersForRecreate(state, c.profileId, c.recreatedByAccountKey);
+ *     if (c.recreatedByAccountKey !== UNOWNED_ACCOUNT_KEY) {
+ *       state = applyProfileOwnerStamp(state, c.profileId, c.recreatedByAccountKey);
+ *     }
+ *     const hiddenFromRecreator = selectHiddenProfileIdsForAccount(state, c.recreatedByAccountKey).has(c.profileId);
+ *     const hiddenFromOther = c.checkVisibilityForOtherAccountKey
+ *       ? selectHiddenProfileIdsForAccount(state, c.checkVisibilityForOtherAccountKey).has(c.profileId)
+ *       : null;
+ *     const ok = hiddenFromRecreator === c.expectedHiddenFromRecreator
+ *       && (c.checkVisibilityForOtherAccountKey === undefined || hiddenFromOther === c.expectedHiddenFromOtherAccount);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES: Array<{
+  name: string;
+  profileId: string;
+  deletedByAccountKey: string;
+  recreatedByAccountKey: string;
+  expectedHiddenFromRecreator: boolean;
+  checkVisibilityForOtherAccountKey?: string;
+  expectedHiddenFromOtherAccount?: boolean;
+}> = [
+  {
+    name: "signed-out delete -> A's authenticated recreate — A's own established reclaim-visibility contract is unchanged (still visible to A), and A's fresh ownership stamp now also hides it from a different account B immediately",
+    profileId: "family",
+    deletedByAccountKey: UNOWNED_ACCOUNT_KEY,
+    recreatedByAccountKey: "userA",
+    expectedHiddenFromRecreator: false,
+    checkVisibilityForOtherAccountKey: "userB",
+    expectedHiddenFromOtherAccount: true,
+  },
+  {
+    name: "signed-out delete -> signed-out recreate — unaffected by this round: still visible while signed out, and (since a signed-out recreate never stamps ownership) still freely visible/adoptable for any other account too",
+    profileId: "family",
+    deletedByAccountKey: UNOWNED_ACCOUNT_KEY,
+    recreatedByAccountKey: UNOWNED_ACCOUNT_KEY,
+    expectedHiddenFromRecreator: false,
+    checkVisibilityForOtherAccountKey: "userB",
+    expectedHiddenFromOtherAccount: false,
+  },
+];
 
 /**
  * Rename an existing profile (name only — id stays stable).
