@@ -55,7 +55,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { getServerSession, type Session } from "next-auth";
 import { authOptions } from "@/lib/auth";
 import { getPool } from "@/lib/db";
-import { getUserId, validateProfileId, validateProfileName } from "@/lib/syncIdentity";
+import {
+  getUserId,
+  validateProfileId,
+  validateProfileName,
+  MAX_PROFILES_PER_ADOPTION_REQUEST,
+} from "@/lib/syncIdentity";
 
 // This route depends on the signed-in user's auth session and the database
 // on every call — there is nothing cacheable/static about "the account's
@@ -71,10 +76,6 @@ export const dynamic = "force-dynamic";
 // Small metadata rows — 50 KB is generous for any realistic number of
 // device-local profile names in one adoption request.
 const MAX_BODY_BYTES = 50_000;
-
-// Defensive cap — a real device's local profile list is expected to stay
-// tiny; this only bounds the cost of a single malformed/abusive request.
-const MAX_PROFILES_PER_REQUEST = 50;
 
 type ProfileRow = { profile_id: string; name: string; updated_at: Date; deleted_at: Date | null };
 
@@ -140,7 +141,7 @@ function parseAdoptBody(raw: string): AdoptEntry[] | null {
     return null;
   }
   const rawProfiles = (parsed as { profiles: unknown[] }).profiles;
-  if (rawProfiles.length === 0 || rawProfiles.length > MAX_PROFILES_PER_REQUEST) return null;
+  if (rawProfiles.length === 0 || rawProfiles.length > MAX_PROFILES_PER_ADOPTION_REQUEST) return null;
 
   const result: AdoptEntry[] = [];
   const seen = new Set<string>();

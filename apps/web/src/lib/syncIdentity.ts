@@ -90,3 +90,14 @@ export function sanitizeProfileName(raw: string): string | null {
   if (!trimmed) return null;
   return trimmed.length > MAX_PROFILE_NAME_LENGTH ? trimmed.slice(0, MAX_PROFILE_NAME_LENGTH) : trimmed;
 }
+
+// SH.4.1 Codex P2 follow-up (4th round) — the ONE maintained maximum number
+// of profiles a single `/api/sync/profiles` PUT request may carry. Both
+// route.ts's own request-size defense and profileRegistrySync.ts's
+// batchProfilesForAdoption() (which splits an adoption round's candidates
+// into requests the server will actually accept) import this same constant,
+// so the two can never drift apart — without batching, the server rejecting
+// an oversized `profiles` array fails the WHOLE request, and therefore
+// every profile in it, repeatedly, on every future round, whenever a device
+// has more than this many profiles to adopt at once.
+export const MAX_PROFILES_PER_ADOPTION_REQUEST = 50;

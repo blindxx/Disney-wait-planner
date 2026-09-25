@@ -486,6 +486,89 @@ export function getLocallyDeletedProfileIds(currentOwnerUserId: string): Set<str
   return selectLocallyDeletedIdsForAccount(readProfileRegistryState(), currentOwnerUserId);
 }
 
+/**
+ * Pure filter: hide any profile whose id is in `locallyDeletedIds` from
+ * `profiles`, WITHOUT removing it from `profiles` itself — callers pass the
+ * result on for display, never write it back. Codex P1 follow-up (4th
+ * round) — account-scoped deletion previously only ever gated what
+ * REJOINED `dwp.profiles` during reconciliation (selectActiveServerProfiles/
+ * adoptServerProfiles); it did nothing for an id ALREADY sitting in the
+ * shared list. Concretely: A deletes "family" (removed from `dwp.profiles`,
+ * marked locally deleted for A); B later discovers B's own, distinct
+ * "family" and adoptServerProfiles adds `{id:"family",...}` BACK into the
+ * one shared `dwp.profiles` array; when A returns, that entry is already
+ * present, so the additive-merge guard in adoptServerProfiles/
+ * mergeProfilesAdditive (which only ever prevents ADDING a duplicate) never
+ * gets a chance to keep it hidden from A — nothing previously re-derived
+ * A's EFFECTIVE list from the raw stored one. This filter is that missing
+ * step. It must never be used to justify writing a filtered list back to
+ * `dwp.profiles` — that would physically delete B's entry out from under
+ * B, which is exactly what this fix must not do.
+ *
+ * Run from Node:
+ *   import { DEV_FILTER_VISIBLE_PROFILES_CASES, filterVisibleProfiles } from "@/lib/profileStorage";
+ *   DEV_FILTER_VISIBLE_PROFILES_CASES.forEach(c => {
+ *     const got = filterVisibleProfiles(c.profiles, c.locallyDeletedIds);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function filterVisibleProfiles(profiles: Profile[], locallyDeletedIds: ReadonlySet<string>): Profile[] {
+  if (locallyDeletedIds.size === 0) return profiles;
+  return profiles.filter((p) => !locallyDeletedIds.has(p.id));
+}
+
+export const DEV_FILTER_VISIBLE_PROFILES_CASES: Array<{
+  name: string;
+  profiles: Profile[];
+  locallyDeletedIds: Set<string>;
+  expected: Profile[];
+}> = [
+  {
+    name: "no locally-deleted ids — list returned unchanged (same reference, no copy needed)",
+    profiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    locallyDeletedIds: new Set(),
+    expected: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+  },
+  {
+    name: "Codex P1 follow-up (4th round) — A's deleted 'family' is hidden even though it is already present in the shared list (e.g. B re-added it via discovery)",
+    profiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    locallyDeletedIds: new Set(["family"]),
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "an id not present in the list is simply absent from the result — filtering never adds anything",
+    profiles: [{ id: "default", name: "Default" }],
+    locallyDeletedIds: new Set(["family"]),
+    expected: [{ id: "default", name: "Default" }],
+  },
+];
+
+/**
+ * Returns the EFFECTIVE profile list for `currentOwnerUserId` (a real
+ * userId, or UNOWNED_ACCOUNT_KEY when signed out): every profile currently
+ * in the shared local `dwp.profiles` list, except an id THIS account has
+ * explicitly, locally deleted (getLocallyDeletedProfileIds/
+ * filterVisibleProfiles above). This is a READ-ONLY, per-render view — it
+ * never writes to `dwp.profiles`, so the underlying shared list (and
+ * therefore any OTHER account's own same-id profile) is completely
+ * unaffected; only what THIS call returns for display is filtered. Callers
+ * displaying the profile picker (settings/page.tsx) should call this
+ * instead of getProfiles() directly whenever an authenticated identity (or
+ * its signed-out equivalent, UNOWNED_ACCOUNT_KEY) is known.
+ */
+export function getVisibleProfiles(currentOwnerUserId: string): Profile[] {
+  return filterVisibleProfiles(getProfiles(), getLocallyDeletedProfileIds(currentOwnerUserId));
+}
+
 const DEFAULT_PROFILE: Profile = { id: "default", name: "Default" };
 
 /** Legacy single-user keys that get migrated into the Default namespace on first bootstrap. */

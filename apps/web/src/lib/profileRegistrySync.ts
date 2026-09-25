@@ -53,6 +53,14 @@
  *     in the first place (profileStorage.ts's createProfile/renameProfile
  *     sanitize at the input boundary); this filter exists for legacy local
  *     profiles that predate that fix.
+ *   - The (already-filtered, already-validated) adopt-list is split into
+ *     batches of at most syncIdentity.ts's MAX_PROFILES_PER_ADOPTION_REQUEST
+ *     (batchProfilesForAdoption — Codex P2 follow-up, 4th round) before
+ *     sending, since the server rejects an oversized `profiles` array
+ *     outright: without this, a device with more than that many profiles to
+ *     adopt at once would have its ENTIRE request fail, repeatedly,
+ *     registering nothing every round. sendAdoptionBatches re-checks the
+ *     identity guard before and after every individual batch.
  *   - Every round that reaches the server successfully durably stamps
  *     ownership (profileStorage.ts's markProfileOwner) for every id the
  *     server confirms belongs to this account, keyed by `(profileId,
@@ -99,11 +107,12 @@
 import {
   type Profile,
   getProfiles,
+  filterVisibleProfiles,
   adoptServerProfiles,
   markProfileOwner,
   getLocallyDeletedProfileIds,
 } from "./profileStorage";
-import { validateProfileName } from "./syncIdentity";
+import { validateProfileName, MAX_PROFILES_PER_ADOPTION_REQUEST } from "./syncIdentity";
 
 // ===== TYPES =====
 
@@ -236,6 +245,12 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
     localProfiles: [{ id: "family", name: "Family" }],
     expected: [{ id: "family", name: "Family" }],
   },
+  {
+    name: "Codex P1 follow-up (4th round, bounded adjacency) — an id A deleted locally must never be silently re-adopted for A just because B's unrelated discovery re-added it to the shared list; reconcileProfileRegistry pre-filters it out of `localProfiles` via filterVisibleProfiles before this function ever runs, so it is simply absent here, exactly as this case models",
+    serverProfiles: [], // A's own account has never registered "family"
+    localProfiles: [{ id: "default", name: "Default" }], // "family" already excluded upstream — see reconcileProfileRegistry
+    expected: [{ id: "default", name: "Default" }],
+  },
 ];
 
 /**
@@ -306,6 +321,155 @@ export const DEV_FILTER_ADOPTABLE_PROFILES_CASES: Array<{
       { id: "mom", name: "Mom" },
     ],
     expected: [{ id: "mom", name: "Mom" }],
+  },
+];
+
+/**
+ * Splits `toAdopt` into deterministic, order-preserving batches of at most
+ * MAX_PROFILES_PER_ADOPTION_REQUEST entries (Codex P2 follow-up, 4th
+ * round). `/api/sync/profiles`'s PUT rejects the WHOLE request (400) when
+ * its `profiles` array exceeds that same limit — a device with more than
+ * this many profiles to adopt in one round would otherwise have its entire
+ * adoption request fail, repeatedly, every future round, registering
+ * NOTHING at all rather than the (majority) of profiles that would have
+ * fit. Splitting is a pure, mechanical chunking — it does not change WHICH
+ * profiles are adoptable (that is computeProfilesToAdopt/
+ * filterAdoptableProfiles's job) or impose any smaller cap of its own;
+ * every candidate is still sent, just across as many requests as needed.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_BATCH_PROFILES_FOR_ADOPTION_CASES, batchProfilesForAdoption } from "@/lib/profileRegistrySync";
+ *   DEV_BATCH_PROFILES_FOR_ADOPTION_CASES.forEach(c => {
+ *     const got = batchProfilesForAdoption(c.toAdopt);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function batchProfilesForAdoption(toAdopt: Profile[]): Profile[][] {
+  if (toAdopt.length === 0) return [];
+  const batches: Profile[][] = [];
+  for (let i = 0; i < toAdopt.length; i += MAX_PROFILES_PER_ADOPTION_REQUEST) {
+    batches.push(toAdopt.slice(i, i + MAX_PROFILES_PER_ADOPTION_REQUEST));
+  }
+  return batches;
+}
+
+function makeProfile(n: number): Profile {
+  return { id: `p${n}`, name: `Profile ${n}` };
+}
+
+export const DEV_BATCH_PROFILES_FOR_ADOPTION_CASES: Array<{
+  name: string;
+  toAdopt: Profile[];
+  expected: Profile[][];
+}> = [
+  {
+    name: "empty input — no batches",
+    toAdopt: [],
+    expected: [],
+  },
+  {
+    name: "fewer than the limit — a single batch",
+    toAdopt: [makeProfile(1), makeProfile(2), makeProfile(3)],
+    expected: [[makeProfile(1), makeProfile(2), makeProfile(3)]],
+  },
+  {
+    name: "exactly the limit (50) — a single, full batch, not a trailing empty one",
+    toAdopt: Array.from({ length: 50 }, (_, i) => makeProfile(i)),
+    expected: [Array.from({ length: 50 }, (_, i) => makeProfile(i))],
+  },
+  {
+    name: "Codex P2 follow-up (4th round) — 51 adoptable profiles split into batches of at most 50",
+    toAdopt: Array.from({ length: 51 }, (_, i) => makeProfile(i)),
+    expected: [Array.from({ length: 50 }, (_, i) => makeProfile(i)), [makeProfile(50)]],
+  },
+  {
+    name: "exactly double the limit (100) — two full batches, order preserved",
+    toAdopt: Array.from({ length: 100 }, (_, i) => makeProfile(i)),
+    expected: [
+      Array.from({ length: 50 }, (_, i) => makeProfile(i)),
+      Array.from({ length: 50 }, (_, i) => makeProfile(50 + i)),
+    ],
+  },
+];
+
+/**
+ * Sends `batches` in order via `sendBatch`, checking `isCurrent()` BEFORE
+ * every batch (never sending a batch once identity has gone stale) and
+ * AGAIN immediately after each batch's request resolves (never proceeding
+ * to the next batch — or letting the caller proceed to whatever runs after
+ * this returns, such as the final authoritative re-GET — once stale).
+ * Codex P1/P2 follow-up (4th round) — this is the ONLY looping/async-
+ * sequencing logic the adoption path needs, factored out so the exact
+ * stale-check-before-and-after-every-batch behavior is directly testable
+ * with fake `sendBatch`/`isCurrent` callbacks, without any real network I/O
+ * or timing. Returns true only if every batch was sent while still
+ * current; false the moment staleness is detected, at which point no
+ * further batches are sent — reconcileProfileRegistry re-checks
+ * `isCurrent()` itself immediately after calling this, so it never needs to
+ * branch on this return value to stay safe, but the value makes the
+ * short-circuit directly observable for testing.
+ *
+ * Run from Node (needs a `for...of` + `await`, unlike this file's other
+ * synchronous DEV_* runners, since this function is itself async):
+ *   import { DEV_SEND_ADOPTION_BATCHES_CASES, sendAdoptionBatches } from "@/lib/profileRegistrySync";
+ *   for (const c of DEV_SEND_ADOPTION_BATCHES_CASES) {
+ *     const sent = [];
+ *     let sentCount = 0;
+ *     const isCurrent = () => c.staleAtBatchIndex === null || sentCount < c.staleAtBatchIndex;
+ *     const result = await sendAdoptionBatches(c.batches, async (b) => { sent.push(b); sentCount++; }, isCurrent);
+ *     const ok = result === c.expectedReturn && JSON.stringify(sent) === JSON.stringify(c.expectedBatchesSent);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   }
+ */
+export async function sendAdoptionBatches(
+  batches: Profile[][],
+  sendBatch: (batch: Profile[]) => Promise<void>,
+  isCurrent: () => boolean
+): Promise<boolean> {
+  for (const batch of batches) {
+    if (!isCurrent()) return false;
+    await sendBatch(batch);
+    if (!isCurrent()) return false;
+  }
+  return true;
+}
+
+export const DEV_SEND_ADOPTION_BATCHES_CASES: Array<{
+  name: string;
+  batches: Profile[][];
+  staleAtBatchIndex: number | null;
+  expectedBatchesSent: Profile[][];
+  expectedReturn: boolean;
+}> = [
+  {
+    name: "all batches sent while identity remains current",
+    batches: [[makeProfile(1)], [makeProfile(2)]],
+    staleAtBatchIndex: null,
+    expectedBatchesSent: [[makeProfile(1)], [makeProfile(2)]],
+    expectedReturn: true,
+  },
+  {
+    name: "Codex P1/P2 follow-up (4th round) — identity goes stale between batches — a later batch is never sent",
+    batches: [[makeProfile(1)], [makeProfile(2)], [makeProfile(3)]],
+    staleAtBatchIndex: 1,
+    expectedBatchesSent: [[makeProfile(1)]],
+    expectedReturn: false,
+  },
+  {
+    name: "already stale before the first batch — nothing is sent, no mutation attempted",
+    batches: [[makeProfile(1)]],
+    staleAtBatchIndex: 0,
+    expectedBatchesSent: [],
+    expectedReturn: false,
+  },
+  {
+    name: "no batches to send — trivially returns true without calling sendBatch",
+    batches: [],
+    staleAtBatchIndex: null,
+    expectedBatchesSent: [],
+    expectedReturn: true,
   },
 ];
 
@@ -586,6 +750,23 @@ export const DEV_RESOLVE_AUTHORITATIVE_SERVER_PROFILES_CASES: Array<{
       { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
     ],
   },
+  {
+    name: "Codex P2 follow-up (4th round) — 51 profiles adopted across two batches are ALL reflected once the single final re-GET runs (batching never changes this decision — it's still one authoritative snapshot after every batch has been attempted)",
+    initialServerProfiles: [],
+    pushAttempted: true,
+    reconfirmedServerProfiles: Array.from({ length: 51 }, (_, i) => ({
+      profileId: `p${i}`,
+      name: `Profile ${i}`,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      deletedAt: null,
+    })),
+    expected: Array.from({ length: 51 }, (_, i) => ({
+      profileId: `p${i}`,
+      name: `Profile ${i}`,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      deletedAt: null,
+    })),
+  },
 ];
 
 // ===== NETWORK ORCHESTRATION =====
@@ -681,6 +862,20 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
  * letting it poison the whole push; and `getLocallyDeletedProfileIds(userId)`
  * only ever suppresses discovery for ids THIS account (or no account) has
  * locally deleted, never a different account's own same-id deletion.
+ *
+ * Codex P2 follow-up (4th round) — the adopt-list is split into batches of
+ * at most MAX_PROFILES_PER_ADOPTION_REQUEST (batchProfilesForAdoption)
+ * before sending, since the server rejects an oversized `profiles` array
+ * outright; sendAdoptionBatches re-checks `isCurrent()` before AND after
+ * every individual batch, so identity going stale between batches stops
+ * any further batch from being sent — exactly like every other await
+ * boundary in this function. Still exactly ONE confirmatory re-GET runs
+ * after ALL batches have been attempted (never one per batch): it reflects
+ * whatever actually committed across every batch, so a batch whose own
+ * response was lost or that never got sent at all (because identity went
+ * stale, or a network error) is handled identically to the single-batch
+ * case — resolveAuthoritativeServerProfiles decides what's real from that
+ * one authoritative snapshot, never from assuming any batch succeeded.
  */
 export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
@@ -691,13 +886,27 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const initialServerProfiles = await fetchServerProfiles();
   if (!isCurrent() || initialServerProfiles === null) return;
 
-  const localProfiles = getProfiles();
+  // Codex P1 follow-up (4th round, bounded adjacency) — computed ONCE and
+  // used for BOTH sides of this round: filtering discovery (below, as
+  // before) AND filtering the ADOPTION candidates here. Without this
+  // second use, an id `userId` explicitly deleted locally, but which
+  // reappears in the shared `dwp.profiles` list only because a DIFFERENT
+  // account's own unrelated discovery re-added it (adoptServerProfiles is
+  // account-agnostic — it just merges into the one shared list), would
+  // look to computeProfilesToAdopt like a brand-new, never-registered local
+  // profile and get silently PUSHED as newly `userId`'s own — resurrecting
+  // exactly what this account just deleted, the same failure class as the
+  // display-visibility bug this round fixes, just on the push side instead
+  // of the pull side.
+  const locallyDeletedIds = getLocallyDeletedProfileIds(userId);
+  const localProfiles = filterVisibleProfiles(getProfiles(), locallyDeletedIds);
   const toAdopt = filterAdoptableProfiles(computeProfilesToAdopt(initialServerProfiles, localProfiles));
+  const batches = batchProfilesForAdoption(toAdopt);
 
-  const pushAttempted = toAdopt.length > 0;
+  const pushAttempted = batches.length > 0;
   let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
   if (pushAttempted) {
-    await pushProfilesToAdopt(toAdopt);
+    await sendAdoptionBatches(batches, pushProfilesToAdopt, isCurrent);
     if (!isCurrent()) return;
     reconfirmedServerProfiles = await fetchServerProfiles();
     if (!isCurrent()) return;
@@ -718,6 +927,5 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     markProfileOwner(id, userId);
   }
 
-  const locallyDeletedIds = getLocallyDeletedProfileIds(userId);
   adoptServerProfiles(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
 }

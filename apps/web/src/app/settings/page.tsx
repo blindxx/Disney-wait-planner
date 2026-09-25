@@ -28,7 +28,8 @@ import {
 import {
   type Profile,
   bootstrapProfiles,
-  getProfiles,
+  getVisibleProfiles,
+  UNOWNED_ACCOUNT_KEY,
   getActiveProfileId,
   setActiveProfileId as setActiveProfileIdInStorage,
   createProfile,
@@ -134,6 +135,13 @@ export default function SettingsPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const authenticatedUserId =
     sessionStatus === "authenticated" ? ((session?.user as any)?.id ?? session?.user?.email ?? null) : null;
+  // SH.4.1 (Codex P1 follow-up, 4th round) — the account key to scope
+  // profile VISIBILITY by (getVisibleProfiles/getLocallyDeletedProfileIds):
+  // the real authenticated userId when signed in, or the shared
+  // UNOWNED_ACCOUNT_KEY bucket when signed out — mirrors exactly how
+  // deleteProfile's own `currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY` already
+  // scopes the write side of this same provenance.
+  const visibilityOwnerKey = authenticatedUserId ?? UNOWNED_ACCOUNT_KEY;
   const [emailInput, setEmailInput] = useState("");
   const [signInSent, setSignInSent] = useState(false);
   const [signInError, setSignInError] = useState("");
@@ -157,7 +165,7 @@ export default function SettingsPage() {
     bootstrapProfiles();
     const profileKeys = getActiveProfileKeys();
     profileKeysRef.current = profileKeys;
-    setProfiles(getProfiles());
+    setProfiles(getVisibleProfiles(visibilityOwnerKey));
     setActiveProfileIdState(getActiveProfileId());
 
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
@@ -242,7 +250,12 @@ export default function SettingsPage() {
     if (!authenticatedUserId) return;
     let cancelled = false;
     reconcileProfileRegistry(authenticatedUserId).then(() => {
-      if (!cancelled) setProfiles(getProfiles());
+      // SH.4.1 (Codex P1 follow-up, 4th round) — re-derive the EFFECTIVE
+      // list for `authenticatedUserId` after reconciling, not the raw
+      // shared list: reconciliation may have just re-added an id (via
+      // adoptServerProfiles) that THIS account has separately, locally
+      // deleted — see getVisibleProfiles's own doc.
+      if (!cancelled) setProfiles(getVisibleProfiles(authenticatedUserId));
     });
     return () => {
       cancelled = true;
@@ -313,7 +326,7 @@ export default function SettingsPage() {
     const name = window.prompt("New profile name:");
     if (!name || !name.trim()) return;
     const profile = createProfile(name);
-    setProfiles(getProfiles());
+    setProfiles(getVisibleProfiles(visibilityOwnerKey));
     // Switch to the newly created profile immediately
     setActiveProfileIdInStorage(profile.id);
     setActiveProfileIdState(profile.id);
@@ -326,7 +339,7 @@ export default function SettingsPage() {
     const name = window.prompt("Rename profile:", current.name);
     if (!name || !name.trim()) return;
     renameProfile(activeProfileId, name);
-    setProfiles(getProfiles());
+    setProfiles(getVisibleProfiles(visibilityOwnerKey));
   }
 
   function handleDeleteProfile() {
@@ -343,7 +356,7 @@ export default function SettingsPage() {
     // same grandfathered id on a shared browser — see deleteProfile's own
     // doc in profileStorage.ts.
     deleteProfile(activeProfileId, authenticatedUserId);
-    const remaining = getProfiles();
+    const remaining = getVisibleProfiles(visibilityOwnerKey);
     setProfiles(remaining);
     setActiveProfileIdState("default");
     location.reload();
