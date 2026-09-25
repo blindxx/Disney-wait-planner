@@ -8,14 +8,20 @@
  *   dwp.activeProfile  — currently active profile id
  *   dwp.profiles       — JSON array of Profile objects
  *
- * Per-profile namespaced keys (dwp:{profileId}:{baseKey}):
+ * Per-profile namespaced keys (dwp:{profileId}:{baseKey}), signed-out/
+ * device-local — see buildNamespacedKey below:
  *   dwp:{id}:plans          — plans data (mirrors legacy dwp.myPlans)
  *   dwp:{id}:lightning      — lightning data (mirrors legacy dwp.lightning.v1)
  *   dwp:{id}:selectedResort — active resort (mirrors legacy dwp.selectedResort)
  *   dwp:{id}:selectedPark   — active park (mirrors legacy dwp.selectedPark)
+ *
+ * SH.4.1d — authenticated, account-qualified keys (dwp:{userId}:{profileId}:
+ * {baseKey}) — see buildAccountQualifiedKey/decideLegacyKeyAdoption below.
+ * This is the storage-key + legacy-adoption FOUNDATION only; no consumer
+ * reads/writes through the qualified shape yet.
  */
 
-import { purgeProfileSyncState } from "./syncHelper";
+import { getLocalContentOwner, purgeProfileSyncState } from "./syncHelper";
 import { sanitizeProfileName } from "./syncIdentity";
 
 // ===== TYPES =====
@@ -1432,9 +1438,198 @@ const LEGACY_KEY_MAP: Record<string, string> = {
 /**
  * Build the namespaced localStorage key for a given profile and base key.
  * Example: buildNamespacedKey("lindsay", "plans") → "dwp:lindsay:plans"
+ *
+ * This is the signed-out/device-local key shape. It remains completely
+ * unchanged by SH.4.1d below — see buildAccountQualifiedKey's own doc for
+ * the authenticated counterpart.
  */
 export function buildNamespacedKey(profileId: string, baseKey: string): string {
   return `dwp:${profileId}:${baseKey}`;
+}
+
+// ===== ACCOUNT-QUALIFIED KEY + LEGACY ADOPTION (SH.4.1d) =====
+//
+// Architecture decision this slice establishes: authenticated local planner
+// identity becomes (userId, profileId), not profileId alone — aligning
+// physical local storage with the server identity model and with SH.2's
+// already account-qualified confirmed/pending sync state. This section adds
+// ONLY the key-construction primitive and the legacy-adoption decision
+// (storage-key foundation). It deliberately does NOT wire any consumer
+// (Plans/Lightning/Tom/beacon/import-export/purge) to read or write through
+// the qualified key yet — see this slice's own task description for the
+// full non-goal list. Every existing unqualified `dwp:{profileId}:{baseKey}`
+// read/write in the app is completely unaffected by adding this primitive.
+//
+// THIS is the single shared account-qualified key builder — every future
+// consumer must call buildAccountQualifiedKey() rather than hand-rolling its
+// own `dwp:${userId}:${profileId}:${baseKey}` template, exactly like every
+// existing signed-out consumer already goes through buildNamespacedKey()
+// rather than a page-local builder.
+
+/**
+ * Build the authenticated, account-qualified localStorage key for a given
+ * user, profile, and base key: `dwp:{userId}:{profileId}:{baseKey}`.
+ * Example: buildAccountQualifiedKey("42", "lindsay", "plans") →
+ * "dwp:42:lindsay:plans"
+ *
+ * Signed-out/device-local storage is untouched by this — it keeps using
+ * buildNamespacedKey()'s existing unqualified `dwp:{profileId}:{baseKey}`
+ * shape. This builder is additive: it names a NEW key namespace alongside
+ * the existing one, never a replacement for it.
+ */
+export function buildAccountQualifiedKey(userId: string, profileId: string, baseKey: string): string {
+  return `dwp:${userId}:${profileId}:${baseKey}`;
+}
+
+/**
+ * The legacy-adoption decision this key primitive requires before any
+ * consumer copies an existing unqualified `dwp:{profileId}:{baseKey}` value
+ * into its new account-qualified home. This is deliberately NOT "qualified
+ * key absent => copy unqualified bytes" — that rule was explicitly rejected
+ * for this slice, because the unqualified slot is exactly the ambiguous,
+ * un-account-scoped storage this architecture change exists to move away
+ * from: it may hold bytes left behind by a completely different account
+ * that previously used this same browser/profile id.
+ *
+ * Evidence used: `legacyOwner`, i.e. whatever
+ * syncHelper.ts's existing getLocalContentOwner(profileId) currently
+ * returns — the SAME durable per-profileId marker SH.4.1a's
+ * evaluateLocalContentForeign() already uses to decide whether a profile's
+ * current physical bytes are safe to render/edit for a given identity. This
+ * is a deliberate reuse of that single existing provenance concept rather
+ * than a second, competing ownership model.
+ *
+ * This decision is DELIBERATELY STRICTER than evaluateLocalContentForeign()
+ * for the null case. evaluateLocalContentForeign() trusts a null/never-
+ * tagged owner for ANY identity, because that check only ever gates a
+ * TEMPORARY, repeatedly-re-evaluated render/edit trust over the ONE
+ * existing shared physical copy — nothing is permanently bound, and the
+ * check runs again on every future page load. Adoption is different: once
+ * copied, the account-qualified key becomes THAT account's own durable
+ * storage going forward (this module's own "never overwrite an existing
+ * qualified value" rule means a wrong adoption can never be silently
+ * corrected by a later, more-informed run). A null/never-tagged owner does
+ * NOT prove this content is `currentUserId`'s own — it may equally be
+ * pre-SH.4.1a content, or content left by a signed-out session, or content
+ * from an account whose pull never reached the point where
+ * setLocalContentOwner() was called. Only a marker that POSITIVELY,
+ * affirmatively names `currentUserId` is treated as safely attributable;
+ * every other case (null, or a different known identity) fails closed.
+ *
+ * Required properties (all satisfied by this single decision):
+ *   - never overwrite an existing qualified value — `qualifiedValueExists`
+ *     short-circuits to "skip" before the owner is even consulted;
+ *   - never copy known-foreign legacy content into another account —
+ *     `legacyOwner` naming a different identity returns "skip";
+ *   - ambiguous ownership fails closed rather than guessing —
+ *     `legacyOwner === null` also returns "skip", not "adopt";
+ *   - repeated evaluation is safe/idempotent — a pure function of its
+ *     inputs; once a real adoption has run once, `qualifiedValueExists`
+ *     becomes true and every subsequent call again returns "skip";
+ *   - signed-out/local-only data remains untouched — this decision is only
+ *     ever meaningful for an authenticated `currentUserId`; the signed-out
+ *     storage path never constructs a qualified key or consults this
+ *     function at all, it simply keeps using buildNamespacedKey() directly;
+ *   - migration copies rather than destructively moves legacy data — this
+ *     is a decision function only (no I/O); see adoptLegacyProfileValueIfSafe
+ *     below for the copy-only wrapper that acts on it;
+ *   - no network dependency — legacyOwner is read from localStorage only.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES, decideLegacyKeyAdoption } from "@/lib/profileStorage";
+ *   DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES.forEach(c => {
+ *     const got = decideLegacyKeyAdoption(c.input);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type LegacyKeyAdoptionDecision = "adopt" | "skip";
+
+export function decideLegacyKeyAdoption(input: {
+  qualifiedValueExists: boolean;
+  legacyValueExists: boolean;
+  legacyOwner: string | null;
+  currentUserId: string;
+}): LegacyKeyAdoptionDecision {
+  const { qualifiedValueExists, legacyValueExists, legacyOwner, currentUserId } = input;
+  if (qualifiedValueExists) return "skip"; // never overwrite an existing qualified value
+  if (!legacyValueExists) return "skip"; // nothing to adopt
+  if (legacyOwner === currentUserId) return "adopt"; // positively, affirmatively attributable
+  return "skip"; // null (ambiguous/never tagged) or a different known identity (foreign) — both fail closed
+}
+
+export const DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES: Array<{
+  name: string;
+  input: {
+    qualifiedValueExists: boolean;
+    legacyValueExists: boolean;
+    legacyOwner: string | null;
+    currentUserId: string;
+  };
+  expected: LegacyKeyAdoptionDecision;
+}> = [
+  {
+    name: "existing qualified value => no adoption/overwrite, regardless of legacy owner",
+    input: { qualifiedValueExists: true, legacyValueExists: true, legacyOwner: "userA", currentUserId: "userA" },
+    expected: "skip",
+  },
+  {
+    name: "safely attributable legacy value (owner === currentUserId) => adopt",
+    input: { qualifiedValueExists: false, legacyValueExists: true, legacyOwner: "userA", currentUserId: "userA" },
+    expected: "adopt",
+  },
+  {
+    name: "known-foreign legacy value (owner is a different known identity) => do not adopt",
+    input: { qualifiedValueExists: false, legacyValueExists: true, legacyOwner: "userB", currentUserId: "userA" },
+    expected: "skip",
+  },
+  {
+    name: "ambiguous legacy ownership (never tagged, owner null) => fail closed, not a guessed adopt",
+    input: { qualifiedValueExists: false, legacyValueExists: true, legacyOwner: null, currentUserId: "userA" },
+    expected: "skip",
+  },
+  {
+    name: "repeated adoption decision is idempotent — once qualifiedValueExists flips true (post-adoption), re-evaluation still skips",
+    input: { qualifiedValueExists: true, legacyValueExists: true, legacyOwner: "userA", currentUserId: "userA" },
+    expected: "skip",
+  },
+  {
+    name: "no legacy value present at all => nothing to adopt",
+    input: { qualifiedValueExists: false, legacyValueExists: false, legacyOwner: null, currentUserId: "userA" },
+    expected: "skip",
+  },
+];
+
+/**
+ * I/O wrapper around decideLegacyKeyAdoption(): reads the current qualified
+ * and legacy values for `(userId, profileId, baseKey)` plus the existing
+ * `getLocalContentOwner(profileId)` provenance marker, and — only when the
+ * decision is "adopt" — COPIES (never deletes) the legacy value into the
+ * new account-qualified key. Returns whether an adoption copy was made.
+ *
+ * Not yet called by any consumer in this slice (see this section's own
+ * header doc) — provided so a later phase's Plans/Lightning/etc. wiring has
+ * a single, already-reviewed entry point rather than needing to reimplement
+ * this read/decide/copy sequence itself.
+ */
+export function adoptLegacyProfileValueIfSafe(userId: string, profileId: string, baseKey: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const qualifiedKey = buildAccountQualifiedKey(userId, profileId, baseKey);
+    const legacyKey = buildNamespacedKey(profileId, baseKey);
+    const qualifiedValue = localStorage.getItem(qualifiedKey);
+    const legacyValue = localStorage.getItem(legacyKey);
+    const decision = decideLegacyKeyAdoption({
+      qualifiedValueExists: qualifiedValue !== null,
+      legacyValueExists: legacyValue !== null,
+      legacyOwner: getLocalContentOwner(profileId),
+      currentUserId: userId,
+    });
+    if (decision !== "adopt") return false;
+    localStorage.setItem(qualifiedKey, legacyValue as string);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ===== PROFILE LIST HELPERS =====
