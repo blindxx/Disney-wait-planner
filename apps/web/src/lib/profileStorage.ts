@@ -313,61 +313,106 @@ export function applyLocalDeletionMarker(
 }
 
 /**
- * Pure state transition: clear every account's local-deletion marker for
- * `profileId` (including the UNOWNED_ACCOUNT_KEY sentinel), preserving each
- * account's own `owned` fact if any. Called when this exact id is
- * explicitly recreated (createProfile below) — a deliberate new Create is
- * this device's own signal that the id should be eligible for discovery/
- * adoption again, regardless of which account (or none) had previously
- * deleted it.
+ * Pure state transition: clear ONLY `accountKey`'s own local-deletion
+ * marker for `profileId` (a real userId, or UNOWNED_ACCOUNT_KEY when no
+ * account is authenticated), preserving that same account's `owned` fact if
+ * any, and leaving EVERY OTHER account's entry for the identical
+ * `profileId` completely untouched. Called when this exact id is
+ * explicitly (re)created (createProfile below) — a deliberate new Create is
+ * THAT account's (or, when signed out, the shared unowned bucket's) own
+ * signal that the id should be eligible for discovery/adoption again for
+ * IT specifically.
+ *
+ * Codex P1 follow-up (5th round) — previously this cleared EVERY account's
+ * marker for the id at once: if B had locally deleted "family" and A later
+ * created A's own "family" (the same literal id, since normalizeId() is
+ * deterministic), A's creation would ALSO silently clear B's unrelated
+ * suppression, resurrecting "family" for B's next reconciliation even
+ * though B never asked for that. Scoping the clear to exactly the creating
+ * account is the fix — mirrors applyLocalDeletionMarker's own
+ * single-account write above.
  */
-export function clearLocalDeletionMarkers(state: ProfileRegistryState, profileId: string): ProfileRegistryState {
-  const byAccount = state[profileId];
-  if (!byAccount) return state;
-  let changed = false;
-  const updated: Record<string, ProfileRegistryAccountState> = {};
-  for (const [key, entry] of Object.entries(byAccount)) {
-    if (entry?.locallyDeleted) {
-      changed = true;
-      if (entry.owned) updated[key] = { owned: true };
-    } else {
-      updated[key] = entry;
-    }
+export function clearLocalDeletionMarkerForAccount(
+  state: ProfileRegistryState,
+  profileId: string,
+  accountKey: string
+): ProfileRegistryState {
+  const entry = state[profileId]?.[accountKey];
+  if (!entry?.locallyDeleted) return state;
+  const byAccount = { ...state[profileId] };
+  if (entry.owned) {
+    byAccount[accountKey] = { owned: true };
+  } else {
+    delete byAccount[accountKey];
   }
-  if (!changed) return state;
   const next = { ...state };
-  if (Object.keys(updated).length === 0) {
+  if (Object.keys(byAccount).length === 0) {
     delete next[profileId];
   } else {
-    next[profileId] = updated;
+    next[profileId] = byAccount;
   }
   return next;
 }
 
-export const DEV_CLEAR_LOCAL_DELETION_MARKERS_CASES: Array<{
+export const DEV_CLEAR_LOCAL_DELETION_MARKER_FOR_ACCOUNT_CASES: Array<{
   name: string;
   state: ProfileRegistryState;
   profileId: string;
+  accountKey: string;
   expected: ProfileRegistryState;
 }> = [
   {
-    name: "recreate clears every account's deletion marker, preserving each account's owned fact",
-    state: {
-      family: { userA: { owned: true, locallyDeleted: true }, [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true } },
-    },
+    name: "recreate clears the creating account's own deletion marker, preserving its owned fact",
+    state: { family: { userA: { owned: true, locallyDeleted: true } } },
     profileId: "family",
+    accountKey: "userA",
     expected: { family: { userA: { owned: true } } },
   },
   {
-    name: "no deletion marker present — state returned unchanged",
+    name: "Codex P1 follow-up (5th round) — A recreating 'family' clears ONLY A's marker; B's independent suppression for the identical literal id survives untouched",
+    state: {
+      family: {
+        userA: { owned: true, locallyDeleted: true },
+        userB: { owned: true, locallyDeleted: true },
+      },
+    },
+    profileId: "family",
+    accountKey: "userA",
+    expected: {
+      family: {
+        userA: { owned: true },
+        userB: { owned: true, locallyDeleted: true },
+      },
+    },
+  },
+  {
+    name: "signed-out/unowned creation clears only the shared unowned sentinel's marker, never a real account's",
+    state: {
+      family: {
+        [UNOWNED_ACCOUNT_KEY]: { locallyDeleted: true },
+        userA: { owned: true, locallyDeleted: true },
+      },
+    },
+    profileId: "family",
+    accountKey: UNOWNED_ACCOUNT_KEY,
+    expected: {
+      family: {
+        userA: { owned: true, locallyDeleted: true },
+      },
+    },
+  },
+  {
+    name: "no deletion marker present for this account — state returned unchanged",
     state: { family: { userA: { owned: true } } },
     profileId: "family",
+    accountKey: "userA",
     expected: { family: { userA: { owned: true } } },
   },
   {
     name: "unknown profileId — state returned unchanged",
     state: {},
     profileId: "family",
+    accountKey: "userA",
     expected: {},
   },
 ];
@@ -377,9 +422,9 @@ function markProfileLocallyDeleted(profileId: string, accountKey: string): void 
   writeProfileRegistryState(applyLocalDeletionMarker(state, profileId, accountKey));
 }
 
-function clearLocalDeletionMarker(profileId: string): void {
+function clearLocalDeletionMarker(profileId: string, accountKey: string): void {
   const state = readProfileRegistryState();
-  const updated = clearLocalDeletionMarkers(state, profileId);
+  const updated = clearLocalDeletionMarkerForAccount(state, profileId, accountKey);
   if (updated !== state) writeProfileRegistryState(updated);
 }
 
@@ -661,6 +706,93 @@ export function setActiveProfileId(id: string): void {
   } catch {}
 }
 
+/**
+ * Pure decision: is `activeId` visible in `visibleProfiles`? If so, keep it
+ * unchanged; otherwise fall back to "default" — the SAME fallback
+ * getActiveProfileId() already uses for its own raw-list validation
+ * ("default" can never be deleted, so it is always present in ANY
+ * account's effective visible list — see deleteProfile's own
+ * `id === "default"` guard — making this a safe, unconditional fallback,
+ * never a dead end).
+ *
+ * Codex P1 follow-up (5th round) — this is deliberately a SEPARATE decision
+ * from getActiveProfileId()'s own (which validates against the RAW,
+ * unfiltered `dwp.profiles` and remains parameterless/account-agnostic,
+ * since it is called from many pages — plans/lightning/tom/wait-times —
+ * with no account context of their own; see this module's own doc and
+ * ensureActiveProfileVisible below for where this one is actually applied).
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_RESOLVE_ACTIVE_PROFILE_FOR_VISIBLE_LIST_CASES, resolveActiveProfileForVisibleList } from "@/lib/profileStorage";
+ *   DEV_RESOLVE_ACTIVE_PROFILE_FOR_VISIBLE_LIST_CASES.forEach(c => {
+ *     const got = resolveActiveProfileForVisibleList(c.activeId, c.visibleProfiles);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function resolveActiveProfileForVisibleList(activeId: string, visibleProfiles: Profile[]): string {
+  return visibleProfiles.some((p) => p.id === activeId) ? activeId : "default";
+}
+
+export const DEV_RESOLVE_ACTIVE_PROFILE_FOR_VISIBLE_LIST_CASES: Array<{
+  name: string;
+  activeId: string;
+  visibleProfiles: Profile[];
+  expected: string;
+}> = [
+  {
+    name: "active id is visible for this account — kept unchanged",
+    activeId: "family",
+    visibleProfiles: [
+      { id: "default", name: "Default" },
+      { id: "family", name: "Family" },
+    ],
+    expected: "family",
+  },
+  {
+    name: "Codex P1 follow-up (5th round) — active id is NOT in this account's visible list (locally suppressed) — falls back to default",
+    activeId: "family",
+    visibleProfiles: [{ id: "default", name: "Default" }],
+    expected: "default",
+  },
+  {
+    name: "already active on default — unchanged",
+    activeId: "default",
+    visibleProfiles: [{ id: "default", name: "Default" }],
+    expected: "default",
+  },
+];
+
+/**
+ * Validates the currently stored active profile id against
+ * `currentOwnerUserId`'s EFFECTIVE visible profile list (getVisibleProfiles)
+ * — NOT the raw shared `dwp.profiles` getActiveProfileId() itself checks —
+ * and corrects the stored `dwp.activeProfile` to "default" when it isn't
+ * visible for this account (resolveActiveProfileForVisibleList).
+ *
+ * Codex P1 follow-up (5th round) — meant to run once per authenticated-
+ * account transition/reconciliation (see settings/page.tsx's own effect),
+ * so that by the time ANY downstream consumer calls the plain,
+ * account-agnostic getActiveProfileId() (plans/lightning/tom/wait-times —
+ * see this module's own doc), the stored value has ALREADY been corrected
+ * and is guaranteed both raw-list-valid AND visible for the current
+ * account — those pages need no changes of their own.
+ *
+ * Never deletes or rewrites the underlying `dwp.profiles` entry itself — a
+ * profile hidden for THIS account stays fully intact in the shared list for
+ * whichever account it actually belongs to; only the separate, device-local
+ * `dwp.activeProfile` POINTER may be redirected. activeProfile itself
+ * remains exactly as device-local as before — this only changes what value
+ * it may be corrected TO during an account transition, never where it is
+ * stored or who can read it.
+ */
+export function ensureActiveProfileVisible(currentOwnerUserId: string): void {
+  const activeId = getActiveProfileId();
+  const resolved = resolveActiveProfileForVisibleList(activeId, getVisibleProfiles(currentOwnerUserId));
+  if (resolved !== activeId) setActiveProfileId(resolved);
+}
+
 // ===== PROFILE CRUD =====
 
 /**
@@ -696,8 +828,17 @@ function uniqueId(base: string, existingIds: string[]): string {
  * trimmed, so a profile created here can never later be silently rejected
  * by /api/sync/profiles's server-side validation — see syncIdentity.ts's
  * own doc for the shared constraint both boundaries now enforce.
+ *
+ * `currentOwnerUserId` (SH.4.1 Codex P1 follow-up, 5th round) — the
+ * authenticated account performing the create, if any (pass the caller's
+ * own resolved `authenticatedUserId`; omit/null when signed out) — mirrors
+ * deleteProfile's own `currentOwnerUserId` parameter exactly. Scopes the
+ * deletion-marker clear (below) to that specific account (or the shared
+ * UNOWNED_ACCOUNT_KEY bucket when signed out), so creating/recreating id X
+ * can never clear a DIFFERENT account's own suppression for that same
+ * literal id.
  */
-export function createProfile(name: string): Profile {
+export function createProfile(name: string, currentOwnerUserId: string | null = null): Profile {
   const trimmed = sanitizeProfileName(name) ?? "New Profile";
   const profiles = getProfiles();
   const existingIds = profiles.map((p) => p.id);
@@ -707,11 +848,15 @@ export function createProfile(name: string): Profile {
   writeProfiles([...profiles, newProfile]);
   // SH.4.1 (Codex P1 finding #3, follow-up round) — an explicit, deliberate
   // create always means this id should be eligible for discovery/adoption
-  // going forward, even if this exact id was locally deleted before: the
-  // only way uniqueId() above can return an id not already in `profiles` is
-  // if nothing currently in the list holds it, including a previously
-  // deleted same-named profile. See clearLocalDeletionMarker's own doc.
-  clearLocalDeletionMarker(id);
+  // going forward FOR THIS ACCOUNT, even if this exact id was locally
+  // deleted by it before: the only way uniqueId() above can return an id
+  // not already in `profiles` is if nothing currently in the list holds it,
+  // including a previously deleted same-named profile. Scoped to
+  // `currentOwnerUserId` only (Codex P1 follow-up, 5th round) — see
+  // clearLocalDeletionMarker/clearLocalDeletionMarkerForAccount's own doc
+  // for why a DIFFERENT account's own suppression of the identical literal
+  // id must never be cleared by this.
+  clearLocalDeletionMarker(id, currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY);
   return newProfile;
 }
 

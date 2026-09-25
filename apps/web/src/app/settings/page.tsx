@@ -29,6 +29,7 @@ import {
   type Profile,
   bootstrapProfiles,
   getVisibleProfiles,
+  ensureActiveProfileVisible,
   UNOWNED_ACCOUNT_KEY,
   getActiveProfileId,
   setActiveProfileId as setActiveProfileIdInStorage,
@@ -245,9 +246,26 @@ export default function SettingsPage() {
   //
   // Best-effort and silent: reconcileProfileRegistry() never throws, and a
   // signed-out/loading session simply skips this round.
+  //
+  // Codex P1 follow-up (5th round) — ensureActiveProfileVisible runs FIRST,
+  // synchronously, independent of the async network reconciliation below:
+  // it is a purely LOCAL check (does THIS account's effective visible list
+  // still contain the currently active profile id?), so it must never be
+  // gated on/skipped by a failed or slow network round. This is exactly
+  // what stops a stale-for-this-account active id (e.g. account A had it
+  // active, then locally deleted it, and a DIFFERENT account B's own
+  // unrelated discovery re-added the raw id to the shared `dwp.profiles`
+  // list) from continuing to look "valid" to A's own getActiveProfileId()
+  // just because the raw list happens to contain it again. React state
+  // (`activeProfileId`) is re-synced right after, so the UI and every
+  // handler below (handleRenameProfile/handleDeleteProfile, which read the
+  // `activeProfileId` state) immediately reflect the corrected value too.
   useEffect(() => {
     setRegistryIdentity(authenticatedUserId);
     if (!authenticatedUserId) return;
+    ensureActiveProfileVisible(authenticatedUserId);
+    setActiveProfileIdState(getActiveProfileId());
+    setProfiles(getVisibleProfiles(authenticatedUserId));
     let cancelled = false;
     reconcileProfileRegistry(authenticatedUserId).then(() => {
       // SH.4.1 (Codex P1 follow-up, 4th round) — re-derive the EFFECTIVE
@@ -325,7 +343,12 @@ export default function SettingsPage() {
   function handleAddProfile() {
     const name = window.prompt("New profile name:");
     if (!name || !name.trim()) return;
-    const profile = createProfile(name);
+    // SH.4.1 Codex P1 follow-up (5th round) — scope the deletion-marker
+    // clear this create performs to the currently authenticated account
+    // (or the shared unowned bucket when signed out), so creating/
+    // recreating this id can never clear a DIFFERENT account's own
+    // suppression for the same literal id — see createProfile's own doc.
+    const profile = createProfile(name, authenticatedUserId);
     setProfiles(getVisibleProfiles(visibilityOwnerKey));
     // Switch to the newly created profile immediately
     setActiveProfileIdInStorage(profile.id);
