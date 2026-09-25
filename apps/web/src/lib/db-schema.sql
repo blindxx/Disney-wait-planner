@@ -141,6 +141,32 @@ CREATE TABLE IF NOT EXISTS user_planner_writes (
 -- before this column existed, on an already-deployed database.
 ALTER TABLE user_planner_writes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
+-- SH.4.1 — durable, account-wide profile registry (see AGENTS.md's Sync
+-- Hardening section and the SH.4 architecture audit it references).
+-- Deliberately independent of user_planner/user_planner_writes above: this
+-- table stores profile IDENTITY METADATA ONLY (id + display name), never
+-- planner content, and carries no revision/pending-op ledger of its own —
+-- see api/sync/profiles/route.ts's own doc for why a plain per-row
+-- last-write-wins (`updated_at`, server-assigned via NOW(), never a
+-- client-supplied timestamp) is sufficient here and a planner-grade
+-- conflict system would be the wrong tool. `profile_id` values are the
+-- SAME ids `user_planner`/`user_planner_writes` key planner content by
+-- (validated with the identical PROFILE_ID_RE — see syncIdentity.ts) but
+-- this table has no foreign key to them: a profile row here is pure
+-- metadata about an id that may or may not have planner content yet.
+-- `deleted_at` is a soft-delete tombstone — SH.4.1 only ever reads it (to
+-- stop legacy adoption from resurrecting a deleted id); no code path in
+-- SH.4.1 sets it yet (that lifecycle is SH.4.3 scope).
+CREATE TABLE IF NOT EXISTS user_profiles (
+  user_id     TEXT        NOT NULL,
+  profile_id  TEXT        NOT NULL,
+  name        TEXT        NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deleted_at  TIMESTAMPTZ,
+  PRIMARY KEY (user_id, profile_id)
+);
+
 -- SH.2.5.1 — Stale First-Delivery Operation Rejection: distinguishes an
 -- ACCEPTED write (the only outcome this table recorded before this column
 -- existed — every pre-existing row is correctly backfilled 'accepted' by

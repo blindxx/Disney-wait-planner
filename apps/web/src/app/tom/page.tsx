@@ -35,8 +35,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSession } from "next-auth/react";
 import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
 import { bootstrapProfiles, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
+import { shouldOmitPlannerContextForProfile } from "@/lib/syncHelper";
+import { getUserId } from "@/lib/syncIdentity";
 
 /** Pre-10.4 global (non-profile-scoped) chat cache — read-only migration fallback for the "default" profile. */
 const LEGACY_CHAT_STORAGE_KEY = "dwp.tomChat.v1";
@@ -1089,6 +1092,14 @@ function HelpExampleChips({
 }
 
 export default function TomChatPage() {
+  // SH.4.1a — needed ONLY to decide whether the active profile's planner
+  // content is safe to include in planner_context (see sendQuestion's own
+  // doc below); Tom otherwise has no auth-transition/pull machinery of its
+  // own and this must not introduce any (chat persistence itself stays
+  // exactly as it was — see AGENTS.md's "Tom chat persistence... preserve
+  // unless a phase explicitly modifies chat state management").
+  const { data: session, status: sessionStatus } = useSession();
+  const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string>(() => generateId());
   const [hydrated, setHydrated] = useState(false);
@@ -1306,9 +1317,52 @@ export default function TomChatPage() {
     setError(null);
 
     try {
+      // SH.4.1a — same-class fix as Plans/Lightning's own render-gating:
+      // buildPlannerContextSnapshot() reads the ACTIVE profile's plans/
+      // Lightning bytes directly from `dwp:{profileId}:*` with no ownership
+      // check of its own. Without this guard, a profile whose physical
+      // planner bytes are known (isLocalContentForeign(), syncHelper.ts) to
+      // belong to a DIFFERENT, already-known authenticated account would
+      // still have that foreign content read and sent to the Tom API as
+      // this session's own planner_context. planner_context is already
+      // documented as additive/optional (AGENTS.md, plannerContextSnapshot.ts's
+      // own doc) — omitting it entirely here is the same "simply omit
+      // rather than guess" contract every other optional field already
+      // follows, not a new behavior class. Uses activeProfileIdRef.current
+      // (kept fresh by syncActiveProfile(), already called by
+      // submitQuestion before sendQuestion runs) so this reflects whichever
+      // profile this exact chat/session actually belongs to, including
+      // after an ordinary same-account profile switch.
+      //
+      // Codex P1 follow-up (SH.4.1a exact-HEAD finding #1) — SESSION-LOADING
+      // SAFETY. `authenticatedUserId` (declared above) is null for BOTH
+      // `sessionStatus === "loading"` (unresolved — we simply don't know
+      // the identity yet) AND `sessionStatus === "unauthenticated"`
+      // (resolved — genuinely signed out). Treating both alike previously
+      // let isLocalContentForeign()'s "a null currentUserId is never
+      // foreign" rule — correct for the resolved signed-out case
+      // (local-first, no competing identity) — also apply while still
+      // "loading", where it is WRONG: a question submitted before the
+      // session resolves could have this device's active profile actually
+      // belong to a different, about-to-be-revealed authenticated account,
+      // sending that account's stale local planner content under a
+      // planner_context this pre-resolution moment can't yet vouch for.
+      // shouldOmitPlannerContextForProfile() (syncHelper.ts) checks
+      // `sessionStatus === "loading"` FIRST and omits outright, never
+      // falling through to the ownership comparison for that state — the
+      // same "simply omit rather than guess" contract, applied to an
+      // unresolved identity instead of a confirmed-foreign one. Once
+      // sessionStatus resolves (to either "authenticated" or
+      // "unauthenticated"), this defers entirely to the existing,
+      // unchanged SH.4.1a foreign-content gate.
+      const omitPlannerContext = shouldOmitPlannerContextForProfile(
+        sessionStatus === "loading",
+        activeProfileIdRef.current,
+        authenticatedUserId
+      );
       // Built fresh per request (not cached) so it reflects the latest local
       // planner edits; undefined when there's nothing useful to send.
-      const plannerContext = buildPlannerContextSnapshot();
+      const plannerContext = omitPlannerContext ? undefined : buildPlannerContextSnapshot();
 
       const res = await fetch("/api/tom/ask", {
         method: "POST",
