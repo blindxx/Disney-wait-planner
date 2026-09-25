@@ -28,7 +28,9 @@ import {
 import {
   type Profile,
   bootstrapProfiles,
-  getProfiles,
+  getVisibleProfiles,
+  ensureActiveProfileVisible,
+  UNOWNED_ACCOUNT_KEY,
   getActiveProfileId,
   setActiveProfileId as setActiveProfileIdInStorage,
   createProfile,
@@ -36,6 +38,7 @@ import {
   deleteProfile,
   getActiveProfileKeys,
 } from "../../lib/profileStorage";
+import { reconcileProfileRegistry, setRegistryIdentity } from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -121,6 +124,25 @@ export default function SettingsPage() {
 
   // Account & Sync state
   const { data: session, status: sessionStatus } = useSession();
+  // SH.4.1 (Codex P1 finding #1, follow-up round) — the actual resolved
+  // identity, not just the auth STATUS string. Mirrors plans/page.tsx's own
+  // `authenticatedUserId` (same resolution order as getUserId() in
+  // api/sync/planner/route.ts / syncIdentity.ts) so the registry-
+  // reconciliation effect below re-runs whenever the SIGNED-IN USER changes
+  // — including an A -> B account switch that a next-auth session update
+  // could in principle deliver without `sessionStatus` itself ever leaving
+  // "authenticated" — not only on the coarser loading/authenticated
+  // transitions `sessionStatus` alone would catch.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const authenticatedUserId =
+    sessionStatus === "authenticated" ? ((session?.user as any)?.id ?? session?.user?.email ?? null) : null;
+  // SH.4.1 (Codex P1 follow-up, 4th round) — the account key to scope
+  // profile VISIBILITY by (getVisibleProfiles/getLocallyDeletedProfileIds):
+  // the real authenticated userId when signed in, or the shared
+  // UNOWNED_ACCOUNT_KEY bucket when signed out — mirrors exactly how
+  // deleteProfile's own `currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY` already
+  // scopes the write side of this same provenance.
+  const visibilityOwnerKey = authenticatedUserId ?? UNOWNED_ACCOUNT_KEY;
   const [emailInput, setEmailInput] = useState("");
   const [signInSent, setSignInSent] = useState(false);
   const [signInError, setSignInError] = useState("");
@@ -140,12 +162,28 @@ export default function SettingsPage() {
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
-    // Bootstrap profiles system and load profile state
+    // Bootstrap profiles system — account-agnostic structural setup
+    // (guarantees Default exists, migrates legacy keys) that must always
+    // run on mount regardless of session status.
     bootstrapProfiles();
     const profileKeys = getActiveProfileKeys();
     profileKeysRef.current = profileKeys;
-    setProfiles(getProfiles());
-    setActiveProfileIdState(getActiveProfileId());
+    // Codex P1 follow-up (11th round) — profiles/activeProfileId are
+    // DELIBERATELY NOT populated here anymore. This is a ONE-TIME (`[]`
+    // deps) effect, so it would otherwise bake in whatever
+    // `visibilityOwnerKey` happened to resolve to on the very FIRST
+    // render — typically UNOWNED_ACCOUNT_KEY, since useSession() starts in
+    // "loading" before next-auth's own session fetch resolves — and
+    // project the signed-out/local-first view (with usable profile
+    // controls) before authentication has actually resolved one way or the
+    // other. Leaving `profiles` at its initial empty array here means the
+    // entire Profiles section (gated on `profiles.length > 0` in the JSX
+    // below) simply does not render — no picker, no Add/Rename/Delete
+    // controls — until the registry-reconciliation effect below populates
+    // it for a DEFINITE, resolved session status (authenticated or
+    // explicitly unauthenticated); that effect now explicitly refuses to
+    // do anything at all while `sessionStatus === "loading"` — see its own
+    // doc.
 
     const { defaultResort: resort, defaultPark: park } = getSettingsDefaults();
     setDefaultResort(resort);
@@ -190,6 +228,113 @@ export default function SettingsPage() {
       window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
     };
   }, []);
+
+  // SH.4.1 — account profile registry reconciliation. Deliberately a
+  // SEPARATE effect from planner sync (which lives in plans/page.tsx and
+  // has its own auth-transition handling): this only reconciles the
+  // device-local profile LIST (dwp.profiles) against the durable
+  // `user_profiles` registry — legacy local profiles get additively
+  // registered, and any account profiles this device hasn't seen yet get
+  // additively discovered — never planner content, never
+  // `dwp.activeProfile`. See profileRegistrySync.ts for the full contract.
+  //
+  // SH.4.1 (Codex P1 finding #1) — keyed on `authenticatedUserId` (the
+  // resolved identity), not `sessionStatus` alone, so an A -> B account
+  // switch always re-runs this effect even in the (rare, but possible with
+  // next-auth) case where `sessionStatus` itself never leaves
+  // "authenticated". setRegistryIdentity() is called FIRST, on every run
+  // (including the null/signed-out case) — that alone invalidates any
+  // still-in-flight round started under a previous identity (see
+  // isRegistryRunCurrent's own doc in profileRegistrySync.ts): such a round
+  // will stop at its next check, before issuing another request or writing
+  // to `dwp.profiles`/the ownership map.
+  //
+  // Codex P1 follow-up (2nd round) — the cleanup function ALSO calls
+  // setRegistryIdentity(null), not only `cancelled = true`. `cancelled`
+  // exists purely to suppress THIS component's own setProfiles() call — it
+  // has no effect on reconcileProfileRegistry's own internal staleness
+  // checks. Without this, a round started under A that is still in flight
+  // when Settings unmounts would keep looking "current" to
+  // isRegistryRunCurrent forever (nothing else in the app calls
+  // setRegistryIdentity), letting it complete a later request and local
+  // write with no live UI still vouching for identity A. Calling it here
+  // makes unmount itself an identity transition, exactly like signing out.
+  //
+  // Best-effort and silent: reconcileProfileRegistry() never throws, and a
+  // signed-out/loading session simply skips this round.
+  //
+  // Codex P1 follow-up (5th round) — ensureActiveProfileVisible runs FIRST,
+  // synchronously, independent of the async network reconciliation below:
+  // it is a purely LOCAL check (does THIS account's effective visible list
+  // still contain the currently active profile id?), so it must never be
+  // gated on/skipped by a failed or slow network round. This is exactly
+  // what stops a stale-for-this-account active id (e.g. account A had it
+  // active, then locally deleted it, and a DIFFERENT account B's own
+  // unrelated discovery re-added the raw id to the shared `dwp.profiles`
+  // list) from continuing to look "valid" to A's own getActiveProfileId()
+  // just because the raw list happens to contain it again. React state
+  // (`activeProfileId`) is re-synced right after, so the UI and every
+  // handler below (handleRenameProfile/handleDeleteProfile, which read the
+  // `activeProfileId` state) immediately reflect the corrected value too.
+  //
+  // Codex P1 follow-up (11th round) — `sessionStatus === "loading"` is an
+  // UNRESOLVED identity state, distinct from BOTH "authenticated" and
+  // "unauthenticated": it means next-auth has not yet determined whether
+  // anyone is signed in at all. Previously this effect derived
+  // `authenticatedUserId` as `null` during loading (identical to genuinely
+  // signed out — see that value's own derivation above) and branched on
+  // `!authenticatedUserId` alone, so it projected the FULL signed-out/
+  // UNOWNED local-first view — including making Add/Rename/Delete/switch
+  // controls usable (the Profiles section renders once `profiles.length >
+  // 0`) — before authentication had actually resolved one way or the
+  // other. A user could interact with profile controls scoped to
+  // UNOWNED_ACCOUNT_KEY during that brief unresolved window even though
+  // they turned out to already be signed in, or vice versa. The guard
+  // below makes "loading" a genuine no-op: no registry identity
+  // transition, no local profiles/activeProfileId recomputation, and
+  // (critically) no ensureActiveProfileVisible call — so `dwp.activeProfile`
+  // and every deletion/provenance marker this effect could otherwise touch
+  // stay completely untouched while identity is unresolved. Because
+  // `authenticatedUserId` is `null` in BOTH the loading and unauthenticated
+  // cases, `sessionStatus` itself must be in this effect's dependency
+  // array — otherwise a loading -> unauthenticated transition (identical
+  // `authenticatedUserId` value on both sides) would never re-run this
+  // effect, and the signed-out view would never actually get projected.
+  useEffect(() => {
+    if (sessionStatus === "loading") return;
+    setRegistryIdentity(authenticatedUserId);
+    if (!authenticatedUserId) {
+      // SH.4.1 Codex P2 follow-up (6th round) — signing out must NOT just
+      // invalidate the network identity guard above and stop: without
+      // recomputing local state here, Settings would keep showing the
+      // PREVIOUS authenticated account's effective profile list/active id
+      // (whatever the last authenticated render left in React state) until
+      // something else happened to re-render it. This branch is purely
+      // local (no fetch/registry network activity while signed out) —
+      // `visibilityOwnerKey` already resolves to UNOWNED_ACCOUNT_KEY here
+      // since `authenticatedUserId` is null.
+      ensureActiveProfileVisible(visibilityOwnerKey);
+      setActiveProfileIdState(getActiveProfileId());
+      setProfiles(getVisibleProfiles(visibilityOwnerKey));
+      return;
+    }
+    ensureActiveProfileVisible(authenticatedUserId);
+    setActiveProfileIdState(getActiveProfileId());
+    setProfiles(getVisibleProfiles(authenticatedUserId));
+    let cancelled = false;
+    reconcileProfileRegistry(authenticatedUserId).then(() => {
+      // SH.4.1 (Codex P1 follow-up, 4th round) — re-derive the EFFECTIVE
+      // list for `authenticatedUserId` after reconciling, not the raw
+      // shared list: reconciliation may have just re-added an id (via
+      // adoptServerProfiles) that THIS account has separately, locally
+      // deleted — see getVisibleProfiles's own doc.
+      if (!cancelled) setProfiles(getVisibleProfiles(authenticatedUserId));
+    });
+    return () => {
+      cancelled = true;
+      setRegistryIdentity(null);
+    };
+  }, [sessionStatus, authenticatedUserId]);
 
   // Mediate syncState → displayedSyncState with a minimum "syncing" display time.
   useEffect(() => {
@@ -250,35 +395,54 @@ export default function SettingsPage() {
     location.reload();
   }
 
-  function handleAddProfile() {
+  // Codex P1 follow-up (12th round) — createProfile/renameProfile/
+  // deleteProfile all became async in profileStorage.ts: their
+  // `dwp.profiles` read-modify-write is now serialized via the Web Locks
+  // API against every other writer of that same key (see profileStorage.ts's
+  // own "LOCAL MUTATION SERIALIZATION" section doc), closing a lost-update
+  // race against server-profile adoption running concurrently. These
+  // handlers simply await the result before continuing — mirrors
+  // handleSendSignInLink's own existing async-handler pattern below.
+  async function handleAddProfile() {
     const name = window.prompt("New profile name:");
     if (!name || !name.trim()) return;
-    const profile = createProfile(name);
-    setProfiles(getProfiles());
+    // SH.4.1 Codex P1 follow-up (5th round) — scope the deletion-marker
+    // clear this create performs to the currently authenticated account
+    // (or the shared unowned bucket when signed out), so creating/
+    // recreating this id can never clear a DIFFERENT account's own
+    // suppression for the same literal id — see createProfile's own doc.
+    const profile = await createProfile(name, authenticatedUserId);
+    setProfiles(getVisibleProfiles(visibilityOwnerKey));
     // Switch to the newly created profile immediately
     setActiveProfileIdInStorage(profile.id);
     setActiveProfileIdState(profile.id);
     location.reload();
   }
 
-  function handleRenameProfile() {
+  async function handleRenameProfile() {
     const current = profiles.find((p) => p.id === activeProfileId);
     if (!current) return;
     const name = window.prompt("Rename profile:", current.name);
     if (!name || !name.trim()) return;
-    renameProfile(activeProfileId, name);
-    setProfiles(getProfiles());
+    await renameProfile(activeProfileId, name);
+    setProfiles(getVisibleProfiles(visibilityOwnerKey));
   }
 
-  function handleDeleteProfile() {
+  async function handleDeleteProfile() {
     if (profiles.length <= 1 || activeProfileId === "default") return;
     const current = profiles.find((p) => p.id === activeProfileId);
     const confirmed = window.confirm(
       `Delete profile "${current?.name ?? activeProfileId}"? All its stored data will be removed.`
     );
     if (!confirmed) return;
-    deleteProfile(activeProfileId);
-    const remaining = getProfiles();
+    // SH.4.1 Codex P1 follow-up (3rd round) — scope the local-delete/
+    // rediscovery-suppression marker to the currently authenticated account
+    // (or the shared unowned bucket when signed out), so this delete can
+    // never suppress a DIFFERENT account's own, distinct profile under the
+    // same grandfathered id on a shared browser — see deleteProfile's own
+    // doc in profileStorage.ts.
+    await deleteProfile(activeProfileId, authenticatedUserId);
+    const remaining = getVisibleProfiles(visibilityOwnerKey);
     setProfiles(remaining);
     setActiveProfileIdState("default");
     location.reload();
@@ -521,7 +685,7 @@ export default function SettingsPage() {
           </select>
           <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
             <button
-              onClick={handleAddProfile}
+              onClick={() => void handleAddProfile()}
               style={{
                 flex: "1 1 auto",
                 padding: "10px 12px",
@@ -538,7 +702,7 @@ export default function SettingsPage() {
               Add Profile
             </button>
             <button
-              onClick={handleRenameProfile}
+              onClick={() => void handleRenameProfile()}
               style={{
                 flex: "1 1 auto",
                 padding: "10px 12px",
@@ -555,7 +719,7 @@ export default function SettingsPage() {
               Rename
             </button>
             <button
-              onClick={handleDeleteProfile}
+              onClick={() => void handleDeleteProfile()}
               disabled={profiles.length <= 1 || activeProfileId === "default"}
               style={{
                 flex: "1 1 auto",
