@@ -2140,6 +2140,92 @@ export function shouldOmitPlannerContextForProfile(
   return isLocalContentForeign(profileId, currentUserId);
 }
 
+// ── Session-loading-safe planner render gate (Codex P1, SH.4.1 Plans-migration round) ──
+//
+// Codex found the SAME "sessionStatus === 'loading' collapses to a null
+// currentUserId, which evaluateLocalContentForeign() correctly treats as
+// 'never foreign'" gap evaluateOmitPlannerContext() above already closes
+// for Tom's planner_context — but for Plans' OWN render/edit gate instead
+// of Tom's request payload. Plans' mount effect (`[]` deps) is deliberately
+// AUTH-INDEPENDENT and always hydrates/renders from local storage
+// immediately, before `sessionStatus` resolves — by design, so the page
+// never blocks on a network round trip for the ordinary signed-out/
+// same-account case. `localContentWithheld` (the render gate this page
+// already has — see its own doc where it is declared) is set to a REAL
+// verdict only once the auth-transition effect's "authenticated" branch
+// runs isLocalContentForeign() — meaning throughout the ENTIRE "loading"
+// window, it still holds whatever it was on the previous render (`false`
+// on a fresh mount), so the editable items list, Add/Edit forms, and day
+// management were all reachable — and editable — for an identity this
+// device does not know yet, on a shared browser where that identity may
+// turn out to own DIFFERENT local content than whichever profile happens
+// to be active right now.
+//
+// evaluateLocalContentWithheld() below is the pure core of the fix:
+// `sessionIsLoading` is checked FIRST and unconditionally withholds,
+// mirroring evaluateOmitPlannerContext()'s own "simply omit/withhold
+// rather than guess" contract for an unresolved identity — applied here to
+// Plans' own render gate instead of Tom's context payload. Once the
+// session resolves one way or the other, this defers entirely to the
+// EXISTING, unchanged `contentOwnershipMismatch` verdict Plans' own
+// auth-transition effect already computes and stores in
+// `localContentWithheld` — no change to that verdict's own logic.
+
+/**
+ * Pure core: should Plans' own render gate withhold the editable planner
+ * UI (items list, Add/Edit forms, day management, import/export) right
+ * now? See this section's own header doc for the full rationale.
+ *
+ * `contentOwnershipMismatch` is the caller's own already-computed
+ * "known-foreign content" verdict (Plans' `localContentWithheld` state,
+ * fresh from isLocalContentForeign() the last time its auth-transition
+ * effect ran) — passed in rather than re-derived here, since a render has
+ * no `owner`/`currentUserId` of its own to look up.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_LOCAL_CONTENT_WITHHELD_CASES, evaluateLocalContentWithheld } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_LOCAL_CONTENT_WITHHELD_CASES.forEach(c => {
+ *     const got = evaluateLocalContentWithheld(c.sessionIsLoading, c.contentOwnershipMismatch);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateLocalContentWithheld(sessionIsLoading: boolean, contentOwnershipMismatch: boolean): boolean {
+  if (sessionIsLoading) return true;
+  return contentOwnershipMismatch;
+}
+
+export const DEV_EVALUATE_LOCAL_CONTENT_WITHHELD_CASES: Array<{
+  name: string;
+  sessionIsLoading: boolean;
+  contentOwnershipMismatch: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "session still loading — withheld outright, even with no foreign-content verdict at all (fresh mount default false)",
+    sessionIsLoading: true,
+    contentOwnershipMismatch: false,
+    expected: true,
+  },
+  {
+    name: "session still loading — withheld even if a STALE prior verdict from a previous mount/transition happened to say 'not foreign'",
+    sessionIsLoading: true,
+    contentOwnershipMismatch: false,
+    expected: true,
+  },
+  {
+    name: "resolved (not loading), no foreign-content verdict — ordinary same-account/offline/signed-out render proceeds, unchanged from before this fix",
+    sessionIsLoading: false,
+    contentOwnershipMismatch: false,
+    expected: false,
+  },
+  {
+    name: "resolved (not loading), known-foreign content — the pre-existing SH.4.1a gate is unchanged by this fix",
+    sessionIsLoading: false,
+    contentOwnershipMismatch: true,
+    expected: true,
+  },
+];
+
 /** The ways a hydration attempt following a foreign-content detection can resolve. */
 export type LocalContentHydrationOutcome = "success" | "failed" | "slow" | "cancelled";
 
@@ -4612,6 +4698,139 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
 }
 
 /**
+ * SH.4.1 Plans-migration Codex P1 fix (2nd round) — "Preserve queued Plans
+ * work on namespace switch." PURE CORE: what should happen to a
+ * currentSyncPlansQualified transition's own pending debounced push, if
+ * any? The FIRST round of this fix (resetSyncPlansQualified()/
+ * setSyncPlansQualified() below) always CANCELLED a pending push outright
+ * on any namespace-mode change — correct for a genuine identity/profile
+ * change (AGENTS.md's own invariant: stale scheduled work must never fire
+ * for a stale session), but WRONG here: an authenticated Plans edit
+ * followed by immediate navigation to Lightning is an ORDINARY
+ * same-identity transition, not a stale session — the pending push's
+ * payload is still perfectly valid for the account it belongs to, only the
+ * PAGE (and therefore the local namespace doPush() would read it from) is
+ * about to change. Discarding it stranded a genuine, already-debounced
+ * edit: it stays durable on this device forever (local-first), but never
+ * reaches the cloud until something else happens to schedule a fresh push
+ * — possibly never, if the user does not return to Plans.
+ *
+ * `"unchanged"` when the transition is a no-op (nothing to protect).
+ * `"flush-pending-work"` when a real transition is about to cancel a push
+ * that is STILL pending (not yet fired) — the caller must fire it NOW,
+ * synchronously, before applying the transition, so it captures the
+ * OUTGOING namespace/identity exactly like it would have if the debounce
+ * timer had simply fired a moment earlier. `"cancel-no-pending-work"` when
+ * a real transition has nothing queued to preserve — an ordinary cancel.
+ *
+ * Symmetric by design (covers `false -> true`, i.e. Lightning's own
+ * pending edit when navigating back to Plans, exactly the same way): this
+ * is a general "don't strand a page's own already-debounced push merely
+ * because another page took over sync" fix, not specific to one direction.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES, decideSyncPlansQualifiedTransitionAction } from "@/lib/syncHelper";
+ *   DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES.forEach(c => {
+ *     const got = decideSyncPlansQualifiedTransitionAction(c.currentQualified, c.nextQualified, c.hasPendingScheduledPush);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type SyncPlansQualifiedTransitionAction = "unchanged" | "cancel-no-pending-work" | "flush-pending-work";
+
+export function decideSyncPlansQualifiedTransitionAction(
+  currentQualified: boolean,
+  nextQualified: boolean,
+  hasPendingScheduledPush: boolean
+): SyncPlansQualifiedTransitionAction {
+  if (currentQualified === nextQualified) return "unchanged";
+  return hasPendingScheduledPush ? "flush-pending-work" : "cancel-no-pending-work";
+}
+
+export const DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES: Array<{
+  name: string;
+  currentQualified: boolean;
+  nextQualified: boolean;
+  hasPendingScheduledPush: boolean;
+  expected: SyncPlansQualifiedTransitionAction;
+}> = [
+  {
+    name: "no-op re-assertion (Plans' own effect re-running with the same qualified=true) — nothing to protect, regardless of pending work",
+    currentQualified: true,
+    nextQualified: true,
+    hasPendingScheduledPush: true,
+    expected: "unchanged",
+  },
+  {
+    name: "no-op reset (Lightning mounting again while already unqualified) — nothing to protect",
+    currentQualified: false,
+    nextQualified: false,
+    hasPendingScheduledPush: true,
+    expected: "unchanged",
+  },
+  {
+    name: "REGRESSION CASE — authenticated Plans edit debounced, then immediate navigation to Lightning: a queued qualified push must be flushed, never silently discarded",
+    currentQualified: true,
+    nextQualified: false,
+    hasPendingScheduledPush: true,
+    expected: "flush-pending-work",
+  },
+  {
+    name: "Plans -> Lightning navigation with nothing queued — an ordinary cancel, nothing to flush",
+    currentQualified: true,
+    nextQualified: false,
+    hasPendingScheduledPush: false,
+    expected: "cancel-no-pending-work",
+  },
+  {
+    name: "symmetric case — Lightning's own debounced edit, then navigation back to Plans: its queued push must also be flushed, not discarded",
+    currentQualified: false,
+    nextQualified: true,
+    hasPendingScheduledPush: true,
+    expected: "flush-pending-work",
+  },
+  {
+    name: "Lightning -> Plans navigation with nothing queued — an ordinary cancel",
+    currentQualified: false,
+    nextQualified: true,
+    hasPendingScheduledPush: false,
+    expected: "cancel-no-pending-work",
+  },
+];
+
+/**
+ * I/O wrapper: applies decideSyncPlansQualifiedTransitionAction()'s
+ * decision, then reassigns currentSyncPlansQualified to `nextQualified`.
+ * `"flush-pending-work"` clears the pending timer and fires doPush() NOW,
+ * BEFORE the reassignment below — doPush() captures currentSyncProfileId/
+ * currentSyncUserId (and, via buildPayloadFromStorage()'s own
+ * syncScopedDomainKey() calls, currentSyncPlansQualified) synchronously at
+ * its own start, before its first `await`, so this flushed push is
+ * guaranteed to read the SAME (outgoing) namespace/identity this
+ * transition is about to leave, exactly as if the debounce had simply
+ * fired an instant earlier — never the incoming one. Shared by both
+ * resetSyncPlansQualified() and setSyncPlansQualified() below so a genuine
+ * transition in EITHER direction gets the identical protection.
+ */
+function applySyncPlansQualifiedTransition(nextQualified: boolean): void {
+  const action = decideSyncPlansQualifiedTransitionAction(
+    currentSyncPlansQualified,
+    nextQualified,
+    debounceTimer !== null
+  );
+  if (action === "unchanged") return;
+  if (action === "flush-pending-work") {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    void doPush();
+  } else {
+    cancelScheduledSync();
+  }
+  currentSyncPlansQualified = nextQualified;
+}
+
+/**
  * SH.4.1 Plans-migration Codex P1 fix — the shared reset both
  * setSyncProfileId() and setSyncUserId() call UNCONDITIONALLY, before their
  * own "did it actually change" early return: reverts
@@ -4627,11 +4846,14 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
  * purpose these two functions serve). No-ops when already false — a
  * signed-out mount, or Lightning mounting again, must not cancel a
  * genuinely unrelated pending push for no reason.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (2nd round) — no longer a blind
+ * cancel: routes through applySyncPlansQualifiedTransition() above, which
+ * flushes a still-pending push instead of discarding it — see that
+ * function's and decideSyncPlansQualifiedTransitionAction()'s own docs.
  */
 function resetSyncPlansQualified(): void {
-  if (!currentSyncPlansQualified) return;
-  cancelScheduledSync();
-  currentSyncPlansQualified = false;
+  applySyncPlansQualifiedTransition(false);
 }
 
 // ── setSyncProfileId ──────────────────────────────────────────────────────────
@@ -4736,16 +4958,14 @@ export function setSyncUserId(userId: string | null): void {
  * of Lightning's own — see currentSyncPlansQualified's own doc for the
  * full contract this composes with.
  *
- * A genuine change cancels any pending debounced push first, exactly like
- * setSyncProfileId()/setSyncUserId() already do for an identity/profile
- * change — see resetSyncPlansQualified()'s own doc for why a push
- * scheduled under one namespace mode must never be allowed to fire after
- * the correct namespace has changed underneath it.
+ * A genuine change flushes a still-pending debounced push first (never
+ * silently discards it), exactly like resetSyncPlansQualified() does for
+ * the opposite direction — see applySyncPlansQualifiedTransition()'s and
+ * decideSyncPlansQualifiedTransitionAction()'s own docs for the full
+ * "preserve queued work on namespace switch" contract this composes with.
  */
 export function setSyncPlansQualified(qualified: boolean): void {
-  if (qualified === currentSyncPlansQualified) return;
-  cancelScheduledSync();
-  currentSyncPlansQualified = qualified;
+  applySyncPlansQualifiedTransition(qualified);
 }
 
 // ── Ordinary-edit local-content ownership (SH.4.1a Codex P1 follow-up) ──────

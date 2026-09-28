@@ -123,6 +123,7 @@ import {
   hasSurvivingEditFact,
   setLocalContentOwner,
   isLocalContentForeign,
+  evaluateLocalContentWithheld,
   selectPendingOpBatch,
   reconcilePendingOperations,
   commitLocalDomainRaw,
@@ -5658,7 +5659,21 @@ export default function PlansPage() {
   // the SAME trade-off the SH.4.1 active-profile correction already makes);
   // what this gate guarantees is that no further render or edit can ever
   // build on it once identity is known.
-  if (localContentWithheld) {
+  //
+  // SH.4.1 Plans-migration Codex P1 fix — "Session-loading protection."
+  // `localContentWithheld` alone only reflects a KNOWN-foreign verdict,
+  // computed by the auth-transition effect's "authenticated" branch — which
+  // never runs at all while `sessionStatus === "loading"`, so this gate
+  // previously stayed open (whatever it was on the prior render — `false`
+  // on a fresh mount) for the entire loading window, not just the single
+  // unavoidable first-paint tick the comment above accepts. Routed through
+  // evaluateLocalContentWithheld() (syncHelper.ts) so an unresolved session
+  // ALSO withholds outright, regardless of `localContentWithheld`'s own
+  // (necessarily stale, since identity isn't known yet) value — see that
+  // function's own doc for the full rationale. Once `sessionStatus` leaves
+  // "loading", this defers entirely to the existing, unchanged
+  // `localContentWithheld` verdict.
+  if (evaluateLocalContentWithheld(sessionStatus === "loading", localContentWithheld)) {
     // Deliberately inline-styled, not the .plans-container/.empty-state
     // classes used below: those are defined inside the <style> tag that is
     // part of the NORMAL render this early return replaces, so they would
