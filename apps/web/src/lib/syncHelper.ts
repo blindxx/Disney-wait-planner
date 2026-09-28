@@ -2115,8 +2115,32 @@ export const DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES: Array<{
 // same "simply omit rather than guess" contract every other optional
 // planner_context field already follows, applied to an unresolved identity
 // instead of a confirmed-foreign one. Once the session resolves one way or
-// the other, this defers entirely to the existing, unchanged
-// evaluateLocalContentForeign() contract.
+// the other, this deferred entirely to evaluateLocalContentForeign()'s
+// contract — UNTIL the SH.4 Tom migration round below.
+//
+// SH.4 Tom migration round — Tom's own planner-context build
+// (plannerContextSnapshot.ts's buildPlannerContextSnapshot()) now resolves
+// every SH.4-migrated domain (plans/days/dayMeta/dayParks/dayAutoFallbacks/
+// lightning) through the SAME account-qualified key Plans/Lightning use
+// (resolveAccountScopedKey()) once authenticated, rather than always the
+// legacy per-profileId key. That is exactly the "qualified" storage mode
+// shouldApplyLegacyForeignContentGate() above already documents: once a
+// domain is read via its account-qualified key, two different accounts
+// physically cannot share the same bytes for the same profileId, so the
+// legacy per-profileId foreign-content marker (evaluateLocalContentForeign,
+// `owner`) can no longer say anything meaningful about it — exactly the
+// reason Plans'/Lightning's own retarget functions already hardcode their
+// own `contentOwnershipMismatch` to `false` once qualified. Tom's omission
+// decision now applies that identical rule via `shouldApplyLegacyForeignContentGate`
+// below, rather than unconditionally consulting `owner` for every resolved
+// session: authenticated (currentUserId a real id) means Tom is about to
+// read the qualified shape, so the legacy gate is skipped entirely (never
+// omit on that basis); the resolved signed-out branch (currentUserId null)
+// still keeps reading the legacy shape and so still nominally applies the
+// gate, though `evaluateLocalContentForeign` already always resolves that
+// to `false` for a null `currentUserId` — this is structural symmetry with
+// Plans/Lightning's own storageMode branching, not a behavior change for
+// the signed-out case.
 
 /**
  * Pure core: should planner_context be omitted from a Tom request right
@@ -2135,6 +2159,8 @@ export function evaluateOmitPlannerContext(
   currentUserId: string | null
 ): boolean {
   if (sessionIsLoading) return true;
+  const storageMode: LocalContentStorageMode = currentUserId ? "qualified" : "legacy";
+  if (!shouldApplyLegacyForeignContentGate(storageMode)) return false;
   return evaluateLocalContentForeign(owner, currentUserId);
 }
 
@@ -2174,17 +2200,28 @@ export const DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES: Array<{
     expected: false,
   },
   {
-    name: "resolved authenticated session with a foreign marker still omits — the pre-existing SH.4.1a gate is unchanged by this fix",
+    name: "SH.4 Tom migration — a resolved authenticated session no longer omits on a stale/foreign legacy marker: Tom now reads the account-qualified key for currentUserId, which physically cannot hold userA's bytes, so the legacy per-profileId marker is moot (was `expected: true` pre-SH.4-Tom-migration, when Tom still read the shared legacy key)",
     sessionIsLoading: false,
     owner: "userA",
     currentUserId: "userB",
-    expected: true,
+    expected: false,
+  },
+  {
+    name: "SH.4 Tom migration — even a legacy marker naming the SAME currentUserId no longer drives the decision once authenticated (qualified storage mode skips the gate entirely, not merely 'happens to agree')",
+    sessionIsLoading: false,
+    owner: null,
+    currentUserId: "userB",
+    expected: false,
   },
 ];
 
 /**
  * I/O wrapper: the ONE function Tom's own send-question flow calls — see
- * evaluateOmitPlannerContext()'s own doc above for the full contract.
+ * evaluateOmitPlannerContext()'s own doc above for the full contract,
+ * including the SH.4 Tom migration round's storage-mode gating (mirrored
+ * here rather than delegating to evaluateOmitPlannerContext() itself, since
+ * this wrapper reads `owner` from storage via isLocalContentForeign() rather
+ * than taking it as a parameter).
  */
 export function shouldOmitPlannerContextForProfile(
   sessionIsLoading: boolean,
@@ -2192,6 +2229,8 @@ export function shouldOmitPlannerContextForProfile(
   currentUserId: string | null
 ): boolean {
   if (sessionIsLoading) return true;
+  const storageMode: LocalContentStorageMode = currentUserId ? "qualified" : "legacy";
+  if (!shouldApplyLegacyForeignContentGate(storageMode)) return false;
   return isLocalContentForeign(profileId, currentUserId);
 }
 

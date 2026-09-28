@@ -1319,20 +1319,20 @@ export default function TomChatPage() {
     try {
       // SH.4.1a — same-class fix as Plans/Lightning's own render-gating:
       // buildPlannerContextSnapshot() reads the ACTIVE profile's plans/
-      // Lightning bytes directly from `dwp:{profileId}:*` with no ownership
-      // check of its own. Without this guard, a profile whose physical
-      // planner bytes are known (isLocalContentForeign(), syncHelper.ts) to
-      // belong to a DIFFERENT, already-known authenticated account would
-      // still have that foreign content read and sent to the Tom API as
-      // this session's own planner_context. planner_context is already
-      // documented as additive/optional (AGENTS.md, plannerContextSnapshot.ts's
-      // own doc) — omitting it entirely here is the same "simply omit
-      // rather than guess" contract every other optional field already
-      // follows, not a new behavior class. Uses activeProfileIdRef.current
-      // (kept fresh by syncActiveProfile(), already called by
-      // submitQuestion before sendQuestion runs) so this reflects whichever
-      // profile this exact chat/session actually belongs to, including
-      // after an ordinary same-account profile switch.
+      // Lightning bytes with no ownership check of its own. Without this
+      // guard, a profile whose physical planner bytes are known
+      // (isLocalContentForeign(), syncHelper.ts) to belong to a DIFFERENT,
+      // already-known authenticated account would still have that foreign
+      // content read and sent to the Tom API as this session's own
+      // planner_context. planner_context is already documented as
+      // additive/optional (AGENTS.md, plannerContextSnapshot.ts's own doc)
+      // — omitting it entirely here is the same "simply omit rather than
+      // guess" contract every other optional field already follows, not a
+      // new behavior class. Uses activeProfileIdRef.current (kept fresh by
+      // syncActiveProfile(), already called by submitQuestion before
+      // sendQuestion runs) so this reflects whichever profile this exact
+      // chat/session actually belongs to, including after an ordinary
+      // same-account profile switch.
       //
       // Codex P1 follow-up (SH.4.1a exact-HEAD finding #1) — SESSION-LOADING
       // SAFETY. `authenticatedUserId` (declared above) is null for BOTH
@@ -1351,10 +1351,24 @@ export default function TomChatPage() {
       // `sessionStatus === "loading"` FIRST and omits outright, never
       // falling through to the ownership comparison for that state — the
       // same "simply omit rather than guess" contract, applied to an
-      // unresolved identity instead of a confirmed-foreign one. Once
-      // sessionStatus resolves (to either "authenticated" or
-      // "unauthenticated"), this defers entirely to the existing,
-      // unchanged SH.4.1a foreign-content gate.
+      // unresolved identity instead of a confirmed-foreign one.
+      //
+      // SH.4 Tom migration — once sessionStatus resolves, `authenticatedUserId`
+      // is now also the identity buildPlannerContextSnapshot() itself uses
+      // (below) to resolve every SH.4-migrated domain's account-qualified
+      // key, exactly like Plans/Lightning's own auth-transition retarget.
+      // shouldOmitPlannerContextForProfile() no longer applies the legacy
+      // per-profileId foreign-content gate to the authenticated branch at
+      // all (see shouldApplyLegacyForeignContentGate()'s own doc in
+      // syncHelper.ts, and Plans'/Lightning's own retarget functions, which
+      // hardcode that same gate to `false` for the identical reason): once a
+      // domain is read via its account-qualified key, two accounts
+      // physically cannot share the same bytes for the same profileId, so a
+      // stale/unrelated legacy ownership marker can no longer withhold an
+      // authenticated account's own legitimate planner_context. The gate
+      // still applies (structurally, though never actually triggers, since
+      // `currentUserId` is null there) for the resolved signed-out branch,
+      // which keeps reading the legacy key exactly as before.
       const omitPlannerContext = shouldOmitPlannerContextForProfile(
         sessionStatus === "loading",
         activeProfileIdRef.current,
@@ -1362,7 +1376,10 @@ export default function TomChatPage() {
       );
       // Built fresh per request (not cached) so it reflects the latest local
       // planner edits; undefined when there's nothing useful to send.
-      const plannerContext = omitPlannerContext ? undefined : buildPlannerContextSnapshot();
+      // `authenticatedUserId` is passed through so the snapshot itself reads
+      // the same account-qualified (or legacy, signed out) keys Plans/
+      // Lightning use — see plannerContextSnapshot.ts's own doc.
+      const plannerContext = omitPlannerContext ? undefined : buildPlannerContextSnapshot(authenticatedUserId);
 
       const res = await fetch("/api/tom/ask", {
         method: "POST",
