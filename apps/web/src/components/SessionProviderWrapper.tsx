@@ -9,6 +9,11 @@ import {
 } from "@/lib/profileStorage";
 import { getUserId } from "@/lib/syncIdentity";
 import { invalidatePendingUnloadSync } from "@/lib/syncHelper";
+import {
+  reconcileProfileRegistry,
+  setRegistryIdentity,
+  shouldAttemptRegistryReconciliation,
+} from "@/lib/profileRegistrySync";
 
 /**
  * Codex P1 follow-up (12th round) — GLOBAL auth-transition active-profile
@@ -113,6 +118,57 @@ function ActiveProfileAuthGuard(): null {
   return null;
 }
 
+/**
+ * SH.4.4 Codex P1 fix — GLOBAL account profile registry reconciliation
+ * lifecycle. Before this fix, registry reconciliation (profileRegistrySync.ts's
+ * setRegistryIdentity/reconcileProfileRegistry) was triggered ONLY from
+ * settings/page.tsx's own effect — a legacy local profile belonging to an
+ * account that never happened to visit Settings during a session sat
+ * unreconciled (and therefore never durably ownership-stamped) for as long
+ * as that held, remaining freely adoptable by a DIFFERENT account that
+ * signed in on the same device and reconciled first. See
+ * profileRegistrySync.ts's own module doc for the full rationale.
+ *
+ * Mounted here for the SAME reason ActiveProfileAuthGuard above is: this is
+ * the shared, page-independent boundary next-auth's own `useSession()`
+ * context is rooted at, and the highest point in the tree from which a
+ * session-status change is visible to literally every page, regardless of
+ * which one happens to be mounted — so every authenticated session
+ * resolution attempts a reconciliation round, not just a Settings visit.
+ *
+ * This component is the PRIMARY owner of the identity binding
+ * (setRegistryIdentity) as of this fix — see
+ * profileRegistrySync.ts's own doc. It deliberately does NOT reset identity
+ * to null in a cleanup function: it is mounted for the lifetime of the
+ * whole app/session (it never unmounts on ordinary page navigation, unlike
+ * settings/page.tsx, which DID need that on its own unmount when it was the
+ * sole owner), so the only event that can legitimately invalidate an
+ * in-flight round — an actual identity transition — is already covered by
+ * the next call to setRegistryIdentity() with the new value
+ * (advanceRegistryIdentity bumps the epoch whenever the identity itself
+ * changes, including through null on sign-out).
+ *
+ * shouldAttemptRegistryReconciliation() is the same pure decision
+ * settings/page.tsx's own `if (sessionStatus === "loading") return;` /
+ * `if (!authenticatedUserId) { ...; return; }` branching is structurally
+ * equivalent to — factored out here as its own tested predicate so this
+ * guard's gating logic doesn't silently drift from that structural
+ * equivalent. See its own doc in profileRegistrySync.ts.
+ */
+function ProfileRegistryReconciliationGuard(): null {
+  const { data: session, status: sessionStatus } = useSession();
+  const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
+
+  useEffect(() => {
+    if (sessionStatus === "loading") return;
+    setRegistryIdentity(authenticatedUserId);
+    if (!shouldAttemptRegistryReconciliation(sessionStatus, authenticatedUserId)) return;
+    reconcileProfileRegistry(authenticatedUserId as string);
+  }, [sessionStatus, authenticatedUserId]);
+
+  return null;
+}
+
 export default function SessionProviderWrapper({
   children,
 }: {
@@ -121,6 +177,7 @@ export default function SessionProviderWrapper({
   return (
     <SessionProvider>
       <ActiveProfileAuthGuard />
+      <ProfileRegistryReconciliationGuard />
       {children}
     </SessionProvider>
   );

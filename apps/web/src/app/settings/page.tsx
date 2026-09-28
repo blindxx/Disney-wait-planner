@@ -38,7 +38,7 @@ import {
   deleteProfile,
   getActiveProfileKeys,
 } from "../../lib/profileStorage";
-import { reconcileProfileRegistry, setRegistryIdentity } from "../../lib/profileRegistrySync";
+import { reconcileProfileRegistry } from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -242,23 +242,28 @@ export default function SettingsPage() {
   // resolved identity), not `sessionStatus` alone, so an A -> B account
   // switch always re-runs this effect even in the (rare, but possible with
   // next-auth) case where `sessionStatus` itself never leaves
-  // "authenticated". setRegistryIdentity() is called FIRST, on every run
-  // (including the null/signed-out case) — that alone invalidates any
-  // still-in-flight round started under a previous identity (see
-  // isRegistryRunCurrent's own doc in profileRegistrySync.ts): such a round
-  // will stop at its next check, before issuing another request or writing
-  // to `dwp.profiles`/the ownership map.
+  // "authenticated".
   //
-  // Codex P1 follow-up (2nd round) — the cleanup function ALSO calls
-  // setRegistryIdentity(null), not only `cancelled = true`. `cancelled`
-  // exists purely to suppress THIS component's own setProfiles() call — it
-  // has no effect on reconcileProfileRegistry's own internal staleness
-  // checks. Without this, a round started under A that is still in flight
-  // when Settings unmounts would keep looking "current" to
-  // isRegistryRunCurrent forever (nothing else in the app calls
-  // setRegistryIdentity), letting it complete a later request and local
-  // write with no live UI still vouching for identity A. Calling it here
-  // makes unmount itself an identity transition, exactly like signing out.
+  // SH.4.4 Codex P1 fix — this effect NO LONGER calls setRegistryIdentity()
+  // itself. Registry identity is now bound by the GLOBAL authenticated
+  // lifecycle guard in SessionProviderWrapper.tsx (mounted once at the app
+  // root, above every page — its effect runs before this one in the same
+  // React commit whenever both fire together, per its own doc), which is
+  // now the binding's PRIMARY owner — see profileRegistrySync.ts's own
+  // module doc for the full rationale (a legacy profile used without ever
+  // visiting Settings must still reconcile). This effect only calls
+  // reconcileProfileRegistry() below, for a prompt UI refresh while Settings
+  // itself is open — it relies on the root-level guard having already bound
+  // identity to `authenticatedUserId` by the time this runs.
+  //
+  // Critically, this effect's cleanup must NOT call setRegistryIdentity(null)
+  // any more either: Settings unmounts on ordinary navigation (unlike the
+  // root-level guard, which persists for the whole session), and resetting
+  // identity to null there would invalidate the root-level guard's own
+  // still-authenticated, still-in-flight round out from under it. `cancelled`
+  // below exists purely to suppress THIS component's own setProfiles() call
+  // after unmount — reconcileProfileRegistry's own internal staleness checks
+  // (isRegistryRunCurrent) are unaffected by it.
   //
   // Best-effort and silent: reconcileProfileRegistry() never throws, and a
   // signed-out/loading session simply skips this round.
@@ -302,7 +307,6 @@ export default function SettingsPage() {
   // effect, and the signed-out view would never actually get projected.
   useEffect(() => {
     if (sessionStatus === "loading") return;
-    setRegistryIdentity(authenticatedUserId);
     if (!authenticatedUserId) {
       // SH.4.1 Codex P2 follow-up (6th round) — signing out must NOT just
       // invalidate the network identity guard above and stop: without
@@ -332,7 +336,6 @@ export default function SettingsPage() {
     });
     return () => {
       cancelled = true;
-      setRegistryIdentity(null);
     };
   }, [sessionStatus, authenticatedUserId]);
 

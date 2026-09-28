@@ -102,15 +102,36 @@
  * `dwp.profiles`/the ownership map) once auth identity has moved on. See
  * reconcileProfileRegistry's own doc for exactly where it's checked.
  *
- * Codex P1 follow-up (2nd round) — this binding is a LIFECYCLE resource, not
- * just an auth-transition guard: the Settings integration that owns it MUST
- * invalidate it (call setRegistryIdentity(null)) on its own unmount, not
- * only when the resolved identity value changes. A round left bound to "the
- * last identity Settings happened to run under" would otherwise keep
- * looking current indefinitely once Settings unmounts — nothing else in the
- * app calls setRegistryIdentity — letting it complete a later request/local
- * write with no live UI still vouching for that identity. See
- * settings/page.tsx's own effect for where this is done.
+ * SH.4.4 Codex P1 fix — this binding's PRIMARY owner is now the GLOBAL
+ * authenticated lifecycle guard in SessionProviderWrapper.tsx (mounted once,
+ * at the app root, above every page — the same shared boundary
+ * ActiveProfileAuthGuard already uses there for active-profile correction),
+ * not settings/page.tsx. Before this fix, ONLY settings/page.tsx ever called
+ * setRegistryIdentity/reconcileProfileRegistry, so a legacy local profile
+ * belonging to an account that never happened to visit Settings sat
+ * unreconciled — and therefore never durably ownership-stamped — for the
+ * entire session, remaining freely adoptable by a DIFFERENT account that
+ * signed in on the same device and reconciled first (e.g. by visiting
+ * Settings itself). Binding identity from the app-root guard means every
+ * authenticated session resolution — not just a Settings visit — attempts a
+ * reconciliation round, so a legacy profile in active local use is claimed
+ * for its account well before any other account gets a chance to.
+ *
+ * Because the root-level guard is mounted for the lifetime of the whole
+ * app/session (it never unmounts on ordinary page navigation, unlike
+ * settings/page.tsx), it does NOT need an unmount-time
+ * setRegistryIdentity(null) of its own: advanceRegistryIdentity already
+ * bumps the epoch on every actual identity transition (including through
+ * null on sign-out), which is the only event that can legitimately
+ * invalidate an in-flight round — see advanceRegistryIdentity's own doc.
+ * settings/page.tsx still calls reconcileProfileRegistry() itself (for a
+ * prompt UI refresh while the page is open), but — Codex P1 fix — it must
+ * NOT also call setRegistryIdentity() any more: since it no longer owns the
+ * binding, its own unmount must not reset identity to null out from under
+ * a still-authenticated, still-in-flight ROOT-level round. See
+ * SessionProviderWrapper.tsx's own doc for where the binding now lives, and
+ * shouldAttemptRegistryReconciliation() below for the shared, pure gating
+ * decision both callers rely on.
  */
 
 import {
@@ -817,6 +838,76 @@ let registryIdentityState: RegistryIdentityState = { currentUserId: null, epoch:
 export function setRegistryIdentity(userId: string | null): void {
   registryIdentityState = advanceRegistryIdentity(registryIdentityState, userId);
 }
+
+/**
+ * SH.4.4 Codex P1 fix — shared, pure gating decision for whether a resolved
+ * authenticated-session lifecycle event should (re)bind registry identity
+ * (setRegistryIdentity) and, when authenticated, attempt a reconciliation
+ * round (reconcileProfileRegistry). Factored out so the SAME decision drives
+ * both the GLOBAL root-level guard (SessionProviderWrapper.tsx — the
+ * primary owner as of this fix) and settings/page.tsx's own page-local
+ * trigger, without duplicating the branching logic in two places that could
+ * drift apart.
+ *
+ * "loading" is a genuinely UNRESOLVED identity state — never treated as
+ * equivalent to "unauthenticated" (mirrors every other
+ * `sessionStatus === "loading"` guard already established in this codebase;
+ * see settings/page.tsx's own 11th-round fix and
+ * SessionProviderWrapper.tsx's own doc for the identical distinction).
+ * `authenticatedUserId === null` while `sessionStatus === "authenticated"`
+ * is defensive — next-auth should never resolve "authenticated" without a
+ * usable session, but there is nothing to bind identity to in that case, so
+ * this also declines.
+ *
+ * Pure — takes both values as parameters.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_ATTEMPT_REGISTRY_RECONCILIATION_CASES, shouldAttemptRegistryReconciliation } from "@/lib/profileRegistrySync";
+ *   DEV_SHOULD_ATTEMPT_REGISTRY_RECONCILIATION_CASES.forEach(c => {
+ *     const got = shouldAttemptRegistryReconciliation(c.sessionStatus, c.authenticatedUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type SessionLifecycleStatus = "loading" | "authenticated" | "unauthenticated";
+
+export function shouldAttemptRegistryReconciliation(
+  sessionStatus: SessionLifecycleStatus,
+  authenticatedUserId: string | null
+): boolean {
+  return sessionStatus !== "loading" && authenticatedUserId !== null;
+}
+
+export const DEV_SHOULD_ATTEMPT_REGISTRY_RECONCILIATION_CASES: Array<{
+  name: string;
+  sessionStatus: SessionLifecycleStatus;
+  authenticatedUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "unresolved session — never attempted, identity not yet known",
+    sessionStatus: "loading",
+    authenticatedUserId: null,
+    expected: false,
+  },
+  {
+    name: "resolved signed-out — never attempted, no account to reconcile against",
+    sessionStatus: "unauthenticated",
+    authenticatedUserId: null,
+    expected: false,
+  },
+  {
+    name: "SH.4.4 Codex P1 — resolved authenticated with a resolved user id — attempted regardless of which page/component is mounted (this is what lets a legacy profile reconcile without ever visiting Settings)",
+    sessionStatus: "authenticated",
+    authenticatedUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "defensive — authenticated status but no resolvable user id — never attempted (nothing to bind identity to)",
+    sessionStatus: "authenticated",
+    authenticatedUserId: null,
+    expected: false,
+  },
+];
 
 // ===== AMBIGUOUS ADOPTION OUTCOME RESOLUTION (Codex P1 follow-up #3) =====
 

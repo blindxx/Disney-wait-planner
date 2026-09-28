@@ -38,7 +38,7 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
 import { bootstrapProfiles, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
-import { shouldOmitPlannerContextForProfile } from "@/lib/syncHelper";
+import { shouldOmitPlannerContextForProfile, isIdentityStaleForRequest } from "@/lib/syncHelper";
 import { getUserId } from "@/lib/syncIdentity";
 
 /** Pre-10.4 global (non-profile-scoped) chat cache — read-only migration fallback for the "default" profile. */
@@ -1136,6 +1136,21 @@ export default function TomChatPage() {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
 
+  // SH.4.4 Codex P1 fix — mirrors `authenticatedUserId` for synchronous
+  // reads inside async callbacks, exactly like sessionIdRef above, so an
+  // in-flight request started under one authenticated identity can detect
+  // that the identity has since changed (an A -> B account switch, a
+  // sign-out, or a sign-in) and treat its own response as stale — even when
+  // the chat's session_id and active profile id happen to remain unchanged
+  // across that transition (e.g. a legacy/shared local profile that hasn't
+  // been retargeted). See isIdentityStaleForRequest()'s own doc in
+  // syncHelper.ts and sendQuestion's own isStale() below for where this is
+  // used.
+  const authenticatedUserIdRef = useRef(authenticatedUserId);
+  useEffect(() => {
+    authenticatedUserIdRef.current = authenticatedUserId;
+  }, [authenticatedUserId]);
+
   // The active local planner profile this chat's messages/sessionId belong
   // to. Kept in a ref (not state) so syncActiveProfile() below can compare
   // against it and update it synchronously, before any state-setter-driven
@@ -1311,7 +1326,14 @@ export default function TomChatPage() {
     // match and the response below is discarded instead of landing in the
     // new conversation.
     const requestSessionId = sessionIdRef.current;
-    const isStale = () => sessionIdRef.current !== requestSessionId;
+    // SH.4.4 Codex P1 fix — captured alongside requestSessionId so isStale()
+    // below also discards this request's response if the authenticated
+    // identity changes mid-flight, independent of whether session_id itself
+    // happens to change too. See isIdentityStaleForRequest()'s own doc.
+    const requestAuthenticatedUserId = authenticatedUserIdRef.current;
+    const isStale = () =>
+      sessionIdRef.current !== requestSessionId ||
+      isIdentityStaleForRequest(requestAuthenticatedUserId, authenticatedUserIdRef.current);
 
     setLoading(true);
     setError(null);
@@ -1439,13 +1461,27 @@ export default function TomChatPage() {
     // profile's chat history/session.
     syncActiveProfile();
     const requestSessionId = sessionIdRef.current;
+    // SH.4.4 Codex P1 fix — captured so the retry-restore below also honors
+    // the identity boundary: a request whose failure surfaces after the
+    // authenticated identity has since changed must not repopulate the
+    // input box under the new identity's session, even if session_id itself
+    // is unchanged. See isIdentityStaleForRequest()'s own doc in
+    // syncHelper.ts.
+    const requestAuthenticatedUserId = authenticatedUserIdRef.current;
     conversationInteractedRef.current = false;
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
       // Keep the failed question in the input box so it can be retried or
-      // edited — but only if the conversation wasn't reset in the meantime.
-      if (!ok && sessionIdRef.current === requestSessionId) setInput(question);
+      // edited — but only if the conversation wasn't reset, and the
+      // authenticated identity hasn't changed, in the meantime.
+      if (
+        !ok &&
+        sessionIdRef.current === requestSessionId &&
+        !isIdentityStaleForRequest(requestAuthenticatedUserId, authenticatedUserIdRef.current)
+      ) {
+        setInput(question);
+      }
     });
   }
 

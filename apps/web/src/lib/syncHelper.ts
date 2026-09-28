@@ -2238,6 +2238,89 @@ export function shouldOmitPlannerContextForProfile(
   return isLocalContentForeign(profileId, currentUserId);
 }
 
+// ── Tom in-flight account-transition boundary (SH.4.4 Codex P1 fix) ──
+//
+// Tom's own request flow (tom/page.tsx's sendQuestion) already has a
+// stale-request boundary: it captures the chat's session_id at request
+// start and discards the response (never appends it, never surfaces an
+// error, never re-enables the input under the OLD state) if that session_id
+// has since changed — e.g. "New Chat" swapped in a fresh session while the
+// request was still in flight. Codex found this boundary checked ONLY
+// session_id/active-profile-id, never the AUTHENTICATED IDENTITY the
+// request was made under: a request started under account A, on a chat
+// session_id/profile id that happens to remain unchanged across an
+// in-session A -> B account switch (e.g. a legacy/shared local profile that
+// hasn't been retargeted), would still have A's response appended into
+// what is now B's conversation once it resolved — even though every other
+// domain in this codebase (Plans, Lightning, planner sync itself) treats an
+// authenticated identity change as the canonical trigger for discarding
+// in-flight, identity-scoped work.
+//
+// isIdentityStaleForRequest() extends the SAME existing boundary (not a
+// parallel one) with this additional signal: the caller's own isStale()
+// check ORs this in alongside its existing session_id/profile_id
+// comparison — see tom/page.tsx's own sendQuestion for where it's used.
+// `null` (loading or signed-out) is a meaningful, distinct identity value
+// on either side, compared by strict inequality only — never coerced.
+
+/**
+ * Pure core: has the authenticated identity a Tom request was started under
+ * (`requestAuthenticatedUserId`) changed by the time some later point in
+ * that request's lifecycle is reached (`currentAuthenticatedUserId`)? See
+ * this section's own header doc for the full rationale.
+ *
+ * Run from Node:
+ *   import { DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES, isIdentityStaleForRequest } from "@/lib/syncHelper";
+ *   DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES.forEach(c => {
+ *     const got = isIdentityStaleForRequest(c.requestAuthenticatedUserId, c.currentAuthenticatedUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isIdentityStaleForRequest(
+  requestAuthenticatedUserId: string | null,
+  currentAuthenticatedUserId: string | null
+): boolean {
+  return currentAuthenticatedUserId !== requestAuthenticatedUserId;
+}
+
+export const DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES: Array<{
+  name: string;
+  requestAuthenticatedUserId: string | null;
+  currentAuthenticatedUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "same authenticated identity throughout — not stale",
+    requestAuthenticatedUserId: "userA",
+    currentAuthenticatedUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 Codex P1 — account switches A -> B mid-request — stale even though this signal alone says nothing about session_id/profile_id (the caller ORs both together)",
+    requestAuthenticatedUserId: "userA",
+    currentAuthenticatedUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "signs out mid-request — stale, never append an authenticated account's response into the signed-out/local-first view",
+    requestAuthenticatedUserId: "userA",
+    currentAuthenticatedUserId: null,
+    expected: true,
+  },
+  {
+    name: "signs in mid-request after starting signed out — stale, never append a signed-out request's response into a now-authenticated account's conversation",
+    requestAuthenticatedUserId: null,
+    currentAuthenticatedUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "both signed out throughout — not stale",
+    requestAuthenticatedUserId: null,
+    currentAuthenticatedUserId: null,
+    expected: false,
+  },
+];
+
 // ── Session-loading-safe planner render gate (Codex P1, SH.4.1 Plans-migration round) ──
 //
 // Codex found the SAME "sessionStatus === 'loading' collapses to a null
