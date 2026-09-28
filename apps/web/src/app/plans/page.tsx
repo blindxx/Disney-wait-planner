@@ -2331,6 +2331,28 @@ export default function PlansPage() {
     dayParksBaselineRef.current = loadedDayParks;
 
     setDayAutoFallbacks(loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current));
+
+    // Codex P1 fix — this retarget already points lightningKeyRef.current
+    // at the newly targeted identity's key (above), but was leaving
+    // lightningRawBaselineRef holding whatever the PREVIOUS identity's
+    // Lightning bytes were. Mirrors the mount effect's own seeding of this
+    // SAME ref (see its own doc) and lightning/page.tsx's own
+    // retargetLightningStorageIdentity() (which refreshes its mirror-image
+    // plansRawBaselineRef identically) — the fallback baseline for a
+    // domain this page doesn't own must always be re-seeded from the
+    // (possibly new) target the instant that target changes, or the next
+    // pull's fallback comparison (buildPostFetchPullBaseline(), consulted
+    // only pre-first-confirmation) would diff the NEW identity's actual
+    // Lightning content against the OLD identity's stale snapshot and
+    // misclassify it as a fresh local edit, letting it win outright over
+    // newer cloud state it never actually conflicted with. Captured as the
+    // raw string so no parsing/normalization is needed for a page that
+    // doesn't own that domain.
+    try {
+      lightningRawBaselineRef.current = localStorage.getItem(lightningKeyRef.current);
+    } catch {
+      lightningRawBaselineRef.current = null;
+    }
   }
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
