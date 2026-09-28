@@ -6,6 +6,8 @@ import {
   ensureActiveProfileVisible,
   shouldReloadForActiveProfileCorrection,
   UNOWNED_ACCOUNT_KEY,
+  getActiveProfileId,
+  adoptLegacyProfileValueIfSafe,
 } from "@/lib/profileStorage";
 import { getUserId } from "@/lib/syncIdentity";
 import { invalidatePendingUnloadSync } from "@/lib/syncHelper";
@@ -13,6 +15,7 @@ import {
   reconcileProfileRegistry,
   setRegistryIdentity,
   shouldAttemptRegistryReconciliation,
+  shouldAdoptLegacyPlannerData,
 } from "@/lib/profileRegistrySync";
 
 /**
@@ -119,6 +122,79 @@ function ActiveProfileAuthGuard(): null {
 }
 
 /**
+ * PR #161 Codex fix — GLOBAL legacy planner-data adoption lifecycle. Before
+ * this fix, safe legacy-to-qualified planner-data adoption
+ * (profileStorage.ts's adoptLegacyProfileValueIfSafe(), governed by its
+ * existing decideLegacyKeyAdoption() fail-closed/idempotent/provenance
+ * rules — completely unchanged and reused as-is here) only ever ran from
+ * Plans'/Lightning's own auth-transition effects
+ * (retargetPlansStorageIdentity()/retargetLightningStorageIdentity()). A
+ * user who signed in and went straight to Tom — without ever visiting
+ * Plans or Lightning first — had their qualified planner keys stay empty:
+ * plannerContextSnapshot.ts is explicitly read-only and never adopts on
+ * its own (see its own module doc: "This module performs NO legacy-key
+ * adoption of its own... Whether an authenticated profile's qualified keys
+ * already hold adopted content depends entirely on Plans/Lightning's own
+ * auth-transition adoption having already run"), so Tom's planner_context
+ * silently omitted legitimate legacy data that was simply never copied
+ * over yet.
+ *
+ * Mounted here for the SAME reason ActiveProfileAuthGuard/
+ * ProfileRegistryReconciliationGuard above are: this is the shared,
+ * page-independent boundary next-auth's own `useSession()` context is
+ * rooted at, and the highest point in the tree from which a session-status
+ * change is visible to literally every page — including Tom — before that
+ * page's own mount effect ever runs (this component renders BEFORE
+ * `{children}`, and AFTER ActiveProfileAuthGuard specifically so it reads
+ * `dwp.activeProfile` only once any auth-transition active-profile
+ * correction above has already applied — see that guard's own doc).
+ *
+ * Adopts the exact SAME union of SH.4-migrated planner base keys Plans' own
+ * retargetPlansStorageIdentity() already adopts ("plans", "days",
+ * "activeDayId", "dayMeta", "dayParks", "dayAutoFallbacks", "lightning") —
+ * no new base-key list, no new migration/adoption system. This is
+ * deliberately ADDITIVE, not a replacement: Plans'/Lightning's own
+ * per-page adoption calls are untouched and keep running exactly as
+ * before — adoptLegacyProfileValueIfSafe() is safe and idempotent to call
+ * redundantly from multiple call sites (its own doc), so whichever of
+ * this guard, Plans, or Lightning runs first for a given
+ * (userId, profileId, baseKey) "wins" and every later call is a no-op.
+ *
+ * Tom itself stays strictly read-only with respect to planner data — this
+ * guard, not Tom, performs the one safe, already-reviewed adoption copy,
+ * exactly mirroring how Plans/Lightning already do it. Account/profile
+ * isolation and fail-closed handling of ambiguous legacy ownership are
+ * entirely governed by the existing, unchanged
+ * decideLegacyKeyAdoption()/isProfileUnclaimedByOtherAccount() rules inside
+ * adoptLegacyProfileValueIfSafe() itself — this guard adds no isolation
+ * logic of its own.
+ *
+ * shouldAdoptLegacyPlannerData() is the same pure "resolved authenticated
+ * identity" shape shouldAttemptRegistryReconciliation() above uses, kept as
+ * its own separate predicate since it gates a distinct concern — see its
+ * own doc in profileRegistrySync.ts.
+ */
+function LegacyPlannerAdoptionGuard(): null {
+  const { data: session, status: sessionStatus } = useSession();
+  const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
+
+  useEffect(() => {
+    if (!shouldAdoptLegacyPlannerData(sessionStatus, authenticatedUserId)) return;
+    const userId = authenticatedUserId as string;
+    const profileId = getActiveProfileId();
+    adoptLegacyProfileValueIfSafe(userId, profileId, "plans");
+    adoptLegacyProfileValueIfSafe(userId, profileId, "days");
+    adoptLegacyProfileValueIfSafe(userId, profileId, "activeDayId");
+    adoptLegacyProfileValueIfSafe(userId, profileId, "dayMeta");
+    adoptLegacyProfileValueIfSafe(userId, profileId, "dayParks");
+    adoptLegacyProfileValueIfSafe(userId, profileId, "dayAutoFallbacks");
+    adoptLegacyProfileValueIfSafe(userId, profileId, "lightning");
+  }, [sessionStatus, authenticatedUserId]);
+
+  return null;
+}
+
+/**
  * SH.4.4 Codex P1 fix — GLOBAL account profile registry reconciliation
  * lifecycle. Before this fix, registry reconciliation (profileRegistrySync.ts's
  * setRegistryIdentity/reconcileProfileRegistry) was triggered ONLY from
@@ -197,6 +273,7 @@ export default function SessionProviderWrapper({
   return (
     <SessionProvider>
       <ActiveProfileAuthGuard />
+      <LegacyPlannerAdoptionGuard />
       <ProfileRegistryReconciliationGuard />
       {children}
     </SessionProvider>

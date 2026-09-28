@@ -22,12 +22,20 @@
  * This module performs NO legacy-key adoption of its own (no
  * adoptLegacyProfileValueIfSafe call, no localStorage.setItem anywhere in
  * this file) — Tom stays strictly read-only with respect to planner data
- * (AGENTS.md's Tom integration / planner-context contract). Whether an
- * authenticated profile's qualified keys already hold adopted content
- * depends entirely on Plans/Lightning's own auth-transition adoption having
- * already run for this device/profile — this module only ever reads
- * whatever currently exists at the resolved key, never guesses or backfills
- * from the legacy key on its own.
+ * (AGENTS.md's Tom integration / planner-context contract). This module
+ * only ever reads whatever currently exists at the resolved key, never
+ * guesses or backfills from the legacy key on its own.
+ *
+ * PR #161 Codex fix — whether an authenticated profile's qualified keys
+ * already hold adopted content no longer depends on the user having
+ * visited Plans or Lightning first: SessionProviderWrapper.tsx's own
+ * LegacyPlannerAdoptionGuard now runs the SAME
+ * adoptLegacyProfileValueIfSafe() adoption Plans/Lightning already ran, at
+ * the shared authenticated lifecycle boundary every page (including Tom)
+ * mounts under, before this module's own key resolution is ever reached.
+ * This module's own contract is otherwise unchanged — it still performs no
+ * adoption itself and still just reads whatever currently exists at the
+ * resolved key.
  *
  * Reads only the existing namespaced/account-qualified planner localStorage
  * keys (via profileStorage's buildNamespacedKey/resolveAccountScopedKey) —

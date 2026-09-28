@@ -969,6 +969,80 @@ export const DEV_SHOULD_WITHHOLD_PROFILE_CONTROLS_CASES: Array<{
   },
 ];
 
+/**
+ * PR #161 Codex fix — shared, pure gating decision for whether the GLOBAL
+ * legacy planner-data adoption guard (SessionProviderWrapper.tsx's
+ * LegacyPlannerAdoptionGuard) should run
+ * profileStorage.ts's adoptLegacyProfileValueIfSafe() for the active
+ * profile's SH.4-migrated planner domains right now.
+ *
+ * Before this fix, safe legacy-to-qualified planner-data adoption (driven
+ * by profileStorage.ts's existing decideLegacyKeyAdoption() fail-closed/
+ * idempotent rules) only ever ran from Plans'/Lightning's own auth-
+ * transition effects (retargetPlansStorageIdentity()/
+ * retargetLightningStorageIdentity() in plans/page.tsx/lightning/page.tsx).
+ * A user who signed in and went straight to Tom without ever visiting
+ * Plans or Lightning first therefore had their qualified planner keys stay
+ * empty: plannerContextSnapshot.ts is explicitly read-only and never
+ * adopts on its own (see its own module doc), so Tom's planner_context
+ * silently omitted legitimate legacy data that was simply never copied
+ * over yet.
+ *
+ * Identical shape to shouldAttemptRegistryReconciliation() above (a
+ * resolved, authenticated identity) — kept as its own separate, distinctly
+ * named predicate rather than reused directly, since it gates a
+ * differently scoped concern: local, synchronous legacy-data adoption,
+ * never a network round or the registry identity binding
+ * shouldAttemptRegistryReconciliation() itself governs.
+ *
+ * Pure — takes both values as parameters.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_ADOPT_LEGACY_PLANNER_DATA_CASES, shouldAdoptLegacyPlannerData } from "@/lib/profileRegistrySync";
+ *   DEV_SHOULD_ADOPT_LEGACY_PLANNER_DATA_CASES.forEach(c => {
+ *     const got = shouldAdoptLegacyPlannerData(c.sessionStatus, c.authenticatedUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldAdoptLegacyPlannerData(
+  sessionStatus: SessionLifecycleStatus,
+  authenticatedUserId: string | null
+): boolean {
+  return sessionStatus !== "loading" && authenticatedUserId !== null;
+}
+
+export const DEV_SHOULD_ADOPT_LEGACY_PLANNER_DATA_CASES: Array<{
+  name: string;
+  sessionStatus: SessionLifecycleStatus;
+  authenticatedUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "unresolved session — never adopts; identity not yet known, would risk adopting into the wrong (or no) account's qualified keys",
+    sessionStatus: "loading",
+    authenticatedUserId: null,
+    expected: false,
+  },
+  {
+    name: "resolved signed-out — never adopts; there is no qualified key to adopt into",
+    sessionStatus: "unauthenticated",
+    authenticatedUserId: null,
+    expected: false,
+  },
+  {
+    name: "PR #161 Codex fix — resolved authenticated with a resolved user id — adopts regardless of which page/component is mounted, so Tom (or any other qualified reader) sees adopted legacy data even when the user never visits Plans or Lightning first",
+    sessionStatus: "authenticated",
+    authenticatedUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "defensive — authenticated status but no resolvable user id — never adopts (nothing to adopt into)",
+    sessionStatus: "authenticated",
+    authenticatedUserId: null,
+    expected: false,
+  },
+];
+
 // ===== AMBIGUOUS ADOPTION OUTCOME RESOLUTION (Codex P1 follow-up #3) =====
 
 /**
