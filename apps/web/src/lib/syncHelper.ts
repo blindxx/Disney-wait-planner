@@ -3898,12 +3898,24 @@ export const DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES: Array<{
 ];
 
 /**
- * Thin I/O wrapper around decideSyncScopedDomainKey(): reads the module's
- * own LIVE currentSyncPlansQualified state (see its own doc) rather than
- * requiring every call site to thread it through explicitly.
+ * Thin I/O wrapper around decideSyncScopedDomainKey(): by default reads the
+ * module's own LIVE currentSyncPlansQualified state (see its own doc)
+ * rather than requiring every call site to thread it through explicitly.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
+ * across a namespace switch." `plansQualifiedOverride`, when provided,
+ * wins outright over the live flag — see doPush()'s own doc for why a
+ * DEFERRED (inFlight-retried) push must keep reading the namespace it was
+ * ORIGINALLY captured under, never whatever currentSyncPlansQualified has
+ * since become.
  */
-function syncScopedDomainKey(userId: string | null, profileId: string, baseKey: string): string {
-  return decideSyncScopedDomainKey(currentSyncPlansQualified, userId, profileId, baseKey);
+function syncScopedDomainKey(
+  userId: string | null,
+  profileId: string,
+  baseKey: string,
+  plansQualifiedOverride?: boolean
+): string {
+  return decideSyncScopedDomainKey(plansQualifiedOverride ?? currentSyncPlansQualified, userId, profileId, baseKey);
 }
 
 /**
@@ -3923,10 +3935,22 @@ function syncScopedDomainKey(userId: string | null, profileId: string, baseKey: 
  * Lightning's own migration is a separate, later slice, and Lightning's
  * page code still only ever writes its canonical value (and therefore its
  * edit-facts) under the legacy key.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
+ * passes straight through to syncScopedDomainKey() (see its own doc); every
+ * EXISTING caller that omits it (recordConfirmedFactBody(),
+ * reconcilePendingOperations() — both pull-side, unrelated to this fix)
+ * keeps reading the live flag, unchanged. Only buildPendingOpDomains()
+ * (doPush()'s own pending-op evidence, see its own doc) passes one.
  */
-function domainCanonicalKey(userId: string | null, profileId: string, domain: ConfirmedDomainName): string {
+function domainCanonicalKey(
+  userId: string | null,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  plansQualifiedOverride?: boolean
+): string {
   if (domain === "lightning") return buildNamespacedKey(profileId, domain);
-  return syncScopedDomainKey(userId, profileId, domain);
+  return syncScopedDomainKey(userId, profileId, domain, plansQualifiedOverride);
 }
 
 /**
@@ -3979,38 +4003,56 @@ function getKnownBaseRevision(userId: string, profileId: string): number {
  * buildPayloadFromStorage() just read `payload` from, never a stale
  * legacy-shape snapshot for a domain that has since moved to the
  * account-qualified key.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
+ * passes straight through to domainCanonicalKey() (see its own doc):
+ * doPush() passes the SAME captured snapshot it used to build `payload`
+ * itself, so a deferred/retried push's own pending-op evidence is always
+ * taken from the IDENTICAL namespace as the payload it describes — never a
+ * mix of the two.
  */
 function buildPendingOpDomains(
   userId: string,
   profileId: string,
-  payload: SyncedPlannerPayload
+  payload: SyncedPlannerPayload,
+  plansQualifiedOverride?: boolean
 ): PendingOpRecord["domains"] {
   const domains: PendingOpRecord["domains"] = {
     plans: {
       digest: canonicalDigest(payload.plans),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "plans"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "plans", plansQualifiedOverride))
+      ),
     },
     lightning: {
       digest: canonicalDigest(payload.lightning),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "lightning"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "lightning", plansQualifiedOverride))
+      ),
     },
   };
   if (payload.days !== undefined) {
     domains.days = {
       digest: canonicalDigest(payload.days),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "days"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "days", plansQualifiedOverride))
+      ),
     };
   }
   if (payload.dayMeta !== undefined) {
     domains.dayMeta = {
       digest: canonicalDigest(payload.dayMeta),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayMeta"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayMeta", plansQualifiedOverride))
+      ),
     };
   }
   if (payload.dayParks !== undefined) {
     domains.dayParks = {
       digest: canonicalDigest(payload.dayParks),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayParks"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayParks", plansQualifiedOverride))
+      ),
     };
   }
   return domains;
@@ -5777,13 +5819,22 @@ function parseLocalDatasetEntry(
  * syncScopedDomainKey() (gated on currentSyncPlansQualified, not `userId`
  * alone), mirroring wherever the CURRENTLY ACTIVE sync-driving page's own
  * daysKeyRef actually targets — see that function's own doc for why.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
+ * passes straight through to syncScopedDomainKey(); see doPush()'s own doc
+ * for why a deferred/retried push must keep reading the namespace it was
+ * originally captured under.
  */
-function readLocalDaysOrder(userId: string | null, profileId: string): unknown[] | undefined {
+function readLocalDaysOrder(
+  userId: string | null,
+  profileId: string,
+  plansQualifiedOverride?: boolean
+): unknown[] | undefined {
   try {
     // Codex P1 fix (17th round) — reads the newest DURABLE edit for the
     // days key, not merely whatever the canonical key currently holds; see
     // readLatestDurableValue()'s own doc above.
-    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "days"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "days", plansQualifiedOverride));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed : undefined;
@@ -5806,10 +5857,13 @@ function readLocalDaysOrder(userId: string | null, profileId: string): unknown[]
  *
  * SH.4.1 Plans-migration Codex P1 fix — same syncScopedDomainKey() routing
  * as readLocalDaysOrder() above.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — same
+ * `plansQualifiedOverride` threading as readLocalDaysOrder() above.
  */
-function readLocalDayMeta(userId: string | null, profileId: string): unknown {
+function readLocalDayMeta(userId: string | null, profileId: string, plansQualifiedOverride?: boolean): unknown {
   try {
-    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayMeta"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayMeta", plansQualifiedOverride));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -5831,10 +5885,13 @@ function readLocalDayMeta(userId: string | null, profileId: string): unknown {
  *
  * SH.4.1 Plans-migration Codex P1 fix — same syncScopedDomainKey() routing
  * as readLocalDaysOrder() above.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — same
+ * `plansQualifiedOverride` threading as readLocalDaysOrder() above.
  */
-function readLocalDayParks(userId: string | null, profileId: string): unknown {
+function readLocalDayParks(userId: string | null, profileId: string, plansQualifiedOverride?: boolean): unknown {
   try {
-    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayParks"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayParks", plansQualifiedOverride));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -5893,8 +5950,19 @@ function readLocalDayParks(userId: string | null, profileId: string): unknown {
  * unconditionally: Lightning's own migration is a separate, later slice,
  * and Lightning's page code still only ever writes its canonical value
  * under the legacy key.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
+ * across a namespace switch." `plansQualifiedOverride`, when provided,
+ * pins every one of these reads to that exact namespace mode regardless of
+ * what currentSyncPlansQualified has become BY THE TIME this actually
+ * runs — see doPush()'s own doc for why a deferred (inFlight-retried) push
+ * needs this.
  */
-function buildPayloadFromStorage(profileId: string, userId: string | null): SyncedPlannerPayload | null {
+function buildPayloadFromStorage(
+  profileId: string,
+  userId: string | null,
+  plansQualifiedOverride?: boolean
+): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
   if (userId && hasIncompleteHydrationApplyIntent(userId, profileId)) return null;
   try {
@@ -5906,7 +5974,7 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // is guaranteed to reflect the user's true latest edit even in the rare
     // window where a concurrent hydration race has transiently clobbered
     // the canonical key itself.
-    const plansRaw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "plans"));
+    const plansRaw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "plans", plansQualifiedOverride));
     const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
 
     const plans = parseLocalDatasetEntry(plansRaw);
@@ -5916,9 +5984,9 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // push potentially empty data over valid cloud state.
     if (plans === null || lightning === null) return null;
 
-    const days = readLocalDaysOrder(userId, profileId);
-    const dayMeta = readLocalDayMeta(userId, profileId);
-    const dayParks = readLocalDayParks(userId, profileId);
+    const days = readLocalDaysOrder(userId, profileId, plansQualifiedOverride);
+    const dayMeta = readLocalDayMeta(userId, profileId, plansQualifiedOverride);
+    const dayParks = readLocalDayParks(userId, profileId, plansQualifiedOverride);
     return buildSyncedPlannerPayload(plans, lightning, days, dayMeta, dayParks);
   } catch {
     return null;
@@ -6134,19 +6202,134 @@ function clearStaleSyncingStatus(profileId: string): void {
   } catch {}
 }
 
-async function doPush(): Promise<void> {
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
+ * across a namespace switch." PURE CORE: what identity/profile/namespace
+ * snapshot should a doPush() attempt actually push under?
+ *
+ * Root cause this closes: doPush()'s own `inFlight` retry
+ * (`debounceTimer = setTimeout(() => void doPush(), 1_000)`) previously
+ * captured NOTHING when it deferred — the retry simply called doPush()
+ * again with no arguments, which then re-read `currentSyncProfileId`/
+ * `currentSyncUserId`/`currentSyncPlansQualified` FRESH, a full second
+ * later, whenever it actually got to run. If a qualified Plans push was
+ * already in flight when a SECOND edit's debounced push (or the 2nd
+ * round's own flush-on-namespace-switch, see
+ * applySyncPlansQualifiedTransition()'s doc) called doPush() again, that
+ * second attempt deferred via the SAME retry — and if the user navigated
+ * to Lightning before the 1-second retry fired, `currentSyncPlansQualified`
+ * had ALREADY flipped to false by the time the retry actually ran,
+ * silently reading Plans' edit from the WRONG (legacy, likely stale/empty)
+ * namespace instead of the qualified one it was actually queued for.
+ *
+ * The fix: doPush() now accepts an optional `forcedSnapshot` — the exact
+ * (profileId, userId, plansQualified) triple THIS specific push attempt
+ * belongs to. resolveDeferredPushSnapshot() is the one place that decides
+ * what to use: a `forcedSnapshot` from an EARLIER defer always wins outright
+ * (never re-derived from live state, which is exactly what let the
+ * namespace change out from under a retry); only when no snapshot has been
+ * captured yet (the very first attempt) does it fall back to the live
+ * module state. doPush()'s own retry always re-passes whatever snapshot
+ * IT resolved, so the ORIGINAL identity/namespace survives any number of
+ * consecutive inFlight defers, not just one hop.
+ *
+ * Run from Node:
+ *   import { DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES, resolveDeferredPushSnapshot } from "@/lib/syncHelper";
+ *   DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES.forEach(c => {
+ *     const got = resolveDeferredPushSnapshot(c.forcedSnapshot, c.liveProfileId, c.liveUserId, c.livePlansQualified);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type DeferredPushSnapshot = {
+  profileId: string;
+  userId: string | null;
+  plansQualified: boolean;
+};
+
+export function resolveDeferredPushSnapshot(
+  forcedSnapshot: DeferredPushSnapshot | undefined,
+  liveProfileId: string,
+  liveUserId: string | null,
+  livePlansQualified: boolean
+): DeferredPushSnapshot {
+  if (forcedSnapshot) return forcedSnapshot;
+  return { profileId: liveProfileId, userId: liveUserId, plansQualified: livePlansQualified };
+}
+
+export const DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES: Array<{
+  name: string;
+  forcedSnapshot: DeferredPushSnapshot | undefined;
+  liveProfileId: string;
+  liveUserId: string | null;
+  livePlansQualified: boolean;
+  expected: DeferredPushSnapshot;
+}> = [
+  {
+    name: "first-ever attempt (no forced snapshot yet) — captures live state",
+    forcedSnapshot: undefined,
+    liveProfileId: "default",
+    liveUserId: "userA",
+    livePlansQualified: true,
+    expected: { profileId: "default", userId: "userA", plansQualified: true },
+  },
+  {
+    name: "REGRESSION CASE — a deferred retry's forced snapshot (captured while Plans was qualified) wins outright even though live state has since switched to Lightning/unqualified",
+    forcedSnapshot: { profileId: "default", userId: "userA", plansQualified: true },
+    liveProfileId: "default",
+    liveUserId: "userA",
+    livePlansQualified: false,
+    expected: { profileId: "default", userId: "userA", plansQualified: true },
+  },
+  {
+    name: "a forced snapshot also survives a live identity change (e.g. a different account signing in while this push is still deferred)",
+    forcedSnapshot: { profileId: "default", userId: "userA", plansQualified: true },
+    liveProfileId: "default",
+    liveUserId: "userB",
+    livePlansQualified: true,
+    expected: { profileId: "default", userId: "userA", plansQualified: true },
+  },
+  {
+    name: "signed-out first attempt — captures live null userId, unqualified",
+    forcedSnapshot: undefined,
+    liveProfileId: "default",
+    liveUserId: null,
+    livePlansQualified: false,
+    expected: { profileId: "default", userId: null, plansQualified: false },
+  },
+];
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `forcedSnapshot`, when
+ * provided, pins this ENTIRE push attempt (payload build AND pending-op
+ * evidence) to that exact (profileId, userId, plansQualified) triple — see
+ * resolveDeferredPushSnapshot()'s own doc above for the full rationale.
+ * Ordinary callers (scheduleSync()'s debounce, applySyncPlansQualifiedTransition()'s
+ * flush) omit it, starting a fresh attempt from whatever is live right now
+ * — unchanged from before this round.
+ */
+async function doPush(forcedSnapshot?: DeferredPushSnapshot): Promise<void> {
+  const snapshot = resolveDeferredPushSnapshot(
+    forcedSnapshot,
+    currentSyncProfileId,
+    currentSyncUserId,
+    currentSyncPlansQualified
+  );
   if (inFlight) {
-    // Re-schedule so the latest payload gets sent after the current request
+    // Re-schedule so the latest payload gets sent after the current
+    // request — carrying `snapshot` forward so the retry keeps pushing
+    // under the SAME identity/profile/namespace THIS attempt was for,
+    // never whatever happens to be live a second from now.
     if (debounceTimer !== null) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => void doPush(), 1_000);
+    debounceTimer = setTimeout(() => void doPush(snapshot), 1_000);
     return;
   }
 
   // Capture the profile and user identity at push-start so all writes
   // target the originating profile/identity unconditionally, even if the
   // user switches profiles or signs into a different account mid-flight.
-  const profileId = currentSyncProfileId;
-  const userId = currentSyncUserId;
+  const profileId = snapshot.profileId;
+  const userId = snapshot.userId;
+  const plansQualified = snapshot.plansQualified;
   // SH.2.6 — capture the sync epoch (bumped by setSyncUserId()/
   // setSyncProfileId() on every genuine transition) alongside identity, so
   // this push's own UI-facing completion writes can be gated against it
@@ -6177,7 +6360,7 @@ async function doPush(): Promise<void> {
   // and this push stays exactly as unprotected as any pre-SH.2.5.1 write.
   const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
 
-  const payload = buildPayloadFromStorage(profileId, userId);
+  const payload = buildPayloadFromStorage(profileId, userId, plansQualified);
   if (!payload) return;
 
   const body = JSON.stringify(payload);
@@ -6225,7 +6408,12 @@ async function doPush(): Promise<void> {
   // further edit, or by this same profile's next mount/pull cycle) simply
   // retries once storage pressure clears — no new retry machinery needed.
   if (userId) {
-    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(userId, profileId, payload));
+    const registered = addPendingOp(
+      userId,
+      profileId,
+      opId,
+      buildPendingOpDomains(userId, profileId, payload, plansQualified)
+    );
     if (!registered) {
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");
