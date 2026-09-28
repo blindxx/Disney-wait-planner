@@ -532,6 +532,105 @@ export function getProfileIdsOwnedByOtherAccounts(currentOwnerUserId: string): S
 }
 
 /**
+ * SH.4 Codex fix — "first-sign-in local-data adoption." PURE CORE for a
+ * DIFFERENT question from selectProfileIdsOwnedByOtherAccounts() above:
+ * that function deliberately EXEMPTS the canonical shared `"default"`
+ * profile id from ever counting as "owned by another account" (every
+ * account legitimately, independently owns its own `"default"` by
+ * definition — see CANONICAL_SHARED_PROFILE_ID's own doc), because it
+ * answers "should this id be visible/creatable in MY OWN profile picker."
+ * This function answers a narrower, unrelated question with NO such
+ * exemption: "has any OTHER real account's REAL PLANNER CONTENT ever
+ * occupied this profile id's shared legacy local-storage slot on THIS
+ * device" — used to decide whether a never-tagged (null) legacy content
+ * owner is safe to adopt on a genuinely first-ever sign-in, even for the
+ * `"default"` profile, which is exactly the profile most anonymous users
+ * are on.
+ *
+ * Returns true (safe) when `profileId` has no registry entry at all (no
+ * account has EVER been recorded against it on this device — the true
+ * first-ever-use case) or every recorded "owned" entry belongs to
+ * `currentUserId` itself or the shared UNOWNED_ACCOUNT_KEY sentinel
+ * (mirrors selectProfileIdsOwnedByOtherAccounts()'s own exclusion of that
+ * sentinel — it is never a competing account). Returns false the instant
+ * ANY other real account is recorded as owning this profile id — the
+ * "account whose pull never reached the point where setLocalContentOwner()
+ * was called" case decideLegacyKeyAdoption()'s own doc already worried
+ * about — so that account's stranded content can never be silently handed
+ * to a DIFFERENT account merely because its own ownership marker never got
+ * durably written.
+ *
+ * Run from Node:
+ *   import { DEV_IS_PROFILE_UNCLAIMED_BY_OTHER_ACCOUNT_CASES, isProfileUnclaimedByOtherAccount } from "@/lib/profileStorage";
+ *   DEV_IS_PROFILE_UNCLAIMED_BY_OTHER_ACCOUNT_CASES.forEach(c => {
+ *     const got = isProfileUnclaimedByOtherAccount(c.state, c.profileId, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isProfileUnclaimedByOtherAccount(
+  state: ProfileRegistryState,
+  profileId: string,
+  currentUserId: string
+): boolean {
+  const byAccount = state[profileId];
+  if (!byAccount) return true; // no account has ever been recorded against this profile id at all
+  return Object.entries(byAccount).every(
+    ([accountKey, entry]) => accountKey === currentUserId || accountKey === UNOWNED_ACCOUNT_KEY || !entry?.owned
+  );
+}
+
+export const DEV_IS_PROFILE_UNCLAIMED_BY_OTHER_ACCOUNT_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  currentUserId: string;
+  expected: boolean;
+}> = [
+  {
+    name: "no registry entry at all for this profile id — genuinely first-ever use on this device — safe",
+    state: {},
+    profileId: "default",
+    currentUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "REGRESSION CASE — 'default' is NOT exempt here (unlike selectProfileIdsOwnedByOtherAccounts): account A's real content already claimed it, so B's first sign-in must NOT adopt A's stranded legacy bytes",
+    state: { default: { userA: { owned: true } } },
+    profileId: "default",
+    currentUserId: "userB",
+    expected: false,
+  },
+  {
+    name: "currentUserId is the (sole) recorded owner — safe (this is just decideLegacyKeyAdoption()'s ordinary legacyOwner === currentUserId path re-confirmed at the registry level)",
+    state: { default: { userA: { owned: true } } },
+    profileId: "default",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "only the shared signed-out sentinel is recorded — never a competing real account — safe",
+    state: { default: { [UNOWNED_ACCOUNT_KEY]: { owned: true } } },
+    profileId: "default",
+    currentUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "only a locallyDeleted marker (no ownership) for another account — never counted as 'claimed' — safe",
+    state: { default: { userA: { locallyDeleted: true } } },
+    profileId: "default",
+    currentUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "a non-default custom profile id also protected identically — no exemption difference from 'default'",
+    state: { family: { userA: { owned: true } } },
+    profileId: "family",
+    currentUserId: "userB",
+    expected: false,
+  },
+];
+
+/**
  * Pure query: given the full provenance state and the CURRENT account,
  * return the ids owned by another real account AND NOT also owned by
  * `currentOwnerUserId`. This is DELIBERATELY a different question from
@@ -1509,20 +1608,43 @@ export function buildAccountQualifiedKey(userId: string, profileId: string, base
  * storage going forward (this module's own "never overwrite an existing
  * qualified value" rule means a wrong adoption can never be silently
  * corrected by a later, more-informed run). A null/never-tagged owner does
- * NOT prove this content is `currentUserId`'s own — it may equally be
- * pre-SH.4.1a content, or content left by a signed-out session, or content
- * from an account whose pull never reached the point where
+ * NOT, on its own, prove this content is `currentUserId`'s own — it may
+ * equally be pre-SH.4.1a content, or content left by a signed-out session,
+ * or content from an account whose pull never reached the point where
  * setLocalContentOwner() was called. Only a marker that POSITIVELY,
- * affirmatively names `currentUserId` is treated as safely attributable;
- * every other case (null, or a different known identity) fails closed.
+ * affirmatively names `currentUserId` is unconditionally treated as safely
+ * attributable; a different known identity always fails closed.
+ *
+ * SH.4 Codex fix — "first-sign-in local-data adoption." A null owner is no
+ * longer an UNCONDITIONAL "skip": `legacyProfileUnclaimedByOtherAccount`
+ * (the caller's own snapshot of profileStorage.ts's
+ * isProfileUnclaimedByOtherAccount() — the EXISTING profile-registry
+ * provenance this module already maintains for a completely different
+ * purpose, reused here rather than inventing a second registry) additively
+ * unlocks "adopt" for the null case, ONLY when the profile-registry
+ * provenance independently shows no OTHER real account has ever been
+ * recorded as owning this profile id on this device. This is exactly the
+ * genuinely-first-ever-sign-in case: a user creates planner data while
+ * signed out, then signs in for the very first time on this device/profile
+ * — `legacyOwner` is null (content-ownership provenance was never
+ * touched, since no authenticated session has ever run here) AND the
+ * profile registry has never recorded ANY account against this profile id
+ * either, so there is no competing account this content could belong to
+ * instead. The moment EITHER signal shows ambiguity or a real competing
+ * claim — a different known `legacyOwner`, OR a different real account
+ * recorded in the profile registry — this still fails closed exactly as
+ * before; `legacyProfileUnclaimedByOtherAccount` never overrides a KNOWN
+ * foreign `legacyOwner`, it only ever widens the null-owner case.
  *
  * Required properties (all satisfied by this single decision):
  *   - never overwrite an existing qualified value — `qualifiedValueExists`
  *     short-circuits to "skip" before the owner is even consulted;
  *   - never copy known-foreign legacy content into another account —
- *     `legacyOwner` naming a different identity returns "skip";
- *   - ambiguous ownership fails closed rather than guessing —
- *     `legacyOwner === null` also returns "skip", not "adopt";
+ *     `legacyOwner` naming a different identity returns "skip" regardless
+ *     of `legacyProfileUnclaimedByOtherAccount`;
+ *   - ambiguous ownership still fails closed rather than guessing — a null
+ *     `legacyOwner` returns "skip" unless the registry-provenance signal
+ *     POSITIVELY shows no other account ever claimed this profile;
  *   - repeated evaluation is safe/idempotent — a pure function of its
  *     inputs; once a real adoption has run once, `qualifiedValueExists`
  *     becomes true and every subsequent call again returns "skip";
@@ -1533,7 +1655,8 @@ export function buildAccountQualifiedKey(userId: string, profileId: string, base
  *   - migration copies rather than destructively moves legacy data — this
  *     is a decision function only (no I/O); see adoptLegacyProfileValueIfSafe
  *     below for the copy-only wrapper that acts on it;
- *   - no network dependency — legacyOwner is read from localStorage only.
+ *   - no network dependency — both legacyOwner and the registry-provenance
+ *     snapshot are read from localStorage only.
  *
  * Run from Node:
  *   import { DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES, decideLegacyKeyAdoption } from "@/lib/profileStorage";
@@ -1549,12 +1672,15 @@ export function decideLegacyKeyAdoption(input: {
   legacyValueExists: boolean;
   legacyOwner: string | null;
   currentUserId: string;
+  legacyProfileUnclaimedByOtherAccount: boolean;
 }): LegacyKeyAdoptionDecision {
-  const { qualifiedValueExists, legacyValueExists, legacyOwner, currentUserId } = input;
+  const { qualifiedValueExists, legacyValueExists, legacyOwner, currentUserId, legacyProfileUnclaimedByOtherAccount } =
+    input;
   if (qualifiedValueExists) return "skip"; // never overwrite an existing qualified value
   if (!legacyValueExists) return "skip"; // nothing to adopt
   if (legacyOwner === currentUserId) return "adopt"; // positively, affirmatively attributable
-  return "skip"; // null (ambiguous/never tagged) or a different known identity (foreign) — both fail closed
+  if (legacyOwner === null && legacyProfileUnclaimedByOtherAccount) return "adopt"; // safe first-sign-in adoption
+  return "skip"; // a different known identity (foreign), or a null owner the registry can't clear — fails closed
 }
 
 export const DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES: Array<{
@@ -1564,37 +1690,85 @@ export const DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES: Array<{
     legacyValueExists: boolean;
     legacyOwner: string | null;
     currentUserId: string;
+    legacyProfileUnclaimedByOtherAccount: boolean;
   };
   expected: LegacyKeyAdoptionDecision;
 }> = [
   {
     name: "existing qualified value => no adoption/overwrite, regardless of legacy owner",
-    input: { qualifiedValueExists: true, legacyValueExists: true, legacyOwner: "userA", currentUserId: "userA" },
+    input: {
+      qualifiedValueExists: true,
+      legacyValueExists: true,
+      legacyOwner: "userA",
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: true,
+    },
     expected: "skip",
   },
   {
     name: "safely attributable legacy value (owner === currentUserId) => adopt",
-    input: { qualifiedValueExists: false, legacyValueExists: true, legacyOwner: "userA", currentUserId: "userA" },
+    input: {
+      qualifiedValueExists: false,
+      legacyValueExists: true,
+      legacyOwner: "userA",
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: false,
+    },
     expected: "adopt",
   },
   {
-    name: "known-foreign legacy value (owner is a different known identity) => do not adopt",
-    input: { qualifiedValueExists: false, legacyValueExists: true, legacyOwner: "userB", currentUserId: "userA" },
+    name: "known-foreign legacy value (owner is a different known identity) => do not adopt, even if the registry (wrongly, hypothetically) claims the profile is unclaimed",
+    input: {
+      qualifiedValueExists: false,
+      legacyValueExists: true,
+      legacyOwner: "userB",
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: true,
+    },
     expected: "skip",
   },
   {
-    name: "ambiguous legacy ownership (never tagged, owner null) => fail closed, not a guessed adopt",
-    input: { qualifiedValueExists: false, legacyValueExists: true, legacyOwner: null, currentUserId: "userA" },
+    name: "ambiguous legacy ownership (never tagged, owner null), registry ALSO shows another real account has claimed this profile => fail closed, not a guessed adopt",
+    input: {
+      qualifiedValueExists: false,
+      legacyValueExists: true,
+      legacyOwner: null,
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: false,
+    },
     expected: "skip",
   },
   {
-    name: "repeated adoption decision is idempotent — once qualifiedValueExists flips true (post-adoption), re-evaluation still skips",
-    input: { qualifiedValueExists: true, legacyValueExists: true, legacyOwner: "userA", currentUserId: "userA" },
+    name: "SH.4 Codex fix REGRESSION CASE — genuine first-ever sign-in: owner null AND the profile registry independently shows no other account has ever claimed this profile => safe to adopt, not stranded",
+    input: {
+      qualifiedValueExists: false,
+      legacyValueExists: true,
+      legacyOwner: null,
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: true,
+    },
+    expected: "adopt",
+  },
+  {
+    name: "repeated adoption decision is idempotent — once qualifiedValueExists flips true (post-adoption), re-evaluation still skips even for the first-sign-in path",
+    input: {
+      qualifiedValueExists: true,
+      legacyValueExists: true,
+      legacyOwner: null,
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: true,
+    },
     expected: "skip",
   },
   {
-    name: "no legacy value present at all => nothing to adopt",
-    input: { qualifiedValueExists: false, legacyValueExists: false, legacyOwner: null, currentUserId: "userA" },
+    name: "no legacy value present at all => nothing to adopt, regardless of registry state",
+    input: {
+      qualifiedValueExists: false,
+      legacyValueExists: false,
+      legacyOwner: null,
+      currentUserId: "userA",
+      legacyProfileUnclaimedByOtherAccount: true,
+    },
     expected: "skip",
   },
 ];
@@ -1602,14 +1776,18 @@ export const DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES: Array<{
 /**
  * I/O wrapper around decideLegacyKeyAdoption(): reads the current qualified
  * and legacy values for `(userId, profileId, baseKey)` plus the existing
- * `getLocalContentOwner(profileId)` provenance marker, and — only when the
- * decision is "adopt" — COPIES (never deletes) the legacy value into the
- * new account-qualified key. Returns whether an adoption copy was made.
+ * `getLocalContentOwner(profileId)` provenance marker AND (SH.4 Codex fix)
+ * the existing profile-registry provenance (isProfileUnclaimedByOtherAccount(),
+ * see its own doc), and — only when the decision is "adopt" — COPIES (never
+ * deletes) the legacy value into the new account-qualified key. Returns
+ * whether an adoption copy was made.
  *
- * Not yet called by any consumer in this slice (see this section's own
- * header doc) — provided so a later phase's Plans/Lightning/etc. wiring has
- * a single, already-reviewed entry point rather than needing to reimplement
- * this read/decide/copy sequence itself.
+ * Called identically by every consumer (Plans' own
+ * retargetPlansStorageIdentity(), Lightning's own
+ * retargetLightningStorageIdentity()) — a single, already-reviewed entry
+ * point, so first-sign-in adoption safety is enforced consistently
+ * regardless of which page happens to run it first for a given
+ * (userId, profileId, baseKey).
  */
 export function adoptLegacyProfileValueIfSafe(userId: string, profileId: string, baseKey: string): boolean {
   if (typeof window === "undefined") return false;
@@ -1623,6 +1801,11 @@ export function adoptLegacyProfileValueIfSafe(userId: string, profileId: string,
       legacyValueExists: legacyValue !== null,
       legacyOwner: getLocalContentOwner(profileId),
       currentUserId: userId,
+      legacyProfileUnclaimedByOtherAccount: isProfileUnclaimedByOtherAccount(
+        readProfileRegistryState(),
+        profileId,
+        userId
+      ),
     });
     if (decision !== "adopt") return false;
     localStorage.setItem(qualifiedKey, legacyValue as string);

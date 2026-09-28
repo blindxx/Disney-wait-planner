@@ -4957,12 +4957,11 @@ function applySyncPlansQualifiedTransition(nextQualified: boolean): void {
 }
 
 /**
- * SH.4.1 Plans-migration Codex P1 fix — the shared reset both
- * setSyncProfileId() and setSyncUserId() call UNCONDITIONALLY, before their
- * own "did it actually change" early return: reverts
- * currentSyncPlansQualified to its safe/legacy default the instant EITHER
- * function is called, regardless of whether the value it was given is
- * itself a change. Mirrors those functions' own "cancel pending work
+ * SH.4.1 Plans-migration Codex P1 fix — the shared reset setSyncProfileId()
+ * and setSyncUserId() call for a SAME-identity re-assertion (an ordinary
+ * Plans<->Lightning namespace-mode switch): reverts currentSyncPlansQualified
+ * to its safe/legacy default, regardless of whether the value it was given
+ * is itself a change. Mirrors those functions' own "cancel pending work
  * before a namespace mode a queued push assumed could go stale" pattern —
  * a push scheduled while Plans was the active (qualified) page must never
  * be allowed to fire once Lightning (unqualified) has become the active
@@ -4977,10 +4976,87 @@ function applySyncPlansQualifiedTransition(nextQualified: boolean): void {
  * cancel: routes through applySyncPlansQualifiedTransition() above, which
  * flushes a still-pending push instead of discarding it — see that
  * function's and decideSyncPlansQualifiedTransitionAction()'s own docs.
+ *
+ * SH.4 Codex fix — "account-transition queued push." This function still
+ * runs on every call, before setSyncProfileId()'s/setSyncUserId()'s own
+ * "did it actually change" early return — but it previously ran with
+ * NOTHING having cancelled a pending push for a GENUINE identity/profile
+ * change first, and that ordering was itself the bug: on such a change
+ * (A -> B, sign-in, or sign-out), this function's
+ * OWN flush-preserving behavior (designed only for the harmless same-
+ * identity Plans<->Lightning namespace switch) could still see a pending
+ * debounced push belonging to the OUTGOING identity and FLUSH it — firing
+ * a real doPush() network request. That request reads the OUTGOING
+ * identity's own local storage correctly (doPush() captures its namespace
+ * synchronously), but its fetch() call authenticates via the browser's
+ * CURRENT session cookie — which, by the time this effect runs at all
+ * (triggered by useSession() already having observed the NEW identity),
+ * already belongs to the INCOMING identity. The flushed request would
+ * silently attribute the OUTGOING identity's unsynced local edits to the
+ * INCOMING account's cloud row. See decideIdentityTransitionPushDisposition()
+ * below and its own callers in setSyncProfileId()/setSyncUserId() for the
+ * fix: a genuine change now cancels ALL pending/deferred work OUTRIGHT
+ * (cancelScheduledSync() + cancelDeferredPushRetry(), never a flush)
+ * BEFORE this function ever runs — so by the time it does run, there is
+ * nothing left pending for it to see, and it safely reduces to setting
+ * currentSyncPlansQualified to false with no push fired. A same-identity
+ * re-assertion never takes that cancel-first path at all and keeps this
+ * function's existing flush-preserving behavior exactly as before.
  */
 function resetSyncPlansQualified(): void {
   applySyncPlansQualifiedTransition(false);
 }
+
+/**
+ * SH.4 Codex fix — "account-transition queued push." PURE CORE for
+ * setSyncProfileId()'s/setSyncUserId()'s own dispatch: given whether THIS
+ * call is a GENUINE identity/profile change (`nextValue !== currentValue`),
+ * decide how any pending/deferred push work must be handled BEFORE
+ * resetSyncPlansQualified() ever runs.
+ *
+ * `"cancel-outright"` — a genuine change. Old-identity pending/deferred
+ * work must be cancelled unconditionally, never flushed: see
+ * resetSyncPlansQualified()'s own doc for the full "old-identity data sent
+ * under the new session's credentials" root cause this closes. The caller
+ * cancels FIRST, then still calls resetSyncPlansQualified() afterward
+ * (safe at that point — nothing is left pending for it to flush).
+ *
+ * `"defer-to-namespace-reset"` — a same-identity re-assertion (the
+ * ordinary Plans<->Lightning namespace-mode switch). No genuine identity
+ * change is happening, so the existing flush-preserving protection
+ * (resetSyncPlansQualified() / applySyncPlansQualifiedTransition() /
+ * decideSyncPlansQualifiedTransitionAction()) remains exactly as
+ * hardened — this case does NOT cancel anything up front.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_IDENTITY_TRANSITION_PUSH_DISPOSITION_CASES, decideIdentityTransitionPushDisposition } from "@/lib/syncHelper";
+ *   DEV_DECIDE_IDENTITY_TRANSITION_PUSH_DISPOSITION_CASES.forEach(c => {
+ *     const got = decideIdentityTransitionPushDisposition(c.isGenuineChange);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type IdentityTransitionPushDisposition = "cancel-outright" | "defer-to-namespace-reset";
+
+export function decideIdentityTransitionPushDisposition(isGenuineChange: boolean): IdentityTransitionPushDisposition {
+  return isGenuineChange ? "cancel-outright" : "defer-to-namespace-reset";
+}
+
+export const DEV_DECIDE_IDENTITY_TRANSITION_PUSH_DISPOSITION_CASES: Array<{
+  name: string;
+  isGenuineChange: boolean;
+  expected: IdentityTransitionPushDisposition;
+}> = [
+  {
+    name: "REGRESSION CASE — genuine user/profile change (A -> B, sign-in, or sign-out) must cancel pending/deferred work OUTRIGHT before resetSyncPlansQualified() runs, so it can never flush the outgoing identity's pending push under the new session's already-active credentials",
+    isGenuineChange: true,
+    expected: "cancel-outright",
+  },
+  {
+    name: "same-identity re-assertion (Plans<->Lightning namespace-mode switch) keeps the existing flush-preserving protection untouched",
+    isGenuineChange: false,
+    expected: "defer-to-namespace-reset",
+  },
+];
 
 // ── setSyncProfileId ──────────────────────────────────────────────────────────
 
@@ -5015,20 +5091,30 @@ function resetSyncPlansQualified(): void {
  * "syncing"; any other value (idle/error/unresolved) is left alone.
  */
 export function setSyncProfileId(profileId: string): void {
-  // SH.4.1 Plans-migration Codex P1 fix — see resetSyncPlansQualified()'s
-  // own doc: runs on EVERY call, before this function's own early return,
-  // not merely when profileId itself changes.
+  // SH.4 Codex fix — "account-transition queued push." Dispatch on
+  // decideIdentityTransitionPushDisposition() BEFORE ever calling
+  // resetSyncPlansQualified() — see its own doc and
+  // resetSyncPlansQualified()'s own doc for the full root cause this
+  // ordering closes: resetSyncPlansQualified() must never get a chance to
+  // see (and flush) a pending push that belongs to the OUTGOING profile.
+  if (decideIdentityTransitionPushDisposition(profileId !== currentSyncProfileId) === "cancel-outright") {
+    // Profile changed — cancel any pending work for the old profile
+    // OUTRIGHT, never flushed.
+    cancelScheduledSync();
+    // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE profile
+    // change (unlike the same-identity namespace switch resetSyncPlansQualified()
+    // handles below) must also cancel any already-deferred retry: see
+    // cancelDeferredPushRetry()'s own doc for why a captured snapshot naming
+    // the OUTGOING profile must never fire once the profile this device is
+    // targeting has actually changed.
+    cancelDeferredPushRetry();
+  }
+  // Same-identity re-assertion (nothing above ran): existing flush-
+  // preserving behavior, unchanged. Genuine change: everything that could
+  // have been flushed was already cancelled above, so this safely reduces
+  // to resetting currentSyncPlansQualified to false with no push fired.
   resetSyncPlansQualified();
   if (profileId === currentSyncProfileId) return;
-  // Profile changed — cancel any pending work for the old profile.
-  cancelScheduledSync();
-  // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE profile
-  // change (unlike the same-identity namespace switch resetSyncPlansQualified()
-  // handles above) must also cancel any already-deferred retry: see
-  // cancelDeferredPushRetry()'s own doc for why a captured snapshot naming
-  // the OUTGOING profile must never fire once the profile this device is
-  // targeting has actually changed.
-  cancelDeferredPushRetry();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncProfileId = profileId;
   currentPullEpoch += 1;
@@ -5060,20 +5146,31 @@ export function setSyncProfileId(profileId: string): void {
  * already wrote in THIS tab.
  */
 export function setSyncUserId(userId: string | null): void {
-  // SH.4.1 Plans-migration Codex P1 fix — see resetSyncPlansQualified()'s
-  // own doc: runs on EVERY call, before this function's own early return,
-  // not merely when userId itself changes.
+  // SH.4 Codex fix — "account-transition queued push." Dispatch on
+  // decideIdentityTransitionPushDisposition() BEFORE ever calling
+  // resetSyncPlansQualified() — mirrors setSyncProfileId() exactly, see
+  // its own doc and resetSyncPlansQualified()'s own doc for the full root
+  // cause this ordering closes: resetSyncPlansQualified() must never get a
+  // chance to see (and flush) a pending push that belongs to the OUTGOING
+  // identity — a flushed push's fetch() would authenticate via the
+  // browser's CURRENT session cookie, which by the time this function runs
+  // already belongs to the INCOMING identity, silently attributing the
+  // OUTGOING identity's unsynced edits to the new account server-side.
+  if (decideIdentityTransitionPushDisposition(userId !== currentSyncUserId) === "cancel-outright") {
+    cancelScheduledSync();
+    // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE user
+    // change (sign-out, sign-in, or A -> B) must also cancel any
+    // already-deferred retry: see cancelDeferredPushRetry()'s own doc for
+    // why a captured snapshot naming the OUTGOING identity must never fire
+    // once the session this device is targeting has actually changed.
+    cancelDeferredPushRetry();
+  }
+  // Same-identity re-assertion (nothing above ran): existing flush-
+  // preserving behavior, unchanged. Genuine change: everything that could
+  // have been flushed was already cancelled above, so this safely reduces
+  // to resetting currentSyncPlansQualified to false with no push fired.
   resetSyncPlansQualified();
   if (userId === currentSyncUserId) return;
-  cancelScheduledSync();
-  // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE user
-  // change (sign-out, sign-in, or A -> B) must also cancel any
-  // already-deferred retry: see cancelDeferredPushRetry()'s own doc for
-  // why a captured snapshot naming the OUTGOING identity must never fire
-  // once the session this device is targeting has actually changed — it
-  // would read that outgoing identity's own qualified local storage while
-  // the request itself authenticates via the NEW session's cookie.
-  cancelDeferredPushRetry();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncUserId = userId;
   currentPullEpoch += 1;
