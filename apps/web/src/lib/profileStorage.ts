@@ -1690,6 +1690,20 @@ export const DEV_RESOLVE_ACCOUNT_SCOPED_KEY_CASES: Array<{
     baseKey: "days",
     expected: "dwp:userA:default:days",
   },
+  {
+    name: "SH.4 Lightning slice — Lightning's own 'lightning' base key resolves through the exact same seam as every Plans-owned domain, so Plans and Lightning can never disagree on where Lightning's content lives",
+    userId: "userA",
+    profileId: "default",
+    baseKey: "lightning",
+    expected: "dwp:userA:default:lightning",
+  },
+  {
+    name: "SH.4 Lightning slice — 'activeDayId' (written by BOTH Plans and Lightning) resolves identically for either caller given the same identity — the coherence Plans<->Lightning shared-domain consistency depends on",
+    userId: "userA",
+    profileId: "default",
+    baseKey: "activeDayId",
+    expected: "dwp:userA:default:activeDayId",
+  },
 ];
 
 // ===== PROFILE LIST HELPERS =====

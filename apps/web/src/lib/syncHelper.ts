@@ -3872,7 +3872,7 @@ export const DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES: Array<{
     expected: "dwp:userA:default:plans",
   },
   {
-    name: "REGRESSION CASE — Lightning (unmigrated, plansQualified=false) is the active page even though the sync identity IS authenticated => legacy key, never the qualified one, so an empty/never-adopted qualified 'plans' key can never be pushed over valid cloud data",
+    name: "REGRESSION CASE — a not-yet-migrated (plansQualified=false) page is the active page even though the sync identity IS authenticated => legacy key, never the qualified one, so an empty/never-adopted qualified 'plans' key can never be pushed over valid cloud data",
     plansQualified: false,
     userId: "userA",
     profileId: "default",
@@ -3894,6 +3894,22 @@ export const DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES: Array<{
     profileId: "default",
     baseKey: "dayMeta",
     expected: "dwp:default:dayMeta",
+  },
+  {
+    name: "SH.4 Lightning slice — Lightning's own domain now qualifies exactly like every other domain when Lightning is the active authenticated page",
+    plansQualified: true,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "lightning",
+    expected: "dwp:userA:default:lightning",
+  },
+  {
+    name: "SH.4 Lightning slice — signed out or not-yet-migrated active page keeps Lightning's own domain on the legacy key, exactly like plans/days/etc.",
+    plansQualified: false,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "lightning",
+    expected: "dwp:default:lightning",
   },
 ];
 
@@ -3931,10 +3947,17 @@ function syncScopedDomainKey(
  * just above for the full rationale), mirroring wherever this domain's
  * OWN canonical value now actually lives — this function's whole purpose
  * is to locate that SAME physical keyspace, so it must track it exactly.
- * "lightning" deliberately stays on buildNamespacedKey() unconditionally:
- * Lightning's own migration is a separate, later slice, and Lightning's
- * page code still only ever writes its canonical value (and therefore its
- * edit-facts) under the legacy key.
+ *
+ * SH.4 Lightning slice — "lightning" no longer special-cases
+ * buildNamespacedKey() unconditionally. Lightning's own page code has now
+ * migrated to the same account-qualified local identity as Plans (see
+ * retargetLightningStorageIdentity() in lightning/page.tsx) and asserts
+ * setSyncPlansQualified(true) on its own auth-transition exactly like
+ * Plans does, so "lightning" now tracks currentSyncPlansQualified (via
+ * syncScopedDomainKey()) exactly like every other domain here — whichever
+ * page (Plans or Lightning) most recently drove sync, both now hydrate
+ * every one of these domains, "lightning" included, from the identical
+ * physical keyspace.
  *
  * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
  * passes straight through to syncScopedDomainKey() (see its own doc); every
@@ -3949,7 +3972,6 @@ function domainCanonicalKey(
   domain: ConfirmedDomainName,
   plansQualifiedOverride?: boolean
 ): string {
-  if (domain === "lightning") return buildNamespacedKey(profileId, domain);
   return syncScopedDomainKey(userId, profileId, domain, plansQualifiedOverride);
 }
 
@@ -4694,20 +4716,27 @@ let currentSyncUserId: string | null = null;
  * storage namespace it hydrates." True only while the page CURRENTLY
  * driving sync (i.e., the page that most recently called
  * setSyncProfileId()/setSyncUserId()/setSyncPlansQualified()) actually
- * hydrates its own "plans"/"days"/"dayMeta"/"dayParks" domains from the
- * account-qualified key — in practice, Plans, and only while authenticated.
+ * hydrates its own "plans"/"lightning"/"days"/"dayMeta"/"dayParks" domains
+ * from the account-qualified key — while authenticated, this is now true
+ * for EITHER Plans or Lightning (SH.4 migrated Lightning's own "lightning"
+ * base key, plus its reads of the shared day domains, onto the identical
+ * account-qualified architecture Plans already used — see
+ * retargetLightningStorageIdentity() in lightning/page.tsx).
  *
- * Root cause this closes: `currentSyncUserId` being non-null means only
- * "the sync target is authenticated" — it says nothing about WHICH PAGE is
- * driving sync right now. Lightning has not been migrated (a separate,
- * later slice) and always hydrates/writes these same domains at the legacy
- * unqualified key. Before this flag existed, doPush()/registerUnloadSync()
- * (via buildPayloadFromStorage()/domainCanonicalKey(), see their own docs)
- * read "plans"/"days"/"dayMeta"/"dayParks" using `currentSyncUserId` alone
- * — so opening Lightning (authenticated, but never having visited Plans
- * this session, so the qualified key was never adopted) and triggering any
- * push could read an EMPTY qualified "plans" key and push `plans: []` over
- * valid cloud data, silently erasing it.
+ * Root cause this closed originally: `currentSyncUserId` being non-null
+ * means only "the sync target is authenticated" — it says nothing about
+ * WHICH PAGE is driving sync right now. Before Lightning migrated (SH.4),
+ * it always hydrated/wrote these same domains at the legacy unqualified
+ * key regardless of `currentSyncUserId`. Before this flag existed at all,
+ * doPush()/registerUnloadSync() (via buildPayloadFromStorage()/
+ * domainCanonicalKey(), see their own docs) read these domains using
+ * `currentSyncUserId` alone — so opening Lightning (authenticated, but
+ * never having visited Plans this session, so the qualified key was never
+ * adopted) and triggering any push could read an EMPTY qualified "plans"
+ * key and push `plans: []` over valid cloud data, silently erasing it. The
+ * SAME risk existed in reverse before SH.4 for Lightning's own "lightning"
+ * domain: this flag is what still prevents it now that BOTH pages resolve
+ * every domain identically.
  *
  * Defaults to false (the safe/legacy behavior — matches every existing
  * unmigrated consumer with zero code changes of its own) and is reset to
@@ -4718,10 +4747,17 @@ let currentSyncUserId: string | null = null;
  * Plans and Lightning call these with the IDENTICAL (userId, profileId)
  * pair on an ordinary same-identity navigation between them (a real no-op
  * for every OTHER purpose), and that navigation is exactly the moment this
- * flag must revert to its conservative default. Only Plans' own
- * auth-transition effect calls setSyncPlansQualified(true), immediately
- * after its own setSyncUserId() call, to re-assert it — see that
- * function's own doc.
+ * flag must revert to its conservative default. Both Plans' AND
+ * Lightning's own auth-transition effects call setSyncPlansQualified(true),
+ * immediately after their own setSyncUserId() call, to re-assert it — see
+ * that function's own doc. Since both pages now assert the identical
+ * `true` while authenticated, an ordinary same-identity Plans<->Lightning
+ * navigation no longer actually flips this flag's value at all (ends up
+ * "unchanged" — see decideSyncPlansQualifiedTransitionAction()'s own doc);
+ * the flush-vs-cancel machinery below remains exactly as necessary for a
+ * genuine identity/profile change, and for the (currently unused but still
+ * correctly handled) general case where the two pages' own qualified
+ * state could someday diverge again.
  *
  * A change to this flag's EFFECTIVE value (in either direction) cancels
  * any pending debounced push first, exactly like setSyncProfileId()/
@@ -5048,20 +5084,22 @@ export function setSyncUserId(userId: string | null): void {
 /**
  * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
  * storage namespace it hydrates." Declare whether the page currently
- * driving sync hydrates its own "plans"/"days"/"dayMeta"/"dayParks"
- * domains from the account-qualified key. Call ONLY from Plans' own
- * auth-transition effect, immediately after its own setSyncUserId() call,
- * passing `true` while authenticated (Plans has already retargeted its own
- * refs to the qualified key by this point — see
- * retargetPlansStorageIdentity() in plans/page.tsx) and `false`/simply not
- * calling it while signed out (setSyncUserId(null) already leaves this
- * flag at its default false — see resetSyncPlansQualified()'s own doc).
+ * driving sync hydrates its own "plans"/"lightning"/"days"/"dayMeta"/
+ * "dayParks" domains from the account-qualified key. Call from a migrated
+ * page's own auth-transition effect, immediately after its own
+ * setSyncUserId() call, passing `true` while authenticated (the page has
+ * already retargeted its own refs to the qualified key by this point) and
+ * `false`/simply not calling it while signed out (setSyncUserId(null)
+ * already leaves this flag at its default false — see
+ * resetSyncPlansQualified()'s own doc).
  *
- * Never call this from Lightning: it is not migrated (a separate, later
- * slice), and its own setSyncProfileId()/setSyncUserId() calls already
- * correctly reset this flag to false on every mount with no code changes
- * of Lightning's own — see currentSyncPlansQualified's own doc for the
- * full contract this composes with.
+ * SH.4 Lightning slice — BOTH Plans (retargetPlansStorageIdentity() in
+ * plans/page.tsx) and Lightning (retargetLightningStorageIdentity() in
+ * lightning/page.tsx) now call this. A page not yet migrated to this
+ * architecture simply never calls it, and its own setSyncProfileId()/
+ * setSyncUserId() calls still correctly reset this flag to false on every
+ * mount with no code changes of its own — see currentSyncPlansQualified's
+ * own doc for the full contract this composes with.
  *
  * A genuine change flushes a still-pending debounced push first (never
  * silently discards it), exactly like resetSyncPlansQualified() does for
@@ -6042,10 +6080,14 @@ function readLocalDayParks(userId: string | null, profileId: string, plansQualif
  * added to doPush()/registerUnloadSync() specifically — both already
  * required and threaded a real `userId` through this exact function for
  * the pre-existing hasIncompleteHydrationApplyIntent() gate above.
- * "lightning" deliberately keeps reading buildNamespacedKey()
- * unconditionally: Lightning's own migration is a separate, later slice,
- * and Lightning's page code still only ever writes its canonical value
- * under the legacy key.
+ *
+ * SH.4 Lightning slice — "lightning" now routes through the SAME
+ * syncScopedDomainKey() call as "plans", rather than unconditionally
+ * reading buildNamespacedKey(). Lightning's own page code has migrated to
+ * the account-qualified local identity and asserts
+ * setSyncPlansQualified(true) on its own auth-transition exactly like
+ * Plans — see domainCanonicalKey()'s own doc for the full contract this
+ * composes with.
  *
  * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
  * across a namespace switch." `plansQualifiedOverride`, when provided,
@@ -6071,7 +6113,9 @@ function buildPayloadFromStorage(
     // window where a concurrent hydration race has transiently clobbered
     // the canonical key itself.
     const plansRaw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "plans", plansQualifiedOverride));
-    const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
+    const lightningRaw = readLatestDurableValue(
+      syncScopedDomainKey(userId, profileId, "lightning", plansQualifiedOverride)
+    );
 
     const plans = parseLocalDatasetEntry(plansRaw);
     const lightning = parseLocalDatasetEntry(lightningRaw);
