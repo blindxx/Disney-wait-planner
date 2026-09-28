@@ -3724,6 +3724,103 @@ export function listPendingOps(userId: string, profileId: string): string[] {
 }
 
 /**
+ * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+ * storage namespace it hydrates." PURE CORE: the actual account-qualified-
+ * vs-legacy decision for a Plans-synced domain's OWN canonical key
+ * ("plans"/"days"/"dayMeta"/"dayParks" — NEVER "lightning", which every
+ * caller of the thin wrapper below special-cases separately), used by
+ * every read this module makes at push/pending-op-evidence time.
+ *
+ * Gated on `plansQualified` (the caller's own snapshot of module state
+ * `currentSyncPlansQualified` — see its own doc near setSyncPlansQualified()
+ * below), NOT on `userId` alone. `userId` being non-null only means "the
+ * sync identity currently targeted is authenticated" — it says nothing
+ * about whether the PAGE that is actually driving sync right now (Plans,
+ * migrated to the qualified key; or Lightning, not yet) hydrates these
+ * domains from that qualified key. Lightning has not been migrated (a
+ * separate, later slice) and always hydrates/writes these same domains at
+ * the legacy unqualified key — so a push/pending-op-evidence read
+ * triggered while Lightning is the active page must keep reading that SAME
+ * legacy key regardless of `userId`, or it silently reads whatever (likely
+ * empty, since it was never adopted) content sits at the qualified key and
+ * pushes that over valid cloud data.
+ *
+ * Exported as a pure function (module state passed in explicitly, never
+ * read internally) specifically so this exact regression — a real
+ * `userId` alone is NOT sufficient evidence that Plans is the active page
+ * — has its own directly-testable DEV_* coverage; see
+ * DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES below.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES, decideSyncScopedDomainKey } from "@/lib/syncHelper";
+ *   DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES.forEach(c => {
+ *     const got = decideSyncScopedDomainKey(c.plansQualified, c.userId, c.profileId, c.baseKey);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function decideSyncScopedDomainKey(
+  plansQualified: boolean,
+  userId: string | null,
+  profileId: string,
+  baseKey: string
+): string {
+  return plansQualified
+    ? resolveAccountScopedKey(userId, profileId, baseKey)
+    : buildNamespacedKey(profileId, baseKey);
+}
+
+export const DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES: Array<{
+  name: string;
+  plansQualified: boolean;
+  userId: string | null;
+  profileId: string;
+  baseKey: string;
+  expected: string;
+}> = [
+  {
+    name: "Plans is the active page, authenticated => account-qualified key",
+    plansQualified: true,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "plans",
+    expected: "dwp:userA:default:plans",
+  },
+  {
+    name: "REGRESSION CASE — Lightning (unmigrated, plansQualified=false) is the active page even though the sync identity IS authenticated => legacy key, never the qualified one, so an empty/never-adopted qualified 'plans' key can never be pushed over valid cloud data",
+    plansQualified: false,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "plans",
+    expected: "dwp:default:plans",
+  },
+  {
+    name: "signed out (no active identity at all) => legacy key regardless of plansQualified",
+    plansQualified: false,
+    userId: null,
+    profileId: "default",
+    baseKey: "days",
+    expected: "dwp:default:days",
+  },
+  {
+    name: "defensive — plansQualified true but userId somehow null still fails safe to the legacy key (resolveAccountScopedKey's own null-userId fallback)",
+    plansQualified: true,
+    userId: null,
+    profileId: "default",
+    baseKey: "dayMeta",
+    expected: "dwp:default:dayMeta",
+  },
+];
+
+/**
+ * Thin I/O wrapper around decideSyncScopedDomainKey(): reads the module's
+ * own LIVE currentSyncPlansQualified state (see its own doc) rather than
+ * requiring every call site to thread it through explicitly.
+ */
+function syncScopedDomainKey(userId: string | null, profileId: string, baseKey: string): string {
+  return decideSyncScopedDomainKey(currentSyncPlansQualified, userId, profileId, baseKey);
+}
+
+/**
  * SH.2.3 — the canonical localStorage key for a synced domain (matches
  * buildPayloadFromStorage's own reads) — used to locate a domain's
  * local-edit-fact keyspace (localEditFactPrefix below) when capturing or
@@ -3731,19 +3828,19 @@ export function listPendingOps(userId: string, profileId: string): string[] {
  * `ConfirmedDomainName` and the payload's own domain field names
  * ("plans"/"lightning"/"days") are deliberately identical strings.
  *
- * SH.4.1 Plans slice — `userId` routes "plans"/"days"/"dayMeta"/"dayParks"
- * through resolveAccountScopedKey() (the account-qualified shape once
- * authenticated, unchanged legacy shape signed out), mirroring wherever
- * this domain's OWN canonical value now actually lives — this function's
- * whole purpose is to locate that SAME physical keyspace, so it must track
- * it exactly. "lightning" deliberately stays on buildNamespacedKey()
- * unconditionally: Lightning's own migration is a separate, later slice,
- * and Lightning's page code still only ever writes its canonical value (and
- * therefore its edit-facts) under the legacy key.
+ * SH.4.1 Plans slice — `userId`/`profileId` route "plans"/"days"/
+ * "dayMeta"/"dayParks" through syncScopedDomainKey() (see its own doc
+ * just above for the full rationale), mirroring wherever this domain's
+ * OWN canonical value now actually lives — this function's whole purpose
+ * is to locate that SAME physical keyspace, so it must track it exactly.
+ * "lightning" deliberately stays on buildNamespacedKey() unconditionally:
+ * Lightning's own migration is a separate, later slice, and Lightning's
+ * page code still only ever writes its canonical value (and therefore its
+ * edit-facts) under the legacy key.
  */
 function domainCanonicalKey(userId: string | null, profileId: string, domain: ConfirmedDomainName): string {
   if (domain === "lightning") return buildNamespacedKey(profileId, domain);
-  return resolveAccountScopedKey(userId, profileId, domain);
+  return syncScopedDomainKey(userId, profileId, domain);
 }
 
 /**
@@ -4426,6 +4523,49 @@ let currentSyncProfileId = "default";
 let currentSyncUserId: string | null = null;
 
 /**
+ * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+ * storage namespace it hydrates." True only while the page CURRENTLY
+ * driving sync (i.e., the page that most recently called
+ * setSyncProfileId()/setSyncUserId()/setSyncPlansQualified()) actually
+ * hydrates its own "plans"/"days"/"dayMeta"/"dayParks" domains from the
+ * account-qualified key — in practice, Plans, and only while authenticated.
+ *
+ * Root cause this closes: `currentSyncUserId` being non-null means only
+ * "the sync target is authenticated" — it says nothing about WHICH PAGE is
+ * driving sync right now. Lightning has not been migrated (a separate,
+ * later slice) and always hydrates/writes these same domains at the legacy
+ * unqualified key. Before this flag existed, doPush()/registerUnloadSync()
+ * (via buildPayloadFromStorage()/domainCanonicalKey(), see their own docs)
+ * read "plans"/"days"/"dayMeta"/"dayParks" using `currentSyncUserId` alone
+ * — so opening Lightning (authenticated, but never having visited Plans
+ * this session, so the qualified key was never adopted) and triggering any
+ * push could read an EMPTY qualified "plans" key and push `plans: []` over
+ * valid cloud data, silently erasing it.
+ *
+ * Defaults to false (the safe/legacy behavior — matches every existing
+ * unmigrated consumer with zero code changes of its own) and is reset to
+ * false by setSyncProfileId()/setSyncUserId() below on EVERY call, even
+ * when the profileId/userId they are given is UNCHANGED — deliberately
+ * NOT gated behind those functions' own "did it actually change" early
+ * return, unlike their cancelScheduledSync()/epoch-bump side effects:
+ * Plans and Lightning call these with the IDENTICAL (userId, profileId)
+ * pair on an ordinary same-identity navigation between them (a real no-op
+ * for every OTHER purpose), and that navigation is exactly the moment this
+ * flag must revert to its conservative default. Only Plans' own
+ * auth-transition effect calls setSyncPlansQualified(true), immediately
+ * after its own setSyncUserId() call, to re-assert it — see that
+ * function's own doc.
+ *
+ * A change to this flag's EFFECTIVE value (in either direction) cancels
+ * any pending debounced push first, exactly like setSyncProfileId()/
+ * setSyncUserId() already do for an identity/profile change — a push
+ * scheduled under one namespace mode must never be allowed to fire after
+ * the active page (and therefore the correct namespace) has changed
+ * underneath it. See setSyncPlansQualified()'s own doc.
+ */
+let currentSyncPlansQualified = false;
+
+/**
  * SH.2 architecture (Codex P1, 13th round) — see "Pull execution context" in
  * the module doc above for the full architecture. Bumped by
  * setSyncUserId()/setSyncProfileId() below whenever the value they are
@@ -4471,6 +4611,29 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
   return isPullEpochCurrent(ctx.epoch, currentPullEpoch);
 }
 
+/**
+ * SH.4.1 Plans-migration Codex P1 fix — the shared reset both
+ * setSyncProfileId() and setSyncUserId() call UNCONDITIONALLY, before their
+ * own "did it actually change" early return: reverts
+ * currentSyncPlansQualified to its safe/legacy default the instant EITHER
+ * function is called, regardless of whether the value it was given is
+ * itself a change. Mirrors those functions' own "cancel pending work
+ * before a namespace mode a queued push assumed could go stale" pattern —
+ * a push scheduled while Plans was the active (qualified) page must never
+ * be allowed to fire once Lightning (unqualified) has become the active
+ * page, even though Lightning's own setSyncProfileId()/setSyncUserId()
+ * calls pass the IDENTICAL (userId, profileId) pair Plans just set (an
+ * ordinary same-identity navigation, a genuine no-op for every OTHER
+ * purpose these two functions serve). No-ops when already false — a
+ * signed-out mount, or Lightning mounting again, must not cancel a
+ * genuinely unrelated pending push for no reason.
+ */
+function resetSyncPlansQualified(): void {
+  if (!currentSyncPlansQualified) return;
+  cancelScheduledSync();
+  currentSyncPlansQualified = false;
+}
+
 // ── setSyncProfileId ──────────────────────────────────────────────────────────
 
 /**
@@ -4504,6 +4667,10 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
  * "syncing"; any other value (idle/error/unresolved) is left alone.
  */
 export function setSyncProfileId(profileId: string): void {
+  // SH.4.1 Plans-migration Codex P1 fix — see resetSyncPlansQualified()'s
+  // own doc: runs on EVERY call, before this function's own early return,
+  // not merely when profileId itself changes.
+  resetSyncPlansQualified();
   if (profileId === currentSyncProfileId) return;
   // Profile changed — cancel any pending work for the old profile.
   cancelScheduledSync();
@@ -4538,11 +4705,47 @@ export function setSyncProfileId(profileId: string): void {
  * already wrote in THIS tab.
  */
 export function setSyncUserId(userId: string | null): void {
+  // SH.4.1 Plans-migration Codex P1 fix — see resetSyncPlansQualified()'s
+  // own doc: runs on EVERY call, before this function's own early return,
+  // not merely when userId itself changes.
+  resetSyncPlansQualified();
   if (userId === currentSyncUserId) return;
   cancelScheduledSync();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncUserId = userId;
   currentPullEpoch += 1;
+}
+
+// ── setSyncPlansQualified ─────────────────────────────────────────────────────
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+ * storage namespace it hydrates." Declare whether the page currently
+ * driving sync hydrates its own "plans"/"days"/"dayMeta"/"dayParks"
+ * domains from the account-qualified key. Call ONLY from Plans' own
+ * auth-transition effect, immediately after its own setSyncUserId() call,
+ * passing `true` while authenticated (Plans has already retargeted its own
+ * refs to the qualified key by this point — see
+ * retargetPlansStorageIdentity() in plans/page.tsx) and `false`/simply not
+ * calling it while signed out (setSyncUserId(null) already leaves this
+ * flag at its default false — see resetSyncPlansQualified()'s own doc).
+ *
+ * Never call this from Lightning: it is not migrated (a separate, later
+ * slice), and its own setSyncProfileId()/setSyncUserId() calls already
+ * correctly reset this flag to false on every mount with no code changes
+ * of Lightning's own — see currentSyncPlansQualified's own doc for the
+ * full contract this composes with.
+ *
+ * A genuine change cancels any pending debounced push first, exactly like
+ * setSyncProfileId()/setSyncUserId() already do for an identity/profile
+ * change — see resetSyncPlansQualified()'s own doc for why a push
+ * scheduled under one namespace mode must never be allowed to fire after
+ * the correct namespace has changed underneath it.
+ */
+export function setSyncPlansQualified(qualified: boolean): void {
+  if (qualified === currentSyncPlansQualified) return;
+  cancelScheduledSync();
+  currentSyncPlansQualified = qualified;
 }
 
 // ── Ordinary-edit local-content ownership (SH.4.1a Codex P1 follow-up) ──────
@@ -5350,17 +5553,17 @@ function parseLocalDatasetEntry(
  * omits the field entirely), so this only needs to hand it the raw parsed
  * value, not pre-validate it.
  *
- * SH.4.1 Plans slice — `userId` routes this read through
- * resolveAccountScopedKey(), mirroring wherever Plans' own daysKeyRef
- * currently targets (see buildPayloadFromStorage's own doc for why this
- * must track it exactly).
+ * SH.4.1 Plans-migration Codex P1 fix — this read now routes through
+ * syncScopedDomainKey() (gated on currentSyncPlansQualified, not `userId`
+ * alone), mirroring wherever the CURRENTLY ACTIVE sync-driving page's own
+ * daysKeyRef actually targets — see that function's own doc for why.
  */
 function readLocalDaysOrder(userId: string | null, profileId: string): unknown[] | undefined {
   try {
     // Codex P1 fix (17th round) — reads the newest DURABLE edit for the
     // days key, not merely whatever the canonical key currently holds; see
     // readLatestDurableValue()'s own doc above.
-    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "days"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "days"));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed : undefined;
@@ -5381,11 +5584,12 @@ function readLocalDaysOrder(userId: string | null, profileId: string): unknown[]
  * as-is for buildSyncedPlannerPayload()'s own sanitizeDayMeta() to validate,
  * exactly as this function's days[] counterpart does not pre-validate either.
  *
- * SH.4.1 Plans slice — same `userId` routing as readLocalDaysOrder() above.
+ * SH.4.1 Plans-migration Codex P1 fix — same syncScopedDomainKey() routing
+ * as readLocalDaysOrder() above.
  */
 function readLocalDayMeta(userId: string | null, profileId: string): unknown {
   try {
-    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "dayMeta"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayMeta"));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -5405,11 +5609,12 @@ function readLocalDayMeta(userId: string | null, profileId: string): unknown {
  * (e.g. after Clear All) — is handed through as-is for
  * buildSyncedPlannerPayload()'s own sanitizeDayParks() to validate.
  *
- * SH.4.1 Plans slice — same `userId` routing as readLocalDaysOrder() above.
+ * SH.4.1 Plans-migration Codex P1 fix — same syncScopedDomainKey() routing
+ * as readLocalDaysOrder() above.
  */
 function readLocalDayParks(userId: string | null, profileId: string): unknown {
   try {
-    const raw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "dayParks"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayParks"));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -5442,25 +5647,32 @@ function readLocalDayParks(userId: string | null, profileId: string): unknown {
  * the next successful pull's own commitDomainHydration() call resolves it
  * normally.
  *
- * SH.4.1 Plans slice — "plans"/"days"/"dayMeta"/"dayParks" now route
- * through resolveAccountScopedKey(userId, profileId, baseKey): the
- * account-qualified key once `userId` is a real authenticated user, the
- * unchanged legacy key when signed out. This is NOT a new protection added
- * to doPush()/registerUnloadSync() specifically — both already required and
- * threaded a real `userId` through this exact function for the pre-existing
- * hasIncompleteHydrationApplyIntent() gate above; this only makes the READ
- * itself track the SAME physical location Plans' own auth-transition effect
- * has already retargeted its refs (and, before that, adopted any legacy
- * value) to — see profileStorage.ts's resolveAccountScopedKey()/
- * adoptLegacyProfileValueIfSafe() docs. Without this, doPush() would keep
- * reading a frozen legacy-key snapshot forever once Plans stops writing
- * there, silently breaking authenticated sync — and registerUnloadSync()'s
- * beacon, sharing this same function, would send that same stale snapshot
- * on tab close instead of the user's actual latest edit. "lightning"
- * deliberately keeps reading buildNamespacedKey() unconditionally:
- * Lightning's own migration is a separate, later slice, and Lightning's
- * page code still only ever writes its canonical value under the legacy
- * key.
+ * SH.4.1 Plans slice — "plans"/"days"/"dayMeta"/"dayParks" originally
+ * routed straight through resolveAccountScopedKey(userId, profileId,
+ * baseKey) here. SH.4.1 Plans-migration Codex P1 fix ("Keep Lightning
+ * pushes on the storage namespace it hydrates") — that was wrong: `userId`
+ * alone only says the sync target is authenticated, not that Plans (the
+ * ONLY migrated consumer) is the page that actually drove this
+ * push/beacon. Lightning is unmigrated and always hydrates/writes these
+ * same domains at the legacy key — so a push triggered while Lightning is
+ * the active page must keep reading that SAME legacy key regardless of
+ * `userId`, or it silently reads whatever (likely empty, never-adopted)
+ * content sits at the qualified key and pushes that over valid cloud data,
+ * erasing it. Now routes through syncScopedDomainKey(userId, profileId,
+ * baseKey) instead — gated on currentSyncPlansQualified (module state, set
+ * ONLY by Plans' own auth-transition effect via setSyncPlansQualified(),
+ * reset to false on every setSyncProfileId()/setSyncUserId() call so an
+ * ordinary same-identity Plans->Lightning navigation reverts it with no
+ * code changes of Lightning's own — see that state's own doc for the full
+ * contract), so the READ tracks the SAME physical location the CURRENTLY
+ * ACTIVE page's own refs actually target. This is not a new protection
+ * added to doPush()/registerUnloadSync() specifically — both already
+ * required and threaded a real `userId` through this exact function for
+ * the pre-existing hasIncompleteHydrationApplyIntent() gate above.
+ * "lightning" deliberately keeps reading buildNamespacedKey()
+ * unconditionally: Lightning's own migration is a separate, later slice,
+ * and Lightning's page code still only ever writes its canonical value
+ * under the legacy key.
  */
 function buildPayloadFromStorage(profileId: string, userId: string | null): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
@@ -5474,7 +5686,7 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // is guaranteed to reflect the user's true latest edit even in the rare
     // window where a concurrent hydration race has transiently clobbered
     // the canonical key itself.
-    const plansRaw = readLatestDurableValue(resolveAccountScopedKey(userId, profileId, "plans"));
+    const plansRaw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "plans"));
     const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
 
     const plans = parseLocalDatasetEntry(plansRaw);

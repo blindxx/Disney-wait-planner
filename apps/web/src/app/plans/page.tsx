@@ -113,6 +113,7 @@ import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
   setSyncUserId,
+  setSyncPlansQualified,
   scheduleSync,
   pullPlanner,
   registerUnloadSync,
@@ -2764,6 +2765,17 @@ export default function PlansPage() {
     const previousUserId = activeUserIdRef.current;
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
+    // SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+    // storage namespace it hydrates." setSyncUserId() just above
+    // unconditionally reset syncHelper.ts's currentSyncPlansQualified flag
+    // to false (see resetSyncPlansQualified's own doc), so it must be
+    // re-asserted here on EVERY run of this branch, not only when
+    // `previousUserId !== resolvedUserId` — an ordinary same-identity
+    // re-run (e.g. Lightning having mounted and reset it in between, then
+    // navigating back to this already-authenticated Plans mount) must
+    // still leave doPush()/registerUnloadSync() reading Plans' own
+    // account-qualified domains, not the legacy shape Lightning uses.
+    setSyncPlansQualified(true);
     // SH.4.1 Plans slice — safe legacy adoption + key retarget + render-
     // state re-hydration for the identity THIS transition establishes, run
     // BEFORE anything below (beginPullContext/buildPreFetchPullBaseline)
