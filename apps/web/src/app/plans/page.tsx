@@ -100,11 +100,20 @@ import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 import { getSettingsDefaults } from "@/lib/settingsDefaults";
 import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveAttractionIdentityKey } from "@/lib/legacyAttractions";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
+import {
+  bootstrapProfiles,
+  getActiveProfileKeys,
+  getActiveProfile,
+  getActiveProfileId,
+  buildNamespacedKey,
+  resolveAccountScopedKey,
+  adoptLegacyProfileValueIfSafe,
+} from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
   setSyncProfileId,
   setSyncUserId,
+  setSyncPlansQualified,
   scheduleSync,
   pullPlanner,
   registerUnloadSync,
@@ -112,12 +121,11 @@ import {
   getConfirmedState,
   hasHydrationProvenanceMatch,
   hasSurvivingEditFact,
-  getLocalContentOwner,
-  setLocalContentOwner,
+  evaluateLocalContentWithheld,
   selectPendingOpBatch,
   reconcilePendingOperations,
   commitLocalDomainRaw,
-  commitLocalDomainRawSync,
+  commitOrdinaryLocalEdit,
   isLocalDomainCommitSuccess,
   commitDomainHydration,
   beginPullContext,
@@ -394,8 +402,26 @@ function loadEffectiveDurablePlanItems(key: string): PlanItem[] {
 // CONTRACT in syncHelper.ts's own doc for the full rationale. Callers that
 // DO need CAS-gated, conflict-aware commit (pull hydration) call
 // commitLocalDomainRaw directly instead.
-function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY): void {
-  commitLocalDomainRawSync(key, JSON.stringify({ version: SCHEMA_VERSION, items }));
+//
+// SH.4.1a Codex P1 follow-up — routes through commitOrdinaryLocalEdit()
+// (syncHelper.ts), a thin wrapper around commitLocalDomainRawSync() that
+// ALSO establishes this profile's local-content-owner marker for the
+// currently authenticated identity the instant this write durably
+// succeeds — see its own doc for the full rationale (this is what closes
+// the gap where an authenticated edit made during a failed/offline
+// initial pull previously left the owner marker null indefinitely).
+//
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` is REQUIRED
+// (no default): ownership is stamped only when this call represents a
+// genuine user-originated edit, never a mount/effect-driven persistence
+// pass over already-hydrated (possibly foreign) bytes — see
+// commitOrdinaryLocalEdit's own doc in syncHelper.ts for the full USER-
+// ORIGINATED EDIT EVIDENCE rationale. The two callers of this function
+// that persist non-user state (the mount effect's own migration self-heal,
+// and the generic auto-persist effect when it fires from a hydration-
+// driven `items` change rather than a user edit) pass `false`.
+function saveToStorage(items: PlanItem[], key: string = STORAGE_KEY, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify({ version: SCHEMA_VERSION, items }), isUserEdit);
 }
 
 // ===== DAY MANAGEMENT (Phase 8.0 / 8.0.1 / 8.0.2) =====
@@ -619,8 +645,10 @@ function loadDayMeta(key: string): Record<string, DayMeta> {
 // the prune's raw-byte CAS alone. Publishing edit facts here closes that
 // gap using the exact mechanism SH.2 already built for plans/lightning/days
 // — no new concurrency primitive introduced.
-function saveDayMeta(meta: Record<string, DayMeta>, key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(meta));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale.
+function saveDayMeta(meta: Record<string, DayMeta>, key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(meta), isUserEdit);
 }
 
 /**
@@ -718,8 +746,11 @@ function loadEffectiveDurableDayParks(key: string): Record<string, string> {
 // SH.2 architecture (Codex P1, 12th round; primitive replaced 16th round) —
 // same commitLocalDomainRawSync routing as saveToStorage above; see its own
 // doc there and in syncHelper.ts.
-function saveDays(days: string[], key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(days));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale. The mount effect's
+// own self-heal merge (below) is the one non-user caller of this function.
+function saveDays(days: string[], key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(days), isUserEdit);
 }
 
 function loadActiveDayId(key: string): string {
@@ -1025,8 +1056,10 @@ function loadDayParks(key: string): Record<string, string> {
 // publish the same local-edit-fact log commitLocalDomainRaw() (the cloud-
 // pull reconciliation prune) already re-scans as part of its commit gate.
 /** Persist per-day park overrides to profile-scoped localStorage. */
-function saveDayParks(parks: Record<string, string>, key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(parks));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale.
+function saveDayParks(parks: Record<string, string>, key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(parks), isUserEdit);
 }
 
 /**
@@ -1071,8 +1104,10 @@ function loadDayAutoFallbacks(key: string): Record<string, string> {
 // so ordinary dayAutoFallbacks edits publish the same local-edit-fact log
 // commitLocalDomainRaw() (the cloud-pull reconciliation prune) re-scans.
 /** Persist per-day Auto fallbacks (Phase 10.4.1) to profile-scoped localStorage. */
-function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string): void {
-  commitLocalDomainRawSync(key, JSON.stringify(fallbacks));
+// SH.4.1a Codex P1 follow-up (this round) — `isUserEdit` required; see
+// saveToStorage's own doc above for the full rationale.
+function saveDayAutoFallbacks(fallbacks: Record<string, string>, key: string, isUserEdit: boolean): void {
+  commitOrdinaryLocalEdit(key, JSON.stringify(fallbacks), isUserEdit);
 }
 
 // ===== CROSS-DAY IDENTITY RESOLUTION (Phase 8.6) =====
@@ -1100,6 +1135,12 @@ export default function PlansPage() {
   const planKeyRef = useRef(STORAGE_KEY);
   const resortKeyRef = useRef(STORAGE_RESORT_KEY);
   const parkKeyRef = useRef(STORAGE_PARK_KEY);
+  // SH.4 Lightning slice — this page reads (never writes) Lightning's own
+  // "lightning" domain for cross-day conflict checks/inference/backup, so it
+  // needs the SAME identity-aware key Lightning's own lightningKeyRef
+  // targets — see retargetPlansStorageIdentity()'s own doc for the full
+  // rationale.
+  const lightningKeyRef = useRef("dwp:default:lightning");
   // Stable ref to the active profile id — used by sync effects to target the
   // correct cloud record and to initialise the module-level sync target.
   const activeProfileIdRef = useRef("default");
@@ -1112,6 +1153,19 @@ export default function PlansPage() {
   // DIFFERENT account signing into this same local profile slot read (and
   // build on) the PREVIOUS account's confirmed planner state.
   const activeUserIdRef = useRef<string | null>(null);
+  // SH.4.1a Codex P1 follow-up (this round) — USER-ORIGINATED EDIT EVIDENCE.
+  // `items` is persisted by ONE generic effect (below) that fires for BOTH
+  // genuine user edits (add/delete/move/clear/etc. — every one of which
+  // only ever calls setItems(), relying on that effect to persist) AND
+  // non-user React-state changes (this component's own initial mount load,
+  // and a successful pull's own hydration mirroring already-committed
+  // bytes into `items` state) — see commitOrdinaryLocalEdit's own doc in
+  // syncHelper.ts for why the latter must never stamp local-content
+  // ownership. Defaults to `true` (never attribute a user edit without
+  // positive evidence): set `true` immediately alongside the FEW non-user
+  // setItems() calls (mount load below; the pull effect's own hydration
+  // mirror), and consumed + reset by the auto-persist effect on every run.
+  const pendingNonUserItemsPersistRef = useRef(true);
   // Phase 8.0 — per-profile day storage key refs
   const activeDayKeyRef = useRef("dwp:default:activeDayId");
   const daysKeyRef = useRef("dwp:default:days");
@@ -1281,7 +1335,7 @@ export default function PlansPage() {
       days: capturePreFetchDomainSnapshot(loadEffectiveDurableDays(daysKeyRef.current)),
       dayMeta: capturePreFetchDomainSnapshot(loadEffectiveDurableDayMeta(dayMetaKeyRef.current)),
       dayParks: capturePreFetchDomainSnapshot(loadEffectiveDurableDayParks(dayParksKeyRef.current)),
-      lightningRaw: capturePreFetchDomainSnapshot(readLatestDurableValue(getActiveProfileKeys().lightning)),
+      lightningRaw: capturePreFetchDomainSnapshot(readLatestDurableValue(lightningKeyRef.current)),
     };
   }
 
@@ -1628,6 +1682,18 @@ export default function PlansPage() {
   // while the GET /api/sync/plans request is in-flight. Set true after pull
   // completes (authenticated path) or immediately (unauthenticated path).
   const [syncReady, setSyncReady] = useState(false);
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. SH.4 Codex
+  // P1 fix — "Qualified storage ownership gate": now that this page's
+  // authenticated planner domains are account-qualified (see
+  // contentOwnershipMismatch's own doc in the auth-transition effect
+  // below), the authenticated branch always sets this `false` — there is
+  // no shared physical copy left for a DIFFERENT account's content to
+  // occupy. This state and the render guard near this component's own
+  // return remain in place (never merely because a pull hasn't resolved
+  // yet — that is `sessionStatus === "loading"`'s own, separate reason to
+  // withhold, still fully in effect via evaluateLocalContentWithheld()) in
+  // case a genuinely unqualified consumer ever needs this gate again.
+  const [localContentWithheld, setLocalContentWithheld] = useState(false);
   // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. A pull that
   // rejects its OWN response as stale (SH.2.1 P2's revision bound — see
   // UnusableDomain's own doc below) previously just returned, leaving
@@ -1844,8 +1910,7 @@ export default function PlansPage() {
   // can account for Lightning entries scoped to the target day, not just planner items.
   const lightningClearAllStats = useMemo(() => {
     try {
-      const _key = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-      const _raw = localStorage.getItem(_key);
+      const _raw = localStorage.getItem(lightningKeyRef.current);
       if (_raw) {
         const _parsed = JSON.parse(_raw) as { items?: Array<{ dayId?: string }> };
         const _items = Array.isArray(_parsed?.items) ? _parsed.items : [];
@@ -1974,8 +2039,7 @@ export default function PlansPage() {
   // independent of any pull.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
-      const expectedKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-      if (e.key === expectedKey) {
+      if (e.key === lightningKeyRef.current) {
         setLightningVersion((v) => v + 1);
       }
       if (e.key === daysKeyRef.current) {
@@ -2128,8 +2192,7 @@ export default function PlansPage() {
     const llItemsByDay = new Map<string, Array<LLItem>>();
     const _validDayIdsForInference = new Set(days);
     try {
-      const _llKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-      const _raw = localStorage.getItem(_llKey);
+      const _raw = localStorage.getItem(lightningKeyRef.current);
       if (_raw) {
         const _parsed = JSON.parse(_raw) as { items?: Array<{ name?: string; dayId?: string; startTime?: string; endTime?: string }> };
         for (const it of (Array.isArray(_parsed?.items) ? _parsed.items : [])) {
@@ -2144,6 +2207,153 @@ export default function PlansPage() {
     return computeCrossDayChecks(items, llItemsByDay, days, dayParks);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialized, items, days, dayParks, lightningVersion]);
+
+  /**
+   * SH.4.1 Plans slice (extended by SH.4 Lightning slice) — wires this
+   * page's OWN Plans-owned domains (items/"plans", "days", "activeDayId",
+   * "dayMeta", "dayParks", "dayAutoFallbacks") PLUS the read-only mirror of
+   * Lightning's own "lightning" domain this page also touches (cross-day
+   * inference, Clear All/Remove Day cleanup, backup export/restore) to the
+   * account-qualified local-storage architecture (profileStorage.ts's
+   * buildAccountQualifiedKey/decideLegacyKeyAdoption/
+   * adoptLegacyProfileValueIfSafe, SH.4.1d) — NOT "selectedResort"/
+   * "selectedPark", which stay on the unqualified profile-scoped shape
+   * because they are shared with Lightning/wait-times and neither page
+   * migrates them. "lightning" itself is Lightning-owned (see
+   * retargetLightningStorageIdentity() in lightning/page.tsx for its own
+   * writes/adoption), but this page reads AND occasionally writes it
+   * directly (Clear All, Remove Day, backup restore) and must therefore
+   * target the SAME physical key Lightning's own page does.
+   *
+   * The mount effect below is this page's AUTH-INDEPENDENT initialization
+   * (`[]` deps, always runs before `sessionStatus` first resolves — see its
+   * own doc) and therefore can never itself know whether to target the
+   * qualified or legacy shape; it always loads from the existing unqualified
+   * shape, exactly as before this slice. This function is what corrects that
+   * once identity is actually known: called from the auth-transition effect
+   * below whenever the RESOLVED identity has genuinely changed since the
+   * last time it ran (never unconditionally — an unrelated re-run of that
+   * effect, e.g. a staleRetryTick retry with the SAME identity, must not
+   * re-read disk and clobber whatever is currently rendered with a
+   * redundant reload of the exact same content).
+   *
+   * `userId` is the just-resolved identity: a real authenticated userId, or
+   * null on sign-out/still-signed-out. For each domain:
+   *   1. When authenticated, adoptLegacyProfileValueIfSafe(userId, profileId,
+   *      baseKey) runs FIRST — safe legacy adoption before this (or any)
+   *      qualified key is ever targeted/read. Skipped entirely when signed
+   *      out; there is no qualified key to adopt into.
+   *   2. The ref is retargeted via resolveAccountScopedKey() — the
+   *      account-qualified key once authenticated, or the unchanged legacy
+   *      key signed out (including the sign-OUT direction: an authenticated
+   *      session ending must retarget every ref back to the legacy shape so
+   *      signed-out behavior is genuinely unchanged, not merely "unchanged
+   *      until the first sign-in of this mount").
+   *   3. Rendered state + this page's own fallback baselines are re-hydrated
+   *      from the (possibly new) target, mirroring the mount effect's own
+   *      load exactly (same loaders, same shape) — never a partial update
+   *      that would leave `items`/`days`/etc. reflecting the PREVIOUS
+   *      identity's bytes while future persists/pull comparisons already
+   *      target the new key. Marked as a non-user persist (never a mid-
+   *      transition user edit) via pendingNonUserItemsPersistRef, mirroring
+   *      the mount effect's own load exactly.
+   *
+   * This function's own read/write of each domain is itself entirely
+   * within ONE identity at a time — every key it targets and every value it
+   * loads in a single call is resolved from the SAME `userId`, never a mix
+   * of the outgoing and incoming identity's keys within this one pass.
+   */
+  function retargetPlansStorageIdentity(userId: string | null): void {
+    const profileId = activeProfileIdRef.current;
+    if (userId) {
+      adoptLegacyProfileValueIfSafe(userId, profileId, "plans");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "days");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "activeDayId");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "dayMeta");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "dayParks");
+      adoptLegacyProfileValueIfSafe(userId, profileId, "dayAutoFallbacks");
+      // SH.4 Lightning slice — this page never writes the "lightning"
+      // domain, but its own adoption must still run here (rather than
+      // relying solely on Lightning's own retarget to have run first) so a
+      // device where Plans is opened before Lightning ever runs still sees
+      // Lightning's real content immediately, not an empty never-adopted
+      // qualified key. Safe/idempotent regardless of which page runs it
+      // first — see adoptLegacyProfileValueIfSafe's own doc.
+      adoptLegacyProfileValueIfSafe(userId, profileId, "lightning");
+    }
+    planKeyRef.current = resolveAccountScopedKey(userId, profileId, "plans");
+    daysKeyRef.current = resolveAccountScopedKey(userId, profileId, "days");
+    activeDayKeyRef.current = resolveAccountScopedKey(userId, profileId, "activeDayId");
+    dayMetaKeyRef.current = resolveAccountScopedKey(userId, profileId, "dayMeta");
+    dayParksKeyRef.current = resolveAccountScopedKey(userId, profileId, "dayParks");
+    dayAutoFallbacksKeyRef.current = resolveAccountScopedKey(userId, profileId, "dayAutoFallbacks");
+    lightningKeyRef.current = resolveAccountScopedKey(userId, profileId, "lightning");
+
+    // Re-hydrate rendered state + this page's own fallback baselines from
+    // the (possibly new) target — mirrors the mount effect's own load
+    // exactly (loadEffectiveDurable*/loadActiveDayId/loadDayAutoFallbacks,
+    // never a canonical-only read, for the same cross-tab-hydration-race
+    // reason the mount effect's own load uses them).
+    const rawLoaded = loadEffectiveDurablePlanItems(planKeyRef.current);
+    const loaded = migrateDayIds(rawLoaded);
+    if (loaded !== rawLoaded) {
+      // Migration ran — persist migrated items so next load is clean. Not a
+      // user edit — a one-time retarget-time normalization rewrite.
+      saveToStorage(loaded, planKeyRef.current, false);
+    }
+    if (loaded.length > 0) reseedNextId(loaded);
+    pendingNonUserItemsPersistRef.current = true;
+    setItems(loaded);
+    itemsBaselineRef.current = loaded;
+
+    const storedDays = loadEffectiveDurableDays(daysKeyRef.current);
+    const storedActiveDayId = loadActiveDayId(activeDayKeyRef.current);
+    const itemDayIds = [...new Set(loaded.map((it) => it.dayId))];
+    const extraDayIds = itemDayIds.filter((id) => !storedDays.includes(id)).sort(daySort);
+    const mergedDays = extraDayIds.length > 0 ? [...storedDays, ...extraDayIds] : storedDays;
+    if (mergedDays.join(",") !== storedDays.join(",")) {
+      saveDays(mergedDays, daysKeyRef.current, false);
+    }
+    const validActiveDayId = mergedDays.includes(storedActiveDayId) ? storedActiveDayId : mergedDays[0];
+    if (validActiveDayId !== storedActiveDayId) {
+      saveActiveDayId(validActiveDayId, activeDayKeyRef.current);
+    }
+    setDays(mergedDays);
+    setActiveDayId(validActiveDayId);
+    daysBaselineRef.current = mergedDays;
+
+    const loadedDayMeta = loadEffectiveDurableDayMeta(dayMetaKeyRef.current);
+    setDayMeta(loadedDayMeta);
+    dayMetaBaselineRef.current = loadedDayMeta;
+
+    const loadedDayParks = loadEffectiveDurableDayParks(dayParksKeyRef.current);
+    setDayParks(loadedDayParks);
+    dayParksBaselineRef.current = loadedDayParks;
+
+    setDayAutoFallbacks(loadDayAutoFallbacks(dayAutoFallbacksKeyRef.current));
+
+    // Codex P1 fix — this retarget already points lightningKeyRef.current
+    // at the newly targeted identity's key (above), but was leaving
+    // lightningRawBaselineRef holding whatever the PREVIOUS identity's
+    // Lightning bytes were. Mirrors the mount effect's own seeding of this
+    // SAME ref (see its own doc) and lightning/page.tsx's own
+    // retargetLightningStorageIdentity() (which refreshes its mirror-image
+    // plansRawBaselineRef identically) — the fallback baseline for a
+    // domain this page doesn't own must always be re-seeded from the
+    // (possibly new) target the instant that target changes, or the next
+    // pull's fallback comparison (buildPostFetchPullBaseline(), consulted
+    // only pre-first-confirmation) would diff the NEW identity's actual
+    // Lightning content against the OLD identity's stale snapshot and
+    // misclassify it as a fresh local edit, letting it win outright over
+    // newer cloud state it never actually conflicted with. Captured as the
+    // raw string so no parsing/normalization is needed for a page that
+    // doesn't own that domain.
+    try {
+      lightningRawBaselineRef.current = localStorage.getItem(lightningKeyRef.current);
+    } catch {
+      lightningRawBaselineRef.current = null;
+    }
+  }
 
   // Load saved plan and preferences from localStorage once on mount (client-side only).
   // After loading, reseed nextId to be greater than any persisted item ID so
@@ -2173,6 +2383,11 @@ export default function PlansPage() {
     dayParksKeyRef.current = buildNamespacedKey(currentProfileId, "dayParks");
     // Phase 10.4.1 — set per-profile day Auto fallbacks key
     dayAutoFallbacksKeyRef.current = buildNamespacedKey(currentProfileId, "dayAutoFallbacks");
+    // SH.4 Lightning slice — set per-profile Lightning key (read-only mirror;
+    // Lightning page owns writes). Auth-independent, mirrors every other
+    // keyRef set here exactly — corrected to the account-qualified shape by
+    // retargetPlansStorageIdentity() once identity is known.
+    lightningKeyRef.current = buildNamespacedKey(currentProfileId, "lightning");
     // Retarget the module-level sync to this profile; cancels any pending work
     // from a prior profile (safe no-op on first mount).
     setSyncProfileId(currentProfileId);
@@ -2188,14 +2403,20 @@ export default function PlansPage() {
     const rawLoaded = loadEffectiveDurablePlanItems(planKeyRef.current);
     const loaded = migrateDayIds(rawLoaded);
     if (loaded !== rawLoaded) {
-      // Migration ran — persist migrated items so next load is clean.
-      saveToStorage(loaded, planKeyRef.current);
+      // Migration ran — persist migrated items so next load is clean. Not a
+      // user edit — a one-time mount-time normalization rewrite.
+      saveToStorage(loaded, planKeyRef.current, false);
     }
     // Record how many items existed at mount. The post-import effect uses this
     // to distinguish ordinary page revisits (pre-existing plans) from true
     // import-triggered events where inference is allowed.
     initialItemCountRef.current = loaded.length;
     if (loaded.length > 0) reseedNextId(loaded);
+    // SH.4.1a Codex P1 follow-up — this is the initial mount load, never a
+    // user edit; the generic auto-persist effect below must not attribute
+    // ownership for the persistence pass this triggers. See
+    // pendingNonUserItemsPersistRef's own doc above.
+    pendingNonUserItemsPersistRef.current = true;
     setItems(loaded);
 
     // Phase 8.0 — Load days list and active day for this profile.
@@ -2217,7 +2438,7 @@ export default function PlansPage() {
     const extraDayIds = itemDayIds.filter((id) => !storedDays.includes(id)).sort(daySort);
     const mergedDays = extraDayIds.length > 0 ? [...storedDays, ...extraDayIds] : storedDays;
     if (mergedDays.join(",") !== storedDays.join(",")) {
-      saveDays(mergedDays, daysKeyRef.current);
+      saveDays(mergedDays, daysKeyRef.current, false);
     }
     const validActiveDayId = mergedDays.includes(storedActiveDayId)
       ? storedActiveDayId
@@ -2261,9 +2482,7 @@ export default function PlansPage() {
     // hydrates on every pull — captured as the raw string so no parsing/
     // normalization is needed for a page that doesn't own that domain.
     try {
-      lightningRawBaselineRef.current = localStorage.getItem(
-        buildNamespacedKey(currentProfileId, "lightning")
-      );
+      lightningRawBaselineRef.current = localStorage.getItem(lightningKeyRef.current);
     } catch {
       lightningRawBaselineRef.current = null;
     }
@@ -2403,9 +2622,21 @@ export default function PlansPage() {
   // pull effect below determines "did items change locally" by comparing a
   // fresh read against itemsBaselineRef, not by consulting a flag this
   // effect would have set.
+  //
+  // SH.4.1a Codex P1 follow-up (this round) — this effect fires for EVERY
+  // `items` change, whether from a genuine user edit (every editing handler
+  // only ever calls setItems(), relying on this effect to persist) or from
+  // a non-user React-state change (mount load, pull hydration mirroring —
+  // see pendingNonUserItemsPersistRef's own doc above). Consuming (and
+  // resetting) that ref here, on every run, is what lets this SAME effect
+  // correctly attribute ownership for a genuine edit while never doing so
+  // for a mount/hydration-driven persistence pass over the exact same
+  // `items` state.
   useEffect(() => {
     if (!initialized) return;
-    saveToStorage(items, planKeyRef.current);
+    const isUserEdit = !pendingNonUserItemsPersistRef.current;
+    pendingNonUserItemsPersistRef.current = false;
+    saveToStorage(items, planKeyRef.current, isUserEdit);
   }, [items, initialized]);
 
   // Schedule a debounced cloud push after every items, days, OR dayMeta
@@ -2476,6 +2707,25 @@ export default function PlansPage() {
       // pull's context, not just reset local UI state.
       setSyncUserId(null);
       setSyncReady(true);
+      // SH.4.1a — signed-out mode is local-first by design and has no
+      // competing authenticated identity to withhold content FROM (mirrors
+      // isLocalContentForeign()'s own null-currentUserId contract in
+      // syncHelper.ts) — never leave a stale withhold from a prior
+      // authenticated account applied while signed out.
+      setLocalContentWithheld(false);
+      // SH.4.1 Plans slice — retarget this page's own Plans-domain key refs
+      // (+ re-hydrate rendered state) back to the unqualified/legacy shape
+      // ONLY when THIS mount had previously retargeted them to a real
+      // authenticated identity (activeUserIdRef.current still names it,
+      // since it is otherwise never reset outside the authenticated branch
+      // below). A mount that was NEVER authenticated (activeUserIdRef.current
+      // already null) must not redundantly re-read/re-render — its refs
+      // already are, and always were, the unqualified shape. See
+      // retargetPlansStorageIdentity's own doc above.
+      if (activeUserIdRef.current !== null) {
+        activeUserIdRef.current = null;
+        retargetPlansStorageIdentity(null);
+      }
       return;
     }
     // authenticated
@@ -2491,53 +2741,96 @@ export default function PlansPage() {
     // this same local profile slot. Mirrors the server's own resolution
     // order (getUserId() in api/sync/planner/route.ts).
     const resolvedUserId = authenticatedUserId;
-    // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
-    // SESSION boundary: "for every SH.2 conflict decision, the baseline
-    // and local candidate MUST belong to the same authenticated conflict
-    // context." getConfirmedState/commitConfirmedBaseline already scope
-    // the BASELINE side by identity (3rd round); nothing scoped the
-    // CANDIDATE side — a fresh read of plans/lightning/days localStorage
-    // carries NO identity attribution, so it can be a DIFFERENT account's
-    // still-loaded leftover content if this component never remounted
-    // between accounts. Comparing that content against EITHER this page's
-    // fallback ref OR even a real, correctly-scoped confirmed snapshot for
-    // THIS identity (e.g. this identity used this exact browser before a
-    // different one did) would misclassify the foreign content as this
-    // identity's own unsynced edit and let it win over — and overwrite —
-    // this identity's real cloud state. See getLocalContentOwner()'s own
-    // doc in syncHelper.ts for the full contract; captured here (read
-    // BEFORE being overwritten with the newly-resolved identity, so this
-    // transition's own verdict reflects who owned the content going INTO
-    // it) and consulted below to gate what the upcoming pull treats as
-    // "current" for its conflict decision (see the pull effect's own doc).
+    // SH.4 Codex P1 fix — "Qualified storage ownership gate." SH.2
+    // architecture (Codex P1, 5th/6th rounds) originally computed
+    // `contentOwnershipMismatch` from isLocalContentForeign()/
+    // getLocalContentOwner(profileId) here, because "plans"/"lightning"/
+    // "days"/"dayMeta"/"dayParks" all lived at ONE SHARED PHYSICAL COPY per
+    // profileId (`dwp:{profileId}:{baseKey}`) — a fresh read of that
+    // storage carried NO identity attribution, so a DIFFERENT account's
+    // still-loaded leftover content (this component never having
+    // remounted between accounts) could be misclassified as THIS
+    // identity's own unsynced edit and overwrite its real cloud state.
+    // getLocalContentOwner(profileId)/setLocalContentOwner() existed
+    // specifically to answer "does the content currently in that ONE
+    // shared slot belong to the identity now asking about it" before any
+    // conflict decision trusted a fresh read of it.
     //
-    // This supersedes the 4th round's separate previousUserId-based
-    // fallback-ref rebase (obsolete machinery, removed): that heuristic
-    // only ever protected the fallback-ref tier, used only when no
-    // confirmed snapshot exists yet, and relied on an in-memory ref that
-    // resets to null on every page reload — missing exactly the
-    // reload-crossing case a durable, explicit ownership marker catches
-    // for free. A null/absent marker (never tagged) is trusted for ANY
-    // identity, preserving local-first adoption for anonymous → first
-    // sign-in and for a never-before-tagged profile's first authenticated
-    // use — only a marker naming a DIFFERENT, KNOWN identity is a mismatch.
+    // This session's own SH.4 Lightning-migration slice retargeted EVERY
+    // one of those domains onto the account-qualified key
+    // (`dwp:{userId}:{profileId}:{baseKey}`, via resolveAccountScopedKey()
+    // — see retargetPlansStorageIdentity() above) once authenticated. There
+    // is no shared physical copy left for this branch to protect: account
+    // A's and account B's own qualified bytes for the identical profileId
+    // now live at two DIFFERENT physical keys, so a fresh read of THIS
+    // identity's own qualified storage can never be another account's
+    // content by construction — regardless of remount history. Continuing
+    // to gate it on the profile-only `getLocalContentOwner(profileId)`
+    // marker was itself now a bug: that marker predates qualification and
+    // can carry a stale owner from the OLD shared-key era (or from a
+    // completely unrelated account's own past pull), wrongly withholding
+    // this account's OWN legitimate qualified data as "foreign" — in the
+    // worst case leaving the page stuck on "Verifying your account's saved
+    // data…" for an account that owns this content outright.
     //
-    // Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY: the WRITE that
-    // establishes/reaffirms ownership under `resolvedUserId` is deliberately
-    // NOT here. Writing it now, before the pull below has even started,
-    // was itself a Codex finding: a failed or cancelled pull would leave
-    // ownership relabeled to `resolvedUserId` while this profile's raw
-    // bytes are still whoever owned it before — unreplaced. A LATER
-    // session for `resolvedUserId` would then see its OWN name on the
-    // marker (no mismatch) and wrongly trust that leftover content as its
-    // own. See getLocalContentOwner()'s own doc in syncHelper.ts for the
-    // exact three-part condition; the write itself happens at the END of
-    // this pull's `.then()` below, only once all three hold.
-    const priorLocalContentOwner = getLocalContentOwner(activeProfileIdRef.current);
-    const contentOwnershipMismatch =
-      priorLocalContentOwner !== null && priorLocalContentOwner !== resolvedUserId;
+    // `contentOwnershipMismatch` is therefore hardcoded `false` here —
+    // never computed from isLocalContentForeign()/getLocalContentOwner()
+    // for this (now always account-qualified) branch. The surrounding
+    // fallback-substitution plumbing below (domainFallbackValue()/
+    // clearRefOnFallbackMismatch(), buildPostFetchPullBaseline()'s own
+    // `contentOwnershipMismatch` parameter) is left completely untouched —
+    // it simply always no-ops now. getLocalContentOwner()/
+    // isLocalContentForeign() remain exactly as before for where they are
+    // still needed: profileStorage.ts's adoptLegacyProfileValueIfSafe()
+    // (first-sign-in legacy-key adoption safety) is their one remaining
+    // consumer — see decideLegacyKeyAdoption()'s own doc there. No new
+    // account-qualified ownership marker is introduced; the existing
+    // profile-only marker is simply no longer consulted (or written — see
+    // this pull's own `.then()` below) from this now-qualified path. This
+    // page's authenticated branch is ALWAYS "qualified" (see
+    // retargetPlansStorageIdentity() above) — see
+    // shouldApplyLegacyForeignContentGate()'s own doc in syncHelper.ts
+    // (its DEV-tested "qualified => never applies" case is exactly this
+    // branch) for why that statically makes this always `false`.
+    const contentOwnershipMismatch = false;
+    // SH.4.1a — synchronize the RENDER/EDIT gate to this transition's own
+    // fresh verdict immediately, BEFORE the pull below even starts (mirrors
+    // the mount effect's own synchronous read, which runs independently of
+    // and before this effect). Always re-synchronized so a signed-out ->
+    // signed-in transition (or any other prior verdict) is superseded by
+    // this branch's own — now permanently `false` — verdict.
+    setLocalContentWithheld(contentOwnershipMismatch);
+    // SH.4.1 Plans slice — capture the identity this page's OWN key refs
+    // currently target BEFORE activeUserIdRef is overwritten below, so the
+    // retarget call just after can tell "this transition actually changes
+    // which physical keys are correct" apart from an unrelated re-run of
+    // this same effect (e.g. a staleRetryTick retry) under the SAME
+    // already-resolved identity — see retargetPlansStorageIdentity's own
+    // doc above for why re-running it unconditionally would be wrong.
+    const previousUserId = activeUserIdRef.current;
     activeUserIdRef.current = resolvedUserId;
     setSyncUserId(resolvedUserId);
+    // SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+    // storage namespace it hydrates." setSyncUserId() just above
+    // unconditionally reset syncHelper.ts's currentSyncPlansQualified flag
+    // to false (see resetSyncPlansQualified's own doc), so it must be
+    // re-asserted here on EVERY run of this branch, not only when
+    // `previousUserId !== resolvedUserId` — an ordinary same-identity
+    // re-run (e.g. Lightning having mounted and reset it in between, then
+    // navigating back to this already-authenticated Plans mount) must
+    // still leave doPush()/registerUnloadSync() reading Plans' own
+    // account-qualified domains, not the legacy shape Lightning uses.
+    setSyncPlansQualified(true);
+    // SH.4.1 Plans slice — safe legacy adoption + key retarget + render-
+    // state re-hydration for the identity THIS transition establishes, run
+    // BEFORE anything below (beginPullContext/buildPreFetchPullBaseline)
+    // ever reads this page's own domain keys — required so this pull's own
+    // pre-fetch disk snapshot is taken from the CORRECT (account-qualified)
+    // location for an authenticated identity, never the legacy key the
+    // mount effect optimistically loaded from before identity was known.
+    if (previousUserId !== resolvedUserId) {
+      retargetPlansStorageIdentity(resolvedUserId);
+    }
     // Cancel any pending debounced push before starting the cloud pull so a
     // queued stale PUT cannot fire during the initial pull window.
     cancelScheduledSync();
@@ -2579,7 +2872,6 @@ export default function PlansPage() {
     // here is exactly the mechanism that let a pre-existing, still-unpushed
     // edit get silently discarded by a later pull (Codex finding).
     setSyncReady(false);
-    const profileKeysForPull = getActiveProfileKeys();
     // SH.2.1 — STAGE 1: freeze this pull's causal disk snapshot NOW, before
     // the GET is even issued (Codex P1 #2, preserved). `preFetchBaseline` is
     // closed over by `.then()` below and consulted there instead of any
@@ -3096,8 +3388,8 @@ export default function PlansPage() {
         // newly synced dayParks domain.
         const currentDayParksRaw = localStorage.getItem(dayParksKeyRef.current);
         const currentDayParks = loadEffectiveDurableDayParks(dayParksKeyRef.current);
-        const currentLightningRaw = localStorage.getItem(profileKeysForPull.lightning);
-        const currentLightningRawDurable = readLatestDurableValue(profileKeysForPull.lightning);
+        const currentLightningRaw = localStorage.getItem(lightningKeyRef.current);
+        const currentLightningRawDurable = readLatestDurableValue(lightningKeyRef.current);
 
         // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
         // SESSION substitution: when this transition's ownership check
@@ -3203,7 +3495,7 @@ export default function PlansPage() {
           );
         const lightningHydrationExplained =
           !!pullCtx.userId &&
-          !hasSurvivingEditFact(profileKeysForPull.lightning) &&
+          !hasSurvivingEditFact(lightningKeyRef.current) &&
           hasHydrationProvenanceMatch(
             pullCtx.userId,
             pullCtx.profileId,
@@ -3399,6 +3691,12 @@ export default function PlansPage() {
         // that did NOT actually survive onto disk.
         if (primaryPersistSucceeded && JSON.stringify(winningPlanItems) !== JSON.stringify(itemsRef.current)) {
           reseedNextId(winningPlanItems);
+          // SH.4.1a Codex P1 follow-up — this mirrors bytes commitDomainHydration
+          // ABOVE already durably committed via the CAS-protected hydration
+          // path into React state; it is not a user edit. The generic
+          // auto-persist effect this setItems() triggers must not attribute
+          // ownership for it. See pendingNonUserItemsPersistRef's own doc.
+          pendingNonUserItemsPersistRef.current = true;
           setItems(winningPlanItems);
         }
         if (itemsCloudWon) {
@@ -3700,7 +3998,7 @@ export default function PlansPage() {
         const lightningCloudSourced = !lightningChangedLocally && !!planner?.lightning;
         const { result: lightningCommit, deferralReasons: lightningDeferralReasons } = await commitDomain(
           "lightning",
-          profileKeysForPull.lightning,
+          lightningKeyRef.current,
           currentLightningRaw,
           winningLightningRawToWrite,
           lightningCloudSourced && planner?.lightning
@@ -3776,29 +4074,25 @@ export default function PlansPage() {
         )
           setSyncReady(true);
 
-        // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
-        // BOUNDARY: only NOW — after this pull genuinely resolved
-        // (`cancelled` already checked above), and only when its own
-        // hydration/day writes succeeded — is the local snapshot this
-        // identity should be credited with actually the coherent, durable
-        // one on disk. See getLocalContentOwner's own doc in syncHelper.ts
-        // for the full three-part condition and why writing this any
-        // earlier (e.g. at transition start) let a failed/cancelled pull
-        // relabel ownership without ever replacing the previous identity's
-        // bytes. Codex P1 fix (7th round) — also requires
-        // `primaryPersistSucceeded` (#3): ownership must never transfer
-        // before THIS page's own primary domain — not just the sibling's —
-        // is confirmed durably persisted.
-        if (
-          pullCtx.userId &&
-          hydrationSucceeded &&
-          !daysWriteFailed &&
-          !dayMetaWriteFailed &&
-          !dayParksWriteFailed &&
-          primaryPersistSucceeded
-        ) {
-          setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
-        }
+        // SH.4 Codex P1 fix — "Qualified storage ownership gate." The
+        // DURABLE TRANSFER BOUNDARY write that used to live here
+        // (setLocalContentOwner(pullCtx.profileId, pullCtx.userId), SH.2
+        // architecture Codex P1 6th/7th rounds) is removed: this pull now
+        // operates entirely on the account-qualified key (see
+        // contentOwnershipMismatch's own doc above), which this pull never
+        // touches the LEGACY `dwp:{profileId}:{baseKey}` slot to produce —
+        // adoption (adoptLegacyProfileValueIfSafe(), run once at retarget
+        // time, before this pull ever starts) is the only event that
+        // legitimately relates THIS identity to that legacy slot's content.
+        // Writing this marker unconditionally on every successful qualified
+        // pull — regardless of whether adoption actually happened this
+        // time — would durably (and wrongly) stamp `resolvedUserId` as the
+        // owner of legacy bytes it may never have touched, corrupting a
+        // LATER, unrelated account's own safe first-sign-in adoption
+        // decision (decideLegacyKeyAdoption() in profileStorage.ts) for
+        // content that in fact has nothing to do with this identity. No
+        // account-qualified ownership marker replaces it — see this
+        // section's own header doc.
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
         // MOVED to the top of this `.then()`, before winner selection — see
@@ -3962,8 +4256,8 @@ export default function PlansPage() {
     // Phase 8.0.10 — resolve profile keys at write time so a profile switch
     // between mount and this click always targets the correct namespace.
     const _profileId = getActiveProfileId();
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
 
@@ -3978,7 +4272,7 @@ export default function PlansPage() {
     // equivalent, but this keeps a reordered `days` list intact).
     const nextDays = [...days, candidate];
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
     setActiveDayId(candidate);
     saveActiveDayId(candidate, _activeDayKey);
   }
@@ -4000,7 +4294,7 @@ export default function PlansPage() {
     // this page's `days` state actually reflects, causing Move Up/Down to
     // write the wrong profile's days key.
     const _profileId = activeProfileIdRef.current;
-    const _daysKey = buildNamespacedKey(_profileId, "days");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
     daysKeyRef.current = _daysKey;
     const idx = days.indexOf(dayId);
     if (idx === -1) return;
@@ -4009,7 +4303,7 @@ export default function PlansPage() {
     const nextDays = [...days];
     [nextDays[idx], nextDays[targetIdx]] = [nextDays[targetIdx], nextDays[idx]];
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
   }
 
   // Phase 8.4 — resolve the effective park for a given day.
@@ -4049,7 +4343,7 @@ export default function PlansPage() {
     // Reject unknown park IDs silently; empty string ("") = Auto (clear override).
     if (parkId && !isValidParkId(parkId)) return;
     const _profileId = getActiveProfileId();
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     const clearedOverride = dayParks[dayId]; // captured before deletion, for the Auto branch below
     const next = { ...dayParks };
@@ -4059,7 +4353,7 @@ export default function PlansPage() {
       delete next[dayId]; // "" = Auto: remove override
     }
     setDayParks(next);
-    saveDayParks(next, _dayParksKey);
+    saveDayParks(next, _dayParksKey, true);
     if (parkId) {
       // Manual — sync both park and resort from the chosen park.
       const manualResort = PARK_TO_RESORT[parkId] as ResortId;
@@ -4084,11 +4378,11 @@ export default function PlansPage() {
         // has no plans of its own. Same dayAutoFallbacks map the backup
         // restore flow populates; resolveDayPark's inference step (2) still
         // overrides this the moment real plan content resolves a park.
-        const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+        const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
         dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
         const nextAutoFallbacks = { ...dayAutoFallbacks, [dayId]: clearedOverride };
         setDayAutoFallbacks(nextAutoFallbacks);
-        saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+        saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
         const fallbackResort = PARK_TO_RESORT[clearedOverride] as ResortId;
         setSelectedResort(fallbackResort);
         try { localStorage.setItem(resortKeyRef.current, fallbackResort); } catch {}
@@ -4126,7 +4420,7 @@ export default function PlansPage() {
       return;
     }
     const _profileId = getActiveProfileId();
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
     dayMetaKeyRef.current = _dayMetaKey;
     const nextMeta = { ...dayMeta };
     if (!trimmedLabel && !trimmedDate) {
@@ -4138,7 +4432,7 @@ export default function PlansPage() {
       };
     }
     setDayMeta(nextMeta);
-    saveDayMeta(nextMeta, _dayMetaKey);
+    saveDayMeta(nextMeta, _dayMetaKey, true);
     closeModal();
   }
 
@@ -4165,9 +4459,9 @@ export default function PlansPage() {
     if (dayId === "day-1") return;   // Day 1 is a permanent base day
     if (days.length <= 1) return;   // Cannot remove the last day
     const _profileId = activeProfileIdRef.current;
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
     dayMetaKeyRef.current = _dayMetaKey;
@@ -4176,26 +4470,26 @@ export default function PlansPage() {
     // Remove from days list (no reindexing)
     const nextDays = days.filter((d) => d !== dayId);
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
     // Remove day metadata entry
     const nextMeta = { ...dayMeta };
     delete nextMeta[dayId];
     setDayMeta(nextMeta);
-    saveDayMeta(nextMeta, _dayMetaKey);
+    saveDayMeta(nextMeta, _dayMetaKey, true);
     // Phase 8.4 — remove day park override for removed day
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     const nextDayParks = { ...dayParks };
     delete nextDayParks[dayId];
     setDayParks(nextDayParks);
-    saveDayParks(nextDayParks, _dayParksKey);
+    saveDayParks(nextDayParks, _dayParksKey, true);
     // Phase 9.6 fix 2 — also remove stale auto fallback for the removed day.
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     delete nextAutoFallbacks[dayId];
     setDayAutoFallbacks(nextAutoFallbacks);
-    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
     // Phase 11.0 — Remove Day must also drop Lightning entries scoped to the
     // removed day; otherwise they survive in localStorage (and get pushed to
     // cloud sync) with no owning day left to display them against. This page
@@ -4208,7 +4502,8 @@ export default function PlansPage() {
     // picks this up automatically: setItems() above already changes `items`,
     // which triggers the existing items-effect that debounces a cloud push,
     // and that push reads Lightning fresh from localStorage at push time.
-    const _lightningKey = buildNamespacedKey(_profileId, "lightning");
+    const _lightningKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "lightning");
+    lightningKeyRef.current = _lightningKey;
     try {
       // SH.2.1 P1 fix (this round, Codex finding #2) — reads the
       // Lightning domain's EFFECTIVE DURABLE value (canonical + any still-
@@ -4233,7 +4528,8 @@ export default function PlansPage() {
           const llItems = (parsed as Record<string, unknown>).items as Array<{ dayId?: unknown }>;
           const nextLlItems = llItems.filter((it) => normalizeDayId(it?.dayId) !== dayId);
           if (nextLlItems.length !== llItems.length) {
-            commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }));
+            // Genuine user edit (Remove Day) — see saveToStorage's own doc above.
+            commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: nextLlItems }), true);
             setLightningVersion((v) => v + 1);
           }
         }
@@ -4263,11 +4559,11 @@ export default function PlansPage() {
   // global active-profile read.
   function handleDuplicateDay(sourceDayId: string) {
     const _profileId = activeProfileIdRef.current;
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
     dayMetaKeyRef.current = _dayMetaKey;
@@ -4337,14 +4633,14 @@ export default function PlansPage() {
     // Phase 11.2 — append at the end of the persisted order; never re-sort.
     const nextDays = [...days, newDayId];
     setDays(nextDays);
-    saveDays(nextDays, _daysKey);
+    saveDays(nextDays, _daysKey, true);
     setItems((prev) => [...prev, ...copiedItems]);
     setDayMeta(nextMeta);
-    saveDayMeta(nextMeta, _dayMetaKey);
+    saveDayMeta(nextMeta, _dayMetaKey, true);
     setDayParks(nextDayParks);
-    saveDayParks(nextDayParks, _dayParksKey);
+    saveDayParks(nextDayParks, _dayParksKey, true);
     setDayAutoFallbacks(nextAutoFallbacks);
-    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
 
     // Make the duplicate active.
     setActiveDayId(newDayId);
@@ -4367,12 +4663,12 @@ export default function PlansPage() {
     // All); without this, the cleared fallback survived in localStorage and
     // could resurface after a reload or in a planner_context snapshot.
     const _profileId = getActiveProfileId();
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     const nextAutoFallbacks = { ...dayAutoFallbacks };
     delete nextAutoFallbacks[target];
     setDayAutoFallbacks(nextAutoFallbacks);
-    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks(nextAutoFallbacks, _dayAutoFallbacksKey, true);
     setClearDayTargetId(null);
   }
 
@@ -4739,29 +5035,29 @@ export default function PlansPage() {
     setRemoveConfirmDayId(null);
     // Phase 8.1 — full reset: revert to one empty Day 1, clear all day metadata.
     const _profileId = getActiveProfileId();
-    const _daysKey = buildNamespacedKey(_profileId, "days");
-    const _activeDayKey = buildNamespacedKey(_profileId, "activeDayId");
-    const _dayMetaKey = buildNamespacedKey(_profileId, "dayMeta");
+    const _daysKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "days");
+    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "activeDayId");
+    const _dayMetaKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayMeta");
     daysKeyRef.current = _daysKey;
     activeDayKeyRef.current = _activeDayKey;
     dayMetaKeyRef.current = _dayMetaKey;
     const resetDays = ["day-1"];
     setDays(resetDays);
-    saveDays(resetDays, _daysKey);
+    saveDays(resetDays, _daysKey, true);
     setActiveDayId("day-1");
     saveActiveDayId("day-1", _activeDayKey);
     setDayMeta({});
-    saveDayMeta({}, _dayMetaKey);
+    saveDayMeta({}, _dayMetaKey, true);
     // Phase 8.4 — Clear All resets all day park overrides
-    const _dayParksKey = buildNamespacedKey(_profileId, "dayParks");
+    const _dayParksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayParks");
     dayParksKeyRef.current = _dayParksKey;
     setDayParks({});
-    saveDayParks({}, _dayParksKey);
+    saveDayParks({}, _dayParksKey, true);
     // Phase 9.6 backup gap fix — Clear All also resets per-day auto fallbacks.
-    const _dayAutoFallbacksKey = buildNamespacedKey(_profileId, "dayAutoFallbacks");
+    const _dayAutoFallbacksKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "dayAutoFallbacks");
     dayAutoFallbacksKeyRef.current = _dayAutoFallbacksKey;
     setDayAutoFallbacks({});
-    saveDayAutoFallbacks({}, _dayAutoFallbacksKey);
+    saveDayAutoFallbacks({}, _dayAutoFallbacksKey, true);
     // Phase 7.3.6: "Clear All" is a full session reset — the user is starting
     // fresh, so both the inference gate and the stored session context must be
     // cleared. Without this, a subsequent import is blocked on two levels:
@@ -4788,8 +5084,10 @@ export default function PlansPage() {
     setSelectedPark(resetPark as ParkId);
     // Phase 8.3.2 — Clear All is a full planner reset; wipe Lightning so no
     // hidden day-scoped items survive into the next session (BUG C fix).
-    const _lightningKey = buildNamespacedKey(_profileId, "lightning");
-    commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: [] }));
+    const _lightningKey = resolveAccountScopedKey(activeUserIdRef.current, _profileId, "lightning");
+    lightningKeyRef.current = _lightningKey;
+    // Genuine user edit (Clear All) — see saveToStorage's own doc above.
+    commitOrdinaryLocalEdit(_lightningKey, JSON.stringify({ version: 1, items: [] }), true);
   }
 
   function handleToggleSort(checked: boolean) {
@@ -4839,8 +5137,7 @@ export default function PlansPage() {
     // fact must not be silently dropped from it.
     let lightningItems: LightningBackupItem[] = [];
     try {
-      const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-      const rawLightning = readLatestDurableValue(_lightningKey);
+      const rawLightning = readLatestDurableValue(lightningKeyRef.current);
       if (rawLightning) {
         const parsed = JSON.parse(rawLightning) as unknown;
         if (
@@ -5002,7 +5299,7 @@ export default function PlansPage() {
       // Phase 10.4.1 — also persisted (mirrors the restore-flow write above).
       const nextAutoFallbacks = { ...dayAutoFallbacks, [targetDayId]: fallbackParkId };
       setDayAutoFallbacks(nextAutoFallbacks);
-      saveDayAutoFallbacks(nextAutoFallbacks, dayAutoFallbacksKeyRef.current);
+      saveDayAutoFallbacks(nextAutoFallbacks, dayAutoFallbacksKeyRef.current, true);
       effectiveResort = fallbackResort;
     }
     const typeResort = effectiveResort ?? selectedResort;
@@ -5312,11 +5609,11 @@ export default function PlansPage() {
     reseedNextId(restoredPlans);
     setItems(autoSortEnabled ? sortPlanItems(restoredPlans) : restoredPlans);
     setDays(restoredDays);
-    saveDays(restoredDays, daysKeyRef.current);
+    saveDays(restoredDays, daysKeyRef.current, true);
     setActiveDayId(restoredActiveDayId);
     saveActiveDayId(restoredActiveDayId, activeDayKeyRef.current);
     setDayMeta(restoredDayMeta);
-    saveDayMeta(restoredDayMeta, dayMetaKeyRef.current);
+    saveDayMeta(restoredDayMeta, dayMetaKeyRef.current, true);
     // Phase 8.3.2 — Full restore replaces Lightning from backup payload.
     // data.lightning is present on new backups (fully replaces current state).
     // data.lightning is absent on old backups — fall back to empty so no
@@ -5325,8 +5622,8 @@ export default function PlansPage() {
       ...it,
       dayId: normalizeDayId(it.dayId),
     }));
-    const _lightningKey = buildNamespacedKey(activeProfileIdRef.current, "lightning");
-    commitLocalDomainRawSync(_lightningKey, JSON.stringify({ version: 1, items: restoredLightningItems }));
+    // Genuine user edit (confirmed backup restore) — see saveToStorage's own doc above.
+    commitOrdinaryLocalEdit(lightningKeyRef.current, JSON.stringify({ version: 1, items: restoredLightningItems }), true);
 
     // Close modal and clear all transient UI state (I)
     setRestoreConfirmPayload(null);
@@ -5339,7 +5636,7 @@ export default function PlansPage() {
     setPendingDayImportItems(null);
     setDayImportError("");
     setDayParks(restoredDayParks);
-    saveDayParks(restoredDayParks, dayParksKeyRef.current);
+    saveDayParks(restoredDayParks, dayParksKeyRef.current, true);
 
     // Phase 9.6 backup gap fix — restore per-day auto fallbacks for Auto days.
     // Only accept days that: (a) are in the restored set, (b) are NOT in
@@ -5363,14 +5660,67 @@ export default function PlansPage() {
       }
     }
     setDayAutoFallbacks(restoredAutoFallbacks);
-    dayAutoFallbacksKeyRef.current = buildNamespacedKey(activeProfileIdRef.current, "dayAutoFallbacks");
-    saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current);
+    dayAutoFallbacksKeyRef.current = resolveAccountScopedKey(activeUserIdRef.current, activeProfileIdRef.current, "dayAutoFallbacks");
+    saveDayAutoFallbacks(restoredAutoFallbacks, dayAutoFallbacksKeyRef.current, true);
   }
 
   // Phase 10.4.2 — active day's resolved park for render, computed once so
   // the park selector and wait-overlay label agree; null (unresolved) is a
   // valid, expected state for an Auto day with no park context of its own.
   const activeDayPark = ready ? resolveDayPark(activeDayId) : null;
+
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. Placed
+  // after every hook above (this early return never skips a hook call) and
+  // before the ordinary render below: while `localContentWithheld` is true,
+  // this profile's physical planner bytes are known to belong to a
+  // DIFFERENT, already-known authenticated account, so nothing below — the
+  // items list, the Add/Edit forms, day management, import/export — is
+  // reachable at all. SH.4 Codex P1 fix — "Qualified storage ownership
+  // gate": the authenticated branch now always sets `localContentWithheld`
+  // to `false` (see contentOwnershipMismatch's own doc in the auth-
+  // transition effect above) — this gate's foreign-content half is
+  // structurally unreachable now that authenticated planner domains are
+  // account-qualified, but the gate itself remains in place for the
+  // `sessionStatus === "loading"` half evaluateLocalContentWithheld() also
+  // covers. `items`/`days`/`dayMeta`/`dayParks` React state is
+  // deliberately left completely UNTOUCHED here (never blanked/reset):
+  // this page's own persist effect (`saveToStorage(items, ...)`, keyed on
+  // `[items, initialized]`) would otherwise immediately overwrite this
+  // profile's actual stored bytes with an empty value the instant this
+  // gate cleared `items` — destroying the very content this gate exists to
+  // protect. A short-lived flash of the loaded (possibly foreign) content
+  // during the gap between this component's first paint and this effect's
+  // first run is an accepted, unavoidable consequence of local-first
+  // rendering (session identity is never known synchronously at mount —
+  // the SAME trade-off the SH.4.1 active-profile correction already makes);
+  // what this gate guarantees is that no further render or edit can ever
+  // build on it once identity is known.
+  //
+  // SH.4.1 Plans-migration Codex P1 fix — "Session-loading protection."
+  // `localContentWithheld` alone only reflects a KNOWN-foreign verdict,
+  // computed by the auth-transition effect's "authenticated" branch — which
+  // never runs at all while `sessionStatus === "loading"`, so this gate
+  // previously stayed open (whatever it was on the prior render — `false`
+  // on a fresh mount) for the entire loading window, not just the single
+  // unavoidable first-paint tick the comment above accepts. Routed through
+  // evaluateLocalContentWithheld() (syncHelper.ts) so an unresolved session
+  // ALSO withholds outright, regardless of `localContentWithheld`'s own
+  // (necessarily stale, since identity isn't known yet) value — see that
+  // function's own doc for the full rationale. Once `sessionStatus` leaves
+  // "loading", this defers entirely to the existing, unchanged
+  // `localContentWithheld` verdict.
+  if (evaluateLocalContentWithheld(sessionStatus === "loading", localContentWithheld)) {
+    // Deliberately inline-styled, not the .plans-container/.empty-state
+    // classes used below: those are defined inside the <style> tag that is
+    // part of the NORMAL render this early return replaces, so they would
+    // never actually apply here.
+    return (
+      <div style={{ maxWidth: 480, margin: "0 auto", padding: "2rem 1rem", textAlign: "center" }}>
+        <p>Verifying your account&rsquo;s saved data for this profile&hellip;</p>
+        <p style={{ color: "#6b7280", fontSize: "0.9rem" }}>This only takes a moment.</p>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -6414,7 +6764,7 @@ export default function PlansPage() {
                   aria-pressed={isActive}
                   onClick={() => {
                     // Phase 8.0.10 — resolve active-day key at click time.
-                    const _activeDayKey = buildNamespacedKey(getActiveProfileId(), "activeDayId");
+                    const _activeDayKey = resolveAccountScopedKey(activeUserIdRef.current, getActiveProfileId(), "activeDayId");
                     activeDayKeyRef.current = _activeDayKey;
                     setActiveDayId(dayId);
                     saveActiveDayId(dayId, _activeDayKey);

@@ -29,6 +29,10 @@ Reviewers should check any changes affecting:
  *   pullPlanner(profileId)       — fetch combined cloud planner on sign-in
  *   registerUnloadSync()         — best-effort beacon push on page unload
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
+ *   invalidatePendingUnloadSync() — call immediately BEFORE a corrective
+ *                                  auth/profile reload (see its own doc);
+ *                                  suppresses the next unload-sync beacon
+ *                                  as well as any pending debounced push
  *   getConfirmedState(userId, profileId)              — read the current
  *                                                       PER-DOMAIN confirmed
  *                                                       state (plans/
@@ -777,7 +781,7 @@ Reviewers should check any changes affecting:
  * never left "authenticated" the whole time.
  */
 
-import { buildNamespacedKey } from "./profileStorage";
+import { buildNamespacedKey, resolveAccountScopedKey } from "./profileStorage";
 import {
   buildSyncedPlannerPayload,
   parseSyncedPlannerPayload,
@@ -1912,6 +1916,658 @@ export function setLocalContentOwner(profileId: string, userId: string | null): 
   } catch {}
 }
 
+// ── Account-aware local content ownership (SH.4.1a) ─────────────────────────
+//
+// SH.4.1 (Codex architecture checkpoint, exact HEAD ed2e3ce5) — finding #2:
+// two accounts can legitimately, independently own the identical literal
+// grandfathered profileId (profileStorage.ts's own module doc,
+// applyProfileOwnerStamp), but this profile's physical planner bytes
+// (`dwp:{profileId}:*`) remain ONE PHYSICAL COPY, not one per owning
+// account — SH.4.1a deliberately keeps it that way (no account-qualified
+// storage; see this round's own task scope) and instead makes the EXISTING
+// getLocalContentOwner()/setLocalContentOwner() marker do the account-aware
+// job it was always positioned to do: it already durably tracks EXACTLY ONE
+// identity per profileId (the identity whose most recent successful pull
+// established/confirmed today's physical bytes), which is precisely the
+// `(profileId, current-owning-account)` pair a single shared copy can ever
+// have at once — two accounts cannot BOTH currently own the live bytes,
+// only the registry PROVENANCE (a different, already per-`(profileId,
+// accountKey)` concern) supports true co-ownership.
+//
+// What was missing was not the marker's shape but WHERE it gets consulted:
+// each page's own auth-transition pull effect already reads it to decide
+// whether the pull's OWN conflict/merge logic may trust local bytes as a
+// candidate (`contentOwnershipMismatch`, computed inline at each call site
+// below) — but nothing consulted it BEFORE that pull resolves, so the
+// ordinary synchronous mount-time render (loading local bytes straight into
+// React state, well before any auth-transition effect even runs) could
+// still show — and the page's own edit affordances could still let a user
+// modify — a profile's leftover bytes that in fact belong to a DIFFERENT,
+// already-known account. isLocalContentForeign() below is the ONE shared
+// predicate every consuming page now calls, synchronously, to decide
+// whether this profile's CURRENTLY STORED bytes are safe to render/edit for
+// `currentUserId` at all, independent of and prior to any pull outcome.
+//
+// evaluateLocalContentForeign() is split out as the pure core (no
+// localStorage read) purely so it is directly DEV-testable, mirroring this
+// module's/profileStorage.ts's own established pure-core-plus-thin-I/O-
+// wrapper convention.
+
+/**
+ * Pure core of isLocalContentForeign() below. `owner` is whatever
+ * getLocalContentOwner(profileId) currently returns; `currentUserId` is the
+ * identity asking to render/edit/trust this profile's local content right
+ * now (a real authenticated userId, or `null` for signed-out/not-yet-
+ * resolved).
+ *
+ * `currentUserId === null` NEVER reports foreign content — signed-out mode
+ * is local-first by design (see profileStorage.ts's own module doc on
+ * signed-out visibility: "no authenticated account to protect against")
+ * and a session that hasn't resolved yet has no known identity to compare
+ * with at all, so the decision is deferred rather than guessed; callers
+ * re-evaluate once `currentUserId` actually resolves one way or the other,
+ * exactly like every existing auth-transition effect already does for
+ * `sessionStatus`.
+ *
+ * `owner === null` (never tagged — a fresh profile, or one that has never
+ * been authenticated-tagged before) is trusted for ANY identity — this is
+ * what preserves local-first adoption for anonymous → first sign-in, and
+ * for a fresh profile's very first authenticated use.
+ *
+ * Only a marker naming a DIFFERENT, KNOWN identity is foreign.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES.forEach(c => {
+ *     const got = evaluateLocalContentForeign(c.owner, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateLocalContentForeign(owner: string | null, currentUserId: string | null): boolean {
+  if (currentUserId === null) return false;
+  return owner !== null && owner !== currentUserId;
+}
+
+export const DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES: Array<{
+  name: string;
+  owner: string | null;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "same-account use — this identity's own prior ownership is never foreign to itself",
+    owner: "userA",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "A/B same-id isolation — B must never trust A's physical planner bytes as its own merely because both accounts share this literal profileId",
+    owner: "userA",
+    currentUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "never tagged — trusted for a fresh profile's first authenticated use, or anonymous -> first sign-in (no prior identity to conflict with)",
+    owner: null,
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "signed-out session (currentUserId null) is never foreign, regardless of a real account's prior ownership — signed-out mode stays fully local-first",
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "session not yet resolved (currentUserId null, mirrors 'loading') — deferred, never guessed as foreign",
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "reverse transition — B's content is now marked owned by B; A switching back must see it as foreign until A's own pull re-establishes ownership",
+    owner: "userB",
+    currentUserId: "userA",
+    expected: true,
+  },
+];
+
+/**
+ * I/O wrapper: reads `profileId`'s current content-owner marker and applies
+ * evaluateLocalContentForeign() above. Call this synchronously, BEFORE
+ * trusting/rendering/editing a profile's LEGACY (unqualified) local planner
+ * content for `currentUserId` — see this section's own header doc for the
+ * full rationale. SH.4 Codex P1 fix — "Qualified storage ownership gate":
+ * Plans/Lightning no longer call this at all (their authenticated planner
+ * domains are account-qualified — see shouldApplyLegacyForeignContentGate()
+ * below for exactly when this gate still applies); Tom's own planner-
+ * context build is unaffected by this fix and out of this fix's scope.
+ */
+export function isLocalContentForeign(profileId: string, currentUserId: string | null): boolean {
+  return evaluateLocalContentForeign(getLocalContentOwner(profileId), currentUserId);
+}
+
+/**
+ * SH.4 Codex P1 fix — "Qualified storage ownership gate." PURE CORE
+ * documenting/locking exactly when the legacy per-profileId foreign-
+ * content gate (isLocalContentForeign() above) may ever be consulted for a
+ * domain: only while that domain is still resolved via the LEGACY
+ * (unqualified, `dwp:{profileId}:{baseKey}`) key, where — pre-SH.4/SH.4.1
+ * qualification — two different accounts could genuinely share the exact
+ * same physical bytes for the identical profileId, so a fresh read carried
+ * no identity attribution on its own.
+ *
+ * Once a domain is resolved via the account-qualified key
+ * (`dwp:{userId}:{profileId}:{baseKey}`, resolveAccountScopedKey() in
+ * profileStorage.ts), that ambiguity is gone by construction: account A's
+ * and account B's own bytes for the identical profileId live at two
+ * DIFFERENT physical keys, so this gate must NEVER be applied there — doing
+ * so would let a STALE legacy-era marker (or an unrelated account's own
+ * past ownership stamp) wrongly withhold an account's OWN legitimate
+ * qualified data as "foreign." Plans' and Lightning's own auth-transition
+ * effects hardcode their `contentOwnershipMismatch` to `false` for exactly
+ * this reason — see their own detailed doc for the full root cause and
+ * regression this closes.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES, shouldApplyLegacyForeignContentGate } from "@/lib/syncHelper";
+ *   DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES.forEach(c => {
+ *     const got = shouldApplyLegacyForeignContentGate(c.storageMode);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type LocalContentStorageMode = "legacy" | "qualified";
+
+export function shouldApplyLegacyForeignContentGate(storageMode: LocalContentStorageMode): boolean {
+  return storageMode === "legacy";
+}
+
+export const DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES: Array<{
+  name: string;
+  storageMode: LocalContentStorageMode;
+  expected: boolean;
+}> = [
+  {
+    name: "legacy (unqualified) storage — the historical shared-physical-copy risk still applies, gate stays active",
+    storageMode: "legacy",
+    expected: true,
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — account-qualified storage never applies the legacy foreign-content gate: the qualified key already gives this account its own physical copy, so a stale/unrelated profile-only ownership marker must never withhold it",
+    storageMode: "qualified",
+    expected: false,
+  },
+];
+
+// ── Session-loading-safe planner-context omission (SH.4.1a exact-HEAD finding #1) ──
+//
+// Codex found that Tom's own `authenticatedUserId` derivation
+// (`sessionStatus === "authenticated" ? getUserId(session) : null`)
+// collapses BOTH `sessionStatus === "loading"` (identity genuinely
+// unresolved) and `sessionStatus === "unauthenticated"` (identity resolved
+// to "no one") to the same `null` value — and evaluateLocalContentForeign()
+// deliberately treats a null currentUserId as "never foreign", which is
+// correct for the resolved signed-out case (local-first, no competing
+// identity) but WRONG while still "loading": a question submitted before
+// the session resolves could still send a DIFFERENT, about-to-be-revealed
+// account's stale local planner content, since nothing yet vouches for
+// whose content this device's active profile actually holds.
+//
+// evaluateOmitPlannerContext() below is the pure core of that fix:
+// `sessionIsLoading` is checked FIRST and unconditionally forces omission,
+// never falling through to the ownership comparison for that state — the
+// same "simply omit rather than guess" contract every other optional
+// planner_context field already follows, applied to an unresolved identity
+// instead of a confirmed-foreign one. Once the session resolves one way or
+// the other, this deferred entirely to evaluateLocalContentForeign()'s
+// contract — UNTIL the SH.4 Tom migration round below.
+//
+// SH.4 Tom migration round — Tom's own planner-context build
+// (plannerContextSnapshot.ts's buildPlannerContextSnapshot()) now resolves
+// every SH.4-migrated domain (plans/days/dayMeta/dayParks/dayAutoFallbacks/
+// lightning) through the SAME account-qualified key Plans/Lightning use
+// (resolveAccountScopedKey()) once authenticated, rather than always the
+// legacy per-profileId key. That is exactly the "qualified" storage mode
+// shouldApplyLegacyForeignContentGate() above already documents: once a
+// domain is read via its account-qualified key, two different accounts
+// physically cannot share the same bytes for the same profileId, so the
+// legacy per-profileId foreign-content marker (evaluateLocalContentForeign,
+// `owner`) can no longer say anything meaningful about it — exactly the
+// reason Plans'/Lightning's own retarget functions already hardcode their
+// own `contentOwnershipMismatch` to `false` once qualified. Tom's omission
+// decision now applies that identical rule via `shouldApplyLegacyForeignContentGate`
+// below, rather than unconditionally consulting `owner` for every resolved
+// session: authenticated (currentUserId a real id) means Tom is about to
+// read the qualified shape, so the legacy gate is skipped entirely (never
+// omit on that basis); the resolved signed-out branch (currentUserId null)
+// still keeps reading the legacy shape and so still nominally applies the
+// gate, though `evaluateLocalContentForeign` already always resolves that
+// to `false` for a null `currentUserId` — this is structural symmetry with
+// Plans/Lightning's own storageMode branching, not a behavior change for
+// the signed-out case.
+
+/**
+ * Pure core: should planner_context be omitted from a Tom request right
+ * now? See this section's own header doc for the full rationale.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES, evaluateOmitPlannerContext } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES.forEach(c => {
+ *     const got = evaluateOmitPlannerContext(c.sessionIsLoading, c.owner, c.currentUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateOmitPlannerContext(
+  sessionIsLoading: boolean,
+  owner: string | null,
+  currentUserId: string | null
+): boolean {
+  if (sessionIsLoading) return true;
+  const storageMode: LocalContentStorageMode = currentUserId ? "qualified" : "legacy";
+  if (!shouldApplyLegacyForeignContentGate(storageMode)) return false;
+  return evaluateLocalContentForeign(owner, currentUserId);
+}
+
+export const DEV_EVALUATE_OMIT_PLANNER_CONTEXT_CASES: Array<{
+  name: string;
+  sessionIsLoading: boolean;
+  owner: string | null;
+  currentUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "Tom loading state omits planner context outright, even with no ownership marker at all",
+    sessionIsLoading: true,
+    owner: null,
+    currentUserId: null,
+    expected: true,
+  },
+  {
+    name: "Tom loading state omits planner context even when the marker would otherwise look same-account-safe once resolved — identity is not yet known, so nothing can vouch for it yet",
+    sessionIsLoading: true,
+    owner: "userA",
+    currentUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "explicit unauthenticated (resolved, NOT loading) Tom behavior is unchanged — signed-out local-first still includes planner context",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: null,
+    expected: false,
+  },
+  {
+    name: "authenticated same-account Tom context still works once the session has resolved and the marker is not foreign",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "SH.4 Tom migration — a resolved authenticated session no longer omits on a stale/foreign legacy marker: Tom now reads the account-qualified key for currentUserId, which physically cannot hold userA's bytes, so the legacy per-profileId marker is moot (was `expected: true` pre-SH.4-Tom-migration, when Tom still read the shared legacy key)",
+    sessionIsLoading: false,
+    owner: "userA",
+    currentUserId: "userB",
+    expected: false,
+  },
+  {
+    name: "SH.4 Tom migration — even a legacy marker naming the SAME currentUserId no longer drives the decision once authenticated (qualified storage mode skips the gate entirely, not merely 'happens to agree')",
+    sessionIsLoading: false,
+    owner: null,
+    currentUserId: "userB",
+    expected: false,
+  },
+];
+
+/**
+ * I/O wrapper: the ONE function Tom's own send-question flow calls — see
+ * evaluateOmitPlannerContext()'s own doc above for the full contract,
+ * including the SH.4 Tom migration round's storage-mode gating (mirrored
+ * here rather than delegating to evaluateOmitPlannerContext() itself, since
+ * this wrapper reads `owner` from storage via isLocalContentForeign() rather
+ * than taking it as a parameter).
+ */
+export function shouldOmitPlannerContextForProfile(
+  sessionIsLoading: boolean,
+  profileId: string,
+  currentUserId: string | null
+): boolean {
+  if (sessionIsLoading) return true;
+  const storageMode: LocalContentStorageMode = currentUserId ? "qualified" : "legacy";
+  if (!shouldApplyLegacyForeignContentGate(storageMode)) return false;
+  return isLocalContentForeign(profileId, currentUserId);
+}
+
+// ── Tom in-flight account-transition boundary (SH.4.4 Codex P1 fix) ──
+//
+// Tom's own request flow (tom/page.tsx's sendQuestion) already has a
+// stale-request boundary: it captures the chat's session_id at request
+// start and discards the response (never appends it, never surfaces an
+// error, never re-enables the input under the OLD state) if that session_id
+// has since changed — e.g. "New Chat" swapped in a fresh session while the
+// request was still in flight. Codex found this boundary checked ONLY
+// session_id/active-profile-id, never the AUTHENTICATED IDENTITY the
+// request was made under: a request started under account A, on a chat
+// session_id/profile id that happens to remain unchanged across an
+// in-session A -> B account switch (e.g. a legacy/shared local profile that
+// hasn't been retargeted), would still have A's response appended into
+// what is now B's conversation once it resolved — even though every other
+// domain in this codebase (Plans, Lightning, planner sync itself) treats an
+// authenticated identity change as the canonical trigger for discarding
+// in-flight, identity-scoped work.
+//
+// isIdentityStaleForRequest() extends the SAME existing boundary (not a
+// parallel one) with this additional signal: the caller's own isStale()
+// check ORs this in alongside its existing session_id/profile_id
+// comparison — see tom/page.tsx's own sendQuestion for where it's used.
+// `null` (loading or signed-out) is a meaningful, distinct identity value
+// on either side, compared by strict inequality only — never coerced.
+
+/**
+ * Pure core: has the authenticated identity a Tom request was started under
+ * (`requestAuthenticatedUserId`) changed by the time some later point in
+ * that request's lifecycle is reached (`currentAuthenticatedUserId`)? See
+ * this section's own header doc for the full rationale.
+ *
+ * Run from Node:
+ *   import { DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES, isIdentityStaleForRequest } from "@/lib/syncHelper";
+ *   DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES.forEach(c => {
+ *     const got = isIdentityStaleForRequest(c.requestAuthenticatedUserId, c.currentAuthenticatedUserId);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isIdentityStaleForRequest(
+  requestAuthenticatedUserId: string | null,
+  currentAuthenticatedUserId: string | null
+): boolean {
+  return currentAuthenticatedUserId !== requestAuthenticatedUserId;
+}
+
+/**
+ * Pure core: PR #161 Codex finding #1. Whether Tom's sendQuestion() should
+ * release its `loading` state now that a request has completed (in its
+ * `finally` block). `isSessionStale` reflects ONLY whether the chat's
+ * session_id changed (New Chat) by completion time — that path already owns
+ * clearing `loading` itself, synchronously, at the moment it cancels the old
+ * request (see handleNewChat in tom/page.tsx), so releasing it again here
+ * could stomp a NEWER request's own loading state that may have started
+ * since. An identity-only change (isIdentityStaleForRequest() above) has no
+ * such separate release anywhere else in this codepath — this decision
+ * deliberately does NOT take identity staleness into account, so a request
+ * that survives an authenticated account switch still releases loading here
+ * regardless. Without this, handleSubmit()/handleStarterPrompt()'s own
+ * `if (loading) return;` guard would leave Tom's input permanently disabled
+ * after an account switch mid-flight, since nothing else would ever clear
+ * it.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_RELEASE_TOM_LOADING_CASES, shouldReleaseTomLoadingOnCompletion } from "@/lib/syncHelper";
+ *   DEV_SHOULD_RELEASE_TOM_LOADING_CASES.forEach(c => {
+ *     const got = shouldReleaseTomLoadingOnCompletion(c.isSessionStale);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldReleaseTomLoadingOnCompletion(isSessionStale: boolean): boolean {
+  return !isSessionStale;
+}
+
+export const DEV_SHOULD_RELEASE_TOM_LOADING_CASES: Array<{
+  name: string;
+  isSessionStale: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "PR #161 Codex finding #1 — no session_id change (ordinary completion, OR a request that survived an identity-only account change) — loading is released; nothing else in this codepath clears it for an identity transition, and handleSubmit/handleStarterPrompt refuse to resubmit while loading stays true",
+    isSessionStale: false,
+    expected: true,
+  },
+  {
+    name: "session_id changed (New Chat) — withheld here, since that path already synchronously cleared loading itself when it cancelled the old request; releasing it again could stomp a newer request's own loading state",
+    isSessionStale: true,
+    expected: false,
+  },
+];
+
+export const DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES: Array<{
+  name: string;
+  requestAuthenticatedUserId: string | null;
+  currentAuthenticatedUserId: string | null;
+  expected: boolean;
+}> = [
+  {
+    name: "same authenticated identity throughout — not stale",
+    requestAuthenticatedUserId: "userA",
+    currentAuthenticatedUserId: "userA",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 Codex P1 — account switches A -> B mid-request — stale even though this signal alone says nothing about session_id/profile_id (the caller ORs both together)",
+    requestAuthenticatedUserId: "userA",
+    currentAuthenticatedUserId: "userB",
+    expected: true,
+  },
+  {
+    name: "signs out mid-request — stale, never append an authenticated account's response into the signed-out/local-first view",
+    requestAuthenticatedUserId: "userA",
+    currentAuthenticatedUserId: null,
+    expected: true,
+  },
+  {
+    name: "signs in mid-request after starting signed out — stale, never append a signed-out request's response into a now-authenticated account's conversation",
+    requestAuthenticatedUserId: null,
+    currentAuthenticatedUserId: "userA",
+    expected: true,
+  },
+  {
+    name: "both signed out throughout — not stale",
+    requestAuthenticatedUserId: null,
+    currentAuthenticatedUserId: null,
+    expected: false,
+  },
+];
+
+// ── Session-loading-safe planner render gate (Codex P1, SH.4.1 Plans-migration round) ──
+//
+// Codex found the SAME "sessionStatus === 'loading' collapses to a null
+// currentUserId, which evaluateLocalContentForeign() correctly treats as
+// 'never foreign'" gap evaluateOmitPlannerContext() above already closes
+// for Tom's planner_context — but for Plans' OWN render/edit gate instead
+// of Tom's request payload. Plans' mount effect (`[]` deps) is deliberately
+// AUTH-INDEPENDENT and always hydrates/renders from local storage
+// immediately, before `sessionStatus` resolves — by design, so the page
+// never blocks on a network round trip for the ordinary signed-out/
+// same-account case. `localContentWithheld` (the render gate this page
+// already has — see its own doc where it is declared) is set to a REAL
+// verdict only once the auth-transition effect's "authenticated" branch
+// runs isLocalContentForeign() — meaning throughout the ENTIRE "loading"
+// window, it still holds whatever it was on the previous render (`false`
+// on a fresh mount), so the editable items list, Add/Edit forms, and day
+// management were all reachable — and editable — for an identity this
+// device does not know yet, on a shared browser where that identity may
+// turn out to own DIFFERENT local content than whichever profile happens
+// to be active right now.
+//
+// evaluateLocalContentWithheld() below is the pure core of the fix:
+// `sessionIsLoading` is checked FIRST and unconditionally withholds,
+// mirroring evaluateOmitPlannerContext()'s own "simply omit/withhold
+// rather than guess" contract for an unresolved identity — applied here to
+// Plans' own render gate instead of Tom's context payload. Once the
+// session resolves one way or the other, this defers entirely to the
+// EXISTING, unchanged `contentOwnershipMismatch` verdict Plans' own
+// auth-transition effect already computes and stores in
+// `localContentWithheld` — no change to that verdict's own logic.
+
+/**
+ * Pure core: should Plans' own render gate withhold the editable planner
+ * UI (items list, Add/Edit forms, day management, import/export) right
+ * now? See this section's own header doc for the full rationale.
+ *
+ * `contentOwnershipMismatch` is the caller's own already-computed
+ * "known-foreign content" verdict (Plans' `localContentWithheld` state,
+ * fresh from isLocalContentForeign() the last time its auth-transition
+ * effect ran) — passed in rather than re-derived here, since a render has
+ * no `owner`/`currentUserId` of its own to look up.
+ *
+ * Run from Node:
+ *   import { DEV_EVALUATE_LOCAL_CONTENT_WITHHELD_CASES, evaluateLocalContentWithheld } from "@/lib/syncHelper";
+ *   DEV_EVALUATE_LOCAL_CONTENT_WITHHELD_CASES.forEach(c => {
+ *     const got = evaluateLocalContentWithheld(c.sessionIsLoading, c.contentOwnershipMismatch);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function evaluateLocalContentWithheld(sessionIsLoading: boolean, contentOwnershipMismatch: boolean): boolean {
+  if (sessionIsLoading) return true;
+  return contentOwnershipMismatch;
+}
+
+export const DEV_EVALUATE_LOCAL_CONTENT_WITHHELD_CASES: Array<{
+  name: string;
+  sessionIsLoading: boolean;
+  contentOwnershipMismatch: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "session still loading — withheld outright, even with no foreign-content verdict at all (fresh mount default false)",
+    sessionIsLoading: true,
+    contentOwnershipMismatch: false,
+    expected: true,
+  },
+  {
+    name: "session still loading — withheld even if a STALE prior verdict from a previous mount/transition happened to say 'not foreign'",
+    sessionIsLoading: true,
+    contentOwnershipMismatch: false,
+    expected: true,
+  },
+  {
+    name: "resolved (not loading), no foreign-content verdict — ordinary same-account/offline/signed-out render proceeds, unchanged from before this fix",
+    sessionIsLoading: false,
+    contentOwnershipMismatch: false,
+    expected: false,
+  },
+  {
+    name: "resolved (not loading), known-foreign content — the pre-existing SH.4.1a gate is unchanged by this fix",
+    sessionIsLoading: false,
+    contentOwnershipMismatch: true,
+    expected: true,
+  },
+];
+
+/** The ways a hydration attempt following a foreign-content detection can resolve. */
+export type LocalContentHydrationOutcome = "success" | "failed" | "slow" | "cancelled";
+
+/**
+ * Pure timeline model of the ONE rule every consuming page's pull effect
+ * follows (see getLocalContentOwner's own DURABLE TRANSFER BOUNDARY doc
+ * above, unchanged by SH.4.1a): the content-owner marker — and therefore
+ * whether content stays withheld — is updated ONLY on "success" (a pull
+ * that genuinely resolved, wasn't superseded, and whose own hydration/day
+ * writes durably succeeded). "failed" (the request itself failed/threw),
+ * "slow" (still in flight — this identity's own pull has not yet resolved
+ * one way or the other), and "cancelled" (superseded by a newer transition
+ * before it resolved) all leave the marker — and therefore the foreign
+ * verdict — EXACTLY as it was: withheld content is never deleted or
+ * relabeled by anything short of this identity's own successful, coherent
+ * hydration.
+ *
+ * This mirrors, at the ownership-marker level, the exact discipline each
+ * page's real `.then()` callback already applies to
+ * setLocalContentOwner()'s own call site (only reached once `cancelled` is
+ * false, `isPullCurrent()` still holds, and hydration succeeded) — kept
+ * here as a pure function so that discipline is directly DEV-testable
+ * without a browser, a fetch mock, or React.
+ *
+ * Run from Node:
+ *   import { DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES, simulateLocalContentOwnershipAfterHydration, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES.forEach(c => {
+ *     const withheldBefore = evaluateLocalContentForeign(c.ownerBeforeHydration, c.currentUserId);
+ *     const after = simulateLocalContentOwnershipAfterHydration(c.ownerBeforeHydration, c.currentUserId, c.outcome);
+ *     const ok = withheldBefore === c.expectedWithheldBefore
+ *       && after.ownerAfter === c.expectedOwnerAfter
+ *       && after.withheldAfter === c.expectedWithheldAfter;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateLocalContentOwnershipAfterHydration(
+  ownerBeforeHydration: string | null,
+  currentUserId: string,
+  outcome: LocalContentHydrationOutcome
+): { ownerAfter: string | null; withheldAfter: boolean } {
+  if (outcome === "success") {
+    return { ownerAfter: currentUserId, withheldAfter: false };
+  }
+  // failed / slow / cancelled — never relabels ownership; the foreign
+  // verdict is therefore unchanged, since nothing about the marker moved.
+  return {
+    ownerAfter: ownerBeforeHydration,
+    withheldAfter: evaluateLocalContentForeign(ownerBeforeHydration, currentUserId),
+  };
+}
+
+export const DEV_LOCAL_CONTENT_HYDRATION_LIFECYCLE_CASES: Array<{
+  name: string;
+  ownerBeforeHydration: string | null;
+  currentUserId: string;
+  outcome: LocalContentHydrationOutcome;
+  expectedWithheldBefore: boolean;
+  expectedOwnerAfter: string | null;
+  expectedWithheldAfter: boolean;
+}> = [
+  {
+    name: "successful hydration establishes the current account as the safe local-content owner and lifts withholding",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "success",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userB",
+    expectedWithheldAfter: false,
+  },
+  {
+    name: "failed hydration — foreign content stays withheld; the marker is never deleted or relabeled",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "failed",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "slow hydration (not yet resolved) — identical to failed until it actually resolves one way or the other",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "slow",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "cancelled hydration (superseded by a newer transition before it resolved) — leaves this attempt's marker exactly as it was, never relabeling",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userB",
+    outcome: "cancelled",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: true,
+  },
+  {
+    name: "ordinary same-account hydration — never withheld at any point, before or after",
+    ownerBeforeHydration: "userA",
+    currentUserId: "userA",
+    outcome: "success",
+    expectedWithheldBefore: false,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: false,
+  },
+  {
+    name: "architecture-checkpoint scenario G — ordinary same-account profile switch to a DIFFERENT profileId previously owned by another account: this profile's own marker (independent of whichever profile was active before the switch) is correctly foreign for the switching account until ITS OWN pull for this profileId succeeds",
+    ownerBeforeHydration: "userB",
+    currentUserId: "userA",
+    outcome: "success",
+    expectedWithheldBefore: true,
+    expectedOwnerAfter: "userA",
+    expectedWithheldAfter: false,
+  },
+];
+
 // ── Shared stable-prefix key snapshot (SH.2, Codex P1, 15th round) ──────────────
 
 /**
@@ -1988,6 +2644,39 @@ function snapshotKeysWithPrefix(prefix: string): string[] {
 export function purgeProfileSyncState(profileId: string): void {
   for (const key of snapshotKeysWithPrefix("")) {
     if (!isProfileOwnedSyncKey(key, profileId)) continue;
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  }
+}
+
+/**
+ * SH.4.4 — "profile deletion vs. SH.4 account-qualified planner storage."
+ * I/O wrapper profileStorage.ts's deleteProfile() calls UNCONDITIONALLY for
+ * a real authenticated `userId`, regardless of whether the shared/legacy
+ * `dwp:{profileId}:*` slot is also safe to destroy this round
+ * (isDestructiveProfileCleanupSafe) — an account-qualified key
+ * (`dwp:{userId}:{profileId}:{baseKey}`, its local-edit facts, and its
+ * `dwp:sync:{userId}:{profileId}:...` sync-layer state) physically belongs
+ * to ONLY `userId` by construction (see buildAccountQualifiedKey()/
+ * resolveAccountScopedKey() in profileStorage.ts), so removing it can never
+ * touch a co-owning account's own data the way destroying the SHARED legacy
+ * slot could. Built on the SAME shared predicate purgeProfileSyncState()
+ * itself uses (isProfileOwnedSyncKey(), syncPayload.ts) — its userId-scoped
+ * mode — rather than a second/competing key-shape enumeration; see that
+ * predicate's own doc for exactly which shapes this covers and why the
+ * shared/legacy markers are deliberately excluded from this narrower mode.
+ *
+ * Without this, deleting then recreating a profile with the SAME normalized
+ * id (normalizeId() is deterministic) while signed in as the same account
+ * would leave that account's own qualified canonical planner values and
+ * local-edit facts durably in place: the moment the recreated profile's
+ * pages resolve the identical account-qualified key again, this stale data
+ * — not a genuinely empty new profile — silently reappears.
+ */
+export function purgeAccountQualifiedProfileState(userId: string, profileId: string): void {
+  for (const key of snapshotKeysWithPrefix("")) {
+    if (!isProfileOwnedSyncKey(key, profileId, userId)) continue;
     try {
       localStorage.removeItem(key);
     } catch {}
@@ -2461,7 +3150,7 @@ function recordConfirmedFactBody(
   // independently bounds this store's growth on every future write
   // regardless of whether this cross-store pass ever fires for it.
   try {
-    const domainKey = domainCanonicalKey(profileId, domain);
+    const domainKey = domainCanonicalKey(userId, profileId, domain);
     let currentCanonicalValue: unknown = null;
     try {
       const currentRaw = readLatestDurableValue(domainKey);
@@ -3380,15 +4069,169 @@ export function listPendingOps(userId: string, profileId: string): string[] {
 }
 
 /**
- * SH.2.3 — the canonical localStorage key for a synced domain, keyed only
- * by profileId (matches buildPayloadFromStorage's own reads) — used to
- * locate a domain's local-edit-fact keyspace (localEditFactPrefix below)
- * when capturing or re-checking a pending operation's own per-domain
- * evidence. `ConfirmedDomainName` and the payload's own domain field names
- * ("plans"/"lightning"/"days") are deliberately identical strings.
+ * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+ * storage namespace it hydrates." PURE CORE: the actual account-qualified-
+ * vs-legacy decision for a Plans-synced domain's OWN canonical key
+ * ("plans"/"days"/"dayMeta"/"dayParks" — NEVER "lightning", which every
+ * caller of the thin wrapper below special-cases separately), used by
+ * every read this module makes at push/pending-op-evidence time.
+ *
+ * Gated on `plansQualified` (the caller's own snapshot of module state
+ * `currentSyncPlansQualified` — see its own doc near setSyncPlansQualified()
+ * below), NOT on `userId` alone. `userId` being non-null only means "the
+ * sync identity currently targeted is authenticated" — it says nothing
+ * about whether the PAGE that is actually driving sync right now (Plans,
+ * migrated to the qualified key; or Lightning, not yet) hydrates these
+ * domains from that qualified key. Lightning has not been migrated (a
+ * separate, later slice) and always hydrates/writes these same domains at
+ * the legacy unqualified key — so a push/pending-op-evidence read
+ * triggered while Lightning is the active page must keep reading that SAME
+ * legacy key regardless of `userId`, or it silently reads whatever (likely
+ * empty, since it was never adopted) content sits at the qualified key and
+ * pushes that over valid cloud data.
+ *
+ * Exported as a pure function (module state passed in explicitly, never
+ * read internally) specifically so this exact regression — a real
+ * `userId` alone is NOT sufficient evidence that Plans is the active page
+ * — has its own directly-testable DEV_* coverage; see
+ * DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES below.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES, decideSyncScopedDomainKey } from "@/lib/syncHelper";
+ *   DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES.forEach(c => {
+ *     const got = decideSyncScopedDomainKey(c.plansQualified, c.userId, c.profileId, c.baseKey);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
  */
-function domainCanonicalKey(profileId: string, domain: ConfirmedDomainName): string {
-  return buildNamespacedKey(profileId, domain);
+export function decideSyncScopedDomainKey(
+  plansQualified: boolean,
+  userId: string | null,
+  profileId: string,
+  baseKey: string
+): string {
+  return plansQualified
+    ? resolveAccountScopedKey(userId, profileId, baseKey)
+    : buildNamespacedKey(profileId, baseKey);
+}
+
+export const DEV_DECIDE_SYNC_SCOPED_DOMAIN_KEY_CASES: Array<{
+  name: string;
+  plansQualified: boolean;
+  userId: string | null;
+  profileId: string;
+  baseKey: string;
+  expected: string;
+}> = [
+  {
+    name: "Plans is the active page, authenticated => account-qualified key",
+    plansQualified: true,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "plans",
+    expected: "dwp:userA:default:plans",
+  },
+  {
+    name: "REGRESSION CASE — a not-yet-migrated (plansQualified=false) page is the active page even though the sync identity IS authenticated => legacy key, never the qualified one, so an empty/never-adopted qualified 'plans' key can never be pushed over valid cloud data",
+    plansQualified: false,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "plans",
+    expected: "dwp:default:plans",
+  },
+  {
+    name: "signed out (no active identity at all) => legacy key regardless of plansQualified",
+    plansQualified: false,
+    userId: null,
+    profileId: "default",
+    baseKey: "days",
+    expected: "dwp:default:days",
+  },
+  {
+    name: "defensive — plansQualified true but userId somehow null still fails safe to the legacy key (resolveAccountScopedKey's own null-userId fallback)",
+    plansQualified: true,
+    userId: null,
+    profileId: "default",
+    baseKey: "dayMeta",
+    expected: "dwp:default:dayMeta",
+  },
+  {
+    name: "SH.4 Lightning slice — Lightning's own domain now qualifies exactly like every other domain when Lightning is the active authenticated page",
+    plansQualified: true,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "lightning",
+    expected: "dwp:userA:default:lightning",
+  },
+  {
+    name: "SH.4 Lightning slice — signed out or not-yet-migrated active page keeps Lightning's own domain on the legacy key, exactly like plans/days/etc.",
+    plansQualified: false,
+    userId: "userA",
+    profileId: "default",
+    baseKey: "lightning",
+    expected: "dwp:default:lightning",
+  },
+];
+
+/**
+ * Thin I/O wrapper around decideSyncScopedDomainKey(): by default reads the
+ * module's own LIVE currentSyncPlansQualified state (see its own doc)
+ * rather than requiring every call site to thread it through explicitly.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
+ * across a namespace switch." `plansQualifiedOverride`, when provided,
+ * wins outright over the live flag — see doPush()'s own doc for why a
+ * DEFERRED (inFlight-retried) push must keep reading the namespace it was
+ * ORIGINALLY captured under, never whatever currentSyncPlansQualified has
+ * since become.
+ */
+function syncScopedDomainKey(
+  userId: string | null,
+  profileId: string,
+  baseKey: string,
+  plansQualifiedOverride?: boolean
+): string {
+  return decideSyncScopedDomainKey(plansQualifiedOverride ?? currentSyncPlansQualified, userId, profileId, baseKey);
+}
+
+/**
+ * SH.2.3 — the canonical localStorage key for a synced domain (matches
+ * buildPayloadFromStorage's own reads) — used to locate a domain's
+ * local-edit-fact keyspace (localEditFactPrefix below) when capturing or
+ * re-checking a pending operation's own per-domain evidence.
+ * `ConfirmedDomainName` and the payload's own domain field names
+ * ("plans"/"lightning"/"days") are deliberately identical strings.
+ *
+ * SH.4.1 Plans slice — `userId`/`profileId` route "plans"/"days"/
+ * "dayMeta"/"dayParks" through syncScopedDomainKey() (see its own doc
+ * just above for the full rationale), mirroring wherever this domain's
+ * OWN canonical value now actually lives — this function's whole purpose
+ * is to locate that SAME physical keyspace, so it must track it exactly.
+ *
+ * SH.4 Lightning slice — "lightning" no longer special-cases
+ * buildNamespacedKey() unconditionally. Lightning's own page code has now
+ * migrated to the same account-qualified local identity as Plans (see
+ * retargetLightningStorageIdentity() in lightning/page.tsx) and asserts
+ * setSyncPlansQualified(true) on its own auth-transition exactly like
+ * Plans does, so "lightning" now tracks currentSyncPlansQualified (via
+ * syncScopedDomainKey()) exactly like every other domain here — whichever
+ * page (Plans or Lightning) most recently drove sync, both now hydrate
+ * every one of these domains, "lightning" included, from the identical
+ * physical keyspace.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
+ * passes straight through to syncScopedDomainKey() (see its own doc); every
+ * EXISTING caller that omits it (recordConfirmedFactBody(),
+ * reconcilePendingOperations() — both pull-side, unrelated to this fix)
+ * keeps reading the live flag, unchanged. Only buildPendingOpDomains()
+ * (doPush()'s own pending-op evidence, see its own doc) passes one.
+ */
+function domainCanonicalKey(
+  userId: string | null,
+  profileId: string,
+  domain: ConfirmedDomainName,
+  plansQualifiedOverride?: boolean
+): string {
+  return syncScopedDomainKey(userId, profileId, domain, plansQualifiedOverride);
 }
 
 /**
@@ -3433,34 +4276,64 @@ function getKnownBaseRevision(userId: string, profileId: string): number {
  * reconcilePendingOperations() later tell "this operation's own now-resolved
  * content" apart from "a genuine local edit made after it" — never from the
  * full content itself.
+ *
+ * SH.4.1 Plans slice — `userId` (both callers already require a non-null
+ * userId to reach this point — see addPendingOp's own doc) is threaded
+ * straight through to domainCanonicalKey() so this operation's own
+ * edit-fact-frontier snapshot is taken from the SAME physical keyspace
+ * buildPayloadFromStorage() just read `payload` from, never a stale
+ * legacy-shape snapshot for a domain that has since moved to the
+ * account-qualified key.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
+ * passes straight through to domainCanonicalKey() (see its own doc):
+ * doPush() passes the SAME captured snapshot it used to build `payload`
+ * itself, so a deferred/retried push's own pending-op evidence is always
+ * taken from the IDENTICAL namespace as the payload it describes — never a
+ * mix of the two.
  */
-function buildPendingOpDomains(profileId: string, payload: SyncedPlannerPayload): PendingOpRecord["domains"] {
+function buildPendingOpDomains(
+  userId: string,
+  profileId: string,
+  payload: SyncedPlannerPayload,
+  plansQualifiedOverride?: boolean
+): PendingOpRecord["domains"] {
   const domains: PendingOpRecord["domains"] = {
     plans: {
       digest: canonicalDigest(payload.plans),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "plans"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "plans", plansQualifiedOverride))
+      ),
     },
     lightning: {
       digest: canonicalDigest(payload.lightning),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "lightning"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "lightning", plansQualifiedOverride))
+      ),
     },
   };
   if (payload.days !== undefined) {
     domains.days = {
       digest: canonicalDigest(payload.days),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "days"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "days", plansQualifiedOverride))
+      ),
     };
   }
   if (payload.dayMeta !== undefined) {
     domains.dayMeta = {
       digest: canonicalDigest(payload.dayMeta),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayMeta"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayMeta", plansQualifiedOverride))
+      ),
     };
   }
   if (payload.dayParks !== undefined) {
     domains.dayParks = {
       digest: canonicalDigest(payload.dayParks),
-      editFactKeys: snapshotKeysWithPrefix(localEditFactPrefix(domainCanonicalKey(profileId, "dayParks"))),
+      editFactKeys: snapshotKeysWithPrefix(
+        localEditFactPrefix(domainCanonicalKey(userId, profileId, "dayParks", plansQualifiedOverride))
+      ),
     };
   }
   return domains;
@@ -3791,7 +4664,7 @@ export async function reconcilePendingOperations(
       for (const domain of CONFIRMED_DOMAIN_NAMES) {
         const evidence = record.domains[domain];
         if (!evidence) continue;
-        const key = domainCanonicalKey(profileId, domain);
+        const key = domainCanonicalKey(userId, profileId, domain);
         const currentEditFactKeys = snapshotKeysWithPrefix(localEditFactPrefix(key));
         // Read via the SAME normalization buildPayloadFromStorage() used to
         // produce `evidence.digest` in the first place (parseLocalDatasetEntry
@@ -4036,7 +4909,56 @@ export function getSyncStateForProfile(profileId: string): SyncState {
 
 // ── Module-level state ────────────────────────────────────────────────────────
 
+/**
+ * The ORDINARY, freely-replaceable debounce slot: scheduleSync() clears
+ * and replaces it unconditionally on every call, from ANY page, for ANY
+ * edit — that is its entire job (coalesce rapid edits into one push).
+ * cancelScheduledSync() clears it on auth/profile transitions. Read by
+ * scheduleSync()/cancelScheduledSync()/registerUnloadSync() and by
+ * applySyncPlansQualifiedTransition()'s own "is there pending work to
+ * flush" check.
+ *
+ * PR #161 Codex finding #2 — scheduleSync()'s own setTimeout callback also
+ * clears this back to `null` the instant it BEGINS (before calling
+ * doPush()), not only when replaced or explicitly cancelled: a fired timer
+ * handle is no longer meaningful to clearTimeout(), and leaving the
+ * variable non-null past that point would make a fired-and-already-running
+ * debounce look identical to a genuinely still-pending one to every reader
+ * above — in particular, could make applySyncPlansQualifiedTransition()
+ * fire a second, redundant doPush() believing there was still queued work
+ * to flush.
+ */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — "Separate deferred/
+ * in-flight retry scheduling from the ordinary replaceable debounce slot."
+ * Root cause this closes: doPush()'s own inFlight-retry (round 3's fix
+ * preserved the identity/profile/namespace snapshot a deferred push
+ * belongs to, but still stored the retry's setTimeout handle in the SAME
+ * `debounceTimer` variable ordinary scheduleSync()/cancelScheduledSync()
+ * calls freely clear-and-replace) — during normal Plans -> Lightning
+ * navigation, a qualified Plans push already deferred (because another
+ * push was still in flight) could be silently cancelled the instant
+ * Lightning called scheduleSync() for its own, completely unrelated edit:
+ * `if (debounceTimer !== null) clearTimeout(debounceTimer);` doesn't know
+ * or care what it's clearing, so it discarded the Plans retry — its
+ * preserved snapshot and all — and replaced it with Lightning's own timer.
+ *
+ * This variable is doPush()'s OWN, exclusively — nothing else in this
+ * module reads or writes it. scheduleSync()/cancelScheduledSync()/
+ * registerUnloadSync() only ever touch `debounceTimer` above, so an
+ * ordinary debounce call from ANY page, for ANY identity/namespace, can
+ * no longer reach in and cancel a DIFFERENT identity/namespace's
+ * already-deferred, already-snapshotted retry — it simply has no path to
+ * this variable at all. A deferred retry surviving a namespace-mode
+ * transition untouched (see applySyncPlansQualifiedTransition()'s own
+ * doc) is exactly the intended behavior, not something that needs
+ * separate "flushing" here: it is already scheduled, already carries its
+ * own snapshot, and will fire on its own once `inFlight` clears.
+ */
+let deferredPushRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
 let inFlight = false;
 
 /**
@@ -4057,6 +4979,80 @@ let currentSyncProfileId = "default";
  * Updated by setSyncUserId().
  */
 let currentSyncUserId: string | null = null;
+
+/**
+ * Codex P1 fix — "auth-transition unload-beacon" (see
+ * invalidatePendingUnloadSync()'s own doc for the full root cause). Single-
+ * shot: set true ONLY by invalidatePendingUnloadSync(), read ONLY by
+ * registerUnloadSync()'s handler via shouldSendUnloadSyncBeacon() below.
+ * Deliberately never reset back to false by setSyncUserId()/
+ * setSyncProfileId()'s own genuine-change branches — see
+ * invalidatePendingUnloadSync()'s own doc for why a reset there would
+ * silently undo this exact suppression, since (per SessionProviderWrapper's
+ * effect-ordering doc) those calls can run in the SAME commit, immediately
+ * AFTER this flag is set. The corrective reload this protects tears the
+ * page down (and this module's in-memory state with it) right after, so no
+ * later "identity settled" moment in THIS tab's lifetime ever needs it
+ * cleared.
+ */
+let unloadSyncInvalidated = false;
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+ * storage namespace it hydrates." True only while the page CURRENTLY
+ * driving sync (i.e., the page that most recently called
+ * setSyncProfileId()/setSyncUserId()/setSyncPlansQualified()) actually
+ * hydrates its own "plans"/"lightning"/"days"/"dayMeta"/"dayParks" domains
+ * from the account-qualified key — while authenticated, this is now true
+ * for EITHER Plans or Lightning (SH.4 migrated Lightning's own "lightning"
+ * base key, plus its reads of the shared day domains, onto the identical
+ * account-qualified architecture Plans already used — see
+ * retargetLightningStorageIdentity() in lightning/page.tsx).
+ *
+ * Root cause this closed originally: `currentSyncUserId` being non-null
+ * means only "the sync target is authenticated" — it says nothing about
+ * WHICH PAGE is driving sync right now. Before Lightning migrated (SH.4),
+ * it always hydrated/wrote these same domains at the legacy unqualified
+ * key regardless of `currentSyncUserId`. Before this flag existed at all,
+ * doPush()/registerUnloadSync() (via buildPayloadFromStorage()/
+ * domainCanonicalKey(), see their own docs) read these domains using
+ * `currentSyncUserId` alone — so opening Lightning (authenticated, but
+ * never having visited Plans this session, so the qualified key was never
+ * adopted) and triggering any push could read an EMPTY qualified "plans"
+ * key and push `plans: []` over valid cloud data, silently erasing it. The
+ * SAME risk existed in reverse before SH.4 for Lightning's own "lightning"
+ * domain: this flag is what still prevents it now that BOTH pages resolve
+ * every domain identically.
+ *
+ * Defaults to false (the safe/legacy behavior — matches every existing
+ * unmigrated consumer with zero code changes of its own) and is reset to
+ * false by setSyncProfileId()/setSyncUserId() below on EVERY call, even
+ * when the profileId/userId they are given is UNCHANGED — deliberately
+ * NOT gated behind those functions' own "did it actually change" early
+ * return, unlike their cancelScheduledSync()/epoch-bump side effects:
+ * Plans and Lightning call these with the IDENTICAL (userId, profileId)
+ * pair on an ordinary same-identity navigation between them (a real no-op
+ * for every OTHER purpose), and that navigation is exactly the moment this
+ * flag must revert to its conservative default. Both Plans' AND
+ * Lightning's own auth-transition effects call setSyncPlansQualified(true),
+ * immediately after their own setSyncUserId() call, to re-assert it — see
+ * that function's own doc. Since both pages now assert the identical
+ * `true` while authenticated, an ordinary same-identity Plans<->Lightning
+ * navigation no longer actually flips this flag's value at all (ends up
+ * "unchanged" — see decideSyncPlansQualifiedTransitionAction()'s own doc);
+ * the flush-vs-cancel machinery below remains exactly as necessary for a
+ * genuine identity/profile change, and for the (currently unused but still
+ * correctly handled) general case where the two pages' own qualified
+ * state could someday diverge again.
+ *
+ * A change to this flag's EFFECTIVE value (in either direction) cancels
+ * any pending debounced push first, exactly like setSyncProfileId()/
+ * setSyncUserId() already do for an identity/profile change — a push
+ * scheduled under one namespace mode must never be allowed to fire after
+ * the active page (and therefore the correct namespace) has changed
+ * underneath it. See setSyncPlansQualified()'s own doc.
+ */
+let currentSyncPlansQualified = false;
 
 /**
  * SH.2 architecture (Codex P1, 13th round) — see "Pull execution context" in
@@ -4104,6 +5100,250 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
   return isPullEpochCurrent(ctx.epoch, currentPullEpoch);
 }
 
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (2nd round) — "Preserve queued Plans
+ * work on namespace switch." PURE CORE: what should happen to a
+ * currentSyncPlansQualified transition's own pending debounced push, if
+ * any? The FIRST round of this fix (resetSyncPlansQualified()/
+ * setSyncPlansQualified() below) always CANCELLED a pending push outright
+ * on any namespace-mode change — correct for a genuine identity/profile
+ * change (AGENTS.md's own invariant: stale scheduled work must never fire
+ * for a stale session), but WRONG here: an authenticated Plans edit
+ * followed by immediate navigation to Lightning is an ORDINARY
+ * same-identity transition, not a stale session — the pending push's
+ * payload is still perfectly valid for the account it belongs to, only the
+ * PAGE (and therefore the local namespace doPush() would read it from) is
+ * about to change. Discarding it stranded a genuine, already-debounced
+ * edit: it stays durable on this device forever (local-first), but never
+ * reaches the cloud until something else happens to schedule a fresh push
+ * — possibly never, if the user does not return to Plans.
+ *
+ * `"unchanged"` when the transition is a no-op (nothing to protect).
+ * `"flush-pending-work"` when a real transition is about to cancel a push
+ * that is STILL pending (not yet fired) — the caller must fire it NOW,
+ * synchronously, before applying the transition, so it captures the
+ * OUTGOING namespace/identity exactly like it would have if the debounce
+ * timer had simply fired a moment earlier. `"cancel-no-pending-work"` when
+ * a real transition has nothing queued to preserve — an ordinary cancel.
+ *
+ * Symmetric by design (covers `false -> true`, i.e. Lightning's own
+ * pending edit when navigating back to Plans, exactly the same way): this
+ * is a general "don't strand a page's own already-debounced push merely
+ * because another page took over sync" fix, not specific to one direction.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES, decideSyncPlansQualifiedTransitionAction } from "@/lib/syncHelper";
+ *   DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES.forEach(c => {
+ *     const got = decideSyncPlansQualifiedTransitionAction(c.currentQualified, c.nextQualified, c.hasPendingScheduledPush);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type SyncPlansQualifiedTransitionAction = "unchanged" | "cancel-no-pending-work" | "flush-pending-work";
+
+export function decideSyncPlansQualifiedTransitionAction(
+  currentQualified: boolean,
+  nextQualified: boolean,
+  hasPendingScheduledPush: boolean
+): SyncPlansQualifiedTransitionAction {
+  if (currentQualified === nextQualified) return "unchanged";
+  return hasPendingScheduledPush ? "flush-pending-work" : "cancel-no-pending-work";
+}
+
+export const DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES: Array<{
+  name: string;
+  currentQualified: boolean;
+  nextQualified: boolean;
+  hasPendingScheduledPush: boolean;
+  expected: SyncPlansQualifiedTransitionAction;
+}> = [
+  {
+    name: "no-op re-assertion (Plans' own effect re-running with the same qualified=true) — nothing to protect, regardless of pending work",
+    currentQualified: true,
+    nextQualified: true,
+    hasPendingScheduledPush: true,
+    expected: "unchanged",
+  },
+  {
+    name: "no-op reset (Lightning mounting again while already unqualified) — nothing to protect",
+    currentQualified: false,
+    nextQualified: false,
+    hasPendingScheduledPush: true,
+    expected: "unchanged",
+  },
+  {
+    name: "REGRESSION CASE — authenticated Plans edit debounced, then immediate navigation to Lightning: a queued qualified push must be flushed, never silently discarded",
+    currentQualified: true,
+    nextQualified: false,
+    hasPendingScheduledPush: true,
+    expected: "flush-pending-work",
+  },
+  {
+    name: "Plans -> Lightning navigation with nothing queued — an ordinary cancel, nothing to flush",
+    currentQualified: true,
+    nextQualified: false,
+    hasPendingScheduledPush: false,
+    expected: "cancel-no-pending-work",
+  },
+  {
+    name: "symmetric case — Lightning's own debounced edit, then navigation back to Plans: its queued push must also be flushed, not discarded",
+    currentQualified: false,
+    nextQualified: true,
+    hasPendingScheduledPush: true,
+    expected: "flush-pending-work",
+  },
+  {
+    name: "Lightning -> Plans navigation with nothing queued — an ordinary cancel",
+    currentQualified: false,
+    nextQualified: true,
+    hasPendingScheduledPush: false,
+    expected: "cancel-no-pending-work",
+  },
+];
+
+/**
+ * I/O wrapper: applies decideSyncPlansQualifiedTransitionAction()'s
+ * decision, then reassigns currentSyncPlansQualified to `nextQualified`.
+ * `"flush-pending-work"` clears the pending timer and fires doPush() NOW,
+ * BEFORE the reassignment below — doPush() captures currentSyncProfileId/
+ * currentSyncUserId (and, via buildPayloadFromStorage()'s own
+ * syncScopedDomainKey() calls, currentSyncPlansQualified) synchronously at
+ * its own start, before its first `await`, so this flushed push is
+ * guaranteed to read the SAME (outgoing) namespace/identity this
+ * transition is about to leave, exactly as if the debounce had simply
+ * fired an instant earlier — never the incoming one. Shared by both
+ * resetSyncPlansQualified() and setSyncPlansQualified() below so a genuine
+ * transition in EITHER direction gets the identical protection.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — deliberately inspects
+ * and touches ONLY `debounceTimer` (the ordinary, not-yet-fired debounce
+ * slot), never `deferredPushRetryTimer`. A push ALREADY deferred because
+ * doPush() found another push in flight needs no action here at all: it
+ * already carries its own captured (profileId, userId, plansQualified)
+ * snapshot (round 3) and lives in its own slot no ordinary scheduling call
+ * can reach (round 4, see deferredPushRetryTimer's own doc) — it will fire
+ * on its own, correctly, regardless of what THIS transition does.
+ */
+function applySyncPlansQualifiedTransition(nextQualified: boolean): void {
+  const action = decideSyncPlansQualifiedTransitionAction(
+    currentSyncPlansQualified,
+    nextQualified,
+    debounceTimer !== null
+  );
+  if (action === "unchanged") return;
+  if (action === "flush-pending-work") {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    void doPush();
+  } else {
+    cancelScheduledSync();
+  }
+  currentSyncPlansQualified = nextQualified;
+}
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix — the shared reset setSyncProfileId()
+ * and setSyncUserId() call for a SAME-identity re-assertion (an ordinary
+ * Plans<->Lightning namespace-mode switch): reverts currentSyncPlansQualified
+ * to its safe/legacy default, regardless of whether the value it was given
+ * is itself a change. Mirrors those functions' own "cancel pending work
+ * before a namespace mode a queued push assumed could go stale" pattern —
+ * a push scheduled while Plans was the active (qualified) page must never
+ * be allowed to fire once Lightning (unqualified) has become the active
+ * page, even though Lightning's own setSyncProfileId()/setSyncUserId()
+ * calls pass the IDENTICAL (userId, profileId) pair Plans just set (an
+ * ordinary same-identity navigation, a genuine no-op for every OTHER
+ * purpose these two functions serve). No-ops when already false — a
+ * signed-out mount, or Lightning mounting again, must not cancel a
+ * genuinely unrelated pending push for no reason.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (2nd round) — no longer a blind
+ * cancel: routes through applySyncPlansQualifiedTransition() above, which
+ * flushes a still-pending push instead of discarding it — see that
+ * function's and decideSyncPlansQualifiedTransitionAction()'s own docs.
+ *
+ * SH.4 Codex fix — "account-transition queued push." This function still
+ * runs on every call, before setSyncProfileId()'s/setSyncUserId()'s own
+ * "did it actually change" early return — but it previously ran with
+ * NOTHING having cancelled a pending push for a GENUINE identity/profile
+ * change first, and that ordering was itself the bug: on such a change
+ * (A -> B, sign-in, or sign-out), this function's
+ * OWN flush-preserving behavior (designed only for the harmless same-
+ * identity Plans<->Lightning namespace switch) could still see a pending
+ * debounced push belonging to the OUTGOING identity and FLUSH it — firing
+ * a real doPush() network request. That request reads the OUTGOING
+ * identity's own local storage correctly (doPush() captures its namespace
+ * synchronously), but its fetch() call authenticates via the browser's
+ * CURRENT session cookie — which, by the time this effect runs at all
+ * (triggered by useSession() already having observed the NEW identity),
+ * already belongs to the INCOMING identity. The flushed request would
+ * silently attribute the OUTGOING identity's unsynced local edits to the
+ * INCOMING account's cloud row. See decideIdentityTransitionPushDisposition()
+ * below and its own callers in setSyncProfileId()/setSyncUserId() for the
+ * fix: a genuine change now cancels ALL pending/deferred work OUTRIGHT
+ * (cancelScheduledSync() + cancelDeferredPushRetry(), never a flush)
+ * BEFORE this function ever runs — so by the time it does run, there is
+ * nothing left pending for it to see, and it safely reduces to setting
+ * currentSyncPlansQualified to false with no push fired. A same-identity
+ * re-assertion never takes that cancel-first path at all and keeps this
+ * function's existing flush-preserving behavior exactly as before.
+ */
+function resetSyncPlansQualified(): void {
+  applySyncPlansQualifiedTransition(false);
+}
+
+/**
+ * SH.4 Codex fix — "account-transition queued push." PURE CORE for
+ * setSyncProfileId()'s/setSyncUserId()'s own dispatch: given whether THIS
+ * call is a GENUINE identity/profile change (`nextValue !== currentValue`),
+ * decide how any pending/deferred push work must be handled BEFORE
+ * resetSyncPlansQualified() ever runs.
+ *
+ * `"cancel-outright"` — a genuine change. Old-identity pending/deferred
+ * work must be cancelled unconditionally, never flushed: see
+ * resetSyncPlansQualified()'s own doc for the full "old-identity data sent
+ * under the new session's credentials" root cause this closes. The caller
+ * cancels FIRST, then still calls resetSyncPlansQualified() afterward
+ * (safe at that point — nothing is left pending for it to flush).
+ *
+ * `"defer-to-namespace-reset"` — a same-identity re-assertion (the
+ * ordinary Plans<->Lightning namespace-mode switch). No genuine identity
+ * change is happening, so the existing flush-preserving protection
+ * (resetSyncPlansQualified() / applySyncPlansQualifiedTransition() /
+ * decideSyncPlansQualifiedTransitionAction()) remains exactly as
+ * hardened — this case does NOT cancel anything up front.
+ *
+ * Run from Node:
+ *   import { DEV_DECIDE_IDENTITY_TRANSITION_PUSH_DISPOSITION_CASES, decideIdentityTransitionPushDisposition } from "@/lib/syncHelper";
+ *   DEV_DECIDE_IDENTITY_TRANSITION_PUSH_DISPOSITION_CASES.forEach(c => {
+ *     const got = decideIdentityTransitionPushDisposition(c.isGenuineChange);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type IdentityTransitionPushDisposition = "cancel-outright" | "defer-to-namespace-reset";
+
+export function decideIdentityTransitionPushDisposition(isGenuineChange: boolean): IdentityTransitionPushDisposition {
+  return isGenuineChange ? "cancel-outright" : "defer-to-namespace-reset";
+}
+
+export const DEV_DECIDE_IDENTITY_TRANSITION_PUSH_DISPOSITION_CASES: Array<{
+  name: string;
+  isGenuineChange: boolean;
+  expected: IdentityTransitionPushDisposition;
+}> = [
+  {
+    name: "REGRESSION CASE — genuine user/profile change (A -> B, sign-in, or sign-out) must cancel pending/deferred work OUTRIGHT before resetSyncPlansQualified() runs, so it can never flush the outgoing identity's pending push under the new session's already-active credentials",
+    isGenuineChange: true,
+    expected: "cancel-outright",
+  },
+  {
+    name: "same-identity re-assertion (Plans<->Lightning namespace-mode switch) keeps the existing flush-preserving protection untouched",
+    isGenuineChange: false,
+    expected: "defer-to-namespace-reset",
+  },
+];
+
 // ── setSyncProfileId ──────────────────────────────────────────────────────────
 
 /**
@@ -4137,9 +5377,30 @@ export function isPullContextCurrent(ctx: PullContext): boolean {
  * "syncing"; any other value (idle/error/unresolved) is left alone.
  */
 export function setSyncProfileId(profileId: string): void {
+  // SH.4 Codex fix — "account-transition queued push." Dispatch on
+  // decideIdentityTransitionPushDisposition() BEFORE ever calling
+  // resetSyncPlansQualified() — see its own doc and
+  // resetSyncPlansQualified()'s own doc for the full root cause this
+  // ordering closes: resetSyncPlansQualified() must never get a chance to
+  // see (and flush) a pending push that belongs to the OUTGOING profile.
+  if (decideIdentityTransitionPushDisposition(profileId !== currentSyncProfileId) === "cancel-outright") {
+    // Profile changed — cancel any pending work for the old profile
+    // OUTRIGHT, never flushed.
+    cancelScheduledSync();
+    // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE profile
+    // change (unlike the same-identity namespace switch resetSyncPlansQualified()
+    // handles below) must also cancel any already-deferred retry: see
+    // cancelDeferredPushRetry()'s own doc for why a captured snapshot naming
+    // the OUTGOING profile must never fire once the profile this device is
+    // targeting has actually changed.
+    cancelDeferredPushRetry();
+  }
+  // Same-identity re-assertion (nothing above ran): existing flush-
+  // preserving behavior, unchanged. Genuine change: everything that could
+  // have been flushed was already cancelled above, so this safely reduces
+  // to resetting currentSyncPlansQualified to false with no push fired.
+  resetSyncPlansQualified();
   if (profileId === currentSyncProfileId) return;
-  // Profile changed — cancel any pending work for the old profile.
-  cancelScheduledSync();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncProfileId = profileId;
   currentPullEpoch += 1;
@@ -4171,11 +5432,498 @@ export function setSyncProfileId(profileId: string): void {
  * already wrote in THIS tab.
  */
 export function setSyncUserId(userId: string | null): void {
+  // SH.4 Codex fix — "account-transition queued push." Dispatch on
+  // decideIdentityTransitionPushDisposition() BEFORE ever calling
+  // resetSyncPlansQualified() — mirrors setSyncProfileId() exactly, see
+  // its own doc and resetSyncPlansQualified()'s own doc for the full root
+  // cause this ordering closes: resetSyncPlansQualified() must never get a
+  // chance to see (and flush) a pending push that belongs to the OUTGOING
+  // identity — a flushed push's fetch() would authenticate via the
+  // browser's CURRENT session cookie, which by the time this function runs
+  // already belongs to the INCOMING identity, silently attributing the
+  // OUTGOING identity's unsynced edits to the new account server-side.
+  if (decideIdentityTransitionPushDisposition(userId !== currentSyncUserId) === "cancel-outright") {
+    cancelScheduledSync();
+    // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE user
+    // change (sign-out, sign-in, or A -> B) must also cancel any
+    // already-deferred retry: see cancelDeferredPushRetry()'s own doc for
+    // why a captured snapshot naming the OUTGOING identity must never fire
+    // once the session this device is targeting has actually changed.
+    cancelDeferredPushRetry();
+  }
+  // Same-identity re-assertion (nothing above ran): existing flush-
+  // preserving behavior, unchanged. Genuine change: everything that could
+  // have been flushed was already cancelled above, so this safely reduces
+  // to resetting currentSyncPlansQualified to false with no push fired.
+  resetSyncPlansQualified();
   if (userId === currentSyncUserId) return;
-  cancelScheduledSync();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncUserId = userId;
   currentPullEpoch += 1;
+}
+
+// ── setSyncPlansQualified ─────────────────────────────────────────────────────
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
+ * storage namespace it hydrates." Declare whether the page currently
+ * driving sync hydrates its own "plans"/"lightning"/"days"/"dayMeta"/
+ * "dayParks" domains from the account-qualified key. Call from a migrated
+ * page's own auth-transition effect, immediately after its own
+ * setSyncUserId() call, passing `true` while authenticated (the page has
+ * already retargeted its own refs to the qualified key by this point) and
+ * `false`/simply not calling it while signed out (setSyncUserId(null)
+ * already leaves this flag at its default false — see
+ * resetSyncPlansQualified()'s own doc).
+ *
+ * SH.4 Lightning slice — BOTH Plans (retargetPlansStorageIdentity() in
+ * plans/page.tsx) and Lightning (retargetLightningStorageIdentity() in
+ * lightning/page.tsx) now call this. A page not yet migrated to this
+ * architecture simply never calls it, and its own setSyncProfileId()/
+ * setSyncUserId() calls still correctly reset this flag to false on every
+ * mount with no code changes of its own — see currentSyncPlansQualified's
+ * own doc for the full contract this composes with.
+ *
+ * A genuine change flushes a still-pending debounced push first (never
+ * silently discards it), exactly like resetSyncPlansQualified() does for
+ * the opposite direction — see applySyncPlansQualifiedTransition()'s and
+ * decideSyncPlansQualifiedTransitionAction()'s own docs for the full
+ * "preserve queued work on namespace switch" contract this composes with.
+ */
+export function setSyncPlansQualified(qualified: boolean): void {
+  applySyncPlansQualifiedTransition(qualified);
+}
+
+// ── Ordinary-edit local-content ownership (SH.4.1a Codex P1 follow-up) ──────
+//
+// Codex found: getLocalContentOwner()/setLocalContentOwner() (this module's
+// own DURABLE TRANSFER BOUNDARY, see setLocalContentOwner's own doc above)
+// was previously established ONLY at the end of a successful cloud PULL. An
+// authenticated user whose initial pull failed or was offline could still
+// durably persist ORDINARY local edits — items, days, dayMeta, dayParks,
+// Lightning selections, all via commitLocalDomainRawSync() above — while
+// this profile's owner marker stayed null indefinitely. A null marker is
+// trusted by ANY identity (evaluateLocalContentForeign()'s own "never
+// tagged" contract, which exists to preserve local-first adoption for a
+// profile that has genuinely never been authenticated-tagged before) — so
+// a DIFFERENT account signing into this same browser/profile later would
+// see the first user's own genuine, unsynced edits as non-foreign and
+// could view/trust them, exactly the exposure SH.4.1a's own render/edit
+// gate exists to prevent.
+//
+// FIX: commitOrdinaryLocalEdit() below is a thin wrapper every ordinary
+// planner-domain edit writer now calls INSTEAD of commitLocalDomainRawSync()
+// directly (Plans' items/days/dayMeta/dayParks/dayAutoFallbacks writers,
+// Lightning's items writer — see this round's own bounded-adjacency audit
+// for the exact call sites) — the ONE shared persistence boundary all of
+// them already funnel through, so ownership stamping is written once here
+// rather than duplicated at each page's own call sites. It calls the
+// EXISTING, unmodified commitLocalDomainRawSync() for the actual write,
+// then — ONLY when that write durably succeeded
+// (isLocalDomainCommitSuccess(status), never "failed") AND a REAL
+// authenticated identity performed it (currentSyncUserId !== null, this
+// module's own existing identity-tracking state — the SAME state
+// doPush()/registerUnloadSync() already trust to know who a push belongs
+// to, kept current by every caller's setSyncUserId()/setSyncProfileId()
+// calls) — calls setLocalContentOwner(currentSyncProfileId,
+// currentSyncUserId): the SAME primitive and SAME semantics the pull path
+// already uses, just a second, EARLIER opportunity to establish it. This
+// is not a new/competing ownership model — setLocalContentOwner's own
+// idempotent "same value" behavior means a pull that later succeeds and
+// re-confirms the identical (profileId, userId) pair is a harmless,
+// coherent no-op; "successful pull ownership behavior remains unchanged"
+// by this fix.
+//
+// `currentSyncUserId === null` (signed out, or session not yet resolved)
+// NEVER stamps — mirrors setLocalContentOwner's own existing no-op-on-null
+// guard and evaluateLocalContentForeign's own null-currentUserId contract:
+// a signed-out edit must never be attributed to an authenticated account,
+// preserving local-first signed-out semantics and genuinely-unowned
+// legacy-content adoption exactly as before this round.
+//
+// `status === "failed"` never stamps either — nothing durable changed, so
+// there is nothing to attribute; any existing marker (or its continued
+// absence) is left completely untouched, matching setLocalContentOwner's
+// own philosophy that ownership only ever follows a value actually
+// landing on disk.
+//
+// Codex P1 follow-up (this round) — USER-ORIGINATED EDIT EVIDENCE. The
+// original version of this fix stamped ownership from ANY durably-
+// succeeding call, including "noop". That is unsafe: this exact function is
+// also the shared persistence boundary for MOUNT hydration, cross-tab
+// storage-listener re-sync, and pull-hydration's own React-state mirroring
+// — none of which are a genuine user edit. Concretely: A owns local planner
+// bytes; B signs in and those bytes are correctly withheld/foreign; B
+// navigates to a page that re-mounts and loads THE SAME still-on-disk A
+// bytes into React state; that mount's own auto-persist effect then calls
+// this function with those unchanged bytes; the underlying commit reports
+// "noop" (nothing to write, already durable); the PREVIOUS version of this
+// function stamped owner=B anyway, incorrectly clearing the foreign-content
+// guard the very next render.
+//
+// The root rule: local-content ownership may transfer from an authenticated
+// local action ONLY when there is evidence of a USER-ORIGINATED EDIT. Mount
+// hydration, persistence mirroring, normalization/self-heal rewrites, or
+// merely observing the same durable value must never establish ownership —
+// regardless of what isLocalDomainCommitSuccess(status) reports, and even
+// for a "committed" (not just "noop") status: a mount-time migration that
+// actually REWRITES bytes (e.g. a one-time dayId migration) is still not a
+// user edit. This is NOT a redefinition of "noop"/commit-status semantics
+// (those are unchanged and remain valid durable results for every other
+// caller of commitLocalDomainRawSync/isLocalDomainCommitSuccess) — it is a
+// SEPARATE, ADDITIONAL gate that only this ownership decision consults.
+//
+// Every call site of commitOrdinaryLocalEdit() now passes
+// `isUserOriginatedEdit` explicitly (required, no default) — the highest
+// sensible existing boundary for this distinction is each page's own
+// handler-vs-effect structure: a call made directly from a user-triggered
+// handler function (add/edit/delete/reorder/import/clear/restore — invoked
+// only from an onClick/onChange/onSubmit) passes `true`; a call made from a
+// mount effect, a cross-tab storage-listener resync, or React-state
+// mirroring of a pull's own already-committed hydration passes `false`. For
+// the one domain per page (Plans' `items`, Lightning's `items`) whose
+// persistence is centralized in a single generic
+// `useEffect(() => { ... }, [items, ...])` that fires for BOTH user edits
+// and hydration-driven state changes alike, each page tracks a small
+// `pendingNonUserItemsPersistRef` (set `true` immediately alongside the
+// FEW non-user setItems() calls — mount load, pull-hydration's own state
+// mirror, and, for Lightning, the cross-tab storage-listener resync — see
+// each page's own doc at those call sites) that the effect reads and
+// resets on every run, defaulting to `true` (never attribute a user edit
+// without positive evidence) until a genuine user handler's own setItems()
+// call leaves it `false`.
+//
+// SH.4 Codex P1 fix — "Qualified edits must not relabel legacy bytes."
+// Everything above this fix was designed when every domain this function
+// writes always lived at the LEGACY, unqualified `dwp:{profileId}:{baseKey}`
+// key — a single shared physical copy any account's edit could equally be
+// attributed to. Since SH.4's account-qualified migration, Plans' and
+// Lightning's authenticated edits write the ACCOUNT-QUALIFIED
+// `dwp:{userId}:{profileId}:{baseKey}` key instead (once retargeted — see
+// retargetPlansStorageIdentity()/retargetLightningStorageIdentity()), for
+// which `localContentOwner` (a marker that, by invariant, describes ONLY
+// the unqualified legacy namespace — see getLocalContentOwner's own doc)
+// has nothing meaningful to say: a qualified key is already exclusively
+// this account's own physical storage, and stamping the legacy marker
+// from a qualified write would wrongly relabel bytes this edit never
+// touched — potentially attributing a completely unrelated legacy-key
+// profile's content to whichever account happens to edit its OWN
+// qualified data next. `shouldStampOwnershipOnOrdinaryEdit()` now also
+// requires `!isQualifiedKey` (reusing this module's own
+// `currentSyncPlansQualified` state — the SAME flag domainCanonicalKey()/
+// syncScopedDomainKey() already use to know whether the page currently
+// driving sync is writing the qualified or legacy shape — never a new,
+// second tracking mechanism) — so this stamp now only ever fires for a
+// genuine LEGACY-key ordinary edit, exactly the scenario this section's
+// own root-cause paragraph above describes. In today's app, every real
+// commitOrdinaryLocalEdit() call site targets a domain that becomes
+// qualified once authenticated, so this stamp now correctly never fires
+// while authenticated; first-sign-in legacy-content ownership is
+// established once, explicitly, at adoption time instead — see
+// adoptLegacyProfileValueIfSafe()'s own doc in profileStorage.ts.
+
+/**
+ * Pure predicate: should commitOrdinaryLocalEdit() (below) stamp local-
+ * content ownership for `currentUserId`? See this section's own header
+ * doc for the full rationale, especially the USER-ORIGINATED EDIT EVIDENCE
+ * gate: `isUserOriginatedEdit` must be true IN ADDITION to durable success
+ * and a real authenticated identity — a mount/effect-driven persistence
+ * pass never stamps, no matter what `status` reports.
+ *
+ * SH.4 Codex P1 fix — "Qualified edits must not relabel legacy bytes."
+ * `isQualifiedKey` (the caller's own snapshot of whether the key just
+ * written is the account-qualified shape — see this section's own header
+ * doc for the full rationale) is a THIRD, independent required condition:
+ * `localContentOwner` describes ONLY the unqualified legacy namespace, so
+ * a qualified-key write must NEVER stamp it, regardless of how strong the
+ * other evidence (durable success, a real authenticated identity, genuine
+ * user intent) is.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES, shouldStampOwnershipOnOrdinaryEdit } from "@/lib/syncHelper";
+ *   DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES.forEach(c => {
+ *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId, c.isUserOriginatedEdit, c.isQualifiedKey);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldStampOwnershipOnOrdinaryEdit(
+  status: LocalDomainSyncCommitStatus,
+  currentUserId: string | null,
+  isUserOriginatedEdit: boolean,
+  isQualifiedKey: boolean
+): boolean {
+  return !isQualifiedKey && isUserOriginatedEdit && currentUserId !== null && isLocalDomainCommitSuccess(status);
+}
+
+export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
+  name: string;
+  status: LocalDomainSyncCommitStatus;
+  currentUserId: string | null;
+  isUserOriginatedEdit: boolean;
+  isQualifiedKey: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "a genuine authenticated user edit to the LEGACY key that durably commits stamps ownership",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: true,
+  },
+  {
+    name: "committed-unprotected (one of the two persistence legs landed) still counts as durable for a genuine user edit — stamps ownership exactly like a fully-protected commit",
+    status: "committed-unprotected",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: true,
+  },
+  {
+    name: "a genuine user edit whose resulting durable value happens to be unchanged (status 'noop') still stamps — the call path itself already proves explicit user intent, so this is NOT the same 'noop' the mount/effect case must suppress; see this file's own header doc for why the gate is on isUserOriginatedEdit, never on status alone",
+    status: "noop",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: true,
+  },
+  {
+    name: "mount/effect persistence returning 'noop' over B-navigated-onto A-owned identical bytes never stamps, regardless of durable success",
+    status: "noop",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    isQualifiedKey: false,
+    expected: false,
+  },
+  {
+    name: "mount/effect persistence that durably 'committed' (e.g. a one-time migration rewrite) still never stamps — the ROOT RULE excludes normalization/self-heal rewrites too, not only noop",
+    status: "committed",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    isQualifiedKey: false,
+    expected: false,
+  },
+  {
+    name: "failed local persistence never stamps ownership, even for a genuine authenticated user edit — nothing durable changed, so there is nothing to attribute",
+    status: "failed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: false,
+  },
+  {
+    name: "signed-out edit (currentUserId null) never stamps ownership, even if it were somehow marked user-originated",
+    status: "committed",
+    currentUserId: null,
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: false,
+  },
+  {
+    name: "session not yet resolved (currentUserId null, mirrors 'loading') never stamps ownership either — nothing here guesses an identity",
+    status: "committed",
+    currentUserId: null,
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: false,
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a genuine authenticated user edit to the ACCOUNT-QUALIFIED key never stamps the legacy marker, even with every other condition (durable commit, real identity, user-originated) satisfied — this is exactly today's real Plans/Lightning call path while authenticated",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expected: false,
+  },
+  {
+    name: "qualified-key edit never stamps regardless of commit status — 'committed-unprotected' would otherwise have qualified as durable success",
+    status: "committed-unprotected",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expected: false,
+  },
+];
+
+/**
+ * Pure simulation of the marker's value after one commitOrdinaryLocalEdit()
+ * attempt — composes shouldStampOwnershipOnOrdinaryEdit() with
+ * evaluateLocalContentForeign() (both already exported above) to model the
+ * exact end-to-end lifecycle DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES
+ * below exercises, without any real localStorage I/O.
+ *
+ * Run from Node:
+ *   import { DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES, simulateOwnerAfterOrdinaryEdit, evaluateLocalContentForeign } from "@/lib/syncHelper";
+ *   DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES.forEach(c => {
+ *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId, c.isUserOriginatedEdit, c.isQualifiedKey);
+ *     const ok = ownerAfter === c.expectedOwnerAfter
+ *       && (c.checkForeignFor === undefined || evaluateLocalContentForeign(ownerAfter, c.checkForeignFor) === c.expectedForeignForChecked);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateOwnerAfterOrdinaryEdit(
+  ownerBefore: string | null,
+  status: LocalDomainSyncCommitStatus,
+  currentUserId: string | null,
+  isUserOriginatedEdit: boolean,
+  isQualifiedKey: boolean
+): string | null {
+  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId, isUserOriginatedEdit, isQualifiedKey)
+    ? currentUserId
+    : ownerBefore;
+}
+
+export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
+  name: string;
+  ownerBefore: string | null;
+  status: LocalDomainSyncCommitStatus;
+  currentUserId: string | null;
+  isUserOriginatedEdit: boolean;
+  isQualifiedKey: boolean;
+  expectedOwnerAfter: string | null;
+  checkForeignFor?: string | null;
+  expectedForeignForChecked?: boolean;
+}> = [
+  {
+    name: "authenticated A edits the LEGACY key after a failed/offline pull — durable local persistence from a genuine user edit (no successful pull at all) establishes A as owner",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "B navigates/mounts over A-owned identical bytes — mount persistence reports 'noop', but since this is NOT a user-originated edit, no ownership transfer occurs; A's bytes remain correctly foreign to B",
+    ownerBefore: "userA",
+    status: "noop",
+    currentUserId: "userB",
+    isUserOriginatedEdit: false,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userB",
+    expectedForeignForChecked: true,
+  },
+  {
+    name: "B then signs in after A's genuine ordinary-edit-established ownership — A's bytes are foreign to B, even though no cloud pull for A ever succeeded",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userB",
+    expectedForeignForChecked: true,
+  },
+  {
+    name: "same-account later use remains local-first — A's own later genuine edit against A's own already-established ownership is never foreign to A",
+    ownerBefore: "userA",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+    checkForeignFor: "userA",
+    expectedForeignForChecked: false,
+  },
+  {
+    name: "signed-out edit does not gain authenticated ownership — a null currentUserId leaves the (absent) marker exactly as it was",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: null,
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "failed persistence does not change ownership, even for a genuine authenticated user edit",
+    ownerBefore: null,
+    status: "failed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "failed persistence leaves a PRE-EXISTING owner marker untouched too — never relabeled/cleared by a failed edit",
+    ownerBefore: "userA",
+    status: "failed",
+    currentUserId: "userB",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "a pre-existing legacy owner marker (e.g. from an earlier legacy-key edit, or first-sign-in adoption) composes correctly with a LATER genuine legacy-key edit by the same account",
+    ownerBefore: "userA",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "mount persistence's own React-state mirror of a JUST-SUCCEEDED pull's hydration (isUserOriginatedEdit false, status noop since hydration already wrote the bytes) never stamps from THIS call",
+    ownerBefore: "userA",
+    status: "noop",
+    currentUserId: "userA",
+    isUserOriginatedEdit: false,
+    isQualifiedKey: false,
+    expectedOwnerAfter: "userA",
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a genuine authenticated user edit to the ACCOUNT-QUALIFIED key (today's real Plans/Lightning call path while authenticated) never stamps or relabels the legacy marker, whatever it already held",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a qualified-key edit never overwrites an EXISTING legacy owner either (e.g. account B's own earlier legacy-key claim on this profile survives account A's unrelated qualified-key edit untouched)",
+    ownerBefore: "userB",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expectedOwnerAfter: "userB",
+  },
+];
+
+/**
+ * The ONE shared boundary every ordinary planner-domain edit writer now
+ * calls instead of commitLocalDomainRawSync() directly — see this
+ * section's own header doc above for the full rationale. Applies uniformly
+ * to every synced domain (Plans' items/days/dayMeta/dayParks/
+ * dayAutoFallbacks, Lightning's items): none of them needs its own
+ * ownership-stamping logic, since all of them already funnel through this
+ * one function.
+ *
+ * `isUserOriginatedEdit` is REQUIRED (no default) — every call site must
+ * explicitly declare whether it represents a genuine user action or a
+ * mount/effect/hydration-mirroring persistence pass; see this section's own
+ * header doc for the exact boundary each page uses to decide. Ownership is
+ * stamped only when this is true, in addition to durable success, a real
+ * authenticated identity, AND (SH.4 Codex P1 fix) a LEGACY, unqualified
+ * `key` (shouldStampOwnershipOnOrdinaryEdit above; `isQualifiedKey` is read
+ * from this module's own `currentSyncPlansQualified` state — the SAME flag
+ * domainCanonicalKey()/syncScopedDomainKey() already use to resolve which
+ * physical key the CURRENT sync-driving page is writing, never a second,
+ * competing tracking mechanism) — the underlying write itself
+ * (commitLocalDomainRawSync) is completely unaffected by either flag; they
+ * only ever gate the ownership side-effect.
+ */
+export function commitOrdinaryLocalEdit(
+  key: string,
+  nextRaw: string,
+  isUserOriginatedEdit: boolean
+): LocalDomainSyncCommitStatus {
+  const status = commitLocalDomainRawSync(key, nextRaw);
+  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId, isUserOriginatedEdit, currentSyncPlansQualified)) {
+    setLocalContentOwner(currentSyncProfileId, currentSyncUserId as string);
+  }
+  return status;
 }
 
 // ── scheduleSync ──────────────────────────────────────────────────────────────
@@ -4190,6 +5938,17 @@ export function scheduleSync(): void {
   if (typeof window === "undefined") return; // SSR guard
   if (debounceTimer !== null) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
+    // PR #161 Codex finding #2 — clear the handle the instant this callback
+    // begins, before doPush() runs. Once a setTimeout has fired, its handle
+    // is no longer meaningful to clearTimeout(), but `debounceTimer` would
+    // otherwise keep holding it as though a debounce were STILL pending. A
+    // later namespace/identity transition that checks
+    // `debounceTimer !== null` — applySyncPlansQualifiedTransition() above,
+    // via decideSyncPlansQualifiedTransitionAction()'s hasPendingDebounce
+    // parameter — would then wrongly conclude there is still queued work to
+    // flush and could fire a second, redundant doPush() for a push that has
+    // already started.
+    debounceTimer = null;
     void doPush();
   }, DEBOUNCE_MS);
 }
@@ -4205,6 +5964,120 @@ export function cancelScheduledSync(): void {
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
+  }
+}
+
+// ── invalidatePendingUnloadSync ─────────────────────────────────────────────────
+
+/**
+ * PURE CORE for registerUnloadSync()'s handler: given whether a corrective
+ * auth/profile reload has invalidated pending unload sync, decide whether
+ * the beforeunload handler may proceed to build and send its beacon.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_SEND_UNLOAD_SYNC_BEACON_CASES, shouldSendUnloadSyncBeacon } from "@/lib/syncHelper";
+ *   DEV_SHOULD_SEND_UNLOAD_SYNC_BEACON_CASES.forEach(c => {
+ *     const got = shouldSendUnloadSyncBeacon(c.invalidated);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldSendUnloadSyncBeacon(invalidated: boolean): boolean {
+  return !invalidated;
+}
+
+export const DEV_SHOULD_SEND_UNLOAD_SYNC_BEACON_CASES: Array<{
+  name: string;
+  invalidated: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "REGRESSION CASE — a corrective auth/profile reload invalidated pending unload sync: the beforeunload beacon must NOT send, since currentSyncProfileId/currentSyncUserId are known to be transiently inconsistent (userId already retargeted to the incoming account, profileId not yet corrected until the reload completes)",
+    invalidated: true,
+    expected: false,
+  },
+  {
+    name: "normal unload — no auth/profile correction in flight: the beacon sends exactly as before",
+    invalidated: false,
+    expected: true,
+  },
+];
+
+/**
+ * Codex P1 fix — "auth-transition unload-beacon." Invalidate any pending
+ * unload-sync beacon immediately BEFORE a corrective auth/profile reload —
+ * call this from SessionProviderWrapper.tsx's ActiveProfileAuthGuard right
+ * before window.location.reload(), whenever
+ * shouldReloadForActiveProfileCorrection() says a correction actually
+ * happened.
+ *
+ * Root cause: per that component's own effect-ordering doc, its effect runs
+ * BEFORE any currently-mounted page's own auth-transition effect in the SAME
+ * React commit. An authenticated A -> B transition that ALSO requires an
+ * active-profile correction (dwp.activeProfile pointed at a profile A owned
+ * but B doesn't) means, in that same commit, Plans'/Lightning's own effect
+ * still runs right after and calls setSyncUserId(B) — retargeting
+ * currentSyncUserId to B immediately — while currentSyncProfileId keeps
+ * naming A's own (now-corrected-away-from) profile: only the reload this
+ * function precedes actually re-derives the corrected profile id (see
+ * setSyncProfileId()'s own doc — nothing re-derives it on a later
+ * transition without a remount). registerUnloadSync()'s handler reads both
+ * as "always current" by design (see its own doc), but for this one window
+ * "current" is exactly the problem: a beforeunload beacon firing in it would
+ * tag A's still-profileId-scoped local content with B's already-active
+ * session cookie, attributing A's content to B's account server-side.
+ *
+ * This stops that beacon at the source, unconditionally, rather than trying
+ * to make currentSyncProfileId/currentSyncUserId briefly consistent:
+ * registerUnloadSync()'s handler checks shouldSendUnloadSyncBeacon() first
+ * and returns immediately when invalidated, before ever reading either
+ * value or touching localStorage.
+ *
+ * Reuses cancelScheduledSync() for the ordinary debounced push — the SAME
+ * two sync paths (debounced push + unload beacon) this module exposes are
+ * suppressed together at this one call site, exactly like every other
+ * genuine identity/profile transition in this module already cancels the
+ * debounced push first (setSyncProfileId()/setSyncUserId() above).
+ *
+ * Preserves normal unload sync: a reload NOT caused by an active-profile
+ * correction (identity unchanged, or no correction needed) never calls
+ * this, so unloadSyncInvalidated stays false and registerUnloadSync()'s
+ * handler behaves exactly as before.
+ */
+export function invalidatePendingUnloadSync(): void {
+  cancelScheduledSync();
+  unloadSyncInvalidated = true;
+}
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (5th round) — "A deferred push retry
+ * must not survive a genuine authenticated user/profile identity
+ * transition." Cancels any pending deferred/in-flight-retry push (see
+ * `deferredPushRetryTimer`'s own doc) — NOT exported: called ONLY from
+ * setSyncProfileId()/setSyncUserId()'s own genuine-change branches below,
+ * never from resetSyncPlansQualified()/applySyncPlansQualifiedTransition()
+ * (which handle the SAME-identity Plans<->Lightning namespace switch,
+ * where a deferred retry's captured snapshot is still valid for the
+ * account it belongs to and must be left running untouched — see that
+ * function's own doc).
+ *
+ * Root cause this closes: round 4 correctly isolated a deferred retry from
+ * an UNRELATED page's ordinary scheduleSync() call, but that same
+ * isolation let it survive a GENUINE user or profile change too — round
+ * 3's captured (profileId, userId, plansQualified) snapshot only controls
+ * which LOCAL storage keys doPush() reads; it does nothing to the actual
+ * network request's credentials, which are the browser's CURRENT session
+ * cookie at fetch time. A retry captured for identity A, still pending
+ * when the session transitions to B, would build its payload from A's own
+ * qualified local storage but send it authenticated as B — silently
+ * attributing A's local content to B's account server-side. Cancelling
+ * here, before the new identity/profile is ever assigned, closes that gap
+ * the same way an ordinary (non-deferred) scheduled push already was
+ * protected by cancelScheduledSync() at this exact boundary.
+ */
+function cancelDeferredPushRetry(): void {
+  if (deferredPushRetryTimer !== null) {
+    clearTimeout(deferredPushRetryTimer);
+    deferredPushRetryTimer = null;
   }
 }
 
@@ -4530,6 +6403,14 @@ export function registerUnloadSync(): () => void {
   }
 
   const handler = (): void => {
+    // Codex P1 fix — "auth-transition unload-beacon." A corrective
+    // auth/profile reload (invalidatePendingUnloadSync(), called from
+    // SessionProviderWrapper.tsx's ActiveProfileAuthGuard) means
+    // currentSyncProfileId/currentSyncUserId below are known to be
+    // transiently inconsistent for this exact unload — see that function's
+    // own doc. Checked FIRST, before reading either value or touching
+    // localStorage, so no stale-identity beacon can be built at all.
+    if (!shouldSendUnloadSyncBeacon(unloadSyncInvalidated)) return;
     // Cancel any pending debounce — beacon takes over
     if (debounceTimer !== null) {
       clearTimeout(debounceTimer);
@@ -4585,7 +6466,7 @@ export function registerUnloadSync(): () => void {
     // LATER session's ordinary doPush()/beacon to pick up and push
     // (correctly evidenced) once storage pressure clears.
     if (userId) {
-      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+      const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(userId, profileId, payload));
       if (!registered) return;
     }
     const baseRevisionParam = baseRevision !== null ? `&baseRevision=${baseRevision}` : "";
@@ -4650,13 +6531,27 @@ function parseLocalDatasetEntry(
  * sanitizes whatever is returned here down to valid canonical day IDs (or
  * omits the field entirely), so this only needs to hand it the raw parsed
  * value, not pre-validate it.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix — this read now routes through
+ * syncScopedDomainKey() (gated on currentSyncPlansQualified, not `userId`
+ * alone), mirroring wherever the CURRENTLY ACTIVE sync-driving page's own
+ * daysKeyRef actually targets — see that function's own doc for why.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `plansQualifiedOverride`
+ * passes straight through to syncScopedDomainKey(); see doPush()'s own doc
+ * for why a deferred/retried push must keep reading the namespace it was
+ * originally captured under.
  */
-function readLocalDaysOrder(profileId: string): unknown[] | undefined {
+function readLocalDaysOrder(
+  userId: string | null,
+  profileId: string,
+  plansQualifiedOverride?: boolean
+): unknown[] | undefined {
   try {
     // Codex P1 fix (17th round) — reads the newest DURABLE edit for the
     // days key, not merely whatever the canonical key currently holds; see
     // readLatestDurableValue()'s own doc above.
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "days"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "days", plansQualifiedOverride));
     if (!raw) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? parsed : undefined;
@@ -4676,10 +6571,16 @@ function readLocalDaysOrder(profileId: string): unknown[] | undefined {
  * an intentionally-empty `{}` (e.g. after Clear All) — is handed through
  * as-is for buildSyncedPlannerPayload()'s own sanitizeDayMeta() to validate,
  * exactly as this function's days[] counterpart does not pre-validate either.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix — same syncScopedDomainKey() routing
+ * as readLocalDaysOrder() above.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — same
+ * `plansQualifiedOverride` threading as readLocalDaysOrder() above.
  */
-function readLocalDayMeta(profileId: string): unknown {
+function readLocalDayMeta(userId: string | null, profileId: string, plansQualifiedOverride?: boolean): unknown {
   try {
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayMeta"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayMeta", plansQualifiedOverride));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -4698,10 +6599,16 @@ function readLocalDayMeta(profileId: string): unknown {
  * a genuinely parsed plain object — INCLUDING an intentionally-empty `{}`
  * (e.g. after Clear All) — is handed through as-is for
  * buildSyncedPlannerPayload()'s own sanitizeDayParks() to validate.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix — same syncScopedDomainKey() routing
+ * as readLocalDaysOrder() above.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — same
+ * `plansQualifiedOverride` threading as readLocalDaysOrder() above.
  */
-function readLocalDayParks(profileId: string): unknown {
+function readLocalDayParks(userId: string | null, profileId: string, plansQualifiedOverride?: boolean): unknown {
   try {
-    const raw = readLatestDurableValue(buildNamespacedKey(profileId, "dayParks"));
+    const raw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "dayParks", plansQualifiedOverride));
     if (raw === null) return undefined;
     const parsed = JSON.parse(raw) as unknown;
     return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -4733,8 +6640,50 @@ function readLocalDayParks(profileId: string): unknown {
  * hydration write into a pushed "local edit" while it remains unresolved;
  * the next successful pull's own commitDomainHydration() call resolves it
  * normally.
+ *
+ * SH.4.1 Plans slice — "plans"/"days"/"dayMeta"/"dayParks" originally
+ * routed straight through resolveAccountScopedKey(userId, profileId,
+ * baseKey) here. SH.4.1 Plans-migration Codex P1 fix ("Keep Lightning
+ * pushes on the storage namespace it hydrates") — that was wrong: `userId`
+ * alone only says the sync target is authenticated, not that Plans (the
+ * ONLY migrated consumer) is the page that actually drove this
+ * push/beacon. Lightning is unmigrated and always hydrates/writes these
+ * same domains at the legacy key — so a push triggered while Lightning is
+ * the active page must keep reading that SAME legacy key regardless of
+ * `userId`, or it silently reads whatever (likely empty, never-adopted)
+ * content sits at the qualified key and pushes that over valid cloud data,
+ * erasing it. Now routes through syncScopedDomainKey(userId, profileId,
+ * baseKey) instead — gated on currentSyncPlansQualified (module state, set
+ * ONLY by Plans' own auth-transition effect via setSyncPlansQualified(),
+ * reset to false on every setSyncProfileId()/setSyncUserId() call so an
+ * ordinary same-identity Plans->Lightning navigation reverts it with no
+ * code changes of Lightning's own — see that state's own doc for the full
+ * contract), so the READ tracks the SAME physical location the CURRENTLY
+ * ACTIVE page's own refs actually target. This is not a new protection
+ * added to doPush()/registerUnloadSync() specifically — both already
+ * required and threaded a real `userId` through this exact function for
+ * the pre-existing hasIncompleteHydrationApplyIntent() gate above.
+ *
+ * SH.4 Lightning slice — "lightning" now routes through the SAME
+ * syncScopedDomainKey() call as "plans", rather than unconditionally
+ * reading buildNamespacedKey(). Lightning's own page code has migrated to
+ * the account-qualified local identity and asserts
+ * setSyncPlansQualified(true) on its own auth-transition exactly like
+ * Plans — see domainCanonicalKey()'s own doc for the full contract this
+ * composes with.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
+ * across a namespace switch." `plansQualifiedOverride`, when provided,
+ * pins every one of these reads to that exact namespace mode regardless of
+ * what currentSyncPlansQualified has become BY THE TIME this actually
+ * runs — see doPush()'s own doc for why a deferred (inFlight-retried) push
+ * needs this.
  */
-function buildPayloadFromStorage(profileId: string, userId: string | null): SyncedPlannerPayload | null {
+function buildPayloadFromStorage(
+  profileId: string,
+  userId: string | null,
+  plansQualifiedOverride?: boolean
+): SyncedPlannerPayload | null {
   if (typeof window === "undefined") return null;
   if (userId && hasIncompleteHydrationApplyIntent(userId, profileId)) return null;
   try {
@@ -4746,8 +6695,10 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // is guaranteed to reflect the user's true latest edit even in the rare
     // window where a concurrent hydration race has transiently clobbered
     // the canonical key itself.
-    const plansRaw = readLatestDurableValue(buildNamespacedKey(profileId, "plans"));
-    const lightningRaw = readLatestDurableValue(buildNamespacedKey(profileId, "lightning"));
+    const plansRaw = readLatestDurableValue(syncScopedDomainKey(userId, profileId, "plans", plansQualifiedOverride));
+    const lightningRaw = readLatestDurableValue(
+      syncScopedDomainKey(userId, profileId, "lightning", plansQualifiedOverride)
+    );
 
     const plans = parseLocalDatasetEntry(plansRaw);
     const lightning = parseLocalDatasetEntry(lightningRaw);
@@ -4756,9 +6707,9 @@ function buildPayloadFromStorage(profileId: string, userId: string | null): Sync
     // push potentially empty data over valid cloud state.
     if (plans === null || lightning === null) return null;
 
-    const days = readLocalDaysOrder(profileId);
-    const dayMeta = readLocalDayMeta(profileId);
-    const dayParks = readLocalDayParks(profileId);
+    const days = readLocalDaysOrder(userId, profileId, plansQualifiedOverride);
+    const dayMeta = readLocalDayMeta(userId, profileId, plansQualifiedOverride);
+    const dayParks = readLocalDayParks(userId, profileId, plansQualifiedOverride);
     return buildSyncedPlannerPayload(plans, lightning, days, dayMeta, dayParks);
   } catch {
     return null;
@@ -4974,19 +6925,298 @@ function clearStaleSyncingStatus(profileId: string): void {
   } catch {}
 }
 
-async function doPush(): Promise<void> {
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — "Deferred Plans pushes
+ * across a namespace switch." PURE CORE: what identity/profile/namespace
+ * snapshot should a doPush() attempt actually push under?
+ *
+ * Root cause this closes: doPush()'s own `inFlight` retry
+ * (`debounceTimer = setTimeout(() => void doPush(), 1_000)`) previously
+ * captured NOTHING when it deferred — the retry simply called doPush()
+ * again with no arguments, which then re-read `currentSyncProfileId`/
+ * `currentSyncUserId`/`currentSyncPlansQualified` FRESH, a full second
+ * later, whenever it actually got to run. If a qualified Plans push was
+ * already in flight when a SECOND edit's debounced push (or the 2nd
+ * round's own flush-on-namespace-switch, see
+ * applySyncPlansQualifiedTransition()'s doc) called doPush() again, that
+ * second attempt deferred via the SAME retry — and if the user navigated
+ * to Lightning before the 1-second retry fired, `currentSyncPlansQualified`
+ * had ALREADY flipped to false by the time the retry actually ran,
+ * silently reading Plans' edit from the WRONG (legacy, likely stale/empty)
+ * namespace instead of the qualified one it was actually queued for.
+ *
+ * The fix: doPush() now accepts an optional `forcedSnapshot` — the exact
+ * (profileId, userId, plansQualified) triple THIS specific push attempt
+ * belongs to. resolveDeferredPushSnapshot() is the one place that decides
+ * what to use: a `forcedSnapshot` from an EARLIER defer always wins outright
+ * (never re-derived from live state, which is exactly what let the
+ * namespace change out from under a retry); only when no snapshot has been
+ * captured yet (the very first attempt) does it fall back to the live
+ * module state. doPush()'s own retry always re-passes whatever snapshot
+ * IT resolved, so the ORIGINAL identity/namespace survives any number of
+ * consecutive inFlight defers, not just one hop.
+ *
+ * Run from Node:
+ *   import { DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES, resolveDeferredPushSnapshot } from "@/lib/syncHelper";
+ *   DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES.forEach(c => {
+ *     const got = resolveDeferredPushSnapshot(c.forcedSnapshot, c.liveProfileId, c.liveUserId, c.livePlansQualified);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type DeferredPushSnapshot = {
+  profileId: string;
+  userId: string | null;
+  plansQualified: boolean;
+};
+
+export function resolveDeferredPushSnapshot(
+  forcedSnapshot: DeferredPushSnapshot | undefined,
+  liveProfileId: string,
+  liveUserId: string | null,
+  livePlansQualified: boolean
+): DeferredPushSnapshot {
+  if (forcedSnapshot) return forcedSnapshot;
+  return { profileId: liveProfileId, userId: liveUserId, plansQualified: livePlansQualified };
+}
+
+export const DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES: Array<{
+  name: string;
+  forcedSnapshot: DeferredPushSnapshot | undefined;
+  liveProfileId: string;
+  liveUserId: string | null;
+  livePlansQualified: boolean;
+  expected: DeferredPushSnapshot;
+}> = [
+  {
+    name: "first-ever attempt (no forced snapshot yet) — captures live state",
+    forcedSnapshot: undefined,
+    liveProfileId: "default",
+    liveUserId: "userA",
+    livePlansQualified: true,
+    expected: { profileId: "default", userId: "userA", plansQualified: true },
+  },
+  {
+    name: "REGRESSION CASE — a deferred retry's forced snapshot (captured while Plans was qualified) wins outright even though live state has since switched to Lightning/unqualified",
+    forcedSnapshot: { profileId: "default", userId: "userA", plansQualified: true },
+    liveProfileId: "default",
+    liveUserId: "userA",
+    livePlansQualified: false,
+    expected: { profileId: "default", userId: "userA", plansQualified: true },
+  },
+  {
+    name: "a forced snapshot also survives a live identity change (e.g. a different account signing in while this push is still deferred)",
+    forcedSnapshot: { profileId: "default", userId: "userA", plansQualified: true },
+    liveProfileId: "default",
+    liveUserId: "userB",
+    livePlansQualified: true,
+    expected: { profileId: "default", userId: "userA", plansQualified: true },
+  },
+  {
+    name: "signed-out first attempt — captures live null userId, unqualified",
+    forcedSnapshot: undefined,
+    liveProfileId: "default",
+    liveUserId: null,
+    livePlansQualified: false,
+    expected: { profileId: "default", userId: null, plansQualified: false },
+  },
+];
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — "Separate deferred/
+ * in-flight retry scheduling from the ordinary replaceable debounce
+ * slot." PURE MODEL of the two scheduling slots' own doc (`debounceTimer`/
+ * `deferredPushRetryTimer` above) and exactly which operation touches
+ * which: `scheduleSync()`/`cancelScheduledSync()` only ever read/write
+ * `debounceSlot`; only doPush()'s own inFlight-retry ever writes
+ * `deferredRetrySlot`. This is a structural fact about the real functions
+ * (verified by inspection — see each real function's own doc for the
+ * literal variable each one touches), modeled here as a pure state
+ * machine so the exact regression scenario (a qualified Plans push
+ * deferred, then an UNRELATED page's ordinary scheduleSync() call) has its
+ * own deterministic, non-timer-based DEV_* coverage.
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES, applyPushSchedulingOperation } from "@/lib/syncHelper";
+ *   DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES.forEach(c => {
+ *     const got = c.operations.reduce(applyPushSchedulingOperation, c.initialState);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type PushSchedulingSlots = {
+  /** Mirrors `debounceTimer`: null (empty) or an opaque token identifying what's scheduled there. */
+  debounceSlot: string | null;
+  /** Mirrors `deferredPushRetryTimer`. */
+  deferredRetrySlot: string | null;
+};
+
+export type PushSchedulingOperation =
+  | { kind: "scheduleSync"; token: string }
+  | { kind: "cancelScheduledSync" }
+  | { kind: "deferPushRetry"; token: string }
+  | { kind: "genuineIdentityChange"; via: "user" | "profile" }
+  | { kind: "debounceFires" };
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (5th round) — "A deferred push retry
+ * must not survive a genuine authenticated user/profile identity
+ * transition." `"genuineIdentityChange"` mirrors setSyncProfileId()'s/
+ * setSyncUserId()'s own genuine-change branch (AFTER the early return that
+ * makes an ordinary same-identity re-call a no-op — see resetSyncPlansQualified()'s
+ * own doc for why THAT case, the Plans<->Lightning namespace switch,
+ * deliberately does NOT reach this operation and must leave
+ * deferredRetrySlot untouched): it clears BOTH slots — cancelScheduledSync()
+ * (debounceSlot) plus the new cancelDeferredPushRetry() (deferredRetrySlot)
+ * — since a snapshot captured for the OUTGOING identity/profile must never
+ * fire once the identity/profile this device targets has actually changed.
+ * `via` is documentary only (which real function's own genuine-change
+ * branch this represents); both axes clear identically, matching
+ * setSyncProfileId()'s and setSyncUserId()'s own identical implementations.
+ */
+export function applyPushSchedulingOperation(
+  state: PushSchedulingSlots,
+  op: PushSchedulingOperation
+): PushSchedulingSlots {
+  switch (op.kind) {
+    case "scheduleSync":
+      // Mirrors scheduleSync(): clears-and-replaces ONLY debounceSlot.
+      return { ...state, debounceSlot: op.token };
+    case "cancelScheduledSync":
+      // Mirrors cancelScheduledSync(): clears ONLY debounceSlot.
+      return { ...state, debounceSlot: null };
+    case "deferPushRetry":
+      // Mirrors doPush()'s own inFlight-retry: writes ONLY deferredRetrySlot.
+      return { ...state, deferredRetrySlot: op.token };
+    case "genuineIdentityChange":
+      // Mirrors setSyncProfileId()'s/setSyncUserId()'s own genuine-change
+      // branch (5th round): clears BOTH slots.
+      return { debounceSlot: null, deferredRetrySlot: null };
+    case "debounceFires":
+      // PR #161 Codex finding #2 — mirrors scheduleSync()'s own setTimeout
+      // callback: clears debounceSlot the instant the timer fires, before
+      // doPush() runs. Without this, a fired-and-already-running debounce
+      // would keep looking identical to a genuinely still-pending one to
+      // every reader of this slot — in particular,
+      // applySyncPlansQualifiedTransition()'s own hasPendingDebounce check
+      // could then wrongly decide to flush (firing a second, redundant
+      // doPush()) for a push that has already started.
+      return { ...state, debounceSlot: null };
+  }
+}
+
+export const DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES: Array<{
+  name: string;
+  initialState: PushSchedulingSlots;
+  operations: PushSchedulingOperation[];
+  expected: PushSchedulingSlots;
+}> = [
+  {
+    name: "REGRESSION SCENARIO — qualified Plans push in flight, second Plans edit's push defers, navigation to Lightning cancels the ordinary debounce, Lightning schedules its own sync: the outgoing qualified retry remains queued throughout, untouched",
+    initialState: { debounceSlot: null, deferredRetrySlot: null },
+    operations: [
+      // Second Plans edit's own debounce (the first push is already in
+      // flight and isn't represented as a slot at all).
+      { kind: "scheduleSync", token: "plans-edit-2-debounce" },
+      // That debounce fires; doPush() finds the first push still in
+      // flight and defers, capturing its own (profileId, userId,
+      // plansQualified=true) snapshot into the SEPARATE retry slot.
+      { kind: "deferPushRetry", token: "plans-qualified-retry(snapshot=qualified)" },
+      // User navigates to Lightning — setSyncProfileId()/setSyncUserId()
+      // reset currentSyncPlansQualified, which (via
+      // applySyncPlansQualifiedTransition()) cancels the ORDINARY
+      // debounce slot only.
+      { kind: "cancelScheduledSync" },
+      // Lightning schedules its own, completely unrelated sync.
+      { kind: "scheduleSync", token: "lightning-edit-debounce" },
+    ],
+    expected: {
+      debounceSlot: "lightning-edit-debounce",
+      deferredRetrySlot: "plans-qualified-retry(snapshot=qualified)",
+    },
+  },
+  {
+    name: "an ordinary cancel with no deferred retry pending leaves the deferred-retry slot at its already-empty default — nothing to protect, nothing spuriously created",
+    initialState: { debounceSlot: "some-debounce", deferredRetrySlot: null },
+    operations: [{ kind: "cancelScheduledSync" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "a later deferred retry from the SAME page's own doPush() retry loop legitimately replaces an earlier one in that SAME slot — this is doPush()'s own coalescing, not cross-namespace cancellation",
+    initialState: { debounceSlot: null, deferredRetrySlot: "retry-1" },
+    operations: [{ kind: "deferPushRetry", token: "retry-2" }],
+    expected: { debounceSlot: null, deferredRetrySlot: "retry-2" },
+  },
+  {
+    name: "REGRESSION CASE (5th round) — a genuine USER identity change (sign-out, sign-in, or account A -> B) cancels an already-deferred retry: its captured snapshot names the OUTGOING user, and firing it later would read that user's own qualified local storage while the request authenticates via the NEW session's cookie",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+    operations: [{ kind: "genuineIdentityChange", via: "user" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "REGRESSION CASE (5th round) — a genuine PROFILE identity change (switching the local active profile, same account) equally cancels an already-deferred retry — same cross-identity risk, on the profile axis",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=profileA)" },
+    operations: [{ kind: "genuineIdentityChange", via: "profile" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "same user/profile Plans -> Lightning namespace switch (an ORDINARY cancelScheduledSync, via resetSyncPlansQualified()/applySyncPlansQualifiedTransition() — NOT a genuine identity change) preserves an already-deferred retry untouched, exactly as round 4 established",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+    operations: [{ kind: "cancelScheduledSync" }],
+    expected: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+  },
+  {
+    name: "PR #161 Codex finding #2 — a debounce that has already FIRED no longer looks pending afterward: without clearing debounceSlot when it fires, a later namespace/identity transition would wrongly see it still occupied and could take the flush-pending-work path for a push that has already started",
+    initialState: { debounceSlot: null, deferredRetrySlot: null },
+    operations: [{ kind: "scheduleSync", token: "plans-edit-debounce" }, { kind: "debounceFires" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "PR #161 Codex finding #2 — a fired debounce's cleared slot leaves an UNRELATED, already-deferred retry from a different push completely untouched (debounceFires only ever writes debounceSlot, mirroring deferPushRetry's own single-slot write above)",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+    operations: [{ kind: "scheduleSync", token: "lightning-edit-debounce" }, { kind: "debounceFires" }],
+    expected: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+  },
+];
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `forcedSnapshot`, when
+ * provided, pins this ENTIRE push attempt (payload build AND pending-op
+ * evidence) to that exact (profileId, userId, plansQualified) triple — see
+ * resolveDeferredPushSnapshot()'s own doc above for the full rationale.
+ * Ordinary callers (scheduleSync()'s debounce, applySyncPlansQualifiedTransition()'s
+ * flush) omit it, starting a fresh attempt from whatever is live right now
+ * — unchanged from before this round.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — the inFlight-retry
+ * below now re-schedules into `deferredPushRetryTimer`, NOT the ordinary
+ * `debounceTimer` — see that variable's own doc for the full "must not be
+ * replaceable/cancellable by an unrelated page's ordinary scheduleSync()
+ * call" rationale this closes.
+ */
+async function doPush(forcedSnapshot?: DeferredPushSnapshot): Promise<void> {
+  const snapshot = resolveDeferredPushSnapshot(
+    forcedSnapshot,
+    currentSyncProfileId,
+    currentSyncUserId,
+    currentSyncPlansQualified
+  );
   if (inFlight) {
-    // Re-schedule so the latest payload gets sent after the current request
-    if (debounceTimer !== null) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => void doPush(), 1_000);
+    // Re-schedule so the latest payload gets sent after the current
+    // request — carrying `snapshot` forward so the retry keeps pushing
+    // under the SAME identity/profile/namespace THIS attempt was for,
+    // never whatever happens to be live a second from now. Stored in
+    // `deferredPushRetryTimer`, its OWN separate slot — see that
+    // variable's own doc for why this must never share `debounceTimer`.
+    if (deferredPushRetryTimer !== null) clearTimeout(deferredPushRetryTimer);
+    deferredPushRetryTimer = setTimeout(() => void doPush(snapshot), 1_000);
     return;
   }
 
   // Capture the profile and user identity at push-start so all writes
   // target the originating profile/identity unconditionally, even if the
   // user switches profiles or signs into a different account mid-flight.
-  const profileId = currentSyncProfileId;
-  const userId = currentSyncUserId;
+  const profileId = snapshot.profileId;
+  const userId = snapshot.userId;
+  const plansQualified = snapshot.plansQualified;
   // SH.2.6 — capture the sync epoch (bumped by setSyncUserId()/
   // setSyncProfileId() on every genuine transition) alongside identity, so
   // this push's own UI-facing completion writes can be gated against it
@@ -5017,7 +7247,7 @@ async function doPush(): Promise<void> {
   // and this push stays exactly as unprotected as any pre-SH.2.5.1 write.
   const baseRevision = userId ? getKnownBaseRevision(userId, profileId) : null;
 
-  const payload = buildPayloadFromStorage(profileId, userId);
+  const payload = buildPayloadFromStorage(profileId, userId, plansQualified);
   if (!payload) return;
 
   const body = JSON.stringify(payload);
@@ -5065,7 +7295,12 @@ async function doPush(): Promise<void> {
   // further edit, or by this same profile's next mount/pull cycle) simply
   // retries once storage pressure clears — no new retry machinery needed.
   if (userId) {
-    const registered = addPendingOp(userId, profileId, opId, buildPendingOpDomains(profileId, payload));
+    const registered = addPendingOp(
+      userId,
+      profileId,
+      opId,
+      buildPendingOpDomains(userId, profileId, payload, plansQualified)
+    );
     if (!registered) {
       try {
         localStorage.setItem(syncStatusKeyForProfile(profileId), "error");

@@ -179,6 +179,21 @@ const TABLE_CONTRACTS = {
     ],
     primaryKey: ["user_id"],
   },
+  // SH.4.1 — the account-wide profile registry. /api/sync/profiles's GET
+  // and PUT (ON CONFLICT (user_id, profile_id) DO NOTHING) both require
+  // this exact PRIMARY KEY; `deleted_at` must stay nullable since an
+  // active (non-tombstoned) row is the common case.
+  user_profiles: {
+    columns: [
+      { name: "user_id", dataType: "text", notNull: true },
+      { name: "profile_id", dataType: "text", notNull: true },
+      { name: "name", dataType: "text", notNull: true },
+      { name: "created_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "updated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "deleted_at", dataType: "timestamp with time zone", notNull: false },
+    ],
+    primaryKey: ["user_id", "profile_id"],
+  },
 };
 
 // SH.2.7 — route.ts (`Number(rows[0].revision)`) and syncHelper.ts both
@@ -821,7 +836,7 @@ async function main() {
       return;
     }
 
-    console.log("Migration complete: schema is compatible with SH.2 sync endpoints (/api/sync/planner).");
+    console.log("Migration complete: schema is compatible with the sync endpoints (/api/sync/planner, /api/sync/profiles).");
   } finally {
     await client.end();
   }

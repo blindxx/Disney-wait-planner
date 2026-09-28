@@ -6,10 +6,42 @@
  * "what do I have planned today?" or "what am I repeating?" without ever
  * writing back to planner storage.
  *
- * Reads only the existing namespaced planner localStorage keys (via
- * profileStorage's buildNamespacedKey) — never mutates them, never reads
- * unrelated keys, and never includes secrets, sync tokens, account data, or
- * raw backup payloads. Item counts are capped to keep the payload compact.
+ * SH.4 Tom migration — the planner domains SH.4 migrated Plans/Lightning to
+ * (plans/days/dayMeta/dayParks/dayAutoFallbacks/lightning) are now read via
+ * the SAME account-qualified key resolution Plans/Lightning themselves use
+ * (profileStorage's resolveAccountScopedKey — `dwp:{userId}:{profileId}:
+ * {baseKey}` once authenticated, the unchanged legacy `dwp:{profileId}:
+ * {baseKey}` shape signed out), never a second key-construction scheme. See
+ * resolvePlannerContextKeys() below for the single seam this module resolves
+ * every domain's key through. `selectedResort`/`selectedPark` deliberately
+ * stay on the legacy shape always — Plans/Lightning never migrated those
+ * either (see plans/page.tsx's retargetPlansStorageIdentity doc: shared with
+ * wait-times, not owned by either migrated page), so this module keeps
+ * reading them unqualified regardless of auth state, matching exactly.
+ *
+ * This module performs NO legacy-key adoption of its own (no
+ * adoptLegacyProfileValueIfSafe call, no localStorage.setItem anywhere in
+ * this file) — Tom stays strictly read-only with respect to planner data
+ * (AGENTS.md's Tom integration / planner-context contract). This module
+ * only ever reads whatever currently exists at the resolved key, never
+ * guesses or backfills from the legacy key on its own.
+ *
+ * PR #161 Codex fix — whether an authenticated profile's qualified keys
+ * already hold adopted content no longer depends on the user having
+ * visited Plans or Lightning first: SessionProviderWrapper.tsx's own
+ * LegacyPlannerAdoptionGuard now runs the SAME
+ * adoptLegacyProfileValueIfSafe() adoption Plans/Lightning already ran, at
+ * the shared authenticated lifecycle boundary every page (including Tom)
+ * mounts under, before this module's own key resolution is ever reached.
+ * This module's own contract is otherwise unchanged — it still performs no
+ * adoption itself and still just reads whatever currently exists at the
+ * resolved key.
+ *
+ * Reads only the existing namespaced/account-qualified planner localStorage
+ * keys (via profileStorage's buildNamespacedKey/resolveAccountScopedKey) —
+ * never mutates them, never reads unrelated keys, and never includes
+ * secrets, sync tokens, account data, or raw backup payloads. Item counts
+ * are capped to keep the payload compact.
  *
  * Phase 10.5 audit (Planner Insights, DWP-side only): this snapshot already
  * carries sufficient explicit data for deterministic ordering, optional
@@ -23,7 +55,7 @@
 
 import type { ResortId } from "@disney-wait-planner/shared";
 import type { PlannerItemType } from "./plansTransfer";
-import { bootstrapProfiles, getActiveProfile, buildNamespacedKey } from "./profileStorage";
+import { bootstrapProfiles, getActiveProfile, buildNamespacedKey, resolveAccountScopedKey } from "./profileStorage";
 import { normalizeKey, ALIASES_DLR, ALIASES_WDW, tokenize, containsWholeWordSequence } from "./plansMatching";
 import { inferPlansContext } from "./plansContextInference";
 import { detectTimeConflicts } from "./timeConflicts";
@@ -196,8 +228,8 @@ function readPlainString(key: string): string | undefined {
   }
 }
 
-function readDays(profileId: string): string[] {
-  const parsed = readJson(buildNamespacedKey(profileId, "days"));
+function readDays(key: string): string[] {
+  const parsed = readJson(key);
   if (Array.isArray(parsed)) {
     const valid = parsed.filter(
       (d): d is string => typeof d === "string" && /^day-[1-9]\d*$/.test(d)
@@ -207,8 +239,8 @@ function readDays(profileId: string): string[] {
   return ["day-1"];
 }
 
-function readDayMeta(profileId: string): Record<string, { label?: string; date?: string }> {
-  const parsed = readJson(buildNamespacedKey(profileId, "dayMeta"));
+function readDayMeta(key: string): Record<string, { label?: string; date?: string }> {
+  const parsed = readJson(key);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const result: Record<string, { label?: string; date?: string }> = {};
   for (const [dayId, rawMeta] of Object.entries(parsed as Record<string, unknown>)) {
@@ -221,8 +253,8 @@ function readDayMeta(profileId: string): Record<string, { label?: string; date?:
   return result;
 }
 
-function readDayParks(profileId: string): Record<string, string> {
-  const parsed = readJson(buildNamespacedKey(profileId, "dayParks"));
+function readDayParks(key: string): Record<string, string> {
+  const parsed = readJson(key);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const result: Record<string, string> = {};
   for (const [dayId, park] of Object.entries(parsed as Record<string, unknown>)) {
@@ -239,8 +271,8 @@ function readDayParks(profileId: string): Record<string, string> {
  * dayAutoFallbacksKeyRef in plans/page.tsx). Same validation shape as
  * readDayParks: only valid park id values are accepted.
  */
-function readRestoredDayAutoFallbacks(profileId: string): Record<string, string> {
-  const parsed = readJson(buildNamespacedKey(profileId, "dayAutoFallbacks"));
+function readRestoredDayAutoFallbacks(key: string): Record<string, string> {
+  const parsed = readJson(key);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const result: Record<string, string> = {};
   for (const [dayId, park] of Object.entries(parsed as Record<string, unknown>)) {
@@ -248,6 +280,121 @@ function readRestoredDayAutoFallbacks(profileId: string): Record<string, string>
   }
   return result;
 }
+
+/**
+ * SH.4 Tom migration — the single seam every planner-context read resolves
+ * its storage key through, mirroring resolveAccountScopedKey()'s own branch
+ * (profileStorage.ts) rather than reimplementing it: the account-qualified
+ * shape (`dwp:{userId}:{profileId}:{baseKey}`) for every domain SH.4 already
+ * migrated Plans/Lightning to, once `userId` is a real authenticated user, or
+ * the unchanged legacy shape (`dwp:{profileId}:{baseKey}`) when `userId` is
+ * null (signed out). `selectedResort`/`selectedPark` are deliberately NEVER
+ * qualified — Plans/Lightning don't migrate those either (see this module's
+ * own header doc) — so they always resolve through buildNamespacedKey,
+ * regardless of `userId`.
+ *
+ * Pure/no I/O — exported so DEV_RESOLVE_PLANNER_CONTEXT_KEYS_CASES below can
+ * exercise every domain's key selection directly; buildPlannerContextSnapshot
+ * below is the only real caller.
+ *
+ * Run from Node:
+ *   import { DEV_RESOLVE_PLANNER_CONTEXT_KEYS_CASES, resolvePlannerContextKeys } from "@/lib/plannerContextSnapshot";
+ *   DEV_RESOLVE_PLANNER_CONTEXT_KEYS_CASES.forEach(c => {
+ *     const got = resolvePlannerContextKeys(c.userId, c.profileId);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type PlannerContextKeys = {
+  plans: string;
+  days: string;
+  dayMeta: string;
+  dayParks: string;
+  dayAutoFallbacks: string;
+  lightning: string;
+  selectedResort: string;
+  selectedPark: string;
+};
+
+export function resolvePlannerContextKeys(userId: string | null, profileId: string): PlannerContextKeys {
+  return {
+    plans: resolveAccountScopedKey(userId, profileId, "plans"),
+    days: resolveAccountScopedKey(userId, profileId, "days"),
+    dayMeta: resolveAccountScopedKey(userId, profileId, "dayMeta"),
+    dayParks: resolveAccountScopedKey(userId, profileId, "dayParks"),
+    dayAutoFallbacks: resolveAccountScopedKey(userId, profileId, "dayAutoFallbacks"),
+    lightning: resolveAccountScopedKey(userId, profileId, "lightning"),
+    selectedResort: buildNamespacedKey(profileId, "selectedResort"),
+    selectedPark: buildNamespacedKey(profileId, "selectedPark"),
+  };
+}
+
+export const DEV_RESOLVE_PLANNER_CONTEXT_KEYS_CASES: Array<{
+  name: string;
+  userId: string | null;
+  profileId: string;
+  expected: PlannerContextKeys;
+}> = [
+  {
+    name: "signed out (null userId) — every domain resolves to the unchanged legacy shape, including plans/lightning",
+    userId: null,
+    profileId: "default",
+    expected: {
+      plans: "dwp:default:plans",
+      days: "dwp:default:days",
+      dayMeta: "dwp:default:dayMeta",
+      dayParks: "dwp:default:dayParks",
+      dayAutoFallbacks: "dwp:default:dayAutoFallbacks",
+      lightning: "dwp:default:lightning",
+      selectedResort: "dwp:default:selectedResort",
+      selectedPark: "dwp:default:selectedPark",
+    },
+  },
+  {
+    name: "authenticated — plans/days/dayMeta/dayParks/dayAutoFallbacks/lightning resolve account-qualified, matching Plans/Lightning exactly",
+    userId: "userA",
+    profileId: "default",
+    expected: {
+      plans: "dwp:userA:default:plans",
+      days: "dwp:userA:default:days",
+      dayMeta: "dwp:userA:default:dayMeta",
+      dayParks: "dwp:userA:default:dayParks",
+      dayAutoFallbacks: "dwp:userA:default:dayAutoFallbacks",
+      lightning: "dwp:userA:default:lightning",
+      selectedResort: "dwp:default:selectedResort",
+      selectedPark: "dwp:default:selectedPark",
+    },
+  },
+  {
+    name: "authenticated, non-default profile — account-qualified domains carry the profile id too, selectedResort/selectedPark stay unqualified",
+    userId: "userB",
+    profileId: "lindsay",
+    expected: {
+      plans: "dwp:userB:lindsay:plans",
+      days: "dwp:userB:lindsay:days",
+      dayMeta: "dwp:userB:lindsay:dayMeta",
+      dayParks: "dwp:userB:lindsay:dayParks",
+      dayAutoFallbacks: "dwp:userB:lindsay:dayAutoFallbacks",
+      lightning: "dwp:userB:lindsay:lightning",
+      selectedResort: "dwp:lindsay:selectedResort",
+      selectedPark: "dwp:lindsay:selectedPark",
+    },
+  },
+  {
+    name: "two different authenticated accounts on the identical profile id never collide on any account-qualified domain",
+    userId: "userA",
+    profileId: "family",
+    expected: {
+      plans: "dwp:userA:family:plans",
+      days: "dwp:userA:family:days",
+      dayMeta: "dwp:userA:family:dayMeta",
+      dayParks: "dwp:userA:family:dayParks",
+      dayAutoFallbacks: "dwp:userA:family:dayAutoFallbacks",
+      lightning: "dwp:userA:family:lightning",
+      selectedResort: "dwp:family:selectedResort",
+      selectedPark: "dwp:family:selectedPark",
+    },
+  },
+];
 
 /** Mirrors the { version, items } / legacy-array storage shape used by plans + lightning. */
 function readItemsDataset(key: string): unknown[] {
@@ -891,8 +1038,20 @@ function fitToByteBudget(snapshot: PlannerContextSnapshot): PlannerContextSnapsh
  * (Phase 10.4.2 — previously also omitted for an empty planner with zero
  * plans/Lightning; that gate is removed so Tom can still answer questions
  * like "what park is Day 1?" on an otherwise-empty planner).
+ *
+ * SH.4 Tom migration — `userId` is the caller's own RESOLVED authenticated
+ * identity (a real userId, or null signed-out), exactly the same value
+ * Plans/Lightning's own auth-transition effects use to retarget their
+ * storage refs. Every domain SH.4 migrated Plans/Lightning to is read
+ * through resolvePlannerContextKeys(userId, profile.id) above — the
+ * account-qualified key once authenticated, matching Plans/Lightning
+ * exactly, or the unchanged legacy key signed out. Callers must never pass
+ * a placeholder/guessed identity while their own auth state is still
+ * unresolved (e.g. NextAuth's "loading" status) — see tom/page.tsx's own
+ * doc on why that case omits planner_context outright rather than calling
+ * this with a guessed `userId`.
  */
-export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefined {
+export function buildPlannerContextSnapshot(userId: string | null): PlannerContextSnapshot | undefined {
   if (typeof window === "undefined") return undefined;
 
   try {
@@ -903,15 +1062,16 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     bootstrapProfiles();
 
     const profile = getActiveProfile();
-    const days = readDays(profile.id);
-    const dayMeta = readDayMeta(profile.id);
-    const dayParks = readDayParks(profile.id);
-    const restoredAutoFallbacks = readRestoredDayAutoFallbacks(profile.id);
+    const keys = resolvePlannerContextKeys(userId, profile.id);
+    const days = readDays(keys.days);
+    const dayMeta = readDayMeta(keys.dayMeta);
+    const dayParks = readDayParks(keys.dayParks);
+    const restoredAutoFallbacks = readRestoredDayAutoFallbacks(keys.dayAutoFallbacks);
 
-    const parsedPlans = readItemsDataset(buildNamespacedKey(profile.id, "plans"))
+    const parsedPlans = readItemsDataset(keys.plans)
       .map(toPlanItem)
       .filter((x): x is PlannerContextSnapshotItem => x !== null);
-    const parsedLightning = readItemsDataset(buildNamespacedKey(profile.id, "lightning"))
+    const parsedLightning = readItemsDataset(keys.lightning)
       .map(toLightningItem)
       .filter((x): x is PlannerContextSnapshotLightningItem => x !== null);
 
@@ -921,8 +1081,8 @@ export function buildPlannerContextSnapshot(): PlannerContextSnapshot | undefine
     // the resulting payload turns out to be within the byte budget.
     const itemCapTruncated = plans.length < parsedPlans.length || lightning.length < parsedLightning.length;
 
-    const storedResort = readPlainString(buildNamespacedKey(profile.id, "selectedResort"));
-    const storedPark = readPlainString(buildNamespacedKey(profile.id, "selectedPark"));
+    const storedResort = readPlainString(keys.selectedResort);
+    const storedPark = readPlainString(keys.selectedPark);
     const inferred = inferPlansContext(
       plans.map((p) => ({ id: `${p.dayId}:${p.name}`, name: p.name, timeLabel: p.time }))
     );

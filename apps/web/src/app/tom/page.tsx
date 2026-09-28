@@ -35,8 +35,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useSession } from "next-auth/react";
 import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
 import { bootstrapProfiles, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
+import {
+  shouldOmitPlannerContextForProfile,
+  isIdentityStaleForRequest,
+  shouldReleaseTomLoadingOnCompletion,
+} from "@/lib/syncHelper";
+import { getUserId } from "@/lib/syncIdentity";
 
 /** Pre-10.4 global (non-profile-scoped) chat cache — read-only migration fallback for the "default" profile. */
 const LEGACY_CHAT_STORAGE_KEY = "dwp.tomChat.v1";
@@ -1089,6 +1096,14 @@ function HelpExampleChips({
 }
 
 export default function TomChatPage() {
+  // SH.4.1a — needed ONLY to decide whether the active profile's planner
+  // content is safe to include in planner_context (see sendQuestion's own
+  // doc below); Tom otherwise has no auth-transition/pull machinery of its
+  // own and this must not introduce any (chat persistence itself stays
+  // exactly as it was — see AGENTS.md's "Tom chat persistence... preserve
+  // unless a phase explicitly modifies chat state management").
+  const { data: session, status: sessionStatus } = useSession();
+  const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessionId, setSessionId] = useState<string>(() => generateId());
   const [hydrated, setHydrated] = useState(false);
@@ -1124,6 +1139,21 @@ export default function TomChatPage() {
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
+
+  // SH.4.4 Codex P1 fix — mirrors `authenticatedUserId` for synchronous
+  // reads inside async callbacks, exactly like sessionIdRef above, so an
+  // in-flight request started under one authenticated identity can detect
+  // that the identity has since changed (an A -> B account switch, a
+  // sign-out, or a sign-in) and treat its own response as stale — even when
+  // the chat's session_id and active profile id happen to remain unchanged
+  // across that transition (e.g. a legacy/shared local profile that hasn't
+  // been retargeted). See isIdentityStaleForRequest()'s own doc in
+  // syncHelper.ts and sendQuestion's own isStale() below for where this is
+  // used.
+  const authenticatedUserIdRef = useRef(authenticatedUserId);
+  useEffect(() => {
+    authenticatedUserIdRef.current = authenticatedUserId;
+  }, [authenticatedUserId]);
 
   // The active local planner profile this chat's messages/sessionId belong
   // to. Kept in a ref (not state) so syncActiveProfile() below can compare
@@ -1300,15 +1330,91 @@ export default function TomChatPage() {
     // match and the response below is discarded instead of landing in the
     // new conversation.
     const requestSessionId = sessionIdRef.current;
-    const isStale = () => sessionIdRef.current !== requestSessionId;
+    // SH.4.4 Codex P1 fix — captured alongside requestSessionId so isStale()
+    // below also discards this request's response if the authenticated
+    // identity changes mid-flight, independent of whether session_id itself
+    // happens to change too. See isIdentityStaleForRequest()'s own doc.
+    const requestAuthenticatedUserId = authenticatedUserIdRef.current;
+    // Split out from isStale() below (PR #161 Codex finding #1) — the
+    // `finally` block needs to distinguish WHY a request went stale: a
+    // session_id change (New Chat) already has its own synchronous
+    // setLoading(false) at the point it cancels the old request (see
+    // handleNewChat) — the `finally` block deliberately withholds a SECOND
+    // setLoading(false) in that case so it can never stomp a newer
+    // request's own loading state that may have started after New Chat
+    // reset it. An identity-only change has no such separate reset
+    // anywhere else in this codepath.
+    const isSessionStale = () => sessionIdRef.current !== requestSessionId;
+    const isStale = () =>
+      isSessionStale() || isIdentityStaleForRequest(requestAuthenticatedUserId, authenticatedUserIdRef.current);
 
     setLoading(true);
     setError(null);
 
     try {
+      // SH.4.1a — same-class fix as Plans/Lightning's own render-gating:
+      // buildPlannerContextSnapshot() reads the ACTIVE profile's plans/
+      // Lightning bytes with no ownership check of its own. Without this
+      // guard, a profile whose physical planner bytes are known
+      // (isLocalContentForeign(), syncHelper.ts) to belong to a DIFFERENT,
+      // already-known authenticated account would still have that foreign
+      // content read and sent to the Tom API as this session's own
+      // planner_context. planner_context is already documented as
+      // additive/optional (AGENTS.md, plannerContextSnapshot.ts's own doc)
+      // — omitting it entirely here is the same "simply omit rather than
+      // guess" contract every other optional field already follows, not a
+      // new behavior class. Uses activeProfileIdRef.current (kept fresh by
+      // syncActiveProfile(), already called by submitQuestion before
+      // sendQuestion runs) so this reflects whichever profile this exact
+      // chat/session actually belongs to, including after an ordinary
+      // same-account profile switch.
+      //
+      // Codex P1 follow-up (SH.4.1a exact-HEAD finding #1) — SESSION-LOADING
+      // SAFETY. `authenticatedUserId` (declared above) is null for BOTH
+      // `sessionStatus === "loading"` (unresolved — we simply don't know
+      // the identity yet) AND `sessionStatus === "unauthenticated"`
+      // (resolved — genuinely signed out). Treating both alike previously
+      // let isLocalContentForeign()'s "a null currentUserId is never
+      // foreign" rule — correct for the resolved signed-out case
+      // (local-first, no competing identity) — also apply while still
+      // "loading", where it is WRONG: a question submitted before the
+      // session resolves could have this device's active profile actually
+      // belong to a different, about-to-be-revealed authenticated account,
+      // sending that account's stale local planner content under a
+      // planner_context this pre-resolution moment can't yet vouch for.
+      // shouldOmitPlannerContextForProfile() (syncHelper.ts) checks
+      // `sessionStatus === "loading"` FIRST and omits outright, never
+      // falling through to the ownership comparison for that state — the
+      // same "simply omit rather than guess" contract, applied to an
+      // unresolved identity instead of a confirmed-foreign one.
+      //
+      // SH.4 Tom migration — once sessionStatus resolves, `authenticatedUserId`
+      // is now also the identity buildPlannerContextSnapshot() itself uses
+      // (below) to resolve every SH.4-migrated domain's account-qualified
+      // key, exactly like Plans/Lightning's own auth-transition retarget.
+      // shouldOmitPlannerContextForProfile() no longer applies the legacy
+      // per-profileId foreign-content gate to the authenticated branch at
+      // all (see shouldApplyLegacyForeignContentGate()'s own doc in
+      // syncHelper.ts, and Plans'/Lightning's own retarget functions, which
+      // hardcode that same gate to `false` for the identical reason): once a
+      // domain is read via its account-qualified key, two accounts
+      // physically cannot share the same bytes for the same profileId, so a
+      // stale/unrelated legacy ownership marker can no longer withhold an
+      // authenticated account's own legitimate planner_context. The gate
+      // still applies (structurally, though never actually triggers, since
+      // `currentUserId` is null there) for the resolved signed-out branch,
+      // which keeps reading the legacy key exactly as before.
+      const omitPlannerContext = shouldOmitPlannerContextForProfile(
+        sessionStatus === "loading",
+        activeProfileIdRef.current,
+        authenticatedUserId
+      );
       // Built fresh per request (not cached) so it reflects the latest local
       // planner edits; undefined when there's nothing useful to send.
-      const plannerContext = buildPlannerContextSnapshot();
+      // `authenticatedUserId` is passed through so the snapshot itself reads
+      // the same account-qualified (or legacy, signed out) keys Plans/
+      // Lightning use — see plannerContextSnapshot.ts's own doc.
+      const plannerContext = omitPlannerContext ? undefined : buildPlannerContextSnapshot(authenticatedUserId);
 
       const res = await fetch("/api/tom/ask", {
         method: "POST",
@@ -1357,7 +1463,18 @@ export default function TomChatPage() {
       if (!isStale()) setError("Something went wrong. Please try again.");
       return false;
     } finally {
-      if (!isStale()) setLoading(false);
+      // PR #161 Codex finding #1 — gated on session staleness ONLY, not the
+      // full isStale() (which also trips on an identity-only change). A
+      // request that survives an authenticated identity change must still
+      // release `loading` here: nothing else in this codepath clears it for
+      // that transition, and handleSubmit/handleStarterPrompt both refuse
+      // to submit while `loading` is true — without this, Tom's input
+      // would stay permanently disabled after an account switch mid-flight.
+      // A session_id change (New Chat) is still withheld, since that path
+      // already owns clearing `loading` itself, synchronously, before this
+      // async completion can run. See shouldReleaseTomLoadingOnCompletion()'s
+      // own doc in syncHelper.ts.
+      if (shouldReleaseTomLoadingOnCompletion(isSessionStale())) setLoading(false);
     }
   }
 
@@ -1368,13 +1485,27 @@ export default function TomChatPage() {
     // profile's chat history/session.
     syncActiveProfile();
     const requestSessionId = sessionIdRef.current;
+    // SH.4.4 Codex P1 fix — captured so the retry-restore below also honors
+    // the identity boundary: a request whose failure surfaces after the
+    // authenticated identity has since changed must not repopulate the
+    // input box under the new identity's session, even if session_id itself
+    // is unchanged. See isIdentityStaleForRequest()'s own doc in
+    // syncHelper.ts.
+    const requestAuthenticatedUserId = authenticatedUserIdRef.current;
     conversationInteractedRef.current = false;
     setInput("");
     setMessages((prev) => [...prev, { id: generateId(), role: "user", text: question }]);
     void sendQuestion(question).then((ok) => {
       // Keep the failed question in the input box so it can be retried or
-      // edited — but only if the conversation wasn't reset in the meantime.
-      if (!ok && sessionIdRef.current === requestSessionId) setInput(question);
+      // edited — but only if the conversation wasn't reset, and the
+      // authenticated identity hasn't changed, in the meantime.
+      if (
+        !ok &&
+        sessionIdRef.current === requestSessionId &&
+        !isIdentityStaleForRequest(requestAuthenticatedUserId, authenticatedUserIdRef.current)
+      ) {
+        setInput(question);
+      }
     });
   }
 
