@@ -154,13 +154,33 @@ function ActiveProfileAuthGuard(): null {
  * equivalent to — factored out here as its own tested predicate so this
  * guard's gating logic doesn't silently drift from that structural
  * equivalent. See its own doc in profileRegistrySync.ts.
+ *
+ * PR #161 Codex fix — a LATER transition INTO "loading" (not just the
+ * initial unresolved window before the very first sign-in check) now
+ * immediately calls setRegistryIdentity(null) instead of no-opping. Before
+ * this fix, `if (sessionStatus === "loading") return;` left the registry
+ * identity binding untouched at whatever the PREVIOUS resolved identity
+ * was — so a reconciliation round already in flight under that identity
+ * (account A) kept passing isRegistryRunCurrent() for the ENTIRE "loading"
+ * window, right up until the session finally resolved to a NEW identity,
+ * and could issue adoption writes/ownership stamps under A's stale epoch
+ * during that window even though auth state had already moved on.
+ * setRegistryIdentity(null) here is the SAME call the signed-out branch
+ * already makes (see setRegistryIdentity's own doc — it bumps the epoch
+ * only when the identity actually changes, so this is a harmless no-op
+ * whenever identity was already null/unbound); calling it the instant
+ * "loading" begins bumps the epoch immediately, so any in-flight round from
+ * the previous identity stops at its very next isCurrent() check.
  */
 function ProfileRegistryReconciliationGuard(): null {
   const { data: session, status: sessionStatus } = useSession();
   const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
 
   useEffect(() => {
-    if (sessionStatus === "loading") return;
+    if (sessionStatus === "loading") {
+      setRegistryIdentity(null);
+      return;
+    }
     setRegistryIdentity(authenticatedUserId);
     if (!shouldAttemptRegistryReconciliation(sessionStatus, authenticatedUserId)) return;
     reconcileProfileRegistry(authenticatedUserId as string);

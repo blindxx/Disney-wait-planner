@@ -38,7 +38,7 @@ import {
   deleteProfile,
   getActiveProfileKeys,
 } from "../../lib/profileStorage";
-import { reconcileProfileRegistry } from "../../lib/profileRegistrySync";
+import { reconcileProfileRegistry, shouldWithholdProfileControls } from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -295,9 +295,10 @@ export default function SettingsPage() {
   // other. A user could interact with profile controls scoped to
   // UNOWNED_ACCOUNT_KEY during that brief unresolved window even though
   // they turned out to already be signed in, or vice versa. The guard
-  // below makes "loading" a genuine no-op: no registry identity
-  // transition, no local profiles/activeProfileId recomputation, and
-  // (critically) no ensureActiveProfileVisible call — so `dwp.activeProfile`
+  // below makes "loading" a no-op for every LOCAL/DURABLE side effect: no
+  // registry identity transition (that binding now lives in
+  // SessionProviderWrapper.tsx's own guard — see this effect's own SH.4.4
+  // doc above), no ensureActiveProfileVisible call — so `dwp.activeProfile`
   // and every deletion/provenance marker this effect could otherwise touch
   // stay completely untouched while identity is unresolved. Because
   // `authenticatedUserId` is `null` in BOTH the loading and unauthenticated
@@ -305,8 +306,24 @@ export default function SettingsPage() {
   // array — otherwise a loading -> unauthenticated transition (identical
   // `authenticatedUserId` value on both sides) would never re-run this
   // effect, and the signed-out view would never actually get projected.
+  //
+  // PR #161 Codex fix — "loading" is NOT a no-op for the `profiles` REACT
+  // STATE (rendering only — never localStorage/durable state): it now
+  // clears it via shouldWithholdProfileControls(), reusing the SAME
+  // `profiles.length > 0` gate the Profiles section already renders behind
+  // (see its own doc in profileRegistrySync.ts). This closes a gap the
+  // 11th-round fix above only handled at INITIAL mount (where `profiles`
+  // starts empty and simply hadn't rendered yet): a LATER transition back
+  // into "loading" mid-session (e.g. an account switch/session refetch)
+  // previously left `profiles` holding whatever the PREVIOUS resolved
+  // identity's list was, so the Profiles section kept rendering it — fully
+  // actionable (Add/Rename/Delete/Switch) — against a list/active id no
+  // CURRENT session vouches for.
   useEffect(() => {
-    if (sessionStatus === "loading") return;
+    if (shouldWithholdProfileControls(sessionStatus)) {
+      setProfiles([]);
+      return;
+    }
     if (!authenticatedUserId) {
       // SH.4.1 Codex P2 follow-up (6th round) — signing out must NOT just
       // invalidate the network identity guard above and stop: without

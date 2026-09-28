@@ -909,6 +909,66 @@ export const DEV_SHOULD_ATTEMPT_REGISTRY_RECONCILIATION_CASES: Array<{
   },
 ];
 
+/**
+ * PR #161 Codex fix — shared, pure gating decision for whether
+ * settings/page.tsx's own profile-management UI/actions (the Profiles
+ * section — Add/Rename/Delete/Switch, gated on `profiles.length > 0`) must
+ * be withheld right now. True ONLY while the authenticated session is
+ * genuinely UNRESOLVED ("loading").
+ *
+ * Before this fix, settings/page.tsx's auth-transition effect treated
+ * `sessionStatus === "loading"` as a pure no-op — correct for the INITIAL
+ * mount window (where `profiles` starts empty and the section simply never
+ * renders yet), but wrong for a LATER transition back into "loading" mid-
+ * session (e.g. an account switch/session refetch): `profiles` would still
+ * hold whatever the PREVIOUS resolved identity left there, and the section
+ * would keep rendering it — fully actionable (Add/Rename/Delete/Switch) —
+ * against a profile list/active id that no CURRENT session vouches for.
+ * settings/page.tsx now clears its own `profiles` state (reusing the exact
+ * same `profiles.length > 0` render gate, rather than introducing a
+ * parallel one) whenever this returns true — see its own effect for where
+ * this is called.
+ *
+ * A resolved "authenticated" or "unauthenticated" status never withholds on
+ * this basis alone — each already has its own separate, legitimate reason
+ * to show or hide the section; this predicate only ever answers the LOADING
+ * question.
+ *
+ * Pure — takes the single value as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_WITHHOLD_PROFILE_CONTROLS_CASES, shouldWithholdProfileControls } from "@/lib/profileRegistrySync";
+ *   DEV_SHOULD_WITHHOLD_PROFILE_CONTROLS_CASES.forEach(c => {
+ *     const got = shouldWithholdProfileControls(c.sessionStatus);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldWithholdProfileControls(sessionStatus: SessionLifecycleStatus): boolean {
+  return sessionStatus === "loading";
+}
+
+export const DEV_SHOULD_WITHHOLD_PROFILE_CONTROLS_CASES: Array<{
+  name: string;
+  sessionStatus: SessionLifecycleStatus;
+  expected: boolean;
+}> = [
+  {
+    name: "PR #161 Codex fix — unresolved session (initial mount OR a later mid-session transition back into loading) — withheld",
+    sessionStatus: "loading",
+    expected: true,
+  },
+  {
+    name: "resolved authenticated — not withheld on this basis (the account's own effective list is safe to show)",
+    sessionStatus: "authenticated",
+    expected: false,
+  },
+  {
+    name: "resolved signed-out — not withheld on this basis (the local-first/UNOWNED list is safe to show)",
+    sessionStatus: "unauthenticated",
+    expected: false,
+  },
+];
+
 // ===== AMBIGUOUS ADOPTION OUTCOME RESOLUTION (Codex P1 follow-up #3) =====
 
 /**
