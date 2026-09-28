@@ -8,6 +8,7 @@ import {
   UNOWNED_ACCOUNT_KEY,
 } from "@/lib/profileStorage";
 import { getUserId } from "@/lib/syncIdentity";
+import { invalidatePendingUnloadSync } from "@/lib/syncHelper";
 
 /**
  * Codex P1 follow-up (12th round) — GLOBAL auth-transition active-profile
@@ -91,6 +92,20 @@ function ActiveProfileAuthGuard(): null {
     if (sessionStatus === "loading") return;
     const corrected = ensureActiveProfileVisible(authenticatedUserId ?? UNOWNED_ACCOUNT_KEY);
     if (shouldReloadForActiveProfileCorrection(corrected)) {
+      // Codex P1 fix — "auth-transition unload-beacon." Must run BEFORE
+      // window.location.reload() below, and before any other effect in
+      // this same commit (this component renders above {children} — see
+      // this component's own doc): an authenticated A -> B transition that
+      // requires this correction can have Plans'/Lightning's own
+      // auth-transition effect (same commit, running right after this one)
+      // retarget currentSyncUserId to B while currentSyncProfileId still
+      // names A's own now-corrected-away-from profile, since only this
+      // reload re-derives the corrected profile id. Without this call, a
+      // beforeunload beacon firing during the reload could tag A's still-
+      // profileId-scoped local content with B's already-active session
+      // cookie. See invalidatePendingUnloadSync()'s own doc in
+      // syncHelper.ts for the full root cause.
+      invalidatePendingUnloadSync();
       window.location.reload();
     }
   }, [sessionStatus, authenticatedUserId]);

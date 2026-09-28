@@ -29,6 +29,10 @@ Reviewers should check any changes affecting:
  *   pullPlanner(profileId)       — fetch combined cloud planner on sign-in
  *   registerUnloadSync()         — best-effort beacon push on page unload
  *   cancelScheduledSync()        — cancel pending sync (auth/profile transitions)
+ *   invalidatePendingUnloadSync() — call immediately BEFORE a corrective
+ *                                  auth/profile reload (see its own doc);
+ *                                  suppresses the next unload-sync beacon
+ *                                  as well as any pending debounced push
  *   getConfirmedState(userId, profileId)              — read the current
  *                                                       PER-DOMAIN confirmed
  *                                                       state (plans/
@@ -4806,6 +4810,23 @@ let currentSyncProfileId = "default";
 let currentSyncUserId: string | null = null;
 
 /**
+ * Codex P1 fix — "auth-transition unload-beacon" (see
+ * invalidatePendingUnloadSync()'s own doc for the full root cause). Single-
+ * shot: set true ONLY by invalidatePendingUnloadSync(), read ONLY by
+ * registerUnloadSync()'s handler via shouldSendUnloadSyncBeacon() below.
+ * Deliberately never reset back to false by setSyncUserId()/
+ * setSyncProfileId()'s own genuine-change branches — see
+ * invalidatePendingUnloadSync()'s own doc for why a reset there would
+ * silently undo this exact suppression, since (per SessionProviderWrapper's
+ * effect-ordering doc) those calls can run in the SAME commit, immediately
+ * AFTER this flag is set. The corrective reload this protects tears the
+ * page down (and this module's in-memory state with it) right after, so no
+ * later "identity settled" moment in THIS tab's lifetime ever needs it
+ * cleared.
+ */
+let unloadSyncInvalidated = false;
+
+/**
  * SH.4.1 Plans-migration Codex P1 fix — "Keep Lightning pushes on the
  * storage namespace it hydrates." True only while the page CURRENTLY
  * driving sync (i.e., the page that most recently called
@@ -5764,6 +5785,87 @@ export function cancelScheduledSync(): void {
   }
 }
 
+// ── invalidatePendingUnloadSync ─────────────────────────────────────────────────
+
+/**
+ * PURE CORE for registerUnloadSync()'s handler: given whether a corrective
+ * auth/profile reload has invalidated pending unload sync, decide whether
+ * the beforeunload handler may proceed to build and send its beacon.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_SEND_UNLOAD_SYNC_BEACON_CASES, shouldSendUnloadSyncBeacon } from "@/lib/syncHelper";
+ *   DEV_SHOULD_SEND_UNLOAD_SYNC_BEACON_CASES.forEach(c => {
+ *     const got = shouldSendUnloadSyncBeacon(c.invalidated);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldSendUnloadSyncBeacon(invalidated: boolean): boolean {
+  return !invalidated;
+}
+
+export const DEV_SHOULD_SEND_UNLOAD_SYNC_BEACON_CASES: Array<{
+  name: string;
+  invalidated: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "REGRESSION CASE — a corrective auth/profile reload invalidated pending unload sync: the beforeunload beacon must NOT send, since currentSyncProfileId/currentSyncUserId are known to be transiently inconsistent (userId already retargeted to the incoming account, profileId not yet corrected until the reload completes)",
+    invalidated: true,
+    expected: false,
+  },
+  {
+    name: "normal unload — no auth/profile correction in flight: the beacon sends exactly as before",
+    invalidated: false,
+    expected: true,
+  },
+];
+
+/**
+ * Codex P1 fix — "auth-transition unload-beacon." Invalidate any pending
+ * unload-sync beacon immediately BEFORE a corrective auth/profile reload —
+ * call this from SessionProviderWrapper.tsx's ActiveProfileAuthGuard right
+ * before window.location.reload(), whenever
+ * shouldReloadForActiveProfileCorrection() says a correction actually
+ * happened.
+ *
+ * Root cause: per that component's own effect-ordering doc, its effect runs
+ * BEFORE any currently-mounted page's own auth-transition effect in the SAME
+ * React commit. An authenticated A -> B transition that ALSO requires an
+ * active-profile correction (dwp.activeProfile pointed at a profile A owned
+ * but B doesn't) means, in that same commit, Plans'/Lightning's own effect
+ * still runs right after and calls setSyncUserId(B) — retargeting
+ * currentSyncUserId to B immediately — while currentSyncProfileId keeps
+ * naming A's own (now-corrected-away-from) profile: only the reload this
+ * function precedes actually re-derives the corrected profile id (see
+ * setSyncProfileId()'s own doc — nothing re-derives it on a later
+ * transition without a remount). registerUnloadSync()'s handler reads both
+ * as "always current" by design (see its own doc), but for this one window
+ * "current" is exactly the problem: a beforeunload beacon firing in it would
+ * tag A's still-profileId-scoped local content with B's already-active
+ * session cookie, attributing A's content to B's account server-side.
+ *
+ * This stops that beacon at the source, unconditionally, rather than trying
+ * to make currentSyncProfileId/currentSyncUserId briefly consistent:
+ * registerUnloadSync()'s handler checks shouldSendUnloadSyncBeacon() first
+ * and returns immediately when invalidated, before ever reading either
+ * value or touching localStorage.
+ *
+ * Reuses cancelScheduledSync() for the ordinary debounced push — the SAME
+ * two sync paths (debounced push + unload beacon) this module exposes are
+ * suppressed together at this one call site, exactly like every other
+ * genuine identity/profile transition in this module already cancels the
+ * debounced push first (setSyncProfileId()/setSyncUserId() above).
+ *
+ * Preserves normal unload sync: a reload NOT caused by an active-profile
+ * correction (identity unchanged, or no correction needed) never calls
+ * this, so unloadSyncInvalidated stays false and registerUnloadSync()'s
+ * handler behaves exactly as before.
+ */
+export function invalidatePendingUnloadSync(): void {
+  cancelScheduledSync();
+  unloadSyncInvalidated = true;
+}
+
 /**
  * SH.4.1 Plans-migration Codex P1 fix (5th round) — "A deferred push retry
  * must not survive a genuine authenticated user/profile identity
@@ -6119,6 +6221,14 @@ export function registerUnloadSync(): () => void {
   }
 
   const handler = (): void => {
+    // Codex P1 fix — "auth-transition unload-beacon." A corrective
+    // auth/profile reload (invalidatePendingUnloadSync(), called from
+    // SessionProviderWrapper.tsx's ActiveProfileAuthGuard) means
+    // currentSyncProfileId/currentSyncUserId below are known to be
+    // transiently inconsistent for this exact unload — see that function's
+    // own doc. Checked FIRST, before reading either value or touching
+    // localStorage, so no stale-identity beacon can be built at all.
+    if (!shouldSendUnloadSyncBeacon(unloadSyncInvalidated)) return;
     // Cancel any pending debounce — beacon takes over
     if (debounceTimer !== null) {
       clearTimeout(debounceTimer);
