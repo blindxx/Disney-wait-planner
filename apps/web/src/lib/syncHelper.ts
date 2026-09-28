@@ -4628,7 +4628,46 @@ export function getSyncStateForProfile(profileId: string): SyncState {
 
 // ── Module-level state ────────────────────────────────────────────────────────
 
+/**
+ * The ORDINARY, freely-replaceable debounce slot: scheduleSync() clears
+ * and replaces it unconditionally on every call, from ANY page, for ANY
+ * edit — that is its entire job (coalesce rapid edits into one push).
+ * cancelScheduledSync() clears it on auth/profile transitions. Read by
+ * scheduleSync()/cancelScheduledSync()/registerUnloadSync() and by
+ * applySyncPlansQualifiedTransition()'s own "is there pending work to
+ * flush" check.
+ */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — "Separate deferred/
+ * in-flight retry scheduling from the ordinary replaceable debounce slot."
+ * Root cause this closes: doPush()'s own inFlight-retry (round 3's fix
+ * preserved the identity/profile/namespace snapshot a deferred push
+ * belongs to, but still stored the retry's setTimeout handle in the SAME
+ * `debounceTimer` variable ordinary scheduleSync()/cancelScheduledSync()
+ * calls freely clear-and-replace) — during normal Plans -> Lightning
+ * navigation, a qualified Plans push already deferred (because another
+ * push was still in flight) could be silently cancelled the instant
+ * Lightning called scheduleSync() for its own, completely unrelated edit:
+ * `if (debounceTimer !== null) clearTimeout(debounceTimer);` doesn't know
+ * or care what it's clearing, so it discarded the Plans retry — its
+ * preserved snapshot and all — and replaced it with Lightning's own timer.
+ *
+ * This variable is doPush()'s OWN, exclusively — nothing else in this
+ * module reads or writes it. scheduleSync()/cancelScheduledSync()/
+ * registerUnloadSync() only ever touch `debounceTimer` above, so an
+ * ordinary debounce call from ANY page, for ANY identity/namespace, can
+ * no longer reach in and cancel a DIFFERENT identity/namespace's
+ * already-deferred, already-snapshotted retry — it simply has no path to
+ * this variable at all. A deferred retry surviving a namespace-mode
+ * transition untouched (see applySyncPlansQualifiedTransition()'s own
+ * doc) is exactly the intended behavior, not something that needs
+ * separate "flushing" here: it is already scheduled, already carries its
+ * own snapshot, and will fire on its own once `inFlight` clears.
+ */
+let deferredPushRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
 let inFlight = false;
 
 /**
@@ -4852,6 +4891,15 @@ export const DEV_DECIDE_SYNC_PLANS_QUALIFIED_TRANSITION_ACTION_CASES: Array<{
  * fired an instant earlier — never the incoming one. Shared by both
  * resetSyncPlansQualified() and setSyncPlansQualified() below so a genuine
  * transition in EITHER direction gets the identical protection.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — deliberately inspects
+ * and touches ONLY `debounceTimer` (the ordinary, not-yet-fired debounce
+ * slot), never `deferredPushRetryTimer`. A push ALREADY deferred because
+ * doPush() found another push in flight needs no action here at all: it
+ * already carries its own captured (profileId, userId, plansQualified)
+ * snapshot (round 3) and lives in its own slot no ordinary scheduling call
+ * can reach (round 4, see deferredPushRetryTimer's own doc) — it will fire
+ * on its own, correctly, regardless of what THIS transition does.
  */
 function applySyncPlansQualifiedTransition(nextQualified: boolean): void {
   const action = decideSyncPlansQualifiedTransitionAction(
@@ -6299,6 +6347,100 @@ export const DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES: Array<{
 ];
 
 /**
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — "Separate deferred/
+ * in-flight retry scheduling from the ordinary replaceable debounce
+ * slot." PURE MODEL of the two scheduling slots' own doc (`debounceTimer`/
+ * `deferredPushRetryTimer` above) and exactly which operation touches
+ * which: `scheduleSync()`/`cancelScheduledSync()` only ever read/write
+ * `debounceSlot`; only doPush()'s own inFlight-retry ever writes
+ * `deferredRetrySlot`. This is a structural fact about the real functions
+ * (verified by inspection — see each real function's own doc for the
+ * literal variable each one touches), modeled here as a pure state
+ * machine so the exact regression scenario (a qualified Plans push
+ * deferred, then an UNRELATED page's ordinary scheduleSync() call) has its
+ * own deterministic, non-timer-based DEV_* coverage.
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES, applyPushSchedulingOperation } from "@/lib/syncHelper";
+ *   DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES.forEach(c => {
+ *     const got = c.operations.reduce(applyPushSchedulingOperation, c.initialState);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type PushSchedulingSlots = {
+  /** Mirrors `debounceTimer`: null (empty) or an opaque token identifying what's scheduled there. */
+  debounceSlot: string | null;
+  /** Mirrors `deferredPushRetryTimer`. */
+  deferredRetrySlot: string | null;
+};
+
+export type PushSchedulingOperation =
+  | { kind: "scheduleSync"; token: string }
+  | { kind: "cancelScheduledSync" }
+  | { kind: "deferPushRetry"; token: string };
+
+export function applyPushSchedulingOperation(
+  state: PushSchedulingSlots,
+  op: PushSchedulingOperation
+): PushSchedulingSlots {
+  switch (op.kind) {
+    case "scheduleSync":
+      // Mirrors scheduleSync(): clears-and-replaces ONLY debounceSlot.
+      return { ...state, debounceSlot: op.token };
+    case "cancelScheduledSync":
+      // Mirrors cancelScheduledSync(): clears ONLY debounceSlot.
+      return { ...state, debounceSlot: null };
+    case "deferPushRetry":
+      // Mirrors doPush()'s own inFlight-retry: writes ONLY deferredRetrySlot.
+      return { ...state, deferredRetrySlot: op.token };
+  }
+}
+
+export const DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES: Array<{
+  name: string;
+  initialState: PushSchedulingSlots;
+  operations: PushSchedulingOperation[];
+  expected: PushSchedulingSlots;
+}> = [
+  {
+    name: "REGRESSION SCENARIO — qualified Plans push in flight, second Plans edit's push defers, navigation to Lightning cancels the ordinary debounce, Lightning schedules its own sync: the outgoing qualified retry remains queued throughout, untouched",
+    initialState: { debounceSlot: null, deferredRetrySlot: null },
+    operations: [
+      // Second Plans edit's own debounce (the first push is already in
+      // flight and isn't represented as a slot at all).
+      { kind: "scheduleSync", token: "plans-edit-2-debounce" },
+      // That debounce fires; doPush() finds the first push still in
+      // flight and defers, capturing its own (profileId, userId,
+      // plansQualified=true) snapshot into the SEPARATE retry slot.
+      { kind: "deferPushRetry", token: "plans-qualified-retry(snapshot=qualified)" },
+      // User navigates to Lightning — setSyncProfileId()/setSyncUserId()
+      // reset currentSyncPlansQualified, which (via
+      // applySyncPlansQualifiedTransition()) cancels the ORDINARY
+      // debounce slot only.
+      { kind: "cancelScheduledSync" },
+      // Lightning schedules its own, completely unrelated sync.
+      { kind: "scheduleSync", token: "lightning-edit-debounce" },
+    ],
+    expected: {
+      debounceSlot: "lightning-edit-debounce",
+      deferredRetrySlot: "plans-qualified-retry(snapshot=qualified)",
+    },
+  },
+  {
+    name: "an ordinary cancel with no deferred retry pending leaves the deferred-retry slot at its already-empty default — nothing to protect, nothing spuriously created",
+    initialState: { debounceSlot: "some-debounce", deferredRetrySlot: null },
+    operations: [{ kind: "cancelScheduledSync" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "a later deferred retry from the SAME page's own doPush() retry loop legitimately replaces an earlier one in that SAME slot — this is doPush()'s own coalescing, not cross-namespace cancellation",
+    initialState: { debounceSlot: null, deferredRetrySlot: "retry-1" },
+    operations: [{ kind: "deferPushRetry", token: "retry-2" }],
+    expected: { debounceSlot: null, deferredRetrySlot: "retry-2" },
+  },
+];
+
+/**
  * SH.4.1 Plans-migration Codex P1 fix (3rd round) — `forcedSnapshot`, when
  * provided, pins this ENTIRE push attempt (payload build AND pending-op
  * evidence) to that exact (profileId, userId, plansQualified) triple — see
@@ -6306,6 +6448,12 @@ export const DEV_RESOLVE_DEFERRED_PUSH_SNAPSHOT_CASES: Array<{
  * Ordinary callers (scheduleSync()'s debounce, applySyncPlansQualifiedTransition()'s
  * flush) omit it, starting a fresh attempt from whatever is live right now
  * — unchanged from before this round.
+ *
+ * SH.4.1 Plans-migration Codex P1 fix (4th round) — the inFlight-retry
+ * below now re-schedules into `deferredPushRetryTimer`, NOT the ordinary
+ * `debounceTimer` — see that variable's own doc for the full "must not be
+ * replaceable/cancellable by an unrelated page's ordinary scheduleSync()
+ * call" rationale this closes.
  */
 async function doPush(forcedSnapshot?: DeferredPushSnapshot): Promise<void> {
   const snapshot = resolveDeferredPushSnapshot(
@@ -6318,9 +6466,11 @@ async function doPush(forcedSnapshot?: DeferredPushSnapshot): Promise<void> {
     // Re-schedule so the latest payload gets sent after the current
     // request — carrying `snapshot` forward so the retry keeps pushing
     // under the SAME identity/profile/namespace THIS attempt was for,
-    // never whatever happens to be live a second from now.
-    if (debounceTimer !== null) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(() => void doPush(snapshot), 1_000);
+    // never whatever happens to be live a second from now. Stored in
+    // `deferredPushRetryTimer`, its OWN separate slot — see that
+    // variable's own doc for why this must never share `debounceTimer`.
+    if (deferredPushRetryTimer !== null) clearTimeout(deferredPushRetryTimer);
+    deferredPushRetryTimer = setTimeout(() => void doPush(snapshot), 1_000);
     return;
   }
 
