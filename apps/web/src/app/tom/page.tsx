@@ -38,7 +38,11 @@ import Link from "next/link";
 import { useSession } from "next-auth/react";
 import { buildPlannerContextSnapshot } from "@/lib/plannerContextSnapshot";
 import { bootstrapProfiles, getActiveProfileId, buildNamespacedKey } from "@/lib/profileStorage";
-import { shouldOmitPlannerContextForProfile, isIdentityStaleForRequest } from "@/lib/syncHelper";
+import {
+  shouldOmitPlannerContextForProfile,
+  isIdentityStaleForRequest,
+  shouldReleaseTomLoadingOnCompletion,
+} from "@/lib/syncHelper";
 import { getUserId } from "@/lib/syncIdentity";
 
 /** Pre-10.4 global (non-profile-scoped) chat cache — read-only migration fallback for the "default" profile. */
@@ -1331,9 +1335,18 @@ export default function TomChatPage() {
     // identity changes mid-flight, independent of whether session_id itself
     // happens to change too. See isIdentityStaleForRequest()'s own doc.
     const requestAuthenticatedUserId = authenticatedUserIdRef.current;
+    // Split out from isStale() below (PR #161 Codex finding #1) — the
+    // `finally` block needs to distinguish WHY a request went stale: a
+    // session_id change (New Chat) already has its own synchronous
+    // setLoading(false) at the point it cancels the old request (see
+    // handleNewChat) — the `finally` block deliberately withholds a SECOND
+    // setLoading(false) in that case so it can never stomp a newer
+    // request's own loading state that may have started after New Chat
+    // reset it. An identity-only change has no such separate reset
+    // anywhere else in this codepath.
+    const isSessionStale = () => sessionIdRef.current !== requestSessionId;
     const isStale = () =>
-      sessionIdRef.current !== requestSessionId ||
-      isIdentityStaleForRequest(requestAuthenticatedUserId, authenticatedUserIdRef.current);
+      isSessionStale() || isIdentityStaleForRequest(requestAuthenticatedUserId, authenticatedUserIdRef.current);
 
     setLoading(true);
     setError(null);
@@ -1450,7 +1463,18 @@ export default function TomChatPage() {
       if (!isStale()) setError("Something went wrong. Please try again.");
       return false;
     } finally {
-      if (!isStale()) setLoading(false);
+      // PR #161 Codex finding #1 — gated on session staleness ONLY, not the
+      // full isStale() (which also trips on an identity-only change). A
+      // request that survives an authenticated identity change must still
+      // release `loading` here: nothing else in this codepath clears it for
+      // that transition, and handleSubmit/handleStarterPrompt both refuse
+      // to submit while `loading` is true — without this, Tom's input
+      // would stay permanently disabled after an account switch mid-flight.
+      // A session_id change (New Chat) is still withheld, since that path
+      // already owns clearing `loading` itself, synchronously, before this
+      // async completion can run. See shouldReleaseTomLoadingOnCompletion()'s
+      // own doc in syncHelper.ts.
+      if (shouldReleaseTomLoadingOnCompletion(isSessionStale())) setLoading(false);
     }
   }
 

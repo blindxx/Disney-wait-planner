@@ -2283,6 +2283,51 @@ export function isIdentityStaleForRequest(
   return currentAuthenticatedUserId !== requestAuthenticatedUserId;
 }
 
+/**
+ * Pure core: PR #161 Codex finding #1. Whether Tom's sendQuestion() should
+ * release its `loading` state now that a request has completed (in its
+ * `finally` block). `isSessionStale` reflects ONLY whether the chat's
+ * session_id changed (New Chat) by completion time — that path already owns
+ * clearing `loading` itself, synchronously, at the moment it cancels the old
+ * request (see handleNewChat in tom/page.tsx), so releasing it again here
+ * could stomp a NEWER request's own loading state that may have started
+ * since. An identity-only change (isIdentityStaleForRequest() above) has no
+ * such separate release anywhere else in this codepath — this decision
+ * deliberately does NOT take identity staleness into account, so a request
+ * that survives an authenticated account switch still releases loading here
+ * regardless. Without this, handleSubmit()/handleStarterPrompt()'s own
+ * `if (loading) return;` guard would leave Tom's input permanently disabled
+ * after an account switch mid-flight, since nothing else would ever clear
+ * it.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_RELEASE_TOM_LOADING_CASES, shouldReleaseTomLoadingOnCompletion } from "@/lib/syncHelper";
+ *   DEV_SHOULD_RELEASE_TOM_LOADING_CASES.forEach(c => {
+ *     const got = shouldReleaseTomLoadingOnCompletion(c.isSessionStale);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function shouldReleaseTomLoadingOnCompletion(isSessionStale: boolean): boolean {
+  return !isSessionStale;
+}
+
+export const DEV_SHOULD_RELEASE_TOM_LOADING_CASES: Array<{
+  name: string;
+  isSessionStale: boolean;
+  expected: boolean;
+}> = [
+  {
+    name: "PR #161 Codex finding #1 — no session_id change (ordinary completion, OR a request that survived an identity-only account change) — loading is released; nothing else in this codepath clears it for an identity transition, and handleSubmit/handleStarterPrompt refuse to resubmit while loading stays true",
+    isSessionStale: false,
+    expected: true,
+  },
+  {
+    name: "session_id changed (New Chat) — withheld here, since that path already synchronously cleared loading itself when it cancelled the old request; releasing it again could stomp a newer request's own loading state",
+    isSessionStale: true,
+    expected: false,
+  },
+];
+
 export const DEV_IS_IDENTITY_STALE_FOR_REQUEST_CASES: Array<{
   name: string;
   requestAuthenticatedUserId: string | null;
@@ -4872,6 +4917,16 @@ export function getSyncStateForProfile(profileId: string): SyncState {
  * scheduleSync()/cancelScheduledSync()/registerUnloadSync() and by
  * applySyncPlansQualifiedTransition()'s own "is there pending work to
  * flush" check.
+ *
+ * PR #161 Codex finding #2 — scheduleSync()'s own setTimeout callback also
+ * clears this back to `null` the instant it BEGINS (before calling
+ * doPush()), not only when replaced or explicitly cancelled: a fired timer
+ * handle is no longer meaningful to clearTimeout(), and leaving the
+ * variable non-null past that point would make a fired-and-already-running
+ * debounce look identical to a genuinely still-pending one to every reader
+ * above — in particular, could make applySyncPlansQualifiedTransition()
+ * fire a second, redundant doPush() believing there was still queued work
+ * to flush.
  */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -5883,6 +5938,17 @@ export function scheduleSync(): void {
   if (typeof window === "undefined") return; // SSR guard
   if (debounceTimer !== null) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
+    // PR #161 Codex finding #2 — clear the handle the instant this callback
+    // begins, before doPush() runs. Once a setTimeout has fired, its handle
+    // is no longer meaningful to clearTimeout(), but `debounceTimer` would
+    // otherwise keep holding it as though a debounce were STILL pending. A
+    // later namespace/identity transition that checks
+    // `debounceTimer !== null` — applySyncPlansQualifiedTransition() above,
+    // via decideSyncPlansQualifiedTransitionAction()'s hasPendingDebounce
+    // parameter — would then wrongly conclude there is still queued work to
+    // flush and could fire a second, redundant doPush() for a push that has
+    // already started.
+    debounceTimer = null;
     void doPush();
   }, DEBOUNCE_MS);
 }
@@ -6987,7 +7053,8 @@ export type PushSchedulingOperation =
   | { kind: "scheduleSync"; token: string }
   | { kind: "cancelScheduledSync" }
   | { kind: "deferPushRetry"; token: string }
-  | { kind: "genuineIdentityChange"; via: "user" | "profile" };
+  | { kind: "genuineIdentityChange"; via: "user" | "profile" }
+  | { kind: "debounceFires" };
 
 /**
  * SH.4.1 Plans-migration Codex P1 fix (5th round) — "A deferred push retry
@@ -7023,6 +7090,16 @@ export function applyPushSchedulingOperation(
       // Mirrors setSyncProfileId()'s/setSyncUserId()'s own genuine-change
       // branch (5th round): clears BOTH slots.
       return { debounceSlot: null, deferredRetrySlot: null };
+    case "debounceFires":
+      // PR #161 Codex finding #2 — mirrors scheduleSync()'s own setTimeout
+      // callback: clears debounceSlot the instant the timer fires, before
+      // doPush() runs. Without this, a fired-and-already-running debounce
+      // would keep looking identical to a genuinely still-pending one to
+      // every reader of this slot — in particular,
+      // applySyncPlansQualifiedTransition()'s own hasPendingDebounce check
+      // could then wrongly decide to flush (firing a second, redundant
+      // doPush()) for a push that has already started.
+      return { ...state, debounceSlot: null };
   }
 }
 
@@ -7084,6 +7161,18 @@ export const DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES: Array<{
     name: "same user/profile Plans -> Lightning namespace switch (an ORDINARY cancelScheduledSync, via resetSyncPlansQualified()/applySyncPlansQualifiedTransition() — NOT a genuine identity change) preserves an already-deferred retry untouched, exactly as round 4 established",
     initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
     operations: [{ kind: "cancelScheduledSync" }],
+    expected: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+  },
+  {
+    name: "PR #161 Codex finding #2 — a debounce that has already FIRED no longer looks pending afterward: without clearing debounceSlot when it fires, a later namespace/identity transition would wrongly see it still occupied and could take the flush-pending-work path for a push that has already started",
+    initialState: { debounceSlot: null, deferredRetrySlot: null },
+    operations: [{ kind: "scheduleSync", token: "plans-edit-debounce" }, { kind: "debounceFires" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "PR #161 Codex finding #2 — a fired debounce's cleared slot leaves an UNRELATED, already-deferred retry from a different push completely untouched (debounceFires only ever writes debounceSlot, mirroring deferPushRetry's own single-slot write above)",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+    operations: [{ kind: "scheduleSync", token: "lightning-edit-debounce" }, { kind: "debounceFires" }],
     expected: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
   },
 ];
