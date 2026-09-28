@@ -1664,7 +1664,11 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // — a mismatch with no pending marker means a DIFFERENT device renamed
   // it, which is pulled further down (selectServerRenamesToApply), never
   // pushed from here.
-  const pendingRenames = getPendingProfileRenames();
+  // Codex account-isolation fix — scoped to THIS round's own `userId`:
+  // getPendingProfileRenames now returns only ids `userId` itself renamed,
+  // never a different account's own pending rename recorded on a shared
+  // browser (see profileStorage.ts's PendingRenamesByAccount doc).
+  const pendingRenames = getPendingProfileRenames(userId);
   const toRename = filterAdoptableProfiles(
     computeProfilesToRename(initialServerProfiles, localProfiles, pendingRenames, ownedByOtherAccountIds)
   );
@@ -1711,19 +1715,22 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   );
   if (!isCurrent()) return;
 
-  // SH.5 — rename propagation, push confirmation: clear this device's own
-  // pending-rename marker for every id whose PUSHED name is now confirmed
-  // by `authoritativeServerProfiles` (the SAME re-GET the ownership stamp
-  // above already trusts). An id whose push failed, or whose reconfirmed
-  // name still doesn't match, simply keeps its marker — computeProfilesToRename
-  // will propose it again on the NEXT round, exactly like an adoption
-  // candidate that failed to register keeps getting proposed via
-  // computeProfilesToAdopt's own fresh recomputation.
+  // SH.5 — rename propagation, push confirmation: clear THIS account's
+  // (`userId`'s) own pending-rename marker for every id whose PUSHED name
+  // is now confirmed by `authoritativeServerProfiles` (the SAME re-GET the
+  // ownership stamp above already trusts). An id whose push failed, or
+  // whose reconfirmed name still doesn't match, simply keeps its marker —
+  // computeProfilesToRename will propose it again on the NEXT round,
+  // exactly like an adoption candidate that failed to register keeps
+  // getting proposed via computeProfilesToAdopt's own fresh recomputation.
+  // Codex account-isolation fix — scoping the clear to `userId` means this
+  // round can only ever clear ITS OWN pending rename, never a different
+  // account's (see profileStorage.ts's clearPendingRenameForAccount doc).
   if (toRename.length > 0) {
     const authoritativeNameById = new Map(authoritativeServerProfiles.map((p) => [p.profileId, p.name]));
     for (const renamed of toRename) {
       if (authoritativeNameById.get(renamed.id) === renamed.name) {
-        await clearProfileRenamePending(renamed.id, renamed.name);
+        await clearProfileRenamePending(renamed.id, renamed.name, userId);
       }
     }
   }
@@ -1767,7 +1774,11 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // flight is honored rather than clobbered by a pull built from a stale
   // pre-round snapshot.
   if (!isCurrent()) return;
-  const pendingRenameIdsAtCommit = new Set(Object.keys(getPendingProfileRenames()));
+  // Codex account-isolation fix — scoped to `userId`: a pull must only ever
+  // be suppressed by THIS account's own pending rename, never a different
+  // account's (which this account's reconciliation can no longer even see —
+  // see getPendingProfileRenames's own doc).
+  const pendingRenameIdsAtCommit = new Set(Object.keys(getPendingProfileRenames(userId)));
   const renamesToApply = selectServerRenamesToApply(authoritativeServerProfiles, getProfiles(), pendingRenameIdsAtCommit);
   await applyServerRenames(renamesToApply);
 }

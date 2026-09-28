@@ -459,7 +459,12 @@ export default function SettingsPage() {
     if (!current) return;
     const name = window.prompt("Rename profile:", current.name);
     if (!name || !name.trim()) return;
-    await renameProfile(activeProfileId, name);
+    // Codex account-isolation fix — scope the pending-rename marker this
+    // rename records to the CURRENTLY authenticated account (or the shared
+    // unowned bucket when signed out), mirroring how handleAddProfile/
+    // handleDeleteProfile already scope createProfile/deleteProfile's own
+    // provenance writes — see renameProfile's own doc.
+    await renameProfile(activeProfileId, name, authenticatedUserId);
     setProfiles(getVisibleProfiles(visibilityOwnerKey));
     // SH.5 — a rename doesn't reload the page (unlike Add/Delete), so
     // nothing else would otherwise trigger a fresh reconciliation round to

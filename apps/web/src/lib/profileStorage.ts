@@ -2856,23 +2856,65 @@ export const DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES: Array<{
 
 // ===== SH.5 RENAME PROPAGATION =====
 
+/** One device's not-yet-confirmed local rename fact for a single account. */
 export type PendingRename = { name: string; renamedAt: number };
+
+/**
+ * Flat, SINGLE-ACCOUNT view: `{ [profileId]: PendingRename }` — what
+ * profileRegistrySync.ts's computeProfilesToRename/selectServerRenamesToApply
+ * consume, already scoped to ONE account by getPendingProfileRenames below.
+ */
 export type PendingRenames = Record<string, PendingRename>;
 
-function readPendingRenames(): PendingRenames {
+/**
+ * Codex account-isolation fix — raw on-disk shape:
+ * `{ [profileId]: { [accountKey]: PendingRename } }`, mirroring
+ * ProfileRegistryState's own per-`(profileId, accountKey)` provenance model
+ * (applyProfileOwnerStamp/applyLocalDeletionMarker above) for the IDENTICAL
+ * reason. Before this fix, the marker was keyed by profileId ALONE: account
+ * A renaming `default` on a shared browser wrote a single global
+ * `{ default: { name, renamedAt } }` entry with no account attached, so
+ * account B signing into the SAME browser afterward had its own
+ * reconcileProfileRegistry round read `getPendingProfileRenames()` and see
+ * A's marker as if it were B's OWN pending rename — B's round could then
+ * PUSH A's unconfirmed name to B's account's server row
+ * (computeProfilesToRename), and on success CLEAR A's marker entirely
+ * (clearProfileRenamePending), losing A's own rename with no way to retry
+ * it once A signs back in. This is especially likely for the canonical
+ * `default` id, which every account shares. Keying by `(profileId,
+ * accountKey)` instead means B's round only ever reads/writes `state[id][B]`
+ * — it can never observe, push, confirm, or clear A's own `state[id][A]`
+ * entry, so signing back in as A finds A's original marker untouched and
+ * still eligible for retry.
+ *
+ * `accountKey` is a real authenticated userId, or the shared
+ * UNOWNED_ACCOUNT_KEY sentinel for a rename made while signed out — inert
+ * for push purposes (reconcileProfileRegistry only ever runs authenticated,
+ * so nothing ever reads the UNOWNED bucket), kept only so a signed-out
+ * rename's bookkeeping follows the SAME structural shape as every other
+ * writer here rather than a special-cased one-off.
+ */
+type PendingRenamesByAccount = Record<string, Record<string, PendingRename>>;
+
+function readPendingRenamesByAccount(): PendingRenamesByAccount {
   if (typeof window === "undefined") return {};
   try {
     const raw = localStorage.getItem(PENDING_RENAMES_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const out: PendingRenames = {};
-    for (const [id, entry] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!entry || typeof entry !== "object") continue;
-      const e = entry as Record<string, unknown>;
-      if (typeof e.name === "string" && typeof e.renamedAt === "number") {
-        out[id] = { name: e.name, renamedAt: e.renamedAt };
+    const out: PendingRenamesByAccount = {};
+    for (const [profileId, byAccount] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!byAccount || typeof byAccount !== "object" || Array.isArray(byAccount)) continue;
+      const accounts: Record<string, PendingRename> = {};
+      for (const [accountKey, entry] of Object.entries(byAccount as Record<string, unknown>)) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as Record<string, unknown>;
+        if (typeof e.name === "string" && typeof e.renamedAt === "number") {
+          accounts[accountKey] = { name: e.name, renamedAt: e.renamedAt };
+        }
       }
+      if (Object.keys(accounts).length > 0) out[profileId] = accounts;
     }
     return out;
   } catch {
@@ -2880,52 +2922,316 @@ function readPendingRenames(): PendingRenames {
   }
 }
 
-function writePendingRenames(state: PendingRenames): void {
+function writePendingRenamesByAccount(state: PendingRenamesByAccount): void {
   try {
     localStorage.setItem(PENDING_RENAMES_KEY, JSON.stringify(state));
   } catch {}
 }
 
 /**
- * Read every profile id whose local name has not yet been confirmed as
- * pushed to the server's registry — see PENDING_RENAMES_KEY's own doc.
- * Passed to profileRegistrySync.ts's computeProfilesToRename/
- * selectServerRenamesToApply as plain input data.
+ * Pure state transition: record `accountKey`'s own pending rename for
+ * `profileId`, returning the updated state. Never touches any OTHER
+ * account's own entry for the same profileId — mirrors
+ * applyProfileOwnerStamp/applyLocalDeletionMarker's own single-account
+ * write guarantee above, for the identical account-isolation reason.
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_PENDING_RENAME_CASES, applyPendingRename } from "@/lib/profileStorage";
+ *   DEV_APPLY_PENDING_RENAME_CASES.forEach(c => {
+ *     const got = applyPendingRename(c.state, c.profileId, c.accountKey, c.renameName, c.renamedAt);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
  */
-export function getPendingProfileRenames(): PendingRenames {
-  return readPendingRenames();
+export function applyPendingRename(
+  state: PendingRenamesByAccount,
+  profileId: string,
+  accountKey: string,
+  renameName: string,
+  renamedAt: number
+): PendingRenamesByAccount {
+  return {
+    ...state,
+    [profileId]: { ...state[profileId], [accountKey]: { name: renameName, renamedAt } },
+  };
+}
+
+export const DEV_APPLY_PENDING_RENAME_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  profileId: string;
+  accountKey: string;
+  renameName: string;
+  renamedAt: number;
+  expected: PendingRenamesByAccount;
+}> = [
+  {
+    name: "recording a pending rename for a fresh profile id",
+    state: {},
+    profileId: "default",
+    accountKey: "userA",
+    renameName: "A's Family Trip",
+    renamedAt: 1,
+    expected: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+  },
+  {
+    name: "Codex account-isolation fix — A and B can each independently hold their own pending rename for the identical literal id",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userB",
+    renameName: "B's Family Trip",
+    renamedAt: 2,
+    expected: {
+      default: {
+        userA: { name: "A's Family Trip", renamedAt: 1 },
+        userB: { name: "B's Family Trip", renamedAt: 2 },
+      },
+    },
+  },
+  {
+    name: "a later rename by the SAME account overwrites only its own entry",
+    state: { default: { userA: { name: "Old Name", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userA",
+    renameName: "Newer Name",
+    renamedAt: 2,
+    expected: { default: { userA: { name: "Newer Name", renamedAt: 2 } } },
+  },
+];
+
+/**
+ * Pure query: project `state` down to `accountKey`'s OWN pending renames
+ * only — a DIFFERENT account's own entry for the same profileId is never
+ * included, so it can never be observed (and therefore never pushed,
+ * confirmed, or cleared) by `accountKey`'s reconciliation round. Returns
+ * the flat, single-account PendingRenames shape
+ * profileRegistrySync.ts's computeProfilesToRename/selectServerRenamesToApply
+ * already expect.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_PENDING_RENAMES_FOR_ACCOUNT_CASES, selectPendingRenamesForAccount } from "@/lib/profileStorage";
+ *   DEV_SELECT_PENDING_RENAMES_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = selectPendingRenamesForAccount(c.state, c.accountKey);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectPendingRenamesForAccount(state: PendingRenamesByAccount, accountKey: string): PendingRenames {
+  const out: PendingRenames = {};
+  for (const [profileId, byAccount] of Object.entries(state)) {
+    const entry = byAccount[accountKey];
+    if (entry) out[profileId] = entry;
+  }
+  return out;
+}
+
+export const DEV_SELECT_PENDING_RENAMES_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  accountKey: string;
+  expected: PendingRenames;
+}> = [
+  {
+    name: "empty state — nothing pending for anyone",
+    state: {},
+    accountKey: "userA",
+    expected: {},
+  },
+  {
+    name: "Codex account-isolation fix — B's own view never includes A's pending rename for the same id, even for the canonical 'default' id",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    accountKey: "userB",
+    expected: {},
+  },
+  {
+    name: "the originating account's own view still sees its pending rename",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    accountKey: "userA",
+    expected: { default: { name: "A's Family Trip", renamedAt: 1 } },
+  },
+  {
+    name: "each account's own view reflects only its own independent renames, across multiple ids",
+    state: {
+      default: { userA: { name: "A's Family Trip", renamedAt: 1 }, userB: { name: "B's Family Trip", renamedAt: 2 } },
+      mom: { userA: { name: "Mom (renamed)", renamedAt: 3 } },
+    },
+    accountKey: "userA",
+    expected: {
+      default: { name: "A's Family Trip", renamedAt: 1 },
+      mom: { name: "Mom (renamed)", renamedAt: 3 },
+    },
+  },
+];
+
+/**
+ * Pure state transition: clear ONLY `accountKey`'s own pending-rename
+ * marker for `profileId`, and only when it still matches `confirmedName` —
+ * mirrors this module's established "commit-time re-check" discipline
+ * (clearLocalDeletionMarkerForAccount's analogous single-account clear;
+ * see clearProfileRenamePending's own doc for why the name-match check
+ * itself matters). Leaves every OTHER account's own entry for the
+ * identical profileId completely untouched — this is precisely what makes
+ * it structurally impossible for account B's reconciliation round to clear
+ * account A's own pending rename, since B's round only ever calls this
+ * with `accountKey` equal to B's own userId.
+ *
+ * Run from Node:
+ *   import { DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES, clearPendingRenameForAccount } from "@/lib/profileStorage";
+ *   DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = clearPendingRenameForAccount(c.state, c.profileId, c.accountKey, c.confirmedName);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function clearPendingRenameForAccount(
+  state: PendingRenamesByAccount,
+  profileId: string,
+  accountKey: string,
+  confirmedName: string
+): PendingRenamesByAccount {
+  const entry = state[profileId]?.[accountKey];
+  if (!entry || entry.name !== confirmedName) return state;
+  const byAccount = { ...state[profileId] };
+  delete byAccount[accountKey];
+  const next = { ...state };
+  if (Object.keys(byAccount).length === 0) delete next[profileId];
+  else next[profileId] = byAccount;
+  return next;
+}
+
+export const DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  profileId: string;
+  accountKey: string;
+  confirmedName: string;
+  expected: PendingRenamesByAccount;
+}> = [
+  {
+    name: "confirmed rename matching the pending marker clears it",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userA",
+    confirmedName: "A's Family Trip",
+    expected: {},
+  },
+  {
+    name: "Codex account-isolation fix — B can never clear A's own pending rename, even by coincidentally confirming the exact same name A is pending",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userB",
+    confirmedName: "A's Family Trip",
+    expected: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+  },
+  {
+    name: "a mismatched confirmed name (a newer local edit superseded it) leaves the marker standing for the next round",
+    state: { default: { userA: { name: "Even Newer Name", renamedAt: 2 } } },
+    profileId: "default",
+    accountKey: "userA",
+    confirmedName: "A's Family Trip",
+    expected: { default: { userA: { name: "Even Newer Name", renamedAt: 2 } } },
+  },
+  {
+    name: "clearing one account's entry preserves a different account's own independent entry for the identical id",
+    state: {
+      default: {
+        userA: { name: "A's Family Trip", renamedAt: 1 },
+        userB: { name: "B's Family Trip", renamedAt: 2 },
+      },
+    },
+    profileId: "default",
+    accountKey: "userA",
+    confirmedName: "A's Family Trip",
+    expected: { default: { userB: { name: "B's Family Trip", renamedAt: 2 } } },
+  },
+];
+
+/**
+ * Composed end-to-end regression: the exact A -> B -> A shared-device
+ * scenario the account-isolation fix targets. A renames a profile
+ * (canonical `default` included); B signs into the SAME browser and must
+ * never see A's pending rename, and any attempt by B's own round to
+ * "confirm" it (even coincidentally matching A's own new name) must never
+ * clear it; switching back to A must find the original marker completely
+ * untouched, still eligible for A's own next reconciliation round to push
+ * and confirm.
+ *
+ * Run from Node:
+ *   import { DEV_PENDING_RENAME_ACCOUNT_ISOLATION_CASES, applyPendingRename, selectPendingRenamesForAccount, clearPendingRenameForAccount } from "@/lib/profileStorage";
+ *   DEV_PENDING_RENAME_ACCOUNT_ISOLATION_CASES.forEach(c => {
+ *     let state = applyPendingRename({}, c.profileId, c.originatingAccountKey, c.originatingName, 1);
+ *     const bView = selectPendingRenamesForAccount(state, c.otherAccountKey);
+ *     const bViewEmpty = Object.keys(bView).length === 0;
+ *     const afterBAttemptsClear = clearPendingRenameForAccount(state, c.profileId, c.otherAccountKey, c.originatingName);
+ *     const aUntouchedAfterB = JSON.stringify(afterBAttemptsClear) === JSON.stringify(state);
+ *     const aViewAfterSwitchBack = selectPendingRenamesForAccount(afterBAttemptsClear, c.originatingAccountKey);
+ *     const aStillPending = aViewAfterSwitchBack[c.profileId]?.name === c.originatingName;
+ *     const ok = bViewEmpty && aUntouchedAfterB && aStillPending;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_RENAME_ACCOUNT_ISOLATION_CASES: Array<{
+  name: string;
+  profileId: string;
+  originatingAccountKey: string;
+  originatingName: string;
+  otherAccountKey: string;
+}> = [
+  {
+    name: "Codex account-isolation fix — A renames canonical `default` on a shared browser; B signs in next and must not see, push, confirm, or clear A's pending rename; switching back to A preserves it for retry",
+    profileId: "default",
+    originatingAccountKey: "userA",
+    originatingName: "A's Family Trip",
+    otherAccountKey: "userB",
+  },
+  {
+    name: "same isolation guarantee for an ordinary (non-canonical) profile id",
+    profileId: "family",
+    originatingAccountKey: "userA",
+    originatingName: "The Smiths",
+    otherAccountKey: "userB",
+  },
+];
+
+/**
+ * Read `currentOwnerUserId`'s OWN pending renames only — see
+ * PendingRenamesByAccount/selectPendingRenamesForAccount's own docs for the
+ * account-isolation this enforces. Passed to profileRegistrySync.ts's
+ * computeProfilesToRename/selectServerRenamesToApply as plain input data.
+ */
+export function getPendingProfileRenames(currentOwnerUserId: string): PendingRenames {
+  return selectPendingRenamesForAccount(readPendingRenamesByAccount(), currentOwnerUserId);
 }
 
 /**
- * Record `profileId` as needing its current `name` pushed to the server.
- * Serialized against every other pending-renames writer via its own lock
- * (a separate key from `dwp.profiles`/`dwp.profileRegistryState`, so a
- * rename's own bookkeeping never contends with either of those).
+ * Record `profileId` as needing its current `name` pushed to the server,
+ * scoped to `accountKey` (a real authenticated userId, or
+ * UNOWNED_ACCOUNT_KEY when signed out — see renameProfile's own call
+ * below). Serialized against every other pending-renames writer via its
+ * own lock (a separate key from `dwp.profiles`/`dwp.profileRegistryState`,
+ * so a rename's own bookkeeping never contends with either of those).
  */
-function markProfileRenamePending(profileId: string, name: string): Promise<void> {
+function markProfileRenamePending(profileId: string, name: string, accountKey: string): Promise<void> {
   return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
-    const state = readPendingRenames();
-    writePendingRenames({ ...state, [profileId]: { name, renamedAt: Date.now() } });
+    const state = readPendingRenamesByAccount();
+    writePendingRenamesByAccount(applyPendingRename(state, profileId, accountKey, name, Date.now()));
   });
 }
 
 /**
- * Clear `profileId`'s pending-rename marker, but ONLY when it still matches
- * `confirmedName` — a fresh, commit-time re-check (mirrors this module's
- * established "read again right before acting" pattern —
- * commitDiscoveredProfiles in profileRegistrySync.ts) so a NEWER rename that
- * landed after this round's push was sent, but before this clear runs, is
- * never mistaken for confirmed and is left standing for the NEXT round to
- * push and confirm on its own.
+ * Clear `accountKey`'s own pending-rename marker for `profileId`, but ONLY
+ * when it still matches `confirmedName` — a fresh, commit-time re-check
+ * (mirrors this module's established "read again right before acting"
+ * pattern — commitDiscoveredProfiles in profileRegistrySync.ts) so a NEWER
+ * rename that landed after this round's push was sent, but before this
+ * clear runs, is never mistaken for confirmed and is left standing for the
+ * NEXT round to push and confirm on its own. Scoped to `accountKey` — see
+ * clearPendingRenameForAccount's own doc for why this is what makes it
+ * structurally impossible for one account's round to clear another
+ * account's own pending rename.
  */
-export function clearProfileRenamePending(profileId: string, confirmedName: string): Promise<void> {
+export function clearProfileRenamePending(profileId: string, confirmedName: string, accountKey: string): Promise<void> {
   return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
-    const state = readPendingRenames();
-    const entry = state[profileId];
-    if (!entry || entry.name !== confirmedName) return;
-    const next = { ...state };
-    delete next[profileId];
-    writePendingRenames(next);
+    const state = readPendingRenamesByAccount();
+    const next = clearPendingRenameForAccount(state, profileId, accountKey, confirmedName);
+    if (next !== state) writePendingRenamesByAccount(next);
   });
 }
 
@@ -2952,15 +3258,26 @@ export function clearProfileRenamePending(profileId: string, confirmedName: stri
  * reconfirmed server read matches, exactly mirroring how a brand-new
  * profile's own registration already self-retries every round via
  * computeProfilesToAdopt's fresh "unknown to server" recomputation.
+ *
+ * Codex account-isolation fix — takes `currentOwnerUserId` (mirrors
+ * createProfile/deleteProfile's own signature: a real authenticated userId,
+ * or `null` when signed out, scoped internally to the shared
+ * UNOWNED_ACCOUNT_KEY sentinel) so the pending-rename marker this call
+ * records is scoped to the ACCOUNT THAT MADE THE RENAME, never a bare
+ * profileId a different account's reconciliation round could otherwise
+ * read, push, confirm, or clear — see PendingRenamesByAccount's own doc for
+ * the full rationale. Settings' handleRenameProfile passes its own
+ * `authenticatedUserId`.
  */
-export function renameProfile(id: string, name: string): Promise<void> {
+export function renameProfile(id: string, name: string, currentOwnerUserId: string | null = null): Promise<void> {
   const trimmed = sanitizeProfileName(name);
   if (!trimmed) return Promise.resolve();
+  const scopeKey = currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY;
   return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
     const profiles = getProfiles();
     const updated = profiles.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
     writeProfiles(updated);
-  }).then(() => markProfileRenamePending(id, trimmed));
+  }).then(() => markProfileRenamePending(id, trimmed, scopeKey));
 }
 
 /**
