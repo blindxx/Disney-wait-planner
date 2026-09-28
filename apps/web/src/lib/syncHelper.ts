@@ -4986,6 +4986,13 @@ export function setSyncProfileId(profileId: string): void {
   if (profileId === currentSyncProfileId) return;
   // Profile changed — cancel any pending work for the old profile.
   cancelScheduledSync();
+  // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE profile
+  // change (unlike the same-identity namespace switch resetSyncPlansQualified()
+  // handles above) must also cancel any already-deferred retry: see
+  // cancelDeferredPushRetry()'s own doc for why a captured snapshot naming
+  // the OUTGOING profile must never fire once the profile this device is
+  // targeting has actually changed.
+  cancelDeferredPushRetry();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncProfileId = profileId;
   currentPullEpoch += 1;
@@ -5023,6 +5030,14 @@ export function setSyncUserId(userId: string | null): void {
   resetSyncPlansQualified();
   if (userId === currentSyncUserId) return;
   cancelScheduledSync();
+  // SH.4.1 Plans-migration Codex P1 fix (5th round) — a GENUINE user
+  // change (sign-out, sign-in, or A -> B) must also cancel any
+  // already-deferred retry: see cancelDeferredPushRetry()'s own doc for
+  // why a captured snapshot naming the OUTGOING identity must never fire
+  // once the session this device is targeting has actually changed — it
+  // would read that outgoing identity's own qualified local storage while
+  // the request itself authenticates via the NEW session's cookie.
+  cancelDeferredPushRetry();
   clearStaleSyncingStatus(currentSyncProfileId);
   currentSyncUserId = userId;
   currentPullEpoch += 1;
@@ -5417,6 +5432,39 @@ export function cancelScheduledSync(): void {
   if (debounceTimer !== null) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
+  }
+}
+
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (5th round) — "A deferred push retry
+ * must not survive a genuine authenticated user/profile identity
+ * transition." Cancels any pending deferred/in-flight-retry push (see
+ * `deferredPushRetryTimer`'s own doc) — NOT exported: called ONLY from
+ * setSyncProfileId()/setSyncUserId()'s own genuine-change branches below,
+ * never from resetSyncPlansQualified()/applySyncPlansQualifiedTransition()
+ * (which handle the SAME-identity Plans<->Lightning namespace switch,
+ * where a deferred retry's captured snapshot is still valid for the
+ * account it belongs to and must be left running untouched — see that
+ * function's own doc).
+ *
+ * Root cause this closes: round 4 correctly isolated a deferred retry from
+ * an UNRELATED page's ordinary scheduleSync() call, but that same
+ * isolation let it survive a GENUINE user or profile change too — round
+ * 3's captured (profileId, userId, plansQualified) snapshot only controls
+ * which LOCAL storage keys doPush() reads; it does nothing to the actual
+ * network request's credentials, which are the browser's CURRENT session
+ * cookie at fetch time. A retry captured for identity A, still pending
+ * when the session transitions to B, would build its payload from A's own
+ * qualified local storage but send it authenticated as B — silently
+ * attributing A's local content to B's account server-side. Cancelling
+ * here, before the new identity/profile is ever assigned, closes that gap
+ * the same way an ordinary (non-deferred) scheduled push already was
+ * protected by cancelScheduledSync() at this exact boundary.
+ */
+function cancelDeferredPushRetry(): void {
+  if (deferredPushRetryTimer !== null) {
+    clearTimeout(deferredPushRetryTimer);
+    deferredPushRetryTimer = null;
   }
 }
 
@@ -6377,8 +6425,25 @@ export type PushSchedulingSlots = {
 export type PushSchedulingOperation =
   | { kind: "scheduleSync"; token: string }
   | { kind: "cancelScheduledSync" }
-  | { kind: "deferPushRetry"; token: string };
+  | { kind: "deferPushRetry"; token: string }
+  | { kind: "genuineIdentityChange"; via: "user" | "profile" };
 
+/**
+ * SH.4.1 Plans-migration Codex P1 fix (5th round) — "A deferred push retry
+ * must not survive a genuine authenticated user/profile identity
+ * transition." `"genuineIdentityChange"` mirrors setSyncProfileId()'s/
+ * setSyncUserId()'s own genuine-change branch (AFTER the early return that
+ * makes an ordinary same-identity re-call a no-op — see resetSyncPlansQualified()'s
+ * own doc for why THAT case, the Plans<->Lightning namespace switch,
+ * deliberately does NOT reach this operation and must leave
+ * deferredRetrySlot untouched): it clears BOTH slots — cancelScheduledSync()
+ * (debounceSlot) plus the new cancelDeferredPushRetry() (deferredRetrySlot)
+ * — since a snapshot captured for the OUTGOING identity/profile must never
+ * fire once the identity/profile this device targets has actually changed.
+ * `via` is documentary only (which real function's own genuine-change
+ * branch this represents); both axes clear identically, matching
+ * setSyncProfileId()'s and setSyncUserId()'s own identical implementations.
+ */
 export function applyPushSchedulingOperation(
   state: PushSchedulingSlots,
   op: PushSchedulingOperation
@@ -6393,6 +6458,10 @@ export function applyPushSchedulingOperation(
     case "deferPushRetry":
       // Mirrors doPush()'s own inFlight-retry: writes ONLY deferredRetrySlot.
       return { ...state, deferredRetrySlot: op.token };
+    case "genuineIdentityChange":
+      // Mirrors setSyncProfileId()'s/setSyncUserId()'s own genuine-change
+      // branch (5th round): clears BOTH slots.
+      return { debounceSlot: null, deferredRetrySlot: null };
   }
 }
 
@@ -6437,6 +6506,24 @@ export const DEV_APPLY_PUSH_SCHEDULING_OPERATION_CASES: Array<{
     initialState: { debounceSlot: null, deferredRetrySlot: "retry-1" },
     operations: [{ kind: "deferPushRetry", token: "retry-2" }],
     expected: { debounceSlot: null, deferredRetrySlot: "retry-2" },
+  },
+  {
+    name: "REGRESSION CASE (5th round) — a genuine USER identity change (sign-out, sign-in, or account A -> B) cancels an already-deferred retry: its captured snapshot names the OUTGOING user, and firing it later would read that user's own qualified local storage while the request authenticates via the NEW session's cookie",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+    operations: [{ kind: "genuineIdentityChange", via: "user" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "REGRESSION CASE (5th round) — a genuine PROFILE identity change (switching the local active profile, same account) equally cancels an already-deferred retry — same cross-identity risk, on the profile axis",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=profileA)" },
+    operations: [{ kind: "genuineIdentityChange", via: "profile" }],
+    expected: { debounceSlot: null, deferredRetrySlot: null },
+  },
+  {
+    name: "same user/profile Plans -> Lightning namespace switch (an ORDINARY cancelScheduledSync, via resetSyncPlansQualified()/applySyncPlansQualifiedTransition() — NOT a genuine identity change) preserves an already-deferred retry untouched, exactly as round 4 established",
+    initialState: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
+    operations: [{ kind: "cancelScheduledSync" }],
+    expected: { debounceSlot: null, deferredRetrySlot: "plans-qualified-retry(snapshot=userA)" },
   },
 ];
 
