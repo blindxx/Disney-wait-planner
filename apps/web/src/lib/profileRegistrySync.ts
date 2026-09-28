@@ -131,8 +131,14 @@
  * settings/page.tsx), it does NOT need an unmount-time
  * setRegistryIdentity(null) of its own: advanceRegistryIdentity already
  * bumps the epoch on every actual identity transition (including through
- * null on sign-out), which is the only event that can legitimately
- * invalidate an in-flight round — see advanceRegistryIdentity's own doc.
+ * null on sign-out), which is the only event that can invalidate an
+ * in-flight round via the IDENTITY epoch — see advanceRegistryIdentity's
+ * own doc. (Codex finding #2 — a SEPARATE, round-sequencing guard also
+ * invalidates an in-flight round when a NEWER round for the SAME identity
+ * has started since, independent of any identity transition — see the
+ * "RECONCILIATION-ROUND STALE-RUN GUARD" section further below for why
+ * that gap existed and how it's closed; it does not change anything about
+ * this guard's own identity-transition responsibility described here.)
  * settings/page.tsx still calls reconcileProfileRegistry() itself (for a
  * prompt UI refresh while the page is open), but — Codex P1 fix — it must
  * NOT also call setRegistryIdentity() any more: since it no longer owns the
@@ -158,6 +164,7 @@ import {
   applyPendingRename,
   selectPendingRenamesForAccount,
   clearPendingRenameForAccount,
+  discardPendingRenameForAccount,
   mergeProfileRenames,
 } from "./profileStorage";
 import { validateProfileName, MAX_PROFILES_PER_ADOPTION_REQUEST } from "./syncIdentity";
@@ -878,6 +885,62 @@ export const DEV_PENDING_RENAME_CLEARED_WITHOUT_PUSH_CASES: Array<{
 ];
 
 /**
+ * Codex finding #3 — composed end-to-end regression: delete a profile with
+ * an unconfirmed pending rename, then recreate a DIFFERENT profile that
+ * lands on the IDENTICAL normalized id (createProfile's own deterministic
+ * normalizeId()), and prove the next reconciliation round proposes nothing
+ * to push for it — the deleted profile's stale rename marker must not be
+ * mistaken for a genuine pending rename of its successor. Exercises the
+ * SAME pure functions deleteProfile/createProfile/reconcileProfileRegistry
+ * themselves call (profileStorage.ts's discardPendingRenameForAccount, this
+ * module's own computeProfilesToRename), not just the isolated marker
+ * helper.
+ *
+ * Run from Node:
+ *   import { DEV_STALE_RENAME_DISCARDED_ON_DELETE_RECREATE_CASES, computeProfilesToRename } from "@/lib/profileRegistrySync";
+ *   import { applyPendingRename, discardPendingRenameForAccount, selectPendingRenamesForAccount } from "@/lib/profileStorage";
+ *   DEV_STALE_RENAME_DISCARDED_ON_DELETE_RECREATE_CASES.forEach(c => {
+ *     // The original profile is renamed but the push never confirms before it's deleted.
+ *     let pendingState = applyPendingRename({}, c.profileId, c.accountKey, c.staleRenameName, 1);
+ *     // deleteProfile discards this account's own marker for it, unconditionally.
+ *     pendingState = discardPendingRenameForAccount(pendingState, c.profileId, c.accountKey);
+ *     // A later createProfile lands a DIFFERENT, brand-new profile on the identical normalized id.
+ *     const recreatedLocalProfiles = [{ id: c.profileId, name: c.recreatedProfileName }];
+ *     const pendingForAccount = selectPendingRenamesForAccount(pendingState, c.accountKey);
+ *     // The next reconciliation round must propose NOTHING to push for this id —
+ *     // no marker survived to push the stale name onto the new profile.
+ *     const toRename = computeProfilesToRename(c.serverProfiles, recreatedLocalProfiles, pendingForAccount, new Set());
+ *     const ok = Object.keys(pendingForAccount).length === 0 && toRename.length === 0;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_STALE_RENAME_DISCARDED_ON_DELETE_RECREATE_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  staleRenameName: string;
+  recreatedProfileName: string;
+  serverProfiles: ServerProfileRecord[];
+}> = [
+  {
+    name: "Codex finding #3 — a rename pending at delete time never resurfaces to rename the profile later recreated under the same id",
+    profileId: "family",
+    accountKey: "userA",
+    staleRenameName: "The Smiths (never confirmed, then deleted)",
+    recreatedProfileName: "The Garcias",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+  },
+  {
+    name: "same guarantee when the recreated profile happens to be given the EXACT SAME display name as the stale rename — still nothing pending, still nothing to push, since the new create's own name flows through computeProfilesToAdopt/normal push, not a leftover marker",
+    profileId: "family",
+    accountKey: "userA",
+    staleRenameName: "The Smiths",
+    recreatedProfileName: "The Smiths",
+    serverProfiles: [],
+  },
+];
+
+/**
  * Filters `candidates` down to entries whose name satisfies
  * syncIdentity.ts's shared MAX_PROFILE_NAME_LENGTH constraint, dropping any
  * individual entry that doesn't (Codex P2 follow-up) — never failing the
@@ -961,7 +1024,11 @@ export const DEV_FILTER_ADOPTABLE_PROFILES_CASES: Array<{
  * filterAdoptableProfiles's job) or impose any smaller cap of its own;
  * every candidate is still sent, just across as many requests as needed.
  *
- * Pure — takes every input as a parameter.
+ * Pure — takes every input as a parameter. Generic over `T` (Codex finding
+ * #1) purely so the SAME chunking logic batches both plain adopt candidates
+ * and the richer `{ ...Profile, intent }` entries reconcileProfileRegistry
+ * now also sends for rename pushes — no behavioral difference for either
+ * shape.
  *
  * Run from Node:
  *   import { DEV_BATCH_PROFILES_FOR_ADOPTION_CASES, batchProfilesForAdoption } from "@/lib/profileRegistrySync";
@@ -970,9 +1037,9 @@ export const DEV_FILTER_ADOPTABLE_PROFILES_CASES: Array<{
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export function batchProfilesForAdoption(toAdopt: Profile[]): Profile[][] {
+export function batchProfilesForAdoption<T>(toAdopt: T[]): T[][] {
   if (toAdopt.length === 0) return [];
-  const batches: Profile[][] = [];
+  const batches: T[][] = [];
   for (let i = 0; i < toAdopt.length; i += MAX_PROFILES_PER_ADOPTION_REQUEST) {
     batches.push(toAdopt.slice(i, i + MAX_PROFILES_PER_ADOPTION_REQUEST));
   }
@@ -1047,9 +1114,9 @@ export const DEV_BATCH_PROFILES_FOR_ADOPTION_CASES: Array<{
  *     console.log(ok ? "✓" : "✗ FAIL", c.name);
  *   }
  */
-export async function sendAdoptionBatches(
-  batches: Profile[][],
-  sendBatch: (batch: Profile[]) => Promise<void>,
+export async function sendAdoptionBatches<T>(
+  batches: T[][],
+  sendBatch: (batch: T[]) => Promise<void>,
   isCurrent: () => boolean
 ): Promise<boolean> {
   for (const batch of batches) {
@@ -1357,6 +1424,162 @@ export const DEV_STALE_RUN_GUARD_CASES: Array<{
     expectedStillCurrent: false,
   },
 ];
+
+// ===== RECONCILIATION-ROUND STALE-RUN GUARD (Codex finding #2) =====
+//
+// isRegistryRunCurrent above catches an IDENTITY transition (A -> B, or
+// A -> signed-out) invalidating an in-flight round — but setRegistryIdentity
+// is a deliberate NO-OP when the identity does not actually change (see its
+// own doc: this is what lets a page re-render or remount under the SAME
+// user without spuriously invalidating other in-flight work). That no-op is
+// exactly the gap this closes: TWO overlapping reconcileProfileRegistry
+// calls for the SAME account — e.g. the global SessionProviderWrapper guard
+// and Settings' own page-local effect both firing around the same session
+// resolution, or a rename immediately followed by another trigger before
+// the first round's own network round-trips resolve — share the IDENTICAL
+// captured epoch throughout, so isRegistryRunCurrent alone cannot tell an
+// OLDER round apart from a NEWER one for the same identity. Without this,
+// an older round's own stale `authoritativeServerProfiles` snapshot could
+// resolve AFTER a newer round already applied a fresher one, and its own
+// final pull-application step (applyServerRenames) would silently restore
+// the older, already-superseded name locally.
+//
+// A plain, pure monotonic counter — NOT a revision/conflict engine, exactly
+// like the identity epoch above: it answers only "has a NEWER round started
+// since I began", never anything about what to merge.
+
+/**
+ * Pure staleness check: a round captured under `capturedRoundId` may still
+ * act only while no NEWER round (`latestRoundId`) has started since —
+ * mirrors isRegistryRunCurrent's own shape, one level down (round
+ * sequencing rather than identity). A later round for a DIFFERENT identity
+ * is already caught by isRegistryRunCurrent, so this check needs no
+ * identity awareness of its own — it fires equally for a same-identity or
+ * cross-identity newer round, which is harmless: either way, an OLDER round
+ * has no business committing its own stale snapshot once ANY newer round
+ * has begun.
+ *
+ * Run from Node:
+ *   import { DEV_RECONCILIATION_ROUND_STALE_GUARD_CASES, isReconciliationRoundCurrent } from "@/lib/profileRegistrySync";
+ *   DEV_RECONCILIATION_ROUND_STALE_GUARD_CASES.forEach(c => {
+ *     const got = isReconciliationRoundCurrent(c.latestRoundId, c.capturedRoundId);
+ *     console.log(got === c.expectedStillCurrent ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isReconciliationRoundCurrent(latestRoundId: number, capturedRoundId: number): boolean {
+  return capturedRoundId === latestRoundId;
+}
+
+export const DEV_RECONCILIATION_ROUND_STALE_GUARD_CASES: Array<{
+  name: string;
+  capturedRoundId: number;
+  latestRoundId: number;
+  expectedStillCurrent: boolean;
+}> = [
+  {
+    name: "no newer round has started since this one began — still current",
+    capturedRoundId: 1,
+    latestRoundId: 1,
+    expectedStillCurrent: true,
+  },
+  {
+    name: "Codex finding #2 — a NEWER round (same or different identity) started after this one — this older round is stale",
+    capturedRoundId: 1,
+    latestRoundId: 2,
+    expectedStillCurrent: false,
+  },
+  {
+    name: "a round several generations behind the latest is still correctly stale",
+    capturedRoundId: 1,
+    latestRoundId: 5,
+    expectedStillCurrent: false,
+  },
+];
+
+/**
+ * Codex finding #2 — composed end-to-end regression: two overlapping
+ * SAME-ACCOUNT reconciliation rounds, where the OLDER round's own
+ * confirmatory work resolves AFTER the NEWER round has already applied its
+ * own (fresher) pull to the ONE shared local profile list. Proves the
+ * older round's own stale snapshot is never applied once round-sequencing
+ * marks it non-current — exercising the actual pull-application primitives
+ * reconcileProfileRegistry itself calls (this module's own
+ * selectServerRenamesToApply, profileStorage.ts's mergeProfileRenames), not
+ * just the isolated isReconciliationRoundCurrent guard above.
+ *
+ * Run from Node:
+ *   import { DEV_STALE_ROUND_NEVER_APPLIES_CASES, selectServerRenamesToApply, isReconciliationRoundCurrent } from "@/lib/profileRegistrySync";
+ *   import { mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_STALE_ROUND_NEVER_APPLIES_CASES.forEach(c => {
+ *     let profiles = c.initialProfiles;
+ *
+ *     // Round 1 starts (captures roundId 1) and computes its OWN
+ *     // authoritative snapshot from whatever the server showed AT THAT TIME.
+ *     const round1RoundId = 1;
+ *
+ *     // Round 2 starts (captures roundId 2 — now the latest) and runs to
+ *     // completion FIRST, applying its own fresher snapshot to the shared list.
+ *     const round2RoundId = 2;
+ *     const latestRoundIdAfterRound2 = round2RoundId;
+ *     const round2Pulls = selectServerRenamesToApply(c.round2AuthoritativeServerProfiles, profiles, new Set());
+ *     profiles = mergeProfileRenames(profiles, round2Pulls);
+ *     const nameAfterRound2 = profiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // Round 1 finally reaches its own final pull-application checkpoint —
+ *     // but a newer round (round 2) has since started, so it must skip.
+ *     const round1StillCurrent = isReconciliationRoundCurrent(latestRoundIdAfterRound2, round1RoundId);
+ *     if (round1StillCurrent) {
+ *       const round1Pulls = selectServerRenamesToApply(c.round1AuthoritativeServerProfiles, profiles, new Set());
+ *       profiles = mergeProfileRenames(profiles, round1Pulls);
+ *     }
+ *     const nameAfterRound1Checkpoint = profiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     const ok =
+ *       nameAfterRound2 === c.expectedNameAfterRound2 &&
+ *       round1StillCurrent === false &&
+ *       nameAfterRound1Checkpoint === c.expectedNameAfterRound2; // unchanged — round 1's stale pull never applied
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_STALE_ROUND_NEVER_APPLIES_CASES: Array<{
+  name: string;
+  profileId: string;
+  initialProfiles: Profile[];
+  round1AuthoritativeServerProfiles: ServerProfileRecord[];
+  round2AuthoritativeServerProfiles: ServerProfileRecord[];
+  expectedNameAfterRound2: string;
+}> = [
+  {
+    name: "Codex finding #2 — an older round's stale server-name snapshot never overwrites a newer round's already-applied fresher name",
+    profileId: "default",
+    initialProfiles: [{ id: "default", name: "Default" }],
+    // Round 1's OWN view, captured before round 2 ever ran — already stale by the time round 1 gets to act.
+    round1AuthoritativeServerProfiles: [
+      { profileId: "default", name: "Renamed On Another Device (mid-flight)", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    // Round 2's fresher, later view — this is the name that must survive.
+    round2AuthoritativeServerProfiles: [
+      { profileId: "default", name: "Renamed Again, Even Newer", updatedAt: "2026-01-02T00:00:00.000Z", deletedAt: null },
+    ],
+    expectedNameAfterRound2: "Renamed Again, Even Newer",
+  },
+];
+
+let latestReconciliationRoundId = 0;
+
+/**
+ * Starts a new reconciliation round: increments and returns the new
+ * latest-round id, which reconcileProfileRegistry captures for the
+ * lifetime of that one call. Called ONLY after the identity check already
+ * passed (see reconcileProfileRegistry's own early `return` above it), so
+ * a call that never even attempts a round (wrong/stale identity) can never
+ * spuriously bump this counter and invalidate a DIFFERENT, legitimately
+ * in-flight round for the current identity.
+ */
+function beginReconciliationRound(): number {
+  latestReconciliationRoundId += 1;
+  return latestReconciliationRoundId;
+}
 
 let registryIdentityState: RegistryIdentityState = { currentUserId: null, epoch: 0 };
 
@@ -1723,28 +1946,44 @@ async function fetchServerProfiles(): Promise<ServerProfileRecord[] | null> {
 }
 
 /**
- * Fire-and-forget push of a batch of {id, name} pairs — SH.5: carries BOTH
- * brand-new adoptions (computeProfilesToAdopt) and rename updates for
- * already-known ids (computeProfilesToRename); the server's own UPSERT
- * (see /api/sync/profiles's route doc) decides which case each entry is,
- * so this function needs no branching of its own. Codex P1 follow-up (2nd
- * round) — its outcome (success, non-2xx, a lost/malformed response, or a
- * thrown network error) is deliberately NEVER used to decide ownership:
- * reconcileProfileRegistry always re-confirms via a fresh, authoritative GET
- * afterward instead (see resolveAuthoritativeServerProfiles's own doc),
- * since a commit that reached the server but whose response never reached
- * this client must still be reflected, not treated as though it never
- * happened. Swallows all errors — best-effort, exactly like
+ * Codex finding #1 — a {id, name} pair tagged with the explicit INTENT
+ * this push carries: `"adopt"` for a brand-new candidate
+ * (computeProfilesToAdopt) that must be INSERT-ONLY server-side (never
+ * overwrite an existing row, even a stale/delayed adopt retry — see
+ * /api/sync/profiles's route doc), or `"rename"` for an id this account
+ * already has an explicit, local pending-rename marker for
+ * (computeProfilesToRename) and therefore deliberately intends to UPDATE.
+ * The server no longer infers this from "is the row already there" — a
+ * single conflict-free UPSERT could not otherwise tell "stale adopt retry
+ * for an id someone else just renamed" apart from "a genuine intentional
+ * rename", which is exactly what let an adoption silently overwrite an
+ * unrelated name before this fix.
+ */
+type ProfilePushEntry = Profile & { intent: "adopt" | "rename" };
+
+/**
+ * Fire-and-forget push of a batch of intent-tagged {id, name, intent}
+ * entries — SH.5: carries BOTH brand-new adoptions and rename updates for
+ * already-known ids in one request; /api/sync/profiles's PUT runs each
+ * intent through its OWN separate, differently-scoped query (see its own
+ * route doc) rather than inferring intent from conflict state. Codex P1
+ * follow-up (2nd round) — its outcome (success, non-2xx, a lost/malformed
+ * response, or a thrown network error) is deliberately NEVER used to decide
+ * ownership: reconcileProfileRegistry always re-confirms via a fresh,
+ * authoritative GET afterward instead (see resolveAuthoritativeServerProfiles's
+ * own doc), since a commit that reached the server but whose response never
+ * reached this client must still be reflected, not treated as though it
+ * never happened. Swallows all errors — best-effort, exactly like
  * scheduleSync()'s doPush() for planner sync.
  */
-async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
+async function pushProfilesToAdopt(toAdopt: ProfilePushEntry[]): Promise<void> {
   if (toAdopt.length === 0) return;
   try {
     await fetch("/api/sync/profiles", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name })),
+        profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name, intent: p.intent })),
       }),
     });
   } catch {
@@ -1768,10 +2007,12 @@ async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
  * round, which still runs afterward exactly as before and will retry this
  * exact id again if this attempt's own request fails, since
  * computeProfilesToAdopt recomputes "unknown to the server" fresh every
- * round regardless of what any previous attempt did.
+ * round regardless of what any previous attempt did. Always tagged
+ * `"adopt"` (Codex finding #1) — a brand-new profile has no pending-rename
+ * marker of its own yet, so this is never a rename push.
  */
 export async function pushNewProfileRegistration(profile: Profile): Promise<void> {
-  await pushProfilesToAdopt([profile]);
+  await pushProfilesToAdopt([{ ...profile, intent: "adopt" }]);
 }
 
 /**
@@ -1936,7 +2177,20 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
   if (registryIdentityState.currentUserId !== userId) return;
   const capturedEpoch = registryIdentityState.epoch;
-  const isCurrent = () => isRegistryRunCurrent(registryIdentityState, userId, capturedEpoch);
+  // Codex finding #2 — captured AFTER the identity check above, so a call
+  // that never even starts a round (wrong/stale identity) can't spuriously
+  // invalidate a different, legitimately in-flight round for the CURRENT
+  // identity. Folded into the SAME `isCurrent()` every existing checkpoint
+  // in this function already calls, so a newer round for this identity
+  // (e.g. an overlapping trigger from a second mount point) stops this
+  // older round at its very next checkpoint — including, critically, the
+  // final pull-application step, which is what could otherwise restore an
+  // already-superseded name locally. See isReconciliationRoundCurrent's own
+  // doc for why this needs no identity awareness of its own.
+  const capturedRoundId = beginReconciliationRound();
+  const isCurrent = () =>
+    isRegistryRunCurrent(registryIdentityState, userId, capturedEpoch) &&
+    isReconciliationRoundCurrent(latestReconciliationRoundId, capturedRoundId);
 
   const initialServerProfiles = await fetchServerProfiles();
   if (!isCurrent() || initialServerProfiles === null) return;
@@ -1981,7 +2235,16 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const toRename = filterAdoptableProfiles(
     computeProfilesToRename(initialServerProfiles, localProfiles, pendingRenames, ownedByOtherAccountIds)
   );
-  const toPush = [...toAdopt, ...toRename];
+  // Codex finding #1 — each entry is tagged with its own explicit intent so
+  // /api/sync/profiles's PUT can run adopt candidates through an
+  // INSERT-ONLY query and rename candidates through a separate, explicit
+  // UPDATE query, rather than inferring intent server-side from conflict
+  // state (which let a stale/delayed adopt retry silently overwrite an
+  // unrelated existing name — see the route's own doc).
+  const toPush: ProfilePushEntry[] = [
+    ...toAdopt.map((p) => ({ ...p, intent: "adopt" as const })),
+    ...toRename.map((p) => ({ ...p, intent: "rename" as const })),
+  ];
   const batches = batchProfilesForAdoption(toPush);
 
   const pushAttempted = batches.length > 0;

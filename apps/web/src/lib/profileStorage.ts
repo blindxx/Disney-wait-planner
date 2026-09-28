@@ -2712,6 +2712,16 @@ export async function createProfile(name: string, currentOwnerUserId: string | n
   // doc for why a DIFFERENT account's own suppression of the identical
   // literal id must never be cleared by this.
   await clearLocalDeletionMarker(outcome.id, scopeKey);
+  // Codex finding #3 — defensive belt-and-suspenders discard of THIS
+  // account's own pending-rename marker for `outcome.id`, on every
+  // create/reclaim: deleteProfile already discards it at delete time (the
+  // primary fix), but a create/reclaim landing on the identical normalized
+  // id is the ONE moment a stale marker from a PRIOR occupant of this id
+  // could otherwise be mistaken for a genuine pending rename of the NEW
+  // profile (computeProfilesToRename's own presence check, Codex finding
+  // #1's fix, only verifies the id is present again — which it now is).
+  // Never touches a DIFFERENT account's own entry for the identical id.
+  await discardProfileRenamePending(outcome.id, scopeKey);
   return outcome;
 }
 
@@ -3144,6 +3154,94 @@ export const DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES: Array<{
 ];
 
 /**
+ * Codex finding #3 — pure state transition: UNCONDITIONALLY discard
+ * `accountKey`'s own pending-rename marker for `profileId`, regardless of
+ * its current value. Distinct from clearPendingRenameForAccount above,
+ * which only clears when the marker still matches a specific CONFIRMED
+ * name (the reconciliation-confirmation use case): this is for the
+ * DELETE/RECREATE use case, where the marker's VALUE is irrelevant — the
+ * profile it names no longer exists (or is about to be treated as a fresh
+ * one under the same normalized id), so ANY pending rename intent for it
+ * is now obsolete, whatever name it happens to hold.
+ *
+ * Before this fix, deleting a profile left its pending-rename marker
+ * standing. Since `normalizeId()` is deterministic, a later create under
+ * the same display name (createProfile's own reclaim-or-reuse logic) can
+ * land on the IDENTICAL literal id — at which point a stale marker from
+ * the deleted profile would be indistinguishable from a genuine pending
+ * rename for the NEW profile: computeProfilesToRename's own presence
+ * check (Codex finding #1's fix, above) only verifies the id is present
+ * in the local list, which it now is again, so the OLD rename name would
+ * be pushed onto the NEW profile's server row.
+ *
+ * Never touches any OTHER account's own entry for the identical
+ * profileId — mirrors every other single-account write in this module.
+ *
+ * Run from Node:
+ *   import { DEV_DISCARD_PENDING_RENAME_FOR_ACCOUNT_CASES, discardPendingRenameForAccount } from "@/lib/profileStorage";
+ *   DEV_DISCARD_PENDING_RENAME_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = discardPendingRenameForAccount(c.state, c.profileId, c.accountKey);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function discardPendingRenameForAccount(
+  state: PendingRenamesByAccount,
+  profileId: string,
+  accountKey: string
+): PendingRenamesByAccount {
+  const byAccount = state[profileId];
+  if (!byAccount || !(accountKey in byAccount)) return state;
+  const next = { ...byAccount };
+  delete next[accountKey];
+  const result = { ...state };
+  if (Object.keys(next).length === 0) delete result[profileId];
+  else result[profileId] = next;
+  return result;
+}
+
+export const DEV_DISCARD_PENDING_RENAME_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  profileId: string;
+  accountKey: string;
+  expected: PendingRenamesByAccount;
+}> = [
+  {
+    name: "Codex finding #3 — deleting a profile discards this account's own pending rename for it, whatever name it holds (unlike clearPendingRenameForAccount, no name match is required)",
+    state: { family: { userA: { name: "The Smiths (never confirmed)", renamedAt: 1 } } },
+    profileId: "family",
+    accountKey: "userA",
+    expected: {},
+  },
+  {
+    name: "discarding one account's marker preserves a different account's own independent entry for the identical id",
+    state: {
+      family: {
+        userA: { name: "The Smiths", renamedAt: 1 },
+        userB: { name: "The Joneses", renamedAt: 2 },
+      },
+    },
+    profileId: "family",
+    accountKey: "userA",
+    expected: { family: { userB: { name: "The Joneses", renamedAt: 2 } } },
+  },
+  {
+    name: "no marker present for this account — state returned unchanged (same reference)",
+    state: { family: { userB: { name: "The Joneses", renamedAt: 2 } } },
+    profileId: "family",
+    accountKey: "userA",
+    expected: { family: { userB: { name: "The Joneses", renamedAt: 2 } } },
+  },
+  {
+    name: "unknown profileId — state returned unchanged",
+    state: {},
+    profileId: "family",
+    accountKey: "userA",
+    expected: {},
+  },
+];
+
+/**
  * Composed end-to-end regression: the exact A -> B -> A shared-device
  * scenario the account-isolation fix targets. A renames a profile
  * (canonical `default` included); B signs into the SAME browser and must
@@ -3231,6 +3329,24 @@ export function clearProfileRenamePending(profileId: string, confirmedName: stri
   return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
     const state = readPendingRenamesByAccount();
     const next = clearPendingRenameForAccount(state, profileId, accountKey, confirmedName);
+    if (next !== state) writePendingRenamesByAccount(next);
+  });
+}
+
+/**
+ * Codex finding #3 — unconditionally discard `accountKey`'s own
+ * pending-rename marker for `profileId`, whatever its current value — see
+ * discardPendingRenameForAccount's own doc. Called from deleteProfile (the
+ * marker is now obsolete — the profile it named is gone) and from
+ * createProfile (defensive belt-and-suspenders on every create/reclaim,
+ * mirroring exactly how clearLocalDeletionMarker is already called from
+ * both of those same two call sites for the SAME reason: never rely on a
+ * single call site alone to fully retire stale per-account provenance).
+ */
+function discardProfileRenamePending(profileId: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
+    const state = readPendingRenamesByAccount();
+    const next = discardPendingRenameForAccount(state, profileId, accountKey);
     if (next !== state) writePendingRenamesByAccount(next);
   });
 }
@@ -3688,6 +3804,14 @@ export async function deleteProfile(id: string, currentOwnerUserId: string | nul
   // until SH.4.3 implements real server-side tombstones — nor any
   // `user_planner` cloud planner data.
   await markProfileLocallyDeleted(id, scopeKey);
+
+  // Codex finding #3 — this account's own pending-rename intent for `id`
+  // (if any) is now obsolete: the profile it named is gone. Discarded
+  // unconditionally (whatever name it holds) so a later create/reclaim
+  // that lands on this SAME normalized id (createProfile also discards
+  // defensively, but this is the primary fix — see its own doc) can never
+  // have the deleted profile's stale rename mistaken for its own.
+  await discardProfileRenamePending(id, scopeKey);
 
   // If the deleted profile was active, explicitly persist fallback to
   // default. Compare raw localStorage directly rather than calling

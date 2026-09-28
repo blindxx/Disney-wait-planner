@@ -218,11 +218,17 @@ function LegacyPlannerAdoptionGuard(): null {
  * to null in a cleanup function: it is mounted for the lifetime of the
  * whole app/session (it never unmounts on ordinary page navigation, unlike
  * settings/page.tsx, which DID need that on its own unmount when it was the
- * sole owner), so the only event that can legitimately invalidate an
- * in-flight round — an actual identity transition — is already covered by
- * the next call to setRegistryIdentity() with the new value
+ * sole owner), so the only event that can invalidate an in-flight round via
+ * the IDENTITY epoch — an actual identity transition — is already covered
+ * by the next call to setRegistryIdentity() with the new value
  * (advanceRegistryIdentity bumps the epoch whenever the identity itself
- * changes, including through null on sign-out).
+ * changes, including through null on sign-out). Codex finding #2 — a
+ * SEPARATE round-sequencing guard in profileRegistrySync.ts also
+ * invalidates an in-flight round the instant a NEWER round starts for the
+ * SAME identity (e.g. this guard's own re-render firing again while
+ * Settings' page-local reconciliation effect is still mid-flight), needing
+ * no cleanup of its own here either — see that module's own
+ * "RECONCILIATION-ROUND STALE-RUN GUARD" section doc.
  *
  * shouldAttemptRegistryReconciliation() is the same pure decision
  * settings/page.tsx's own `if (sessionStatus === "loading") return;` /
