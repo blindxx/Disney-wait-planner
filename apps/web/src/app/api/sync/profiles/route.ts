@@ -13,18 +13,25 @@
  *        SH.4.3 — SH.4.1 never sets `deleted_at` itself.
  *   401: not signed in
  *
- * PUT /api/sync/profiles — additively register one or more local profiles
- *   that are not yet known to the account's registry (SH.4.1 legacy
- *   adoption — see profileRegistrySync.ts). This is the ONLY write this
- *   endpoint supports, and it is deliberately conflict-free: every insert
- *   is `ON CONFLICT (user_id, profile_id) DO NOTHING`, so a profileId the
- *   server already has a row for — active OR tombstoned — is silently left
- *   untouched, never renamed and never resurrected. Renaming or deleting an
- *   already-registered profile is SH.4.2/SH.4.3 scope, not this endpoint.
+ * PUT /api/sync/profiles — SH.5 register-or-rename one or more local
+ *   profiles for the account's registry (SH.4.1 legacy adoption AND SH.4.2
+ *   rename propagation — see profileRegistrySync.ts). This is the ONLY
+ *   write this endpoint supports. Every entry is an UPSERT scoped to the
+ *   caller's OWN `user_id` (never another account's row):
+ *     - an id the account has never seen is INSERTED (unchanged from
+ *       SH.4.1's additive adoption);
+ *     - an id the account already has an ACTIVE (non-tombstoned) row for
+ *       has its `name`/`updated_at` UPDATED — last-write-wins, since a
+ *       profile's display name has no independent revision/conflict model
+ *       of its own (see profileRegistrySync.ts's computeProfilesToRename);
+ *     - a TOMBSTONED row (`deleted_at` set) is never touched by either path
+ *       — never renamed, never resurrected. Full delete lifecycle/UI beyond
+ *       the existing device-local compatibility shim is still SH.4.3 scope.
  *   body: { profiles: Array<{ profileId: string, name: string }> }
- *   200: { registered: string[] } — ids that were newly inserted by THIS
- *        request (an id already known, active or tombstoned, is simply
- *        omitted from this list — not an error)
+ *   200: { registered: string[] } — ids that were newly inserted OR renamed
+ *        by THIS request (a tombstoned id, or a push whose name already
+ *        matched the stored row, is simply omitted from this list — not an
+ *        error)
  *   400: invalid JSON, a malformed body, or an empty/oversized `profiles`
  *        array — i.e. the ENVELOPE itself is unusable. An individual entry
  *        with an invalid profileId/name is instead silently skipped (Codex
@@ -36,11 +43,12 @@
  *
  * The server owns every timestamp this endpoint writes (`created_at`/
  * `updated_at` are both `NOW()`) — the client never supplies one, so there
- * is no client-clock trust issue. There is also no ordering DECISION to
- * make in the first place: because every write here is a conflict-free
- * additive insert (never an update), there is nothing for a revision or a
- * pending-op ledger to protect — unlike `/api/sync/planner`, this endpoint
- * has no merge/conflict step at all in SH.4.1.
+ * is no client-clock trust issue. The ordering DECISION for a rename is
+ * simple last-write-wins on `name`/`updated_at`: there is nothing for a
+ * revision or a pending-op ledger to protect here, unlike
+ * `/api/sync/planner` — a display name has no interdependent fields a
+ * partial/out-of-order write could corrupt, so this endpoint still has no
+ * merge/conflict step of `/api/sync/planner`'s kind.
  *
  * Deliberately NOT layered onto `/api/sync/planner` or given any of its
  * revision/pending-op/advisory-lock machinery: `user_profiles` stores
@@ -189,15 +197,30 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   const profileIds = entries.map((e) => e.profileId);
   const names = entries.map((e) => e.name);
 
-  // Single conflict-free bulk insert: any (user_id, profile_id) already
-  // present — active or tombstoned — is left completely untouched by
-  // ON CONFLICT DO NOTHING, so this can never rename or resurrect an
-  // existing row. RETURNING only reports the ids that were actually new.
+  // SH.5 — single bulk UPSERT, scoped to the caller's own user_id (never
+  // another account's row, since $1 is this request's own session userId):
+  //   - an unknown (user_id, profile_id) is INSERTED (unchanged SH.4.1
+  //     adoption behavior);
+  //   - a KNOWN, ACTIVE row has its name/updated_at UPDATED — this is the
+  //     SH.4.2 rename-propagation path (profileRegistrySync.ts's
+  //     computeProfilesToRename decides client-side which entries in this
+  //     same request are "new" vs "rename"; the server doesn't need to
+  //     distinguish them — either way it's "this account's current name for
+  //     this profile id");
+  //   - a TOMBSTONED row (deleted_at IS NOT NULL) is excluded from the
+  //     UPDATE branch by the WHERE clause, so it is never renamed or
+  //     resurrected by either an adopt or a rename push.
+  // The `name IS DISTINCT FROM` guard skips a no-op re-push (e.g. a stale
+  // adopt candidate that already matches) so it doesn't needlessly bump
+  // updated_at or appear in RETURNING.
   const { rows } = await getPool().query<{ profile_id: string }>(
     `INSERT INTO user_profiles (user_id, profile_id, name, created_at, updated_at)
      SELECT $1, x.profile_id, x.name, NOW(), NOW()
      FROM UNNEST($2::text[], $3::text[]) AS x(profile_id, name)
-     ON CONFLICT (user_id, profile_id) DO NOTHING
+     ON CONFLICT (user_id, profile_id) DO UPDATE
+       SET name = EXCLUDED.name, updated_at = NOW()
+       WHERE user_profiles.deleted_at IS NULL
+         AND user_profiles.name IS DISTINCT FROM EXCLUDED.name
      RETURNING profile_id`,
     [userId, profileIds, names]
   );

@@ -38,7 +38,11 @@ import {
   deleteProfile,
   getActiveProfileKeys,
 } from "../../lib/profileStorage";
-import { reconcileProfileRegistry, shouldWithholdProfileControls } from "../../lib/profileRegistrySync";
+import {
+  reconcileProfileRegistry,
+  shouldWithholdProfileControls,
+  pushNewProfileRegistration,
+} from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -436,6 +440,17 @@ export default function SettingsPage() {
     // Switch to the newly created profile immediately
     setActiveProfileIdInStorage(profile.id);
     setActiveProfileIdState(profile.id);
+    // SH.5 — attempt ONE immediate, awaited registration push before the
+    // reload below, rather than relying ENTIRELY on the next page load's
+    // own fire-and-forget reconciliation round to ever register this
+    // profile server-side — see pushNewProfileRegistration's own doc for
+    // why this closes a real single-point-of-failure window. Best-effort:
+    // this never throws, and the normal round on the reloaded page still
+    // runs afterward and will retry this exact id if this attempt's own
+    // request failed.
+    if (authenticatedUserId) {
+      await pushNewProfileRegistration(profile);
+    }
     location.reload();
   }
 
@@ -446,6 +461,15 @@ export default function SettingsPage() {
     if (!name || !name.trim()) return;
     await renameProfile(activeProfileId, name);
     setProfiles(getVisibleProfiles(visibilityOwnerKey));
+    // SH.5 — a rename doesn't reload the page (unlike Add/Delete), so
+    // nothing else would otherwise trigger a fresh reconciliation round to
+    // push it this session. Fire-and-forget, mirrors the SAME pattern
+    // ProfileRegistryReconciliationGuard already uses on every session
+    // resolution — reconcileProfileRegistry never throws and is safe to
+    // call redundantly.
+    if (authenticatedUserId) {
+      reconcileProfileRegistry(authenticatedUserId);
+    }
   }
 
   async function handleDeleteProfile() {

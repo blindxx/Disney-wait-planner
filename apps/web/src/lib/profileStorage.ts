@@ -43,6 +43,21 @@ const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
 const PROFILES_LIST_KEY = "dwp.profiles";
 
 /**
+ * SH.5 — rename propagation. `{ [profileId]: { name, renamedAt } }`: a
+ * profile id this device has locally renamed but has not yet confirmed the
+ * server's registry reflects. Deliberately NOT account-scoped (unlike
+ * `dwp.profileRegistryState`): it only ever answers "does the CURRENT local
+ * name for this id still need to be pushed", which is meaningful
+ * independent of which account's reconciliation round happens to do that
+ * pushing — the PUT itself is always scoped by the authenticated session's
+ * own userId server-side (see /api/sync/profiles's route doc), so this
+ * marker can never cause a cross-account write even if account B's round
+ * happens to be the one that clears an entry account A created.
+ */
+const PENDING_RENAMES_KEY = "dwp.profilePendingRenames";
+const PENDING_RENAMES_LOCK_NAME = "dwp:profilePendingRenames";
+
+/**
  * The canonical "always exists" profile id (see DEFAULT_PROFILE further
  * below) is a SPECIAL SHARED LOGICAL id, not an ordinary user-created
  * profile: every fresh device and every freshly authenticated account
@@ -2839,6 +2854,81 @@ export const DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES: Array<{
   },
 ];
 
+// ===== SH.5 RENAME PROPAGATION =====
+
+export type PendingRename = { name: string; renamedAt: number };
+export type PendingRenames = Record<string, PendingRename>;
+
+function readPendingRenames(): PendingRenames {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(PENDING_RENAMES_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: PendingRenames = {};
+    for (const [id, entry] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") continue;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.name === "string" && typeof e.renamedAt === "number") {
+        out[id] = { name: e.name, renamedAt: e.renamedAt };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writePendingRenames(state: PendingRenames): void {
+  try {
+    localStorage.setItem(PENDING_RENAMES_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+/**
+ * Read every profile id whose local name has not yet been confirmed as
+ * pushed to the server's registry — see PENDING_RENAMES_KEY's own doc.
+ * Passed to profileRegistrySync.ts's computeProfilesToRename/
+ * selectServerRenamesToApply as plain input data.
+ */
+export function getPendingProfileRenames(): PendingRenames {
+  return readPendingRenames();
+}
+
+/**
+ * Record `profileId` as needing its current `name` pushed to the server.
+ * Serialized against every other pending-renames writer via its own lock
+ * (a separate key from `dwp.profiles`/`dwp.profileRegistryState`, so a
+ * rename's own bookkeeping never contends with either of those).
+ */
+function markProfileRenamePending(profileId: string, name: string): Promise<void> {
+  return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
+    const state = readPendingRenames();
+    writePendingRenames({ ...state, [profileId]: { name, renamedAt: Date.now() } });
+  });
+}
+
+/**
+ * Clear `profileId`'s pending-rename marker, but ONLY when it still matches
+ * `confirmedName` — a fresh, commit-time re-check (mirrors this module's
+ * established "read again right before acting" pattern —
+ * commitDiscoveredProfiles in profileRegistrySync.ts) so a NEWER rename that
+ * landed after this round's push was sent, but before this clear runs, is
+ * never mistaken for confirmed and is left standing for the NEXT round to
+ * push and confirm on its own.
+ */
+export function clearProfileRenamePending(profileId: string, confirmedName: string): Promise<void> {
+  return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
+    const state = readPendingRenames();
+    const entry = state[profileId];
+    if (!entry || entry.name !== confirmedName) return;
+    const next = { ...state };
+    delete next[profileId];
+    writePendingRenames(next);
+  });
+}
+
 /**
  * Rename an existing profile (name only — id stays stable).
  * No-op if the profile id does not exist or the name is empty.
@@ -2853,6 +2943,15 @@ export const DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES: Array<{
  * the pre-rename name by committing a merge built from a stale read taken
  * before this rename landed — see adoptServerProfiles's own doc. Async as a
  * direct consequence; Settings' handleRenameProfile already awaits it.
+ *
+ * SH.5 — also marks `id` as needing its new name pushed to the server
+ * registry (markProfileRenamePending), closing the SH.4.1-era gap where a
+ * rename was local-only forever: profileRegistrySync.ts's
+ * reconcileProfileRegistry now reads this marker every round
+ * (computeProfilesToRename) and keeps retrying the push until a
+ * reconfirmed server read matches, exactly mirroring how a brand-new
+ * profile's own registration already self-retries every round via
+ * computeProfilesToAdopt's fresh "unknown to server" recomputation.
  */
 export function renameProfile(id: string, name: string): Promise<void> {
   const trimmed = sanitizeProfileName(name);
@@ -2861,7 +2960,7 @@ export function renameProfile(id: string, name: string): Promise<void> {
     const profiles = getProfiles();
     const updated = profiles.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
     writeProfiles(updated);
-  });
+  }).then(() => markProfileRenamePending(id, trimmed));
 }
 
 /**
@@ -3381,11 +3480,17 @@ export function getActiveProfileKeys(): {
 // device shows in its profile picker; SH.4.1 adds a durable, account-wide
 // registry behind it (`user_profiles` table, via /api/sync/profiles — see
 // profileRegistrySync.ts) so a second authenticated device can discover the
-// same ids/names. The two functions below are the ONLY seam between that
-// registry and this device's local list, and they are deliberately narrow:
-// additive-only, never renaming or removing an existing local entry. Any
-// tombstone/rename-propagation policy belongs to a later phase (SH.4.2/
-// SH.4.3), not here.
+// same ids/names. The two functions below are the DISCOVERY seam between
+// that registry and this device's local list, and they are deliberately
+// narrow: additive-only, never renaming or removing an existing local
+// entry. SH.5 adds a SEPARATE, explicit rename-propagation seam
+// (mergeProfileRenames/applyServerRenames further below, plus the pending-
+// rename bookkeeping near renameProfile) rather than loosening this
+// discovery seam's own additive-only contract — a brand-new id discovered
+// here still never carries a name update for an id ALREADY present
+// locally; only that separate seam ever touches an existing entry's name.
+// Full tombstone-propagation policy is still a later phase (SH.4.3), not
+// here.
 
 /**
  * Merge `candidates` (typically the account's ACTIVE server-known profiles
@@ -3577,6 +3682,104 @@ export function adoptServerProfiles(serverProfiles: Profile[]): Promise<Profile[
     const local = getProfiles();
     const merged = mergeProfilesAdditive(local, serverProfiles);
     if (merged.length !== local.length) writeProfiles(merged);
+    return merged;
+  });
+}
+
+/**
+ * SH.5 — pure merge: update `local`'s name for every id present in
+ * `renames`, leaving every other entry (and the array's order/length)
+ * untouched. This is the PULL-side counterpart to mergeProfilesAdditive:
+ * that function deliberately never updates an existing id's name (by
+ * design, for the general discovery case — see its own doc); this function
+ * exists specifically for profileRegistrySync.ts's
+ * selectServerRenamesToApply, which already excludes any id this device has
+ * its OWN unconfirmed pending rename for, so applying `renames` here can
+ * never clobber a local edit that simply hasn't been pushed yet.
+ *
+ * Run from Node:
+ *   import { DEV_MERGE_PROFILE_RENAMES_CASES, mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_MERGE_PROFILE_RENAMES_CASES.forEach(c => {
+ *     const got = mergeProfileRenames(c.local, c.renames);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function mergeProfileRenames(local: Profile[], renames: Profile[]): Profile[] {
+  if (renames.length === 0) return local;
+  const renameMap = new Map(renames.map((p) => [p.id, p.name]));
+  let changed = false;
+  const merged = local.map((p) => {
+    const newName = renameMap.get(p.id);
+    if (newName === undefined || newName === p.name) return p;
+    changed = true;
+    return { ...p, name: newName };
+  });
+  return changed ? merged : local;
+}
+
+export const DEV_MERGE_PROFILE_RENAMES_CASES: Array<{
+  name: string;
+  local: Profile[];
+  renames: Profile[];
+  expected: Profile[];
+}> = [
+  {
+    name: "server's newer name for an already-known id is applied locally",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Our Family Trip" }],
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "a rename for an id not present locally is simply ignored (discovery's job, not this function's)",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "mom", name: "Mom" }],
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "a rename matching the current local name is a no-op — same array reference returned",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Default" }],
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "no renames — local list returned unchanged",
+    local: [{ id: "default", name: "Default" }],
+    renames: [],
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "multiple ids — only the ones present in both lists are updated, others untouched",
+    local: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom (old)" },
+      { id: "dad", name: "Dad" },
+    ],
+    renames: [
+      { id: "mom", name: "Mom (new)" },
+      { id: "unknown-id", name: "Ignored" },
+    ],
+    expected: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom (new)" },
+      { id: "dad", name: "Dad" },
+    ],
+  },
+];
+
+/**
+ * SH.5 — persist server-confirmed rename(s) for id(s) this device already
+ * knows about locally, applying profileRegistrySync.ts's
+ * selectServerRenamesToApply result. Serialized against every other
+ * `dwp.profiles` writer via the SAME lock adoptServerProfiles/createProfile/
+ * renameProfile/deleteProfile already use, for the identical read-modify-
+ * write-safety reason their own docs give.
+ */
+export function applyServerRenames(renames: Profile[]): Promise<Profile[]> {
+  if (renames.length === 0) return Promise.resolve(getProfiles());
+  return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
+    const local = getProfiles();
+    const merged = mergeProfileRenames(local, renames);
+    if (merged !== local) writeProfiles(merged);
     return merged;
   });
 }
