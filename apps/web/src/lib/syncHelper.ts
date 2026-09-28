@@ -2522,6 +2522,39 @@ export function purgeProfileSyncState(profileId: string): void {
   }
 }
 
+/**
+ * SH.4.4 — "profile deletion vs. SH.4 account-qualified planner storage."
+ * I/O wrapper profileStorage.ts's deleteProfile() calls UNCONDITIONALLY for
+ * a real authenticated `userId`, regardless of whether the shared/legacy
+ * `dwp:{profileId}:*` slot is also safe to destroy this round
+ * (isDestructiveProfileCleanupSafe) — an account-qualified key
+ * (`dwp:{userId}:{profileId}:{baseKey}`, its local-edit facts, and its
+ * `dwp:sync:{userId}:{profileId}:...` sync-layer state) physically belongs
+ * to ONLY `userId` by construction (see buildAccountQualifiedKey()/
+ * resolveAccountScopedKey() in profileStorage.ts), so removing it can never
+ * touch a co-owning account's own data the way destroying the SHARED legacy
+ * slot could. Built on the SAME shared predicate purgeProfileSyncState()
+ * itself uses (isProfileOwnedSyncKey(), syncPayload.ts) — its userId-scoped
+ * mode — rather than a second/competing key-shape enumeration; see that
+ * predicate's own doc for exactly which shapes this covers and why the
+ * shared/legacy markers are deliberately excluded from this narrower mode.
+ *
+ * Without this, deleting then recreating a profile with the SAME normalized
+ * id (normalizeId() is deterministic) while signed in as the same account
+ * would leave that account's own qualified canonical planner values and
+ * local-edit facts durably in place: the moment the recreated profile's
+ * pages resolve the identical account-qualified key again, this stale data
+ * — not a genuinely empty new profile — silently reappears.
+ */
+export function purgeAccountQualifiedProfileState(userId: string, profileId: string): void {
+  for (const key of snapshotKeysWithPrefix("")) {
+    if (!isProfileOwnedSyncKey(key, profileId, userId)) continue;
+    try {
+      localStorage.removeItem(key);
+    } catch {}
+  }
+}
+
 // ── Per-domain confirmed state (immutable facts — NO Web Locks needed) ──────────
 
 /** The five synced domains this module tracks confirmed facts for. */

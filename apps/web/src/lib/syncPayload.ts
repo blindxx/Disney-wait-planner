@@ -4686,7 +4686,37 @@ export const DEV_ORDINARY_EDIT_PERSIST_OUTCOME_CASES: Array<{
 // (the I/O wrapper profileStorage.ts's deleteProfile() calls) is a thin
 // scan-and-remove loop built directly on this exact predicate — see its
 // own doc there.
-export function isProfileOwnedSyncKey(key: string, profileId: string): boolean {
+//
+// SH.4.4 — "profile deletion vs. SH.4 account-qualified planner storage."
+// `userId`, when provided, switches this predicate into a DIFFERENT, NARROWER
+// mode: match ONLY the physical key shapes that are exclusively `userId`'s
+// own — never the shared/legacy profile-level markers above (those remain
+// ONE PHYSICAL COPY across every account and are only ever safe to remove
+// as part of the existing profileId-only sweep, when deleteProfile's own
+// isDestructiveProfileCleanupSafe has confirmed no OTHER account still owns
+// this id), and never another account's own qualified state:
+//   - account-qualified canonical planner key:
+//       dwp:{userId}:{profileId}:{baseKey}          (buildAccountQualifiedKey)
+//   - account-qualified local-edit fact:
+//       dwp:localEditFact:dwp:{userId}:{profileId}:{baseKey}:{editId}
+//   - account-qualified sync-layer state (confirmedFact/hydrationFact/
+//     hydrationApplyIntent/observedRevision/pendingOp/pendingOpCursor —
+//     every one of these already lives at dwp:sync:{userId}:{profileId}:...
+//     by construction, so a single prefix check covers the whole family):
+//       dwp:sync:{userId}:{profileId}:...
+// Because an account-qualified key physically belongs to ONLY that one
+// account by construction, this mode is ALWAYS safe to purge regardless of
+// whether any other account co-owns the profile id — unlike the
+// profileId-only sweep below, it needs no isDestructiveProfileCleanupSafe
+// gate. See purgeAccountQualifiedProfileState()'s own doc in syncHelper.ts
+// for the I/O wrapper deleteProfile() calls unconditionally for this.
+export function isProfileOwnedSyncKey(key: string, profileId: string, userId?: string): boolean {
+  if (userId) {
+    if (key.startsWith(`dwp:localEditFact:dwp:${userId}:${profileId}:`)) return true;
+    if (key.startsWith(`dwp:${userId}:${profileId}:`)) return true;
+    if (key.startsWith(`dwp:sync:${userId}:${profileId}:`)) return true;
+    return false;
+  }
   if (key.startsWith(`dwp:localEditFact:dwp:${profileId}:`)) return true;
   if (key === `dwp:sync:${profileId}:localContentOwner`) return true;
   if (key === `dwp:sync:${profileId}:status`) return true;
@@ -4703,10 +4733,11 @@ export function isProfileOwnedSyncKey(key: string, profileId: string): boolean {
 
 /**
  * Reference cases for isProfileOwnedSyncKey() — the REQUIRED cases from the
- * SH.2.1 P1 (this round) architectural contract. Run from Node:
+ * SH.2.1 P1 (this round) architectural contract, plus SH.4.4's userId-scoped
+ * mode. Run from Node:
  *   import { DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES, isProfileOwnedSyncKey } from "@/lib/syncPayload";
  *   DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES.forEach(c => {
- *     const got = isProfileOwnedSyncKey(c.key, c.profileId);
+ *     const got = isProfileOwnedSyncKey(c.key, c.profileId, c.userId);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
  */
@@ -4714,6 +4745,7 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
   name: string;
   key: string;
   profileId: string;
+  userId?: string;
   expected: boolean;
 }> = [
   {
@@ -4816,6 +4848,91 @@ export const DEV_IS_PROFILE_OWNED_SYNC_KEY_CASES: Array<{
     name: "an unrelated global key is never matched",
     key: "dwp.activeProfile",
     profileId: "my-family",
+    expected: false,
+  },
+  // ===== SH.4.4 — userId-scoped mode (account-qualified purge) =====
+  {
+    name: "SH.4.4 — an account-qualified canonical planner key for (userId, profileId) is matched when userId is passed",
+    key: "dwp:user-A:my-family:plans",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: true,
+  },
+  {
+    name: "SH.4.4 — an account-qualified canonical key for a DIFFERENT base key (e.g. Lightning's own domain) is equally matched — no per-baseKey enumeration needed",
+    key: "dwp:user-A:my-family:lightning",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: true,
+  },
+  {
+    name: "SH.4.4 — an account-qualified local-edit fact for (userId, profileId) is matched when userId is passed",
+    key: "dwp:localEditFact:dwp:user-A:my-family:plans:op-123",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: true,
+  },
+  {
+    name: "SH.4.4 — account-qualified sync-layer state (confirmedFact) for (userId, profileId) is matched when userId is passed",
+    key: "dwp:sync:user-A:my-family:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: true,
+  },
+  {
+    name: "SH.4.4 — account-qualified pending-op-cursor for (userId, profileId) is matched when userId is passed",
+    key: "dwp:sync:user-A:my-family:pendingOpCursor",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: true,
+  },
+  {
+    name: "SH.4.4 co-owner isolation — a DIFFERENT account's (user-B's) qualified canonical key for the identical profile id is NEVER matched by user-A's own scoped purge",
+    key: "dwp:user-B:my-family:plans",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 co-owner isolation — a DIFFERENT account's (user-B's) qualified local-edit fact for the identical profile id is NEVER matched by user-A's own scoped purge",
+    key: "dwp:localEditFact:dwp:user-B:my-family:plans:op-456",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 co-owner isolation — a DIFFERENT account's (user-B's) qualified sync state for the identical profile id is NEVER matched by user-A's own scoped purge",
+    key: "dwp:sync:user-B:my-family:confirmedFact:plans:7:op-999",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 — a DIFFERENT profile id's qualified key under the SAME userId is never matched (profile isolation is preserved alongside account isolation)",
+    key: "dwp:user-A:other-profile:plans",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 — the SHARED legacy content-owner marker is never matched by the userId-scoped mode — it is profile-level, not account-qualified, and stays gated behind the existing isDestructiveProfileCleanupSafe sweep",
+    key: "dwp:sync:my-family:localContentOwner",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 — the SHARED legacy sync status marker is never matched by the userId-scoped mode",
+    key: "dwp:sync:my-family:status",
+    profileId: "my-family",
+    userId: "user-A",
+    expected: false,
+  },
+  {
+    name: "SH.4.4 — the SHARED legacy (unqualified) local-edit fact is never matched by the userId-scoped mode — it may still belong to whichever account currently holds legacy content ownership",
+    key: "dwp:localEditFact:dwp:my-family:plans:op-789",
+    profileId: "my-family",
+    userId: "user-A",
     expected: false,
   },
 ];

@@ -21,8 +21,14 @@
  * reads/writes through the qualified shape yet.
  */
 
-import { getLocalContentOwner, setLocalContentOwner, purgeProfileSyncState } from "./syncHelper";
+import {
+  getLocalContentOwner,
+  setLocalContentOwner,
+  purgeProfileSyncState,
+  purgeAccountQualifiedProfileState,
+} from "./syncHelper";
 import { sanitizeProfileName } from "./syncIdentity";
+import { isProfileOwnedSyncKey } from "./syncPayload";
 
 // ===== TYPES =====
 
@@ -2971,6 +2977,160 @@ export const DEV_IS_DESTRUCTIVE_PROFILE_CLEANUP_SAFE_CASES: Array<{
 ];
 
 /**
+ * SH.4.4 — pure simulation of deleteProfile()'s own two-stage physical-key
+ * purge, over a caller-supplied set of localStorage key NAMES (no real
+ * localStorage/DOM involved), so the exact contract deleteProfile() now
+ * enforces can be regression-tested directly:
+ *   1. `currentOwnerUserId`'s own account-qualified state
+ *      (isProfileOwnedSyncKey(key, profileId, currentOwnerUserId) —
+ *      syncPayload.ts's userId-scoped mode) is ALWAYS removed.
+ *   2. WHEN `destructiveCleanupSafe`, the shared/legacy `dwp:{profileId}:*`
+ *      keys AND every account's `dwp:sync:*`/`dwp:localEditFact:*` state
+ *      (isProfileOwnedSyncKey(key, profileId), no userId — the profileId-only
+ *      sweep) are ALSO removed, mirroring deleteProfile()'s own
+ *      `dwp:${id}:` prefix loop + purgeProfileSyncState(id) call.
+ * Returns the keys that SURVIVE. Reuses the SAME predicate deleteProfile()'s
+ * own purge helpers are built on (isProfileOwnedSyncKey) rather than a
+ * second, hand-rolled notion of "which keys belong to this delete."
+ *
+ * Run from Node:
+ *   import { DEV_SIMULATE_PROFILE_DELETE_PURGE_CASES, simulateProfileDeletePurge } from "@/lib/profileStorage";
+ *   DEV_SIMULATE_PROFILE_DELETE_PURGE_CASES.forEach(c => {
+ *     const got = simulateProfileDeletePurge(c.keys, c.profileId, c.currentOwnerUserId, c.destructiveCleanupSafe);
+ *     console.log(JSON.stringify([...got].sort()) === JSON.stringify([...c.expectedSurviving].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateProfileDeletePurge(
+  keys: string[],
+  profileId: string,
+  currentOwnerUserId: string,
+  destructiveCleanupSafe: boolean
+): string[] {
+  return keys.filter((key) => {
+    if (isProfileOwnedSyncKey(key, profileId, currentOwnerUserId)) return false;
+    if (destructiveCleanupSafe) {
+      if (key.startsWith(`dwp:${profileId}:`)) return false;
+      if (isProfileOwnedSyncKey(key, profileId)) return false;
+    }
+    return true;
+  });
+}
+
+export const DEV_SIMULATE_PROFILE_DELETE_PURGE_CASES: Array<{
+  name: string;
+  keys: string[];
+  profileId: string;
+  currentOwnerUserId: string;
+  destructiveCleanupSafe: boolean;
+  expectedSurviving: string[];
+}> = [
+  {
+    name: "SH.4.4 qualified purge — sole-owner delete (destructiveCleanupSafe) removes the deleting account's qualified canonical key, its qualified local-edit fact, its qualified sync state, AND the shared legacy canonical key — nothing survives",
+    keys: [
+      "dwp:userA:family:plans",
+      "dwp:localEditFact:dwp:userA:family:plans:op-1",
+      "dwp:sync:userA:family:confirmedFact:plans:1:op-1",
+      "dwp:family:plans",
+    ],
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    destructiveCleanupSafe: true,
+    expectedSurviving: [],
+  },
+  {
+    name: "SH.4.4 co-owner isolation — co-owned delete (NOT destructiveCleanupSafe) purges ONLY userA's own qualified keys; userB's qualified canonical key, qualified local-edit fact, qualified sync state, AND the shared legacy canonical key all survive untouched",
+    keys: [
+      "dwp:userA:family:plans",
+      "dwp:localEditFact:dwp:userA:family:plans:op-1",
+      "dwp:sync:userA:family:confirmedFact:plans:1:op-1",
+      "dwp:userB:family:plans",
+      "dwp:localEditFact:dwp:userB:family:plans:op-2",
+      "dwp:sync:userB:family:confirmedFact:plans:2:op-2",
+      "dwp:family:plans",
+    ],
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    destructiveCleanupSafe: false,
+    expectedSurviving: [
+      "dwp:userB:family:plans",
+      "dwp:localEditFact:dwp:userB:family:plans:op-2",
+      "dwp:sync:userB:family:confirmedFact:plans:2:op-2",
+      "dwp:family:plans",
+    ],
+  },
+  {
+    name: "unrelated keys (a different profile id, a different account's own untouched key family) are never removed by either stage",
+    keys: ["dwp:userA:other-profile:plans", "dwp.activeProfile", "dwp.profiles"],
+    profileId: "family",
+    currentOwnerUserId: "userA",
+    destructiveCleanupSafe: true,
+    expectedSurviving: ["dwp:userA:other-profile:plans", "dwp.activeProfile", "dwp.profiles"],
+  },
+];
+
+/**
+ * SH.4.4 — end-to-end delete-THEN-recreate regression scenario: proves the
+ * qualified purge above actually prevents resurrection, by feeding its own
+ * output straight into decideLegacyKeyAdoption() (the exact pure decision a
+ * recreated profile's next Plans/Lightning auth-transition effect calls via
+ * adoptLegacyProfileValueIfSafe()). After a sole-owner
+ * (destructiveCleanupSafe) delete purges BOTH the qualified canonical key
+ * AND the shared legacy canonical key, a same-account recreate sees
+ * `qualifiedValueExists: false, legacyValueExists: false` — decision "skip"
+ * ("nothing to adopt"), i.e. a genuinely empty, non-resurrected profile.
+ *
+ * Run from Node:
+ *   import { DEV_DELETE_THEN_RECREATE_NO_RESURRECTION_CASES, simulateProfileDeletePurge, decideLegacyKeyAdoption, isProfileUnclaimedByOtherAccount } from "@/lib/profileStorage";
+ *   DEV_DELETE_THEN_RECREATE_NO_RESURRECTION_CASES.forEach(c => {
+ *     const survivors = simulateProfileDeletePurge(c.keysBeforeDelete, c.profileId, c.deletingUserId, c.destructiveCleanupSafe);
+ *     const qualifiedKey = `dwp:${c.recreatingUserId}:${c.profileId}:plans`;
+ *     const legacyKey = `dwp:${c.profileId}:plans`;
+ *     const decision = decideLegacyKeyAdoption({
+ *       qualifiedValueExists: survivors.includes(qualifiedKey),
+ *       legacyValueExists: survivors.includes(legacyKey),
+ *       legacyOwner: c.legacyOwnerAfterDelete,
+ *       currentUserId: c.recreatingUserId,
+ *       legacyProfileUnclaimedByOtherAccount: isProfileUnclaimedByOtherAccount(c.registryStateAfterDelete, c.profileId, c.recreatingUserId),
+ *     });
+ *     console.log(decision === c.expectedDecision ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_DELETE_THEN_RECREATE_NO_RESURRECTION_CASES: Array<{
+  name: string;
+  keysBeforeDelete: string[];
+  profileId: string;
+  deletingUserId: string;
+  recreatingUserId: string;
+  destructiveCleanupSafe: boolean;
+  legacyOwnerAfterDelete: string | null;
+  registryStateAfterDelete: ProfileRegistryState;
+  expectedDecision: LegacyKeyAdoptionDecision;
+}> = [
+  {
+    name: "sole-owner delete-then-recreate by the SAME account — both qualified and legacy bytes were purged, so recreate finds nothing to adopt (no resurrection)",
+    keysBeforeDelete: ["dwp:userA:family:plans", "dwp:family:plans"],
+    profileId: "family",
+    deletingUserId: "userA",
+    recreatingUserId: "userA",
+    destructiveCleanupSafe: true,
+    legacyOwnerAfterDelete: null,
+    registryStateAfterDelete: {},
+    expectedDecision: "skip",
+  },
+  {
+    name: "co-owned delete-then-recreate by userA — userA's own qualified bytes were purged (no resurrection for userA), while userB's still-intact legacy content ownership correctly blocks userA's recreate from adopting userB's shared legacy bytes",
+    keysBeforeDelete: ["dwp:userA:family:plans", "dwp:userB:family:plans", "dwp:family:plans"],
+    profileId: "family",
+    deletingUserId: "userA",
+    recreatingUserId: "userA",
+    destructiveCleanupSafe: false,
+    legacyOwnerAfterDelete: "userB",
+    registryStateAfterDelete: { family: { userA: { owned: true }, userB: { owned: true } } },
+    expectedDecision: "skip",
+  },
+];
+
+/**
  * Delete a profile for `currentOwnerUserId`'s own view: always hides it
  * from that account going forward (the account-scoped local-deletion
  * marker below), and — ONLY when `isDestructiveProfileCleanupSafe` confirms
@@ -3013,6 +3173,24 @@ export const DEV_IS_DESTRUCTIVE_PROFILE_CLEANUP_SAFE_CASES: Array<{
  * inside the `dwp.profiles` critical section, since the two never need to
  * be atomic WITH EACH OTHER, only each internally consistent against its
  * own other writers.
+ *
+ * SH.4.4 — "profile deletion vs. SH.4 account-qualified planner storage."
+ * When `currentOwnerUserId` is a real authenticated account, this ALSO
+ * purges that account's own SH.4 account-qualified canonical planner keys
+ * (`dwp:{currentOwnerUserId}:{id}:{baseKey}`), its account-qualified
+ * local-edit facts, and its account-qualified sync-layer state
+ * (purgeAccountQualifiedProfileState(), syncHelper.ts) — UNCONDITIONALLY,
+ * regardless of `destructiveCleanupSafe`. This is deliberately NOT gated
+ * the same way the shared/legacy wipe below is: an account-qualified key
+ * physically belongs to ONLY `currentOwnerUserId` by construction (see
+ * buildAccountQualifiedKey()/resolveAccountScopedKey() above), so removing
+ * it can never destroy a co-owning account's own qualified data the way
+ * destroying the ONE PHYSICAL COPY shared/legacy slot could — the very
+ * reason `destructiveCleanupSafe` exists in the first place. Without this,
+ * deleting then recreating the identical normalized id while signed in as
+ * the same account would leave that account's own qualified planner values
+ * and local-edit facts in place, ready to silently resurrect the moment the
+ * recreated profile's pages resolve the same account-qualified key again.
  */
 export async function deleteProfile(id: string, currentOwnerUserId: string | null = null): Promise<void> {
   if (id === "default") return; // Default is protected from deletion via this path
@@ -3023,6 +3201,14 @@ export async function deleteProfile(id: string, currentOwnerUserId: string | nul
     if (profiles.length <= 1) return false; // Cannot delete the last profile
 
     const destructiveCleanupSafe = isDestructiveProfileCleanupSafe(readProfileRegistryState(), id, scopeKey);
+
+    // SH.4.4 — always purge THIS account's own account-qualified planner
+    // data for `id` first, independent of destructiveCleanupSafe: see this
+    // function's own doc above for why an account-qualified key can never
+    // belong to any account other than currentOwnerUserId.
+    if (currentOwnerUserId) {
+      purgeAccountQualifiedProfileState(currentOwnerUserId, id);
+    }
 
     if (destructiveCleanupSafe) {
       const updated = profiles.filter((p) => p.id !== id);
@@ -3060,10 +3246,14 @@ export async function deleteProfile(id: string, currentOwnerUserId: string | nul
     }
     // else: isDestructiveProfileCleanupSafe found another real account still,
     // independently, owns this literal id on this device — the shared
-    // dwp.profiles entry, its dwp:{id}:* namespaced data, and its sync
-    // provenance all remain COMPLETELY untouched, so that account's own
-    // local-first planner content and any unsynced edits survive this delete
-    // intact. Only `scopeKey`'s own view of the id is suppressed, below.
+    // dwp.profiles entry, its legacy dwp:{id}:* namespaced data, and its
+    // profile-level/other-accounts' sync provenance all remain COMPLETELY
+    // untouched, so that other account's own local-first planner content and
+    // any unsynced edits survive this delete intact. Only `scopeKey`'s own
+    // view of the id is suppressed, below — and, per the SH.4.4 doc above,
+    // `currentOwnerUserId`'s own account-qualified planner data (never any
+    // other account's) has already been purged unconditionally regardless of
+    // this branch.
     return true;
   });
 
