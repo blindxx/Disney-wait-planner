@@ -21,7 +21,7 @@
  * reads/writes through the qualified shape yet.
  */
 
-import { getLocalContentOwner, purgeProfileSyncState } from "./syncHelper";
+import { getLocalContentOwner, setLocalContentOwner, purgeProfileSyncState } from "./syncHelper";
 import { sanitizeProfileName } from "./syncIdentity";
 
 // ===== TYPES =====
@@ -1774,6 +1774,91 @@ export const DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES: Array<{
 ];
 
 /**
+ * Codex P1 fix — "First-sign-in adoption must persist its own claim."
+ * PURE, NO-I/O SIMULATION of one decideLegacyKeyAdoption() attempt
+ * followed by adoptLegacyProfileValueIfSafe()'s own "persist the claim on
+ * adopt" write, so the exact two-account regression this fix closes has
+ * its own directly-testable, chainable coverage: feed one call's
+ * `legacyOwnerAfter` back in as the NEXT call's `legacyOwnerBefore` to
+ * model a SECOND account's later attempt against the SAME physically-
+ * unchanged legacy bytes.
+ *
+ * Run from Node:
+ *   import { DEV_SIMULATE_LEGACY_ADOPTION_CLAIM_CASES, simulateLegacyOwnerAfterAdoptionAttempt } from "@/lib/profileStorage";
+ *   DEV_SIMULATE_LEGACY_ADOPTION_CLAIM_CASES.forEach(c => {
+ *     const got = simulateLegacyOwnerAfterAdoptionAttempt(
+ *       c.legacyOwnerBefore, c.qualifiedValueExists, c.legacyValueExists, c.currentUserId, c.legacyProfileUnclaimedByOtherAccount
+ *     );
+ *     const ok = got.decision === c.expectedDecision && got.legacyOwnerAfter === c.expectedLegacyOwnerAfter;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function simulateLegacyOwnerAfterAdoptionAttempt(
+  legacyOwnerBefore: string | null,
+  qualifiedValueExists: boolean,
+  legacyValueExists: boolean,
+  currentUserId: string,
+  legacyProfileUnclaimedByOtherAccount: boolean
+): { decision: LegacyKeyAdoptionDecision; legacyOwnerAfter: string | null } {
+  const decision = decideLegacyKeyAdoption({
+    qualifiedValueExists,
+    legacyValueExists,
+    legacyOwner: legacyOwnerBefore,
+    currentUserId,
+    legacyProfileUnclaimedByOtherAccount,
+  });
+  return {
+    decision,
+    // Mirrors adoptLegacyProfileValueIfSafe()'s own setLocalContentOwner()
+    // write: only a genuine "adopt" ever moves the marker; "skip" always
+    // leaves it exactly as it was.
+    legacyOwnerAfter: decision === "adopt" ? currentUserId : legacyOwnerBefore,
+  };
+}
+
+export const DEV_SIMULATE_LEGACY_ADOPTION_CLAIM_CASES: Array<{
+  name: string;
+  legacyOwnerBefore: string | null;
+  qualifiedValueExists: boolean;
+  legacyValueExists: boolean;
+  currentUserId: string;
+  legacyProfileUnclaimedByOtherAccount: boolean;
+  expectedDecision: LegacyKeyAdoptionDecision;
+  expectedLegacyOwnerAfter: string | null;
+}> = [
+  {
+    name: "STEP 1 — account A's genuine first-ever sign-in adopts the never-tagged, registry-unclaimed legacy bytes, and its claim is persisted (legacyOwnerAfter flips from null to userA)",
+    legacyOwnerBefore: null,
+    qualifiedValueExists: false,
+    legacyValueExists: true,
+    currentUserId: "userA",
+    legacyProfileUnclaimedByOtherAccount: true,
+    expectedDecision: "adopt",
+    expectedLegacyOwnerAfter: "userA",
+  },
+  {
+    name: "STEP 2 (chained from STEP 1's legacyOwnerAfter) — REGRESSION CASE: a DIFFERENT account B's later attempt against the SAME still-physically-present legacy bytes now fails closed, even though the profile registry may not yet have caught up (still reports 'unclaimed by another account') — the persisted legacyOwner alone is enough to block it, so B can never also adopt A's already-claimed bytes",
+    legacyOwnerBefore: "userA",
+    qualifiedValueExists: false,
+    legacyValueExists: true,
+    currentUserId: "userB",
+    legacyProfileUnclaimedByOtherAccount: true,
+    expectedDecision: "skip",
+    expectedLegacyOwnerAfter: "userA",
+  },
+  {
+    name: "STEP 2 alternate — account A itself re-attempts later (e.g. before its own qualified key exists yet, so qualifiedValueExists is still false): the persisted legacyOwner=userA alone (independent of the qualifiedValueExists short-circuit) still correctly recognizes this as A's OWN content — 'adopt' again, harmlessly re-affirming the SAME owner, never blocked the way B's attempt in STEP 2 was",
+    legacyOwnerBefore: "userA",
+    qualifiedValueExists: false,
+    legacyValueExists: true,
+    currentUserId: "userA",
+    legacyProfileUnclaimedByOtherAccount: true,
+    expectedDecision: "adopt",
+    expectedLegacyOwnerAfter: "userA",
+  },
+];
+
+/**
  * I/O wrapper around decideLegacyKeyAdoption(): reads the current qualified
  * and legacy values for `(userId, profileId, baseKey)` plus the existing
  * `getLocalContentOwner(profileId)` provenance marker AND (SH.4 Codex fix)
@@ -1788,6 +1873,27 @@ export const DEV_DECIDE_LEGACY_KEY_ADOPTION_CASES: Array<{
  * point, so first-sign-in adoption safety is enforced consistently
  * regardless of which page happens to run it first for a given
  * (userId, profileId, baseKey).
+ *
+ * Codex P1 fix — "First-sign-in adoption must persist its own claim." A
+ * successful "adopt" (in EITHER branch decideLegacyKeyAdoption() allows —
+ * `legacyOwner === currentUserId` already, or the null-owner/unclaimed-
+ * registry first-sign-in path) now also calls
+ * setLocalContentOwner(profileId, userId) — the SAME legacy per-profileId
+ * marker decideLegacyKeyAdoption() itself reads as `legacyOwner`, never a
+ * second/competing ownership store. Without this, the null-owner path
+ * left `legacyOwner` permanently null after adopting: a LATER, different
+ * account could pass the identical "owner null + registry shows no other
+ * claimant yet" test against the SAME still-unclaimed legacy bytes and
+ * adopt them too, even though this account already durably has its own
+ * qualified copy. Persisting the claim here closes that window — a later
+ * account's own decideLegacyKeyAdoption() call now sees a KNOWN, different
+ * `legacyOwner` and fails closed, exactly like the pre-existing known-
+ * foreign case already does. Idempotent: setLocalContentOwner() is a plain
+ * overwrite with the SAME value when `legacyOwner === currentUserId`
+ * already (`qualifiedValueExists` would in fact already be `true` on any
+ * REPEAT call for this exact (userId, profileId, baseKey), short-
+ * circuiting decideLegacyKeyAdoption() to "skip" before this write is ever
+ * reached again — see its own "repeated evaluation" DEV case).
  */
 export function adoptLegacyProfileValueIfSafe(userId: string, profileId: string, baseKey: string): boolean {
   if (typeof window === "undefined") return false;
@@ -1809,6 +1915,7 @@ export function adoptLegacyProfileValueIfSafe(userId: string, profileId: string,
     });
     if (decision !== "adopt") return false;
     localStorage.setItem(qualifiedKey, legacyValue as string);
+    setLocalContentOwner(profileId, userId);
     return true;
   } catch {
     return false;

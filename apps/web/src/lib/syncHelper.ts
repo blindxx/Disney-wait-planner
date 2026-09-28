@@ -5361,6 +5361,35 @@ export function setSyncPlansQualified(qualified: boolean): void {
 // resets on every run, defaulting to `true` (never attribute a user edit
 // without positive evidence) until a genuine user handler's own setItems()
 // call leaves it `false`.
+//
+// SH.4 Codex P1 fix — "Qualified edits must not relabel legacy bytes."
+// Everything above this fix was designed when every domain this function
+// writes always lived at the LEGACY, unqualified `dwp:{profileId}:{baseKey}`
+// key — a single shared physical copy any account's edit could equally be
+// attributed to. Since SH.4's account-qualified migration, Plans' and
+// Lightning's authenticated edits write the ACCOUNT-QUALIFIED
+// `dwp:{userId}:{profileId}:{baseKey}` key instead (once retargeted — see
+// retargetPlansStorageIdentity()/retargetLightningStorageIdentity()), for
+// which `localContentOwner` (a marker that, by invariant, describes ONLY
+// the unqualified legacy namespace — see getLocalContentOwner's own doc)
+// has nothing meaningful to say: a qualified key is already exclusively
+// this account's own physical storage, and stamping the legacy marker
+// from a qualified write would wrongly relabel bytes this edit never
+// touched — potentially attributing a completely unrelated legacy-key
+// profile's content to whichever account happens to edit its OWN
+// qualified data next. `shouldStampOwnershipOnOrdinaryEdit()` now also
+// requires `!isQualifiedKey` (reusing this module's own
+// `currentSyncPlansQualified` state — the SAME flag domainCanonicalKey()/
+// syncScopedDomainKey() already use to know whether the page currently
+// driving sync is writing the qualified or legacy shape — never a new,
+// second tracking mechanism) — so this stamp now only ever fires for a
+// genuine LEGACY-key ordinary edit, exactly the scenario this section's
+// own root-cause paragraph above describes. In today's app, every real
+// commitOrdinaryLocalEdit() call site targets a domain that becomes
+// qualified once authenticated, so this stamp now correctly never fires
+// while authenticated; first-sign-in legacy-content ownership is
+// established once, explicitly, at adoption time instead — see
+// adoptLegacyProfileValueIfSafe()'s own doc in profileStorage.ts.
 
 /**
  * Pure predicate: should commitOrdinaryLocalEdit() (below) stamp local-
@@ -5370,19 +5399,29 @@ export function setSyncPlansQualified(qualified: boolean): void {
  * and a real authenticated identity — a mount/effect-driven persistence
  * pass never stamps, no matter what `status` reports.
  *
+ * SH.4 Codex P1 fix — "Qualified edits must not relabel legacy bytes."
+ * `isQualifiedKey` (the caller's own snapshot of whether the key just
+ * written is the account-qualified shape — see this section's own header
+ * doc for the full rationale) is a THIRD, independent required condition:
+ * `localContentOwner` describes ONLY the unqualified legacy namespace, so
+ * a qualified-key write must NEVER stamp it, regardless of how strong the
+ * other evidence (durable success, a real authenticated identity, genuine
+ * user intent) is.
+ *
  * Run from Node:
  *   import { DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES, shouldStampOwnershipOnOrdinaryEdit } from "@/lib/syncHelper";
  *   DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES.forEach(c => {
- *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId, c.isUserOriginatedEdit);
+ *     const got = shouldStampOwnershipOnOrdinaryEdit(c.status, c.currentUserId, c.isUserOriginatedEdit, c.isQualifiedKey);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export function shouldStampOwnershipOnOrdinaryEdit(
   status: LocalDomainSyncCommitStatus,
   currentUserId: string | null,
-  isUserOriginatedEdit: boolean
+  isUserOriginatedEdit: boolean,
+  isQualifiedKey: boolean
 ): boolean {
-  return isUserOriginatedEdit && currentUserId !== null && isLocalDomainCommitSuccess(status);
+  return !isQualifiedKey && isUserOriginatedEdit && currentUserId !== null && isLocalDomainCommitSuccess(status);
 }
 
 export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
@@ -5390,13 +5429,15 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
   status: LocalDomainSyncCommitStatus;
   currentUserId: string | null;
   isUserOriginatedEdit: boolean;
+  isQualifiedKey: boolean;
   expected: boolean;
 }> = [
   {
-    name: "a genuine authenticated user edit that durably commits stamps ownership",
+    name: "a genuine authenticated user edit to the LEGACY key that durably commits stamps ownership",
     status: "committed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expected: true,
   },
   {
@@ -5404,6 +5445,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "committed-unprotected",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expected: true,
   },
   {
@@ -5411,6 +5453,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "noop",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expected: true,
   },
   {
@@ -5418,6 +5461,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "noop",
     currentUserId: "userB",
     isUserOriginatedEdit: false,
+    isQualifiedKey: false,
     expected: false,
   },
   {
@@ -5425,6 +5469,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "committed",
     currentUserId: "userB",
     isUserOriginatedEdit: false,
+    isQualifiedKey: false,
     expected: false,
   },
   {
@@ -5432,6 +5477,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "failed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expected: false,
   },
   {
@@ -5439,6 +5485,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "committed",
     currentUserId: null,
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expected: false,
   },
   {
@@ -5446,6 +5493,23 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
     status: "committed",
     currentUserId: null,
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
+    expected: false,
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a genuine authenticated user edit to the ACCOUNT-QUALIFIED key never stamps the legacy marker, even with every other condition (durable commit, real identity, user-originated) satisfied — this is exactly today's real Plans/Lightning call path while authenticated",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expected: false,
+  },
+  {
+    name: "qualified-key edit never stamps regardless of commit status — 'committed-unprotected' would otherwise have qualified as durable success",
+    status: "committed-unprotected",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
     expected: false,
   },
 ];
@@ -5460,7 +5524,7 @@ export const DEV_SHOULD_STAMP_OWNERSHIP_ON_ORDINARY_EDIT_CASES: Array<{
  * Run from Node:
  *   import { DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES, simulateOwnerAfterOrdinaryEdit, evaluateLocalContentForeign } from "@/lib/syncHelper";
  *   DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES.forEach(c => {
- *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId, c.isUserOriginatedEdit);
+ *     const ownerAfter = simulateOwnerAfterOrdinaryEdit(c.ownerBefore, c.status, c.currentUserId, c.isUserOriginatedEdit, c.isQualifiedKey);
  *     const ok = ownerAfter === c.expectedOwnerAfter
  *       && (c.checkForeignFor === undefined || evaluateLocalContentForeign(ownerAfter, c.checkForeignFor) === c.expectedForeignForChecked);
  *     console.log(ok ? "✓" : "✗ FAIL", c.name);
@@ -5470,9 +5534,12 @@ export function simulateOwnerAfterOrdinaryEdit(
   ownerBefore: string | null,
   status: LocalDomainSyncCommitStatus,
   currentUserId: string | null,
-  isUserOriginatedEdit: boolean
+  isUserOriginatedEdit: boolean,
+  isQualifiedKey: boolean
 ): string | null {
-  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId, isUserOriginatedEdit) ? currentUserId : ownerBefore;
+  return shouldStampOwnershipOnOrdinaryEdit(status, currentUserId, isUserOriginatedEdit, isQualifiedKey)
+    ? currentUserId
+    : ownerBefore;
 }
 
 export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
@@ -5481,16 +5548,18 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
   status: LocalDomainSyncCommitStatus;
   currentUserId: string | null;
   isUserOriginatedEdit: boolean;
+  isQualifiedKey: boolean;
   expectedOwnerAfter: string | null;
   checkForeignFor?: string | null;
   expectedForeignForChecked?: boolean;
 }> = [
   {
-    name: "authenticated A edits after a failed/offline pull — durable local persistence from a genuine user edit (no successful pull at all) establishes A as owner",
+    name: "authenticated A edits the LEGACY key after a failed/offline pull — durable local persistence from a genuine user edit (no successful pull at all) establishes A as owner",
     ownerBefore: null,
     status: "committed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
   },
   {
@@ -5499,6 +5568,7 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     status: "noop",
     currentUserId: "userB",
     isUserOriginatedEdit: false,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
     checkForeignFor: "userB",
     expectedForeignForChecked: true,
@@ -5509,6 +5579,7 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     status: "committed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
     checkForeignFor: "userB",
     expectedForeignForChecked: true,
@@ -5519,6 +5590,7 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     status: "committed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
     checkForeignFor: "userA",
     expectedForeignForChecked: false,
@@ -5529,6 +5601,7 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     status: "committed",
     currentUserId: null,
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: null,
   },
   {
@@ -5537,6 +5610,7 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     status: "failed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: null,
   },
   {
@@ -5545,23 +5619,44 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
     status: "failed",
     currentUserId: "userB",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
   },
   {
-    name: "successful pull ownership path unchanged — a pull-established owner (existing DURABLE TRANSFER BOUNDARY path, untouched by this round) composes correctly with a LATER genuine ordinary edit by the same account",
-    ownerBefore: "userA", // as if a successful pull already stamped this
+    name: "a pre-existing legacy owner marker (e.g. from an earlier legacy-key edit, or first-sign-in adoption) composes correctly with a LATER genuine legacy-key edit by the same account",
+    ownerBefore: "userA",
     status: "committed",
     currentUserId: "userA",
     isUserOriginatedEdit: true,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
   },
   {
-    name: "mount persistence's own React-state mirror of a JUST-SUCCEEDED pull's hydration (isUserOriginatedEdit false, status noop since hydration already wrote the bytes) never stamps from THIS call — ownership for that case was already, correctly, established by the pull's own dedicated setLocalContentOwner call, not by this generic effect",
+    name: "mount persistence's own React-state mirror of a JUST-SUCCEEDED pull's hydration (isUserOriginatedEdit false, status noop since hydration already wrote the bytes) never stamps from THIS call",
     ownerBefore: "userA",
     status: "noop",
     currentUserId: "userA",
     isUserOriginatedEdit: false,
+    isQualifiedKey: false,
     expectedOwnerAfter: "userA",
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a genuine authenticated user edit to the ACCOUNT-QUALIFIED key (today's real Plans/Lightning call path while authenticated) never stamps or relabels the legacy marker, whatever it already held",
+    ownerBefore: null,
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expectedOwnerAfter: null,
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a qualified-key edit never overwrites an EXISTING legacy owner either (e.g. account B's own earlier legacy-key claim on this profile survives account A's unrelated qualified-key edit untouched)",
+    ownerBefore: "userB",
+    status: "committed",
+    currentUserId: "userA",
+    isUserOriginatedEdit: true,
+    isQualifiedKey: true,
+    expectedOwnerAfter: "userB",
   },
 ];
 
@@ -5578,10 +5673,15 @@ export const DEV_ORDINARY_EDIT_OWNERSHIP_LIFECYCLE_CASES: Array<{
  * explicitly declare whether it represents a genuine user action or a
  * mount/effect/hydration-mirroring persistence pass; see this section's own
  * header doc for the exact boundary each page uses to decide. Ownership is
- * stamped only when this is true, in addition to durable success and a real
- * authenticated identity (shouldStampOwnershipOnOrdinaryEdit above) — the
- * underlying write itself (commitLocalDomainRawSync) is completely
- * unaffected by this flag; it only ever gates the ownership side-effect.
+ * stamped only when this is true, in addition to durable success, a real
+ * authenticated identity, AND (SH.4 Codex P1 fix) a LEGACY, unqualified
+ * `key` (shouldStampOwnershipOnOrdinaryEdit above; `isQualifiedKey` is read
+ * from this module's own `currentSyncPlansQualified` state — the SAME flag
+ * domainCanonicalKey()/syncScopedDomainKey() already use to resolve which
+ * physical key the CURRENT sync-driving page is writing, never a second,
+ * competing tracking mechanism) — the underlying write itself
+ * (commitLocalDomainRawSync) is completely unaffected by either flag; they
+ * only ever gate the ownership side-effect.
  */
 export function commitOrdinaryLocalEdit(
   key: string,
@@ -5589,7 +5689,7 @@ export function commitOrdinaryLocalEdit(
   isUserOriginatedEdit: boolean
 ): LocalDomainSyncCommitStatus {
   const status = commitLocalDomainRawSync(key, nextRaw);
-  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId, isUserOriginatedEdit)) {
+  if (shouldStampOwnershipOnOrdinaryEdit(status, currentSyncUserId, isUserOriginatedEdit, currentSyncPlansQualified)) {
     setLocalContentOwner(currentSyncProfileId, currentSyncUserId as string);
   }
   return status;
