@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 import { SessionProvider, useSession } from "next-auth/react";
 import {
   ensureActiveProfileVisible,
@@ -61,29 +61,36 @@ import { getUserId } from "@/lib/syncIdentity";
  * effect of their own that re-derives them on a LATER transition — so a
  * mounted page's sync/pull/hydration/write path could otherwise go on
  * combining the OLD profile id with identity/provenance now scoped to the
- * corrected profile. `hasResolvedOnceRef` distinguishes this page load's
- * very first resolved transition (no reload needed — see
- * shouldReloadForActiveProfileCorrection's own doc for why) from a genuine
- * later account switch, where a correction forces the SAME full reload
- * every OTHER `dwp.activeProfile` writer in this codebase already performs
- * immediately after changing it (settings/page.tsx's own switch/create/
- * delete handlers) — the one, already-proven-safe mechanism this codebase
- * uses to retarget a mounted page to a corrected profile, applied here at
- * the shared boundary every page mounts under instead of separately inside
+ * corrected profile. A correction forces the SAME full reload every OTHER
+ * `dwp.activeProfile` writer in this codebase already performs immediately
+ * after changing it (settings/page.tsx's own switch/create/delete
+ * handlers) — the one, already-proven-safe mechanism this codebase uses to
+ * retarget a mounted page to a corrected profile, applied here at the
+ * shared boundary every page mounts under instead of separately inside
  * each page. This is fail-closed: nothing continues running against the
  * stale profile identity past the reload.
+ *
+ * SH.4 Codex P1 fix — "Initial profile correction." This previously tracked
+ * `hasResolvedOnceRef` and skipped the reload on a page's very first
+ * resolved transition, on the assumption that no mounted page could have
+ * read `dwp.activeProfile` before this guard's own effect ran. That
+ * assumption is false: Plans/Lightning/Tom's own mount effects run
+ * unconditionally on first render (`[]` deps), regardless of session
+ * status, so a child can already have mounted and read the STALE pointer
+ * while `sessionStatus` was still "loading" — well before this effect ever
+ * ran for a resolved status. shouldReloadForActiveProfileCorrection() now
+ * gates on nothing but whether a correction actually happened — see its
+ * own doc for the full rationale — so `hasResolvedOnceRef` is removed
+ * rather than kept as unused/misleading state.
  */
 function ActiveProfileAuthGuard(): null {
   const { data: session, status: sessionStatus } = useSession();
   const authenticatedUserId = sessionStatus === "authenticated" ? getUserId(session) : null;
-  const hasResolvedOnceRef = useRef(false);
 
   useEffect(() => {
     if (sessionStatus === "loading") return;
-    const isFirstResolvedTransition = !hasResolvedOnceRef.current;
-    hasResolvedOnceRef.current = true;
     const corrected = ensureActiveProfileVisible(authenticatedUserId ?? UNOWNED_ACCOUNT_KEY);
-    if (shouldReloadForActiveProfileCorrection(isFirstResolvedTransition, corrected)) {
+    if (shouldReloadForActiveProfileCorrection(corrected)) {
       window.location.reload();
     }
   }, [sessionStatus, authenticatedUserId]);

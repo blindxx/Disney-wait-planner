@@ -57,8 +57,6 @@ import {
   getConfirmedState,
   hasHydrationProvenanceMatch,
   hasSurvivingEditFact,
-  setLocalContentOwner,
-  isLocalContentForeign,
   evaluateLocalContentWithheld,
   selectPendingOpBatch,
   reconcilePendingOperations,
@@ -1183,10 +1181,11 @@ export default function LightningPage() {
   const [syncReady, setSyncReady] = useState(false);
   // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. Mirrors
   // plans/page.tsx's own state of the same name exactly — see its detailed
-  // doc there for the full rationale. True only while this profile's
-  // physical planner bytes are known (isLocalContentForeign() in
-  // syncHelper.ts) to belong to a DIFFERENT, already-known authenticated
-  // account.
+  // doc there for the full rationale, including the SH.4 Codex P1 fix
+  // ("Qualified storage ownership gate") that now keeps the authenticated
+  // branch permanently at `false` — there is no shared physical copy left
+  // for a DIFFERENT account's content to occupy now that these domains are
+  // account-qualified.
   const [localContentWithheld, setLocalContentWithheld] = useState(false);
   // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. Mirrors
   // plans/page.tsx's own staleRetryTick/staleRetryPendingRef exactly — see
@@ -1485,22 +1484,30 @@ export default function LightningPage() {
     // this session's authenticated identity BEFORE anything else in this
     // branch. Mirrors plans/page.tsx exactly — see its own detailed doc.
     const resolvedUserId = authenticatedUserId;
-    // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
-    // SESSION boundary. Mirrors plans/page.tsx exactly — see its own
-    // detailed doc for the full root-cause explanation, why this
-    // supersedes the 4th round's previousUserId-based fallback-ref rebase
-    // (obsolete machinery, removed), and why a null/absent ownership
-    // marker is trusted (preserves local-first sign-in behavior).
-    //
-    // Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY: the ownership
-    // WRITE is deliberately NOT here — see getLocalContentOwner's own doc
-    // in syncHelper.ts and plans/page.tsx's mirrored comment. It happens at
-    // the END of this pull's `.then()` below, only once the pull genuinely
-    // resolved AND its own hydration/day writes succeeded.
-    const contentOwnershipMismatch = isLocalContentForeign(activeProfileIdRef.current, resolvedUserId);
+    // SH.4 Codex P1 fix — "Qualified storage ownership gate." Mirrors
+    // plans/page.tsx exactly — see its own detailed doc: this branch now
+    // always operates on the account-qualified key (via
+    // retargetLightningStorageIdentity() below), so there is no shared
+    // physical copy left for a DIFFERENT account's content to occupy.
+    // `contentOwnershipMismatch` is hardcoded `false` — never computed from
+    // isLocalContentForeign()/getLocalContentOwner(profileId) here, which
+    // predate qualification and could otherwise wrongly withhold this
+    // account's OWN legitimate qualified data as "foreign." The surrounding
+    // fallback-substitution plumbing below is left untouched (it simply
+    // always no-ops now); getLocalContentOwner()/isLocalContentForeign()
+    // remain exactly as before for where they are still needed —
+    // profileStorage.ts's adoptLegacyProfileValueIfSafe() (first-sign-in
+    // legacy-key adoption safety) is their one remaining consumer. No
+    // account-qualified ownership marker is introduced. This page's
+    // authenticated branch is ALWAYS "qualified" — see
+    // shouldApplyLegacyForeignContentGate()'s own doc in syncHelper.ts
+    // (its DEV-tested "qualified => never applies" case is exactly this
+    // branch) for why that statically makes this always `false`.
+    const contentOwnershipMismatch = false;
     // SH.4.1a — mirrors plans/page.tsx exactly: synchronize the render/edit
-    // gate to this transition's own fresh verdict immediately, before the
-    // pull below starts. See plans/page.tsx's own detailed doc.
+    // gate to this transition's own fresh — now permanently `false` —
+    // verdict immediately, before the pull below starts. See
+    // plans/page.tsx's own detailed doc.
     setLocalContentWithheld(contentOwnershipMismatch);
     // SH.4 Lightning slice — capture the identity this page's OWN key refs
     // currently target BEFORE activeUserIdRef is overwritten below, so the
@@ -2442,24 +2449,17 @@ export default function LightningPage() {
         )
           setSyncReady(true);
 
-        // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
-        // BOUNDARY. Mirrors plans/page.tsx exactly — see its own detailed
-        // comment and getLocalContentOwner's doc in syncHelper.ts. Codex P1
-        // fix (7th round) — also requires `primaryPersistSucceeded`.
-        if (
-          pullCtx.userId &&
-          hydrationSucceeded &&
-          !daysWriteFailed &&
-          !dayMetaWriteFailed &&
-          !dayParksWriteFailed &&
-          primaryPersistSucceeded
-        ) {
-          setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
-          // SH.4.1a — mirrors plans/page.tsx exactly: the ONE point a
-          // foreign withhold may be lifted, gated by the same three-part
-          // condition as the ownership-marker write above.
-          setLocalContentWithheld(false);
-        }
+        // SH.4 Codex P1 fix — "Qualified storage ownership gate." Mirrors
+        // plans/page.tsx exactly — see its own detailed doc: the DURABLE
+        // TRANSFER BOUNDARY write that used to live here
+        // (setLocalContentOwner(pullCtx.profileId, pullCtx.userId), SH.2
+        // architecture Codex P1 6th/7th rounds) is removed — this pull
+        // operates entirely on the account-qualified key and never touches
+        // the legacy slot, so writing this marker unconditionally on every
+        // successful qualified pull would wrongly stamp `resolvedUserId` as
+        // owning legacy bytes it may never have touched, corrupting a
+        // LATER, unrelated account's own first-sign-in adoption decision.
+        // No account-qualified ownership marker replaces it.
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
         // MOVED to the top of this `.then()`, before winner selection.

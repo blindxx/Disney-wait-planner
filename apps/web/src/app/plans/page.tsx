@@ -121,8 +121,6 @@ import {
   getConfirmedState,
   hasHydrationProvenanceMatch,
   hasSurvivingEditFact,
-  setLocalContentOwner,
-  isLocalContentForeign,
   evaluateLocalContentWithheld,
   selectPendingOpBatch,
   reconcilePendingOperations,
@@ -1684,18 +1682,17 @@ export default function PlansPage() {
   // while the GET /api/sync/plans request is in-flight. Set true after pull
   // completes (authenticated path) or immediately (unauthenticated path).
   const [syncReady, setSyncReady] = useState(false);
-  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. True only
-  // while this profile's physical planner bytes are known (via
-  // syncHelper.ts's isLocalContentForeign(), the account-aware wrapper
-  // around getLocalContentOwner()) to belong to a DIFFERENT, already-known
-  // authenticated account — never merely because a pull hasn't resolved
-  // yet (the ordinary same-account/offline/signed-out case leaves this
-  // false throughout, exactly as before this round). See the auth-
-  // transition effect below for where this is set, and the render guard
-  // near this component's own return for how it's consumed: while true,
-  // this page renders a placeholder instead of the loaded items/days, and
-  // never persists any edit over the withheld bytes (see the placeholder's
-  // own doc for why no persist effect can run while it's showing).
+  // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. SH.4 Codex
+  // P1 fix — "Qualified storage ownership gate": now that this page's
+  // authenticated planner domains are account-qualified (see
+  // contentOwnershipMismatch's own doc in the auth-transition effect
+  // below), the authenticated branch always sets this `false` — there is
+  // no shared physical copy left for a DIFFERENT account's content to
+  // occupy. This state and the render guard near this component's own
+  // return remain in place (never merely because a pull hasn't resolved
+  // yet — that is `sessionStatus === "loading"`'s own, separate reason to
+  // withhold, still fully in effect via evaluateLocalContentWithheld()) in
+  // case a genuinely unqualified consumer ever needs this gate again.
   const [localContentWithheld, setLocalContentWithheld] = useState(false);
   // SH.2.1 (this round) — STALE-RESPONSE PULL RECOVERY. A pull that
   // rejects its OWN response as stale (SH.2.1 P2's revision bound — see
@@ -2722,61 +2719,64 @@ export default function PlansPage() {
     // this same local profile slot. Mirrors the server's own resolution
     // order (getUserId() in api/sync/planner/route.ts).
     const resolvedUserId = authenticatedUserId;
-    // SH.2 architecture (Codex P1, 5th round) — AUTHENTICATED CONFLICT
-    // SESSION boundary: "for every SH.2 conflict decision, the baseline
-    // and local candidate MUST belong to the same authenticated conflict
-    // context." getConfirmedState/commitConfirmedBaseline already scope
-    // the BASELINE side by identity (3rd round); nothing scoped the
-    // CANDIDATE side — a fresh read of plans/lightning/days localStorage
-    // carries NO identity attribution, so it can be a DIFFERENT account's
-    // still-loaded leftover content if this component never remounted
-    // between accounts. Comparing that content against EITHER this page's
-    // fallback ref OR even a real, correctly-scoped confirmed snapshot for
-    // THIS identity (e.g. this identity used this exact browser before a
-    // different one did) would misclassify the foreign content as this
-    // identity's own unsynced edit and let it win over — and overwrite —
-    // this identity's real cloud state. See getLocalContentOwner()'s own
-    // doc in syncHelper.ts for the full contract; captured here (read
-    // BEFORE being overwritten with the newly-resolved identity, so this
-    // transition's own verdict reflects who owned the content going INTO
-    // it) and consulted below to gate what the upcoming pull treats as
-    // "current" for its conflict decision (see the pull effect's own doc).
+    // SH.4 Codex P1 fix — "Qualified storage ownership gate." SH.2
+    // architecture (Codex P1, 5th/6th rounds) originally computed
+    // `contentOwnershipMismatch` from isLocalContentForeign()/
+    // getLocalContentOwner(profileId) here, because "plans"/"lightning"/
+    // "days"/"dayMeta"/"dayParks" all lived at ONE SHARED PHYSICAL COPY per
+    // profileId (`dwp:{profileId}:{baseKey}`) — a fresh read of that
+    // storage carried NO identity attribution, so a DIFFERENT account's
+    // still-loaded leftover content (this component never having
+    // remounted between accounts) could be misclassified as THIS
+    // identity's own unsynced edit and overwrite its real cloud state.
+    // getLocalContentOwner(profileId)/setLocalContentOwner() existed
+    // specifically to answer "does the content currently in that ONE
+    // shared slot belong to the identity now asking about it" before any
+    // conflict decision trusted a fresh read of it.
     //
-    // This supersedes the 4th round's separate previousUserId-based
-    // fallback-ref rebase (obsolete machinery, removed): that heuristic
-    // only ever protected the fallback-ref tier, used only when no
-    // confirmed snapshot exists yet, and relied on an in-memory ref that
-    // resets to null on every page reload — missing exactly the
-    // reload-crossing case a durable, explicit ownership marker catches
-    // for free. A null/absent marker (never tagged) is trusted for ANY
-    // identity, preserving local-first adoption for anonymous → first
-    // sign-in and for a never-before-tagged profile's first authenticated
-    // use — only a marker naming a DIFFERENT, KNOWN identity is a mismatch.
+    // This session's own SH.4 Lightning-migration slice retargeted EVERY
+    // one of those domains onto the account-qualified key
+    // (`dwp:{userId}:{profileId}:{baseKey}`, via resolveAccountScopedKey()
+    // — see retargetPlansStorageIdentity() above) once authenticated. There
+    // is no shared physical copy left for this branch to protect: account
+    // A's and account B's own qualified bytes for the identical profileId
+    // now live at two DIFFERENT physical keys, so a fresh read of THIS
+    // identity's own qualified storage can never be another account's
+    // content by construction — regardless of remount history. Continuing
+    // to gate it on the profile-only `getLocalContentOwner(profileId)`
+    // marker was itself now a bug: that marker predates qualification and
+    // can carry a stale owner from the OLD shared-key era (or from a
+    // completely unrelated account's own past pull), wrongly withholding
+    // this account's OWN legitimate qualified data as "foreign" — in the
+    // worst case leaving the page stuck on "Verifying your account's saved
+    // data…" for an account that owns this content outright.
     //
-    // Codex P1 fix (6th round) — DURABLE TRANSFER BOUNDARY: the WRITE that
-    // establishes/reaffirms ownership under `resolvedUserId` is deliberately
-    // NOT here. Writing it now, before the pull below has even started,
-    // was itself a Codex finding: a failed or cancelled pull would leave
-    // ownership relabeled to `resolvedUserId` while this profile's raw
-    // bytes are still whoever owned it before — unreplaced. A LATER
-    // session for `resolvedUserId` would then see its OWN name on the
-    // marker (no mismatch) and wrongly trust that leftover content as its
-    // own. See getLocalContentOwner()'s own doc in syncHelper.ts for the
-    // exact three-part condition; the write itself happens at the END of
-    // this pull's `.then()` below, only once all three hold.
-    const contentOwnershipMismatch = isLocalContentForeign(activeProfileIdRef.current, resolvedUserId);
+    // `contentOwnershipMismatch` is therefore hardcoded `false` here —
+    // never computed from isLocalContentForeign()/getLocalContentOwner()
+    // for this (now always account-qualified) branch. The surrounding
+    // fallback-substitution plumbing below (domainFallbackValue()/
+    // clearRefOnFallbackMismatch(), buildPostFetchPullBaseline()'s own
+    // `contentOwnershipMismatch` parameter) is left completely untouched —
+    // it simply always no-ops now. getLocalContentOwner()/
+    // isLocalContentForeign() remain exactly as before for where they are
+    // still needed: profileStorage.ts's adoptLegacyProfileValueIfSafe()
+    // (first-sign-in legacy-key adoption safety) is their one remaining
+    // consumer — see decideLegacyKeyAdoption()'s own doc there. No new
+    // account-qualified ownership marker is introduced; the existing
+    // profile-only marker is simply no longer consulted (or written — see
+    // this pull's own `.then()` below) from this now-qualified path. This
+    // page's authenticated branch is ALWAYS "qualified" (see
+    // retargetPlansStorageIdentity() above) — see
+    // shouldApplyLegacyForeignContentGate()'s own doc in syncHelper.ts
+    // (its DEV-tested "qualified => never applies" case is exactly this
+    // branch) for why that statically makes this always `false`.
+    const contentOwnershipMismatch = false;
     // SH.4.1a — synchronize the RENDER/EDIT gate to this transition's own
-    // fresh verdict immediately, BEFORE the pull below even starts: this is
-    // what actually withholds a foreign profile's already-loaded local
-    // bytes (the mount effect's synchronous read runs independently of,
-    // and before, this effect) rather than only gating the pull's own
-    // conflict/merge decision the way `contentOwnershipMismatch` already
-    // did before this round. Always re-synchronized (not merely set to
-    // true) so a REVERSE transition back to an identity this profile's
-    // marker already names correctly lifts a stale withhold from an
-    // earlier transition in the SAME mount — see
-    // simulateLocalContentOwnershipAfterHydration()'s own DEV cases in
-    // syncHelper.ts for the exact reverse-transition contract this mirrors.
+    // fresh verdict immediately, BEFORE the pull below even starts (mirrors
+    // the mount effect's own synchronous read, which runs independently of
+    // and before this effect). Always re-synchronized so a signed-out ->
+    // signed-in transition (or any other prior verdict) is superseded by
+    // this branch's own — now permanently `false` — verdict.
     setLocalContentWithheld(contentOwnershipMismatch);
     // SH.4.1 Plans slice — capture the identity this page's OWN key refs
     // currently target BEFORE activeUserIdRef is overwritten below, so the
@@ -3671,9 +3671,7 @@ export default function PlansPage() {
           reseedNextId(winningPlanItems);
           // SH.4.1a Codex P1 follow-up — this mirrors bytes commitDomainHydration
           // ABOVE already durably committed via the CAS-protected hydration
-          // path into React state; it is not a user edit, and ownership for a
-          // successful pull is already established by this pull's own
-          // dedicated setLocalContentOwner call further below. The generic
+          // path into React state; it is not a user edit. The generic
           // auto-persist effect this setItems() triggers must not attribute
           // ownership for it. See pendingNonUserItemsPersistRef's own doc.
           pendingNonUserItemsPersistRef.current = true;
@@ -4054,36 +4052,25 @@ export default function PlansPage() {
         )
           setSyncReady(true);
 
-        // SH.2 architecture (Codex P1, 6th round) — DURABLE TRANSFER
-        // BOUNDARY: only NOW — after this pull genuinely resolved
-        // (`cancelled` already checked above), and only when its own
-        // hydration/day writes succeeded — is the local snapshot this
-        // identity should be credited with actually the coherent, durable
-        // one on disk. See getLocalContentOwner's own doc in syncHelper.ts
-        // for the full three-part condition and why writing this any
-        // earlier (e.g. at transition start) let a failed/cancelled pull
-        // relabel ownership without ever replacing the previous identity's
-        // bytes. Codex P1 fix (7th round) — also requires
-        // `primaryPersistSucceeded` (#3): ownership must never transfer
-        // before THIS page's own primary domain — not just the sibling's —
-        // is confirmed durably persisted.
-        if (
-          pullCtx.userId &&
-          hydrationSucceeded &&
-          !daysWriteFailed &&
-          !dayMetaWriteFailed &&
-          !dayParksWriteFailed &&
-          primaryPersistSucceeded
-        ) {
-          setLocalContentOwner(pullCtx.profileId, pullCtx.userId);
-          // SH.4.1a — this is the ONE point a foreign withhold may ever be
-          // lifted: the same three-part "safe to establish ownership"
-          // condition guarding the ownership-marker write above. A
-          // failed/slow/cancelled pull never reaches this block, so a
-          // withheld profile's content stays withheld — never deleted or
-          // relabeled — until this identity's OWN coherent hydration lands.
-          setLocalContentWithheld(false);
-        }
+        // SH.4 Codex P1 fix — "Qualified storage ownership gate." The
+        // DURABLE TRANSFER BOUNDARY write that used to live here
+        // (setLocalContentOwner(pullCtx.profileId, pullCtx.userId), SH.2
+        // architecture Codex P1 6th/7th rounds) is removed: this pull now
+        // operates entirely on the account-qualified key (see
+        // contentOwnershipMismatch's own doc above), which this pull never
+        // touches the LEGACY `dwp:{profileId}:{baseKey}` slot to produce —
+        // adoption (adoptLegacyProfileValueIfSafe(), run once at retarget
+        // time, before this pull ever starts) is the only event that
+        // legitimately relates THIS identity to that legacy slot's content.
+        // Writing this marker unconditionally on every successful qualified
+        // pull — regardless of whether adoption actually happened this
+        // time — would durably (and wrongly) stamp `resolvedUserId` as the
+        // owner of legacy bytes it may never have touched, corrupting a
+        // LATER, unrelated account's own safe first-sign-in adoption
+        // decision (decideLegacyKeyAdoption() in profileStorage.ts) for
+        // content that in fact has nothing to do with this identity. No
+        // account-qualified ownership marker replaces it — see this
+        // section's own header doc.
 
         // SH.2 architecture (Codex P1, 8th round) — beacon resolution was
         // MOVED to the top of this `.then()`, before winner selection — see
@@ -5664,10 +5651,16 @@ export default function PlansPage() {
   // after every hook above (this early return never skips a hook call) and
   // before the ordinary render below: while `localContentWithheld` is true,
   // this profile's physical planner bytes are known to belong to a
-  // DIFFERENT, already-known authenticated account (see
-  // isLocalContentForeign()'s own doc in syncHelper.ts), so nothing below —
-  // the items list, the Add/Edit forms, day management, import/export —
-  // is reachable at all. `items`/`days`/`dayMeta`/`dayParks` React state is
+  // DIFFERENT, already-known authenticated account, so nothing below — the
+  // items list, the Add/Edit forms, day management, import/export — is
+  // reachable at all. SH.4 Codex P1 fix — "Qualified storage ownership
+  // gate": the authenticated branch now always sets `localContentWithheld`
+  // to `false` (see contentOwnershipMismatch's own doc in the auth-
+  // transition effect above) — this gate's foreign-content half is
+  // structurally unreachable now that authenticated planner domains are
+  // account-qualified, but the gate itself remains in place for the
+  // `sessionStatus === "loading"` half evaluateLocalContentWithheld() also
+  // covers. `items`/`days`/`dayMeta`/`dayParks` React state is
   // deliberately left completely UNTOUCHED here (never blanked/reset):
   // this page's own persist effect (`saveToStorage(items, ...)`, keyed on
   // `[items, initialized]`) would otherwise immediately overwrite this

@@ -2031,14 +2031,69 @@ export const DEV_EVALUATE_LOCAL_CONTENT_FOREIGN_CASES: Array<{
 /**
  * I/O wrapper: reads `profileId`'s current content-owner marker and applies
  * evaluateLocalContentForeign() above. Call this synchronously, BEFORE
- * trusting/rendering/editing a profile's local planner content for
- * `currentUserId` — see this section's own header doc for the full
- * rationale and each call site (Plans/Lightning's auth-transition effect,
- * Tom's planner-context build) for how the result gates that page.
+ * trusting/rendering/editing a profile's LEGACY (unqualified) local planner
+ * content for `currentUserId` — see this section's own header doc for the
+ * full rationale. SH.4 Codex P1 fix — "Qualified storage ownership gate":
+ * Plans/Lightning no longer call this at all (their authenticated planner
+ * domains are account-qualified — see shouldApplyLegacyForeignContentGate()
+ * below for exactly when this gate still applies); Tom's own planner-
+ * context build is unaffected by this fix and out of this fix's scope.
  */
 export function isLocalContentForeign(profileId: string, currentUserId: string | null): boolean {
   return evaluateLocalContentForeign(getLocalContentOwner(profileId), currentUserId);
 }
+
+/**
+ * SH.4 Codex P1 fix — "Qualified storage ownership gate." PURE CORE
+ * documenting/locking exactly when the legacy per-profileId foreign-
+ * content gate (isLocalContentForeign() above) may ever be consulted for a
+ * domain: only while that domain is still resolved via the LEGACY
+ * (unqualified, `dwp:{profileId}:{baseKey}`) key, where — pre-SH.4/SH.4.1
+ * qualification — two different accounts could genuinely share the exact
+ * same physical bytes for the identical profileId, so a fresh read carried
+ * no identity attribution on its own.
+ *
+ * Once a domain is resolved via the account-qualified key
+ * (`dwp:{userId}:{profileId}:{baseKey}`, resolveAccountScopedKey() in
+ * profileStorage.ts), that ambiguity is gone by construction: account A's
+ * and account B's own bytes for the identical profileId live at two
+ * DIFFERENT physical keys, so this gate must NEVER be applied there — doing
+ * so would let a STALE legacy-era marker (or an unrelated account's own
+ * past ownership stamp) wrongly withhold an account's OWN legitimate
+ * qualified data as "foreign." Plans' and Lightning's own auth-transition
+ * effects hardcode their `contentOwnershipMismatch` to `false` for exactly
+ * this reason — see their own detailed doc for the full root cause and
+ * regression this closes.
+ *
+ * Run from Node:
+ *   import { DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES, shouldApplyLegacyForeignContentGate } from "@/lib/syncHelper";
+ *   DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES.forEach(c => {
+ *     const got = shouldApplyLegacyForeignContentGate(c.storageMode);
+ *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export type LocalContentStorageMode = "legacy" | "qualified";
+
+export function shouldApplyLegacyForeignContentGate(storageMode: LocalContentStorageMode): boolean {
+  return storageMode === "legacy";
+}
+
+export const DEV_SHOULD_APPLY_LEGACY_FOREIGN_CONTENT_GATE_CASES: Array<{
+  name: string;
+  storageMode: LocalContentStorageMode;
+  expected: boolean;
+}> = [
+  {
+    name: "legacy (unqualified) storage — the historical shared-physical-copy risk still applies, gate stays active",
+    storageMode: "legacy",
+    expected: true,
+  },
+  {
+    name: "SH.4 Codex P1 fix REGRESSION CASE — account-qualified storage never applies the legacy foreign-content gate: the qualified key already gives this account its own physical copy, so a stale/unrelated profile-only ownership marker must never withhold it",
+    storageMode: "qualified",
+    expected: false,
+  },
+];
 
 // ── Session-loading-safe planner-context omission (SH.4.1a exact-HEAD finding #1) ──
 //

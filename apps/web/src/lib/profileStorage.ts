@@ -2178,61 +2178,63 @@ export function ensureActiveProfileVisible(currentOwnerUserId: string): boolean 
  * never leave any pull/hydration/write/key resolution running against a
  * stale identity.
  *
- * `isFirstResolvedTransition` guards the ordinary mount case: on a page's
- * very first resolved session status (the "loading" -> resolved edge every
- * page goes through once per load), any correction
- * ensureActiveProfileVisible makes has already landed BEFORE every mounted
- * page's own mount effect first reads `dwp.activeProfile` (this guard
- * renders before `{children}`, so its effect fires first in the same
- * commit — see SessionProviderWrapper.tsx's own doc). Reloading on that
- * edge would be pure noise — an unconditional flash reload on every first
- * load whenever a session's stored active profile happens to need
- * correcting — for a case that is already handled correctly with no reload
- * at all. Only a correction on a SUBSEQUENT transition (a real account
- * switch while pages are already mounted and may already have
- * rendered/cached the pre-correction profile) needs one.
+ * SH.4 Codex P1 fix — "Initial profile correction." This previously also
+ * took an `isFirstResolvedTransition` guard — no reload on a page's very
+ * first resolved session-status transition (the "loading" -> resolved edge
+ * every page goes through once per load), on the assumption that any
+ * correction ensureActiveProfileVisible makes has already landed BEFORE
+ * every mounted page's own mount effect first reads `dwp.activeProfile`
+ * (this guard renders before `{children}`, so its effect fires first in the
+ * same commit). That assumption is false: Plans/Lightning/Tom's own mount
+ * effects run on `[]` deps — unconditionally, on first render, regardless
+ * of session status — so a child CAN mount and read `dwp.activeProfile`
+ * (deriving activeProfileIdRef/planKeyRef/daysKeyRef/currentSyncProfileId/
+ * etc. from it) WHILE `sessionStatus` is still "loading," well before this
+ * guard's own effect has run for a resolved status at all. By the time the
+ * FIRST resolved transition lands and corrects the pointer, such a child's
+ * refs are already exactly as stale as they would be after any LATER
+ * transition's correction — there is no resolved transition, first or not,
+ * that is provably safe to skip. The ONLY question that matters is whether
+ * a correction actually happened: no correction, no reload, on ANY
+ * transition; a correction, on ANY resolved transition (first included),
+ * always reloads. This still deliberately does NOT hot-retarget each
+ * mounted consumer individually — see the "does NOT hot-retarget" rationale
+ * above, unchanged — it only reuses the SAME reload it already performed
+ * for a later transition, now also for the first one.
  *
  * Run from Node:
  *   import { DEV_SHOULD_RELOAD_FOR_ACTIVE_PROFILE_CORRECTION_CASES, shouldReloadForActiveProfileCorrection } from "@/lib/profileStorage";
  *   DEV_SHOULD_RELOAD_FOR_ACTIVE_PROFILE_CORRECTION_CASES.forEach(c => {
- *     const got = shouldReloadForActiveProfileCorrection(c.isFirstResolvedTransition, c.activeProfileWasCorrected);
+ *     const got = shouldReloadForActiveProfileCorrection(c.activeProfileWasCorrected);
  *     console.log(got === c.expected ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export function shouldReloadForActiveProfileCorrection(
-  isFirstResolvedTransition: boolean,
-  activeProfileWasCorrected: boolean
-): boolean {
-  return !isFirstResolvedTransition && activeProfileWasCorrected;
+export function shouldReloadForActiveProfileCorrection(activeProfileWasCorrected: boolean): boolean {
+  return activeProfileWasCorrected;
 }
 
 export const DEV_SHOULD_RELOAD_FOR_ACTIVE_PROFILE_CORRECTION_CASES: Array<{
   name: string;
-  isFirstResolvedTransition: boolean;
   activeProfileWasCorrected: boolean;
   expected: boolean;
 }> = [
   {
-    name: "ordinary first load (loading -> resolved) with a correction — no reload; every mounted page's own mount effect already reads the corrected value, since this guard's effect runs first in the same commit",
-    isFirstResolvedTransition: true,
+    name: "SH.4 Codex P1 fix REGRESSION CASE — a correction on the FIRST resolved transition still reloads: a child (Plans/Lightning/Tom) can already have mounted and read the STALE dwp.activeProfile while sessionStatus was still \"loading\", before this guard's own effect ever ran, so the first resolved transition is no safer to skip than any later one",
     activeProfileWasCorrected: true,
-    expected: false,
+    expected: true,
   },
   {
-    name: "ordinary first load, nothing to correct — no reload",
-    isFirstResolvedTransition: true,
+    name: "no correction — no reload, regardless of which transition this is",
     activeProfileWasCorrected: false,
     expected: false,
   },
   {
     name: "SH.4.1d Codex P1 — a LATER account-switch transition that corrects the pointer while Plans/Lightning/Tom is already mounted — reload required so every mounted page retargets to the corrected profile",
-    isFirstResolvedTransition: false,
     activeProfileWasCorrected: true,
     expected: true,
   },
   {
     name: "a later transition that resolves to the same already-visible active profile — nothing changed, no reload",
-    isFirstResolvedTransition: false,
     activeProfileWasCorrected: false,
     expected: false,
   },
