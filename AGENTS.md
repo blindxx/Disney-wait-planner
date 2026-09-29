@@ -164,15 +164,21 @@ Invariants that must be preserved when touching this area:
   The per-profile local-content-owner marker (`getLocalContentOwner` /
   `setLocalContentOwner` in `syncHelper.ts`) is a separate case: its key
   is also profile-ID-only, but its *value* is the owning account's id —
-  deliberate identity-attribution evidence. It is established at two
-  boundaries, both after the content is durable: after a pull's coherent
-  snapshot has landed, and after a successful safe legacy adoption copy
-  (`adoptLegacyProfileValueIfSafe`). Safe legacy adoption
+  deliberate identity-attribution evidence about the legacy/unqualified
+  namespace. It has exactly two write boundaries, each only after the
+  content is durably written: a successful safe legacy adoption copy
+  (`adoptLegacyProfileValueIfSafe`), and a genuine user-originated edit
+  that durably commits to a legacy/unqualified key
+  (`commitOrdinaryLocalEdit` in `syncHelper.ts`). A normal authenticated
+  planner pull is NOT a write boundary: pulls write account-qualified
+  storage, which the marker does not describe, so Plans/Lightning
+  intentionally do not set it after a pull. Safe legacy adoption
   (`decideLegacyKeyAdoption` in `profileStorage.ts`) and the
   foreign-content checks rely on it to keep one account from adopting or
   pushing another account's local content. Treat it as account-specific
-  evidence, not display state, and preserve both write boundaries (never
-  set it speculatively before content is durable).
+  evidence, not display state, and preserve these two write boundaries (never
+  set it speculatively before content is durable, and never set it after
+  an authenticated qualified pull).
 - **Active profile is device-local.** `dwp.activeProfile` is never
   cloud-synced. Only what value it may point at is corrected, against the
   current account's visible profile list.
