@@ -32,35 +32,50 @@
 - Prefer configuration/environment variables (e.g. `NEXTAUTH_URL`) over
   hardcoding the production domain in application code.
 
-### Database schema deployment order (SH.2.5)
+### Database schema deployment order
 
 `apps/web/src/lib/db-schema.sql` defines the Postgres schema the app
 requires (NextAuth tables, `user_plans`, `user_planner`,
-`user_planner_revision_seq`, `user_planner_writes`). It's kept safely
-rerunnable (`CREATE ... IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`),
-so fresh setup and migrating an existing database both go through the
-same file — never hand-write a separate migration for a production
-database that already has data in it.
+`user_planner_revision_seq`, `user_planner_writes`, `user_profiles`).
+It's kept safely rerunnable (`CREATE ... IF NOT EXISTS` /
+`ADD COLUMN IF NOT EXISTS`), so fresh setup and migrating an existing
+database both go through the same file — never hand-write a separate
+migration for a database that already has data in it.
 
-Required order whenever a change touches `db-schema.sql` (e.g. adding a
-column/table a sync endpoint depends on):
+The migration command is `pnpm --filter web run db:migrate` (the
+`db:migrate` script in `apps/web/package.json`, which runs
+`apps/web/scripts/migrate-db.mjs`). It reads the target database from the
+`DATABASE_URL` environment variable, applies `db-schema.sql` in one
+transaction, then verifies the objects the sync endpoints need exist with
+the expected shape. It exits non-zero and prints `FATAL:` on any failure
+(missing `DATABASE_URL`, connection failure, apply failure, or a
+partial/incompatible schema) rather than passing silently.
 
-1. Run the migration against production **first**, before deploying any
-   application code that depends on the new schema:
-   `DATABASE_URL=<production DATABASE_URL> pnpm --filter web run db:migrate`
-   (see `apps/web/scripts/migrate-db.mjs`). It applies `db-schema.sql`
-   in one transaction, then verifies the objects the sync endpoints
-   need actually exist — it exits non-zero and prints `FATAL:` on any
-   failure (including a partial/incompatible schema) rather than
-   letting a broken migration pass silently.
-2. Only deploy/promote the application code once that run has
-   succeeded. Application code must never go live against a database
-   that hasn't had the corresponding migration applied — sync endpoints
-   have no fallback for missing SH.2 schema and will fail at runtime
-   against it.
-3. Re-running `db:migrate` against an already-migrated database (or a
-   fresh one that already went through `db-schema.sql`) is safe and a
-   no-op — it's fine to run it again if in doubt before a deploy.
+Rules whenever a change touches `db-schema.sql` (e.g. adding a
+column/table an endpoint depends on):
+
+1. **Migrate before deploying.** A schema-dependent migration must run
+   against the target database *before* the deployment that depends on it
+   goes live. Application code must never be live against a database that
+   lacks its schema — the sync endpoints have no fallback for missing
+   schema and fail at runtime (e.g. code needing `user_profiles` reaching
+   Production before its migration made `/api/sync/profiles` fail).
+2. **Migrate every database in use.** Production and Preview must each be
+   migrated whenever they use separate databases; migrating one does not
+   cover the other.
+3. **A failed migration or schema verification blocks deployment.** Do
+   not deploy/promote until `db:migrate` exits successfully against that
+   environment's database.
+4. **Never expose or commit `DATABASE_URL`.** Supply it only via the
+   shell environment for the run
+   (`DATABASE_URL=<target DATABASE_URL> pnpm --filter web run db:migrate`);
+   never write a real connection string into the repo, docs, logs, or
+   commit messages.
+5. Re-running `db:migrate` against an already-migrated database is safe
+   and a no-op — re-run it if in doubt before a deploy.
+
+Migrations are run manually; there is no automatic migration step in the
+build or deploy pipeline.
 
 ## Scope discipline
 
@@ -86,43 +101,17 @@ closures, lifecycle/status, and future Experiences/seasonal data.
 Consumers may decide presentation, but must not fork the underlying
 maintained truth.
 
-### Sync Hardening & Architecture Fix — temporary exception
-
-During the **Sync Hardening & Architecture Fix** phase (SH.0 through
-SH.7), the "preserve existing architecture" rule above does not apply to
-cloud-sync architecture:
-
-- Cloud-sync architecture changes are explicitly in scope, when required
-  to establish the approved authoritative sync model.
-- The current sync implementation is not itself an invariant: existing
-  payload shape, conflict-tracking mechanisms, compatibility/fallback
-  logic, and sync module boundaries may all be revised when justified.
-- This exception applies only to sync-related architecture. It does not
-  authorize unrelated refactors, dependency upgrades, or cleanup outside
-  sync.
-- Implementation should continue to prefer small, independently
-  reviewable changes even while sync architecture is being revised.
-
-The following remain mandatory throughout Sync Hardening and are **not**
-suspended by this exception: local-first behavior, user/profile
-isolation, pull-before-push protection, auth/profile transition safety,
-stale-response protection, and destructive-first-sync prevention.
-
-**The final sync architecture has not been established yet.** SH.0
-inspects current `main` and recommends the target architecture — no
-proposed concept (snapshot version, profile registry design, payload
-schema, conflict model, or similar) is a permanent invariant until
-adopted there. Permanent sync architecture documentation is added to this
-file after implementation and production QA, in SH.7.
-
 ## Local-first + profile safety
 
 Planner state (My Plans, Lightning Lane selections) is **local-first**:
 localStorage is the source of truth, and cloud sync (when signed in)
-mirrors it. Storage and sync state are **profile-scoped** — see
-`apps/web/src/lib/profileStorage.ts` (namespaced keys `dwp:{profileId}:{baseKey}`)
-and `apps/web/src/lib/syncHelper.ts` (debounced push, per-profile sync
-status keys, `pullPlanner()`).
+mirrors it. Storage is **profile-scoped**: authenticated planner content
+is account + profile qualified (`dwp:{userId}:{profileId}:{baseKey}`),
+while signed-out/unqualified storage is profile-scoped
+(`dwp:{profileId}:{baseKey}`) — see `apps/web/src/lib/profileStorage.ts`,
+and `apps/web/src/lib/syncHelper.ts` (debounced push, sync status keys,
+`pullPlanner()`). See "Sync architecture invariants" below for the
+isolation rules and what is and isn't account-isolated.
 
 Invariants that must be preserved when touching this area:
 - Scheduled/debounced work that has not yet started (e.g. a pending
@@ -134,7 +123,10 @@ Invariants that must be preserved when touching this area:
   fetch. Its results and status writes must remain tied to the profile
   captured when it started (`syncHelper.ts` captures `profileId` at
   push-start for exactly this reason), and completion from one
-  profile/session must never mutate another profile's state.
+  profile/session must never mutate another profile/account's planner
+  content or identity-scoped sync state. (The profile-keyed UI metadata
+  `status`/`lastError`/`lastSyncedAt` is tied to the captured profile but
+  is not account-isolated — see Sync architecture invariants.)
 - Preserve pull-before-push and stale-response protections around
   profile/auth transitions (e.g. `setSyncProfileId()` cancelling pending
   sync, `cancelScheduledSync()` on auth transitions, the caller pulling
@@ -150,6 +142,103 @@ Invariants that must be preserved when touching this area:
   route. `/api/sync/plans` remains its own standalone legacy plans-only
   endpoint. Do not treat the legacy route as the primary sync path, and
   do not describe it as what `/api/sync/planner` calls internally.
+
+### Sync architecture invariants
+
+- **Account + profile isolation.** Authenticated planner content is keyed
+  by account *and* profile: server rows by `(user_id, profile_id)`, and
+  authenticated local planner content/sync-baseline storage by
+  account-qualified keys (`dwp:{userId}:{profileId}:{baseKey}`; see
+  `profileStorage.ts`, `syncHelper.ts`). Signed-out storage remains
+  device-local (`dwp:{profileId}:{baseKey}`). One account's or profile's
+  planner content, and identity-scoped sync operations and their
+  in-flight results (identity captured at operation start, cancellation
+  on auth/profile transitions, ownership checks), must never be
+  readable, writable, or pushable under another's identity. This
+  guarantee does NOT extend to the display-only sync metadata
+  `dwp:sync:{profileId}:status` / `lastError` / `lastSyncedAt`: it is
+  keyed by profile ID only and is UI/coordination state, not
+  account-isolated, so accounts sharing an ID (e.g. `default`) on one
+  browser share it and it can persist across accounts. Do not read it as
+  account-specific sync state.
+  The per-profile local-content-owner marker (`getLocalContentOwner` /
+  `setLocalContentOwner` in `syncHelper.ts`) is a separate case: its key
+  is also profile-ID-only, but its *value* is the owning account's id —
+  deliberate identity-attribution evidence about the legacy/unqualified
+  namespace. It has exactly two write boundaries, each only after the
+  content is durably written: a successful safe legacy adoption copy
+  (`adoptLegacyProfileValueIfSafe`), and a genuine user-originated edit
+  that durably commits to a legacy/unqualified key
+  (`commitOrdinaryLocalEdit` in `syncHelper.ts`). A normal authenticated
+  planner pull is NOT a write boundary: pulls write account-qualified
+  storage, which the marker does not describe, so Plans/Lightning
+  intentionally do not set it after a pull. Safe legacy adoption
+  (`decideLegacyKeyAdoption` in `profileStorage.ts`) and the
+  foreign-content checks rely on it to keep one account from adopting or
+  pushing another account's local content. Treat it as account-specific
+  evidence, not display state, and preserve these two write boundaries (never
+  set it speculatively before content is durable, and never set it after
+  an authenticated qualified pull).
+- **Active profile is device-local.** `dwp.activeProfile` is never
+  cloud-synced. Only what value it may point at is corrected, against the
+  current account's visible profile list.
+- **Planner sync protections.** `/api/sync/planner` + `syncHelper.ts` use
+  server revisions with a client `baseRevision` (stale first-delivery
+  writes are rejected with 409), client operation ids with a pending-op
+  queue and replay/status lookup (`opStatuses`), a confirmed-baseline
+  record per domain, conflict/recovery handling, and durable local-commit
+  helpers. Do not bypass these with direct localStorage writes or
+  unconditional pushes; pull-before-push and destructive-first-sync
+  prevention still apply.
+- **Profile registry is separate.** `user_profiles` (via
+  `/api/sync/profiles`, reconciled client-side by `profileRegistrySync.ts`)
+  syncs profile *identity metadata* (id + name) across an account's
+  devices. It never carries planner content and has no
+  revision/pending-op machinery. Profile deletion is NOT synchronized:
+  no code path sets `deleted_at` and there is no delete endpoint, so a
+  delete stays device-local, recorded per account on that device
+  (`markProfileLocallyDeleted` in `profileStorage.ts`) to keep it from
+  being re-discovered there. The `deleted_at` column and the
+  tombstone-aware read/adoption logic are groundwork only — never
+  document or rely on them as a cross-device delete path. Planner network sync
+  and registry reconciliation are separate endpoints/systems with
+  independent revision/reconciliation machinery — neither calls into the
+  other's sync path. They are not fully decoupled, though: safe legacy
+  adoption intentionally consults profile-registry provenance
+  (`isProfileUnclaimedByOtherAccount` over the local registry state) plus
+  the current user's ownership for cross-account safety; preserve that. Registry adoption is
+  additive: a server-known id (active or tombstoned) is never overwritten
+  or resurrected by a stale local copy, and a local id owned by a
+  different account on this device is not adopted — except the canonical
+  shared `default` profile (`CANONICAL_SHARED_PROFILE_ID` in
+  `profileStorage.ts`), which is exempt from that cross-account
+  exclusion: every account legitimately has its own `default`, so one
+  account's registration of it must never block another's. Its planner
+  content stays isolated by account + profile like any other id.
+- **Root authenticated-lifecycle guards.** `SessionProviderWrapper.tsx`
+  (mounted once in the root layout, before page children) owns the
+  global, page-independent *baseline* authenticated lifecycle: correcting
+  the active profile (`ensureActiveProfileVisible`), safe legacy adoption
+  of unqualified local data into account-qualified keys
+  (`adoptLegacyProfileValueIfSafe`), and starting registry
+  reconciliation. While the session status is `loading` (unresolved
+  identity), active-profile correction, legacy adoption, and
+  reconciliation startup are all withheld, but the registry identity is
+  still cleared (`setRegistryIdentity(null)`) so an in-flight
+  reconciliation round from the prior account stops at its next
+  currency check. Some page-level calls are intentional supplements, not
+  duplicates, and must be kept: Plans/Lightning also call
+  `adoptLegacyProfileValueIfSafe` (idempotent, safe to repeat) as part of
+  retargeting their own storage identity, and Settings also calls
+  `reconcileProfileRegistry` for a prompt UI refresh. Do not remove them
+  on the assumption the root guards cover them; do not add new baseline
+  lifecycle behavior to a single page — put it in the root guards.
+- **Legacy compatibility.** Pre-account local data (unqualified keys,
+  legacy `dwp.myPlans`-style values) and legacy server plans remain
+  adoptable/readable only through the existing safe-adoption and
+  fallback paths above, subject to the same isolation rules.
+- Schema for all of the above lives in `db-schema.sql`; see Database
+  schema deployment order.
 
 ## Planner identity / matching
 
