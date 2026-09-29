@@ -370,14 +370,14 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
 // ===== SH.5 RENAME PROPAGATION =====
 
 /**
- * Given the server registry, this device's current local profiles, this
- * device's own unconfirmed pending renames (profileStorage.ts's
- * getPendingProfileRenames), and the ids durably owned by a DIFFERENT
- * account, compute the {id, name} pairs that should be PUSHED as rename
- * updates this round — the PUSH-side counterpart to computeProfilesToAdopt,
- * for an id the account's OWN server row ALREADY exists for (an id the
- * server has never seen belongs to computeProfilesToAdopt instead; this
- * function explicitly skips anything not already server-known).
+ * Given the server registry and this device's current local profiles and
+ * own unconfirmed pending renames (profileStorage.ts's
+ * getPendingProfileRenames), compute the {id, name} pairs that should be
+ * PUSHED as rename updates this round — the PUSH-side counterpart to
+ * computeProfilesToAdopt, for an id the account's OWN server row ALREADY
+ * exists for (an id the server has never seen belongs to
+ * computeProfilesToAdopt instead; this function explicitly skips anything
+ * not already server-known).
  *
  * An id is proposed for rename ONLY when ALL of:
  *   - it has a pending-rename entry (this device deliberately renamed it,
@@ -386,38 +386,51 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
  *     ANOTHER device renamed it, which must be PULLED, never overwritten by
  *     a push from a device that never touched it — selectServerRenamesToApply
  *     below owns that pull path);
- *   - the pending entry's name still matches the CURRENT local name (a
- *     newer, un-pushed edit hasn't superseded it — always true in practice
- *     since renameProfile writes both together, but checked defensively);
- *   - the server already has an ACTIVE row for this id (a not-yet-known id
- *     is computeProfilesToAdopt's job, not a rename);
+ *   - this device still has the profile locally at all (this account
+ *     deleted it, or it was never here — nothing left to push);
+ *   - the server ALREADY has an ACTIVE row for this id, SCOPED TO THIS
+ *     ACCOUNT (`serverProfiles` is this round's own GET response, which the
+ *     server itself already scopes by `user_id` — see /api/sync/profiles's
+ *     route doc). That row's mere existence IS this account's own
+ *     confirmed, unambiguous ownership of it, full stop — a not-yet-known
+ *     id is computeProfilesToAdopt's job, not a rename;
  *   - the server's current name for it differs from the pending name
- *     (nothing to push otherwise — already converged);
- *   - it is not durably owned by a DIFFERENT account (mirrors
- *     computeProfilesToAdopt's own exclusion — this account's push must
- *     never target a row it doesn't own).
+ *     (nothing to push otherwise — already converged).
+ *
+ * Codex finding #1 — deliberately takes NO `ownedByOtherAccountIds`
+ * parameter, unlike computeProfilesToAdopt. That exclusion protects
+ * ADOPTION (a brand-new registration this account has never made before)
+ * from mistaking a legacy local id another account independently owns for
+ * an unclaimed one; a rename target has no such ambiguity to protect
+ * against, because it is ALWAYS already confirmed via THIS round's own
+ * `serverProfiles` — i.e. the server's own `user_id`-scoped row already
+ * proves the CURRENT account owns it, regardless of whether some OTHER
+ * account also, independently, owns the identical literal non-default id
+ * (profileStorage.ts's own module doc: two accounts can each legitimately
+ * own the same literal id). Reusing computeProfilesToAdopt's exclusion here
+ * previously blocked exactly that legitimate case — a confirmed rename for
+ * a co-owned id was silently dropped every round, forever, even though the
+ * account's own server row for it was right there in `serverProfiles`.
  *
  * Pure — takes every input as a parameter.
  *
  * Run from Node:
  *   import { DEV_COMPUTE_PROFILES_TO_RENAME_CASES, computeProfilesToRename } from "@/lib/profileRegistrySync";
  *   DEV_COMPUTE_PROFILES_TO_RENAME_CASES.forEach(c => {
- *     const got = computeProfilesToRename(c.serverProfiles, c.localProfiles, c.pendingRenames, c.ownedByOtherAccountIds);
+ *     const got = computeProfilesToRename(c.serverProfiles, c.localProfiles, c.pendingRenames);
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
 export function computeProfilesToRename(
   serverProfiles: ServerProfileRecord[],
   localProfiles: Profile[],
-  pendingRenames: PendingRenames,
-  ownedByOtherAccountIds: ReadonlySet<string>
+  pendingRenames: PendingRenames
 ): Profile[] {
   const serverNameById = new Map(serverProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
   const localIds = new Set(localProfiles.map((p) => p.id));
   const out: Profile[] = [];
   for (const [id, pending] of Object.entries(pendingRenames)) {
-    if (ownedByOtherAccountIds.has(id)) continue;
-    // Codex finding #1 — presence, NOT name equality: `dwp.profiles` is a
+    // Codex finding — presence, NOT name equality: `dwp.profiles` is a
     // single SHARED local list, not per-account, so a DIFFERENT account's
     // own legitimate pull (selectServerRenamesToApply/applyServerRenames)
     // can freely overwrite the shared display name for an id this account
@@ -445,7 +458,6 @@ export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
   serverProfiles: ServerProfileRecord[];
   localProfiles: Profile[];
   pendingRenames: PendingRenames;
-  ownedByOtherAccountIds: Set<string>;
   expected: Profile[];
 }> = [
   {
@@ -453,7 +465,6 @@ export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
     serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Our Family Trip" }],
     pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "default", name: "Our Family Trip" }],
   },
   {
@@ -461,7 +472,6 @@ export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
     serverProfiles: [{ profileId: "default", name: "Old Name (renamed elsewhere)", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Default" }],
     pendingRenames: {},
-    ownedByOtherAccountIds: new Set(),
     expected: [],
   },
   {
@@ -469,7 +479,6 @@ export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
     serverProfiles: [],
     localProfiles: [{ id: "mom", name: "Mom" }],
     pendingRenames: { mom: { name: "Mom", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(),
     expected: [],
   },
   {
@@ -477,15 +486,13 @@ export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
     serverProfiles: [{ profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Our Family Trip" }],
     pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(),
     expected: [],
   },
   {
-    name: "Codex finding #1 fix — another account's legitimate pull already overwrote the SHARED local display name; this account's own pending rename is still pushed rather than abandoned (the shared dwp.profiles name is no longer proof of what THIS account intends — only the account-scoped pending marker is)",
+    name: "another account's legitimate pull already overwrote the SHARED local display name; this account's own pending rename is still pushed rather than abandoned (the shared dwp.profiles name is no longer proof of what THIS account intends — only the account-scoped pending marker is)",
     serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Some Other Account's Name" }],
     pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "default", name: "Our Family Trip" }],
   },
   {
@@ -493,23 +500,27 @@ export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
     serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Default" }],
     pendingRenames: { family: { name: "The Smiths", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(),
     expected: [],
   },
   {
-    name: "id durably owned by a DIFFERENT account — never pushed as this account's rename",
+    name: "an id NOT yet confirmed via this account's own serverProfiles is never pushed as a rename, even with a pending marker for it — computeProfilesToAdopt's job instead",
     serverProfiles: [],
     localProfiles: [{ id: "family", name: "My Rename" }],
     pendingRenames: { family: { name: "My Rename", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(["family"]),
     expected: [],
   },
   {
-    name: "the canonical 'default' id is never in ownedByOtherAccountIds (see profileStorage.ts's exemption), so its own rename is always pushable for this account",
+    name: "Codex finding #1 — a NON-default id independently owned by another account TOO is still renamed for this account, because this round's own serverProfiles already confirms THIS account's active row for it; the old ownedByOtherAccountIds exclusion (removed) would have wrongly blocked this forever",
+    serverProfiles: [{ profileId: "family", name: "Old Family Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: { family: { name: "The Smiths", renamedAt: 1 } },
+    expected: [{ id: "family", name: "The Smiths" }],
+  },
+  {
+    name: "the canonical 'default' id's own rename is always pushable for this account once confirmed via serverProfiles",
     serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Our Family Trip" }],
     pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
-    ownedByOtherAccountIds: new Set(),
     expected: [{ id: "default", name: "Our Family Trip" }],
   },
 ];
@@ -764,7 +775,7 @@ export const DEV_SELECT_SERVER_RENAMES_TO_APPLY_CASES: Array<{
  *     // (3) Switch back to A — A's own marker is untouched, and still pushable
  *     // even though the shared list no longer reflects A's last local edit.
  *     const aPending = selectPendingRenamesForAccount(pendingState, c.accountA);
- *     const toRename = computeProfilesToRename(c.serverProfilesForA, profiles, aPending, new Set());
+ *     const toRename = computeProfilesToRename(c.serverProfilesForA, profiles, aPending);
  *
  *     // (4) A's push is confirmed — only A's own marker is cleared.
  *     const authoritativeAfterAPush = [{ profileId: c.profileId, name: c.aIntendedName, updatedAt: "x", deletedAt: null }];
@@ -852,7 +863,7 @@ export const DEV_PENDING_RENAME_SURVIVES_CROSS_ACCOUNT_PULL_CASES: Array<{
  *
  *     // Round N+1: a fresh plain GET now shows the true, already-converged
  *     // state. Nothing gets pushed...
- *     const roundNPlus1ToRename = computeProfilesToRename(c.roundNPlus1ServerProfiles, c.localProfiles, c.pendingRenames, new Set());
+ *     const roundNPlus1ToRename = computeProfilesToRename(c.roundNPlus1ServerProfiles, c.localProfiles, c.pendingRenames);
  *     // ...but the marker must still be recognized as confirmed and cleared.
  *     const roundNPlus1Authoritative = resolveAuthoritativeServerProfiles(c.roundNPlus1ServerProfiles, roundNPlus1ToRename.length > 0, null);
  *     const roundNPlus1Confirmed = selectConfirmedPendingRenames(c.pendingRenames, roundNPlus1Authoritative);
@@ -909,7 +920,7 @@ export const DEV_PENDING_RENAME_CLEARED_WITHOUT_PUSH_CASES: Array<{
  *     const pendingForAccount = selectPendingRenamesForAccount(pendingState, c.accountKey);
  *     // The next reconciliation round must propose NOTHING to push for this id —
  *     // no marker survived to push the stale name onto the new profile.
- *     const toRename = computeProfilesToRename(c.serverProfiles, recreatedLocalProfiles, pendingForAccount, new Set());
+ *     const toRename = computeProfilesToRename(c.serverProfiles, recreatedLocalProfiles, pendingForAccount);
  *     const ok = Object.keys(pendingForAccount).length === 0 && toRename.length === 0;
  *     console.log(ok ? "✓" : "✗ FAIL", c.name);
  *   });
@@ -2232,8 +2243,13 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // never a different account's own pending rename recorded on a shared
   // browser (see profileStorage.ts's PendingRenamesByAccount doc).
   const pendingRenames = getPendingProfileRenames(userId);
+  // Codex finding #1 — no ownedByOtherAccountIds argument: a rename target
+  // is always already confirmed via `initialServerProfiles` (this round's
+  // own user_id-scoped GET), which is unambiguous proof of THIS account's
+  // ownership regardless of whether some OTHER account also, independently,
+  // owns the identical literal id — see computeProfilesToRename's own doc.
   const toRename = filterAdoptableProfiles(
-    computeProfilesToRename(initialServerProfiles, localProfiles, pendingRenames, ownedByOtherAccountIds)
+    computeProfilesToRename(initialServerProfiles, localProfiles, pendingRenames)
   );
   // Codex finding #1 — each entry is tagged with its own explicit intent so
   // /api/sync/profiles's PUT can run adopt candidates through an

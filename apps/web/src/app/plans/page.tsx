@@ -109,6 +109,7 @@ import {
   resolveAccountScopedKey,
   adoptLegacyProfileValueIfSafe,
   PROFILE_NAME_CHANGED_EVENT,
+  PROFILES_LIST_KEY,
 } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
@@ -2040,6 +2041,15 @@ export default function PlansPage() {
   // independent of any pull.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
+      // Codex finding — a profile rename PULLED while a DIFFERENT tab on
+      // this same browser is mounted writes `dwp.profiles` there; the
+      // native `storage` event fires in every OTHER tab (never the one that
+      // wrote it — see PROFILE_NAME_CHANGED_EVENT's own same-tab doc), so
+      // this is the cross-tab half of the same fix, reusing this page's
+      // own EXISTING `storage` listener rather than adding a new one.
+      if (e.key === PROFILES_LIST_KEY) {
+        setActiveProfileName(getActiveProfile().name);
+      }
       if (e.key === lightningKeyRef.current) {
         setLightningVersion((v) => v + 1);
       }

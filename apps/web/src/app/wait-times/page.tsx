@@ -40,6 +40,7 @@ import {
   getActiveProfileKeys,
   getActiveProfile,
   PROFILE_NAME_CHANGED_EVENT,
+  PROFILES_LIST_KEY,
 } from "../../lib/profileStorage";
 import {
   PLANNED_CLOSURES,
@@ -564,13 +565,25 @@ export default function WaitTimesPage() {
   // mounted; same-tab localStorage writes never fire the native `storage`
   // event, so without this the "Profile: X" label above would keep
   // showing the stale name until a reload/remount — see
-  // PROFILE_NAME_CHANGED_EVENT's own doc.
+  // PROFILE_NAME_CHANGED_EVENT's own doc. Also covers the CROSS-TAB half
+  // of the same problem: a rename pulled while a DIFFERENT tab on this
+  // browser is mounted writes `dwp.profiles` there, which fires the native
+  // `storage` event in every OTHER tab (never the tab that wrote it) — see
+  // PROFILES_LIST_KEY's own doc. Both listeners perform the identical
+  // refresh, so they're co-located in one effect rather than duplicated.
   useEffect(() => {
     function handleProfileNameChanged() {
       setActiveProfileName(getActiveProfile().name);
     }
+    function handleStorage(e: StorageEvent) {
+      if (e.key === PROFILES_LIST_KEY) handleProfileNameChanged();
+    }
     window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
-    return () => window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+      window.removeEventListener("storage", handleStorage);
+    };
   }, []);
 
   /** Handle resort change — reset park to first in new resort, clear land filter, and persist.

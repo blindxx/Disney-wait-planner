@@ -38,6 +38,7 @@ import {
   deleteProfile,
   getActiveProfileKeys,
   PROFILE_NAME_CHANGED_EVENT,
+  PROFILES_LIST_KEY,
 } from "../../lib/profileStorage";
 import {
   reconcileProfileRegistry,
@@ -265,9 +266,21 @@ export default function SettingsPage() {
       setProfiles(getVisibleProfiles(visibilityOwnerKeyRef.current));
     };
     window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    // Codex finding — the CROSS-TAB half of the same problem: a rename
+    // pulled while a DIFFERENT tab on this browser is mounted writes
+    // `dwp.profiles` there, which fires the native `storage` event in every
+    // OTHER tab (never the tab that wrote it) — see PROFILES_LIST_KEY's own
+    // doc. Reuses the identical refresh (and the same
+    // visibilityOwnerKeyRef.current freshness fix) as the same-tab listener
+    // above rather than duplicating the logic.
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === PROFILES_LIST_KEY) handleProfileNameChanged();
+    };
+    window.addEventListener("storage", handleStorage);
     return () => {
       window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
       window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 

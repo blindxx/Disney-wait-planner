@@ -40,7 +40,13 @@ export type Profile = {
 // ===== CONSTANTS =====
 
 const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
-const PROFILES_LIST_KEY = "dwp.profiles";
+// Codex finding — exported (was module-private) so pages can recognize this
+// exact key in a native `storage` event (which fires in every OTHER tab
+// when this key changes, but never in the tab that wrote it — see
+// PROFILE_NAME_CHANGED_EVENT's own doc for the same-tab half of this same
+// problem) rather than hardcoding the raw string "dwp.profiles" at each
+// call site.
+export const PROFILES_LIST_KEY = "dwp.profiles";
 
 /**
  * SH.5 — rename propagation. `{ [profileId]: { name, renamedAt } }`: a
@@ -74,6 +80,16 @@ const PENDING_RENAMES_LOCK_NAME = "dwp:profilePendingRenames";
  * `window.dispatchEvent(new CustomEvent(...))`, consumed via a plain
  * `window.addEventListener` in each page's own effect) rather than
  * introducing a parallel notification mechanism.
+ *
+ * Codex finding — this is deliberately the SAME-TAB half only. The native
+ * `storage` event fires in every OTHER tab/window when `dwp.profiles`
+ * changes (but never this one), so consumers additionally listen for
+ * `window.addEventListener("storage", ...)` keyed on PROFILES_LIST_KEY to
+ * cover a rename pulled while a DIFFERENT tab on the same browser is
+ * mounted — the two together (this CustomEvent for same-tab,
+ * PROFILES_LIST_KEY's native `storage` event for cross-tab) are the
+ * complete same-browser notification story; neither alone covers both
+ * cases, and there is no third mechanism needed.
  */
 export const PROFILE_NAME_CHANGED_EVENT = "dwp:profileNameChanged";
 
