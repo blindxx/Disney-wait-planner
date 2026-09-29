@@ -152,11 +152,13 @@
 import {
   type Profile,
   type PendingRenames,
+  type ProfileRegistryState,
   getProfiles,
   filterVisibleProfiles,
   adoptServerProfiles,
   markProfileOwner,
   getLocallyDeletedProfileIds,
+  getVisibleProfiles,
   getProfileIdsOwnedByOtherAccounts,
   getPendingProfileRenames,
   clearProfileRenamePending,
@@ -2785,7 +2787,10 @@ function recordRegistrySynced(userId: string, profileIds: string[]): void {
  *     the round's initial GET did not (a new registration or a confirmed
  *     rename); or
  *   - DISCOVERED: absent from `localBefore`, present in `localAfter`, and an
- *     active authoritative server row; or
+ *     active authoritative server row. Callers pass the ACCOUNT-VISIBLE
+ *     lists (getVisibleProfiles), so an id already in the raw shared list
+ *     but hidden by another account's exclusive ownership counts once this
+ *     account's stamping makes it visible; or
  *   - PULLED RENAME: in both lists with a different name, `localAfter`'s
  *     name equal to the authoritative server name.
  * A no-op round (everything already converged) returns []. Local deletion
@@ -2898,6 +2903,52 @@ export const DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES: Array<{
 ];
 
 /**
+ * SH.7B regression — the id already sits in the raw shared `dwp.profiles`
+ * list because ANOTHER account exclusively owns it, so it is hidden from
+ * this account; reconciliation confirms this account's own server row and
+ * stamps its ownership, making it newly visible. Uses the real visibility
+ * helpers (profileStorage.ts) before/after the stamp.
+ *
+ * Run from Node:
+ *   import { DEV_REGISTRY_VISIBILITY_TRANSITION_CASES, selectMeaningfulRegistryChangeIds } from "@/lib/profileRegistrySync";
+ *   import { selectHiddenProfileIdsForAccount, filterVisibleProfiles, applyProfileOwnerStamp } from "@/lib/profileStorage";
+ *   DEV_REGISTRY_VISIBILITY_TRANSITION_CASES.forEach(c => {
+ *     const vis = (st) => filterVisibleProfiles(c.rawShared, selectHiddenProfileIdsForAccount(st, c.userId));
+ *     const after = applyProfileOwnerStamp(c.state, c.profileId, c.userId);
+ *     const got = selectMeaningfulRegistryChangeIds(c.server, c.server, [], vis(c.state), vis(after));
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_REGISTRY_VISIBILITY_TRANSITION_CASES: Array<{
+  name: string;
+  userId: string;
+  profileId: string;
+  rawShared: Profile[];
+  state: ProfileRegistryState;
+  server: ServerProfileRecord[];
+  expected: string[];
+}> = [
+  {
+    name: "raw id exists only because account A owns it; B's reconciliation confirms B's server row and stamps ownership — newly visible to B, counts as meaningful",
+    userId: "userB",
+    profileId: "family",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    state: { family: { userA: { owned: true } } },
+    server: [{ profileId: "family", name: "Family", updatedAt: "x", deletedAt: null }],
+    expected: ["family"],
+  },
+  {
+    name: "already visible to B (B already owns it) — stamping again changes nothing, no-op",
+    userId: "userB",
+    profileId: "family",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    server: [{ profileId: "family", name: "Family", updatedAt: "x", deletedAt: null }],
+    expected: [],
+  },
+];
+
+/**
  * Runs one round of registry reconciliation for `userId`, the authenticated
  * identity the caller has ALREADY bound via setRegistryIdentity(userId)
  * (called synchronously, immediately before this) — refuses to run at all
@@ -2991,6 +3042,12 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
 
   const initialServerProfiles = await fetchServerProfiles();
   if (!isCurrent() || initialServerProfiles === null) return;
+  // SH.7B — this account's EFFECTIVE (visibility-filtered) list at round
+  // start, before ownership stamping below. Raw `getProfiles()` is not
+  // enough: an id already in the shared list because ANOTHER account owns it
+  // is hidden from this account until stamping makes it visible, which is a
+  // genuine discovery for this account.
+  const visibleBeforeRound = getVisibleProfiles(userId);
 
   // Codex P1 follow-up (4th round, bounded adjacency) — this snapshot feeds
   // BOTH the ADOPTION candidates below and (as a starting point only — see
@@ -3172,8 +3229,7 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // so a concurrent local create/rename/delete can never be lost to a
   // stale reconciliation snapshot. commitDiscoveredProfiles's own await of
   // `mergeIntoLocal` propagates that here.
-  const localBeforeDiscovery = getProfiles();
-  const discoveredMerge = await commitDiscoveredProfiles(
+  await commitDiscoveredProfiles(
     authoritativeServerProfiles,
     () => getLocallyDeletedProfileIds(userId),
     adoptServerProfiles
@@ -3187,8 +3243,8 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
       initialServerProfiles,
       authoritativeServerProfiles,
       toPush,
-      localBeforeDiscovery,
-      Array.isArray(discoveredMerge) ? discoveredMerge : localBeforeDiscovery
+      visibleBeforeRound,
+      getVisibleProfiles(userId)
     )
   );
 
