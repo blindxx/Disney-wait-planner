@@ -44,6 +44,9 @@ import {
   reconcileProfileRegistry,
   shouldWithholdProfileControls,
   pushNewProfileRegistration,
+  getRegistryLastSyncedAt,
+  registryLastSyncedKey,
+  PROFILE_REGISTRY_SYNCED_EVENT,
 } from "../../lib/profileRegistrySync";
 
 // ============================================
@@ -183,6 +186,38 @@ export default function SettingsPage() {
     lastError: null,
   });
   const syncingStartedAtRef = useRef<number | null>(null);
+
+  // SH.7B — last MEANINGFUL profile-registry change for the active profile
+  // (profileRegistrySync.ts's recordRegistrySynced — never a no-op check).
+  // Presentation-only and separate from planner syncState above: "Last
+  // synced" shows whichever of the two is later, without either engine
+  // writing into the other's state.
+  const [registryLastSyncedAt, setRegistryLastSyncedAt] = useState<string | null>(null);
+  useEffect(() => {
+    if (!authenticatedUserId) {
+      setRegistryLastSyncedAt(null);
+      return;
+    }
+    const refresh = () => setRegistryLastSyncedAt(getRegistryLastSyncedAt(authenticatedUserId, activeProfileId));
+    refresh();
+    // Cross-tab half: same-tab localStorage writes never fire `storage`, so
+    // the custom event above covers this tab and `storage` covers others.
+    // Only this exact account+profile key is reacted to (e.key === null is
+    // a clear() — also refresh).
+    const registryKey = registryLastSyncedKey(authenticatedUserId, activeProfileId);
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === registryKey) refresh();
+    };
+    window.addEventListener(PROFILE_REGISTRY_SYNCED_EVENT, refresh);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(PROFILE_REGISTRY_SYNCED_EVENT, refresh);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [authenticatedUserId, activeProfileId]);
+  const displayedLastSyncedAt = [displayedSyncState.lastSyncedAt, registryLastSyncedAt]
+    .filter((t): t is string => !!t)
+    .sort((x, y) => Date.parse(y) - Date.parse(x))[0] ?? null;
 
   // Hydrate from localStorage on mount (client-side only).
   useEffect(() => {
@@ -500,7 +535,7 @@ export default function SettingsPage() {
     // runs afterward and will retry this exact id if this attempt's own
     // request failed.
     if (authenticatedUserId) {
-      await pushNewProfileRegistration(profile);
+      await pushNewProfileRegistration(profile, authenticatedUserId);
     }
     location.reload();
   }
@@ -838,7 +873,7 @@ export default function SettingsPage() {
             </button>
           </div>
           <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: "8px" }}>
-            Each profile stores separate Plans, Lightning, and park context. Profiles are local to this device.
+            Each profile stores separate Plans, Lightning, and park context. Signed-in profile names sync across devices; planner data stays separate for each profile.
           </p>
         </section>
       )}
@@ -954,9 +989,7 @@ export default function SettingsPage() {
             </p>
             <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: displayedSyncState.status === "error" ? "4px" : "12px" }}>
               Last synced:{" "}
-              {displayedSyncState.lastSyncedAt
-                ? formatRelativeTime(displayedSyncState.lastSyncedAt)
-                : "--"}
+              {displayedLastSyncedAt ? formatRelativeTime(displayedLastSyncedAt) : "--"}
             </p>
 
             {/* Error message — persists until next successful sync */}

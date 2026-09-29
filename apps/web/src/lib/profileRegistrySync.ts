@@ -152,11 +152,13 @@
 import {
   type Profile,
   type PendingRenames,
+  type ProfileRegistryState,
   getProfiles,
   filterVisibleProfiles,
   adoptServerProfiles,
   markProfileOwner,
   getLocallyDeletedProfileIds,
+  getVisibleProfiles,
   getProfileIdsOwnedByOtherAccounts,
   getPendingProfileRenames,
   clearProfileRenamePending,
@@ -2588,18 +2590,34 @@ type ProfilePushEntry = Profile & { intent: "adopt" | "rename" };
  * scheduleSync()'s doPush() for planner sync.
  */
 async function pushProfilesToAdopt(toAdopt: ProfilePushEntry[]): Promise<void> {
-  if (toAdopt.length === 0) return;
+  await putProfiles(toAdopt);
+}
+
+/**
+ * The raw PUT behind pushProfilesToAdopt. Resolves with the response's
+ * `registered` ids, or null on any failure/empty batch. Reconciliation
+ * rounds ignore the result (see pushProfilesToAdopt's own doc); only
+ * pushNewProfileRegistration's display-only "Last synced" path reads it,
+ * and even there only alongside a confirmatory GET.
+ */
+async function putProfiles(toAdopt: ProfilePushEntry[]): Promise<string[] | null> {
+  if (toAdopt.length === 0) return null;
   try {
-    await fetch("/api/sync/profiles", {
+    const res = await fetch("/api/sync/profiles", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name, intent: p.intent })),
       }),
     });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { registered?: unknown } | null;
+    if (!data || !Array.isArray(data.registered)) return null;
+    return data.registered.filter((id): id is string => typeof id === "string");
   } catch {
     // Best-effort — the confirmatory re-GET below determines what actually
     // committed, regardless of what happened to this request/response.
+    return null;
   }
 }
 
@@ -2622,8 +2640,27 @@ async function pushProfilesToAdopt(toAdopt: ProfilePushEntry[]): Promise<void> {
  * `"adopt"` (Codex finding #1) — a brand-new profile has no pending-rename
  * marker of its own yet, so this is never a rename push.
  */
-export async function pushNewProfileRegistration(profile: Profile): Promise<void> {
-  await pushProfilesToAdopt([{ ...profile, intent: "adopt" }]);
+export async function pushNewProfileRegistration(profile: Profile, userId?: string): Promise<void> {
+  // SH.7B — remember the attempt BEFORE the PUT: a PUT can commit while its
+  // response or the confirmatory GET below is lost, and a later round would
+  // then see the row already present with nothing left to push. The next
+  // authoritative GET that shows this exact name completes it (once) — see
+  // selectConfirmedPendingRegistryActivity.
+  if (userId) await addPendingRegistryConfirmations(userId, [profile]);
+  const registered = await putProfiles([{ ...profile, intent: "adopt" }]);
+  // Activity is recorded only once a fresh GET confirms the row (never from
+  // the PUT response alone) and only if the identity that started this is
+  // still the bound one.
+  if (!userId || !registered || !registered.includes(profile.id)) return;
+  const confirmed = await fetchServerProfiles();
+  if (registryIdentityState.currentUserId !== userId || confirmed === null) return;
+  if (confirmed.some((p) => !p.deletedAt && p.profileId === profile.id && p.name === profile.name)) {
+    // Consumed only if the evidence still holds THIS name — a newer rename
+    // of the same id keeps its own evidence and records on its own confirmation.
+    if (await consumePendingRegistryConfirmation(userId, profile.id, profile.name)) {
+      recordRegistrySynced(userId, [profile.id]);
+    }
+  }
 }
 
 /**
@@ -2666,9 +2703,9 @@ export async function commitDiscoveredProfiles(
   authoritativeServerProfiles: ServerProfileRecord[],
   readLocallyDeletedIds: () => ReadonlySet<string>,
   mergeIntoLocal: (candidates: Profile[]) => void | Promise<void | Profile[]>
-): Promise<void> {
+): Promise<void | Profile[]> {
   const locallyDeletedIds = readLocallyDeletedIds();
-  await mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
+  return await mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
 }
 
 export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
@@ -2708,6 +2745,500 @@ export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
     // runner) ignores that and returns the NEWER commit-time set instead.
     locallyDeletedIdsAtCommitTime: new Set(["family"]),
     expectedMerged: [],
+  },
+];
+
+// ===== SH.7B REGISTRY "LAST SYNCED" PRESENTATION =====
+
+/**
+ * Same-tab event dispatched when a meaningful registry change is recorded
+ * (recordRegistrySynced). A presentation-only signal for Settings' "Last
+ * synced" row — deliberately separate from syncHelper.ts's
+ * SYNC_STATE_CHANGED_EVENT, so registry activity never touches planner sync
+ * state, status, or errors.
+ */
+export const PROFILE_REGISTRY_SYNCED_EVENT = "dwp:profileRegistrySynced";
+
+/**
+ * Display-only timestamp of the last MEANINGFUL registry change for a
+ * profile. Qualified by account (unlike planner's profile-only
+ * `dwp:sync:{profileId}:lastSyncedAt`), so it can't carry across accounts
+ * sharing an id like `default` on one browser. Never read by any sync logic.
+ */
+export function registryLastSyncedKey(userId: string, profileId: string): string {
+  return `dwp:registrySync:${userId}:${profileId}:lastSyncedAt`;
+}
+
+export function getRegistryLastSyncedAt(userId: string, profileId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(registryLastSyncedKey(userId, profileId));
+  } catch {
+    return null;
+  }
+}
+
+function recordRegistrySynced(userId: string, profileIds: string[]): void {
+  if (typeof window === "undefined" || profileIds.length === 0) return;
+  const now = new Date().toISOString();
+  try {
+    for (const id of profileIds) localStorage.setItem(registryLastSyncedKey(userId, id), now);
+    window.dispatchEvent(new CustomEvent(PROFILE_REGISTRY_SYNCED_EVENT));
+  } catch {}
+}
+
+/**
+ * Pure: the profile ids a round MEANINGFULLY changed — the only ones that
+ * may refresh "Last synced". A request merely succeeding is never enough;
+ * an id counts only when:
+ *   - PUSHED (`pushed`, the adopt/rename entries this round sent): the
+ *     authoritative re-GET now shows that exact name on an active row, and
+ *     the round's initial GET did not (a new registration or a confirmed
+ *     rename); or
+ *   - DISCOVERED: absent from `localBefore`, present in `localAfter`, and an
+ *     active authoritative server row. Callers pass the ACCOUNT-VISIBLE
+ *     lists (getVisibleProfiles), so an id already in the raw shared list
+ *     but hidden by another account's exclusive ownership counts once this
+ *     account's stamping makes it visible; or
+ *   - PULLED RENAME: in both lists with a different name, `localAfter`'s
+ *     name equal to the authoritative server name.
+ * A no-op round (everything already converged) returns []. Local deletion
+ * never appears here: it produces no server-side change and no entry.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES, selectMeaningfulRegistryChangeIds } from "@/lib/profileRegistrySync";
+ *   DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES.forEach(c => {
+ *     const got = selectMeaningfulRegistryChangeIds(c.initial, c.authoritative, c.pushed, c.localBefore, c.localAfter);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectMeaningfulRegistryChangeIds(
+  initialServerProfiles: ServerProfileRecord[],
+  authoritativeServerProfiles: ServerProfileRecord[],
+  pushed: Profile[],
+  localBefore: Profile[],
+  localAfter: Profile[]
+): string[] {
+  const nameOf = (rows: ServerProfileRecord[]) =>
+    new Map(rows.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const initial = nameOf(initialServerProfiles);
+  const authoritative = nameOf(authoritativeServerProfiles);
+  const ids = new Set<string>();
+  for (const p of pushed) {
+    if (authoritative.get(p.id) === p.name && initial.get(p.id) !== p.name) ids.add(p.id);
+  }
+  const before = new Map(localBefore.map((p) => [p.id, p.name]));
+  for (const p of localAfter) {
+    const serverName = authoritative.get(p.id);
+    if (serverName === undefined) continue;
+    const beforeName = before.get(p.id);
+    if (beforeName === undefined || (beforeName !== p.name && serverName === p.name)) ids.add(p.id);
+  }
+  return [...ids];
+}
+
+export const DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES: Array<{
+  name: string;
+  initial: ServerProfileRecord[];
+  authoritative: ServerProfileRecord[];
+  pushed: Profile[];
+  localBefore: Profile[];
+  localAfter: Profile[];
+  expected: string[];
+}> = [
+  {
+    name: "no-op round — converged everywhere, nothing pushed or changed locally",
+    initial: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }],
+    localAfter: [{ id: "default", name: "Default" }],
+    expected: [],
+  },
+  {
+    name: "confirmed new registration",
+    initial: [],
+    authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
+    pushed: [{ id: "mom", name: "Mom" }],
+    localBefore: [{ id: "mom", name: "Mom" }],
+    localAfter: [{ id: "mom", name: "Mom" }],
+    expected: ["mom"],
+  },
+  {
+    name: "push attempted but not confirmed by the re-GET — not meaningful",
+    initial: [],
+    authoritative: [],
+    pushed: [{ id: "mom", name: "Mom" }],
+    localBefore: [{ id: "mom", name: "Mom" }],
+    localAfter: [{ id: "mom", name: "Mom" }],
+    expected: [],
+  },
+  {
+    name: "confirmed rename push",
+    initial: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "y", deletedAt: null }],
+    pushed: [{ id: "default", name: "Trip" }],
+    localBefore: [{ id: "default", name: "Trip" }],
+    localAfter: [{ id: "default", name: "Trip" }],
+    expected: ["default"],
+  },
+  {
+    name: "remote profile discovered",
+    initial: [{ profileId: "dad", name: "Dad", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "dad", name: "Dad", updatedAt: "x", deletedAt: null }],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }],
+    localAfter: [{ id: "default", name: "Default" }, { id: "dad", name: "Dad" }],
+    expected: ["dad"],
+  },
+  {
+    name: "remote rename pulled",
+    initial: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }],
+    localAfter: [{ id: "default", name: "Trip" }],
+    expected: ["default"],
+  },
+  {
+    name: "local-only change with no server row (e.g. local delete) is never registry activity",
+    initial: [],
+    authoritative: [],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }, { id: "kid", name: "Kid" }],
+    localAfter: [{ id: "default", name: "Default" }],
+    expected: [],
+  },
+];
+
+/**
+ * SH.7B regression — the id already sits in the raw shared `dwp.profiles`
+ * list because ANOTHER account exclusively owns it, so it is hidden from
+ * this account; reconciliation confirms this account's own server row and
+ * stamps its ownership, making it newly visible. Uses the real visibility
+ * helpers (profileStorage.ts) before/after the stamp.
+ *
+ * Run from Node:
+ *   import { DEV_REGISTRY_VISIBILITY_TRANSITION_CASES, selectMeaningfulRegistryChangeIds } from "@/lib/profileRegistrySync";
+ *   import { selectHiddenProfileIdsForAccount, filterVisibleProfiles, applyProfileOwnerStamp } from "@/lib/profileStorage";
+ *   DEV_REGISTRY_VISIBILITY_TRANSITION_CASES.forEach(c => {
+ *     const vis = (st) => filterVisibleProfiles(c.rawShared, selectHiddenProfileIdsForAccount(st, c.userId));
+ *     const after = applyProfileOwnerStamp(c.state, c.profileId, c.userId);
+ *     const got = selectMeaningfulRegistryChangeIds(c.server, c.server, [], vis(c.state), vis(after));
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_REGISTRY_VISIBILITY_TRANSITION_CASES: Array<{
+  name: string;
+  userId: string;
+  profileId: string;
+  rawShared: Profile[];
+  state: ProfileRegistryState;
+  server: ServerProfileRecord[];
+  expected: string[];
+}> = [
+  {
+    name: "raw id exists only because account A owns it; B's reconciliation confirms B's server row and stamps ownership — newly visible to B, counts as meaningful",
+    userId: "userB",
+    profileId: "family",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    state: { family: { userA: { owned: true } } },
+    server: [{ profileId: "family", name: "Family", updatedAt: "x", deletedAt: null }],
+    expected: ["family"],
+  },
+  {
+    name: "already visible to B (B already owns it) — stamping again changes nothing, no-op",
+    userId: "userB",
+    profileId: "family",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    server: [{ profileId: "family", name: "Family", updatedAt: "x", deletedAt: null }],
+    expected: [],
+  },
+];
+
+/**
+ * SH.7B regression — the rename-stage comparison must use the current
+ * account's visible view on BOTH sides. Case 1: A and B co-own the id; A
+ * locally deleted it (hidden for A) while raw shared storage retains it for
+ * B; an otherwise no-op round for A must not count it. Case 2: an ordinary
+ * visible remote rename still counts.
+ *
+ * Run from Node:
+ *   import { DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES, selectMeaningfulRegistryChangeIds } from "@/lib/profileRegistrySync";
+ *   import { selectHiddenProfileIdsForAccount, filterVisibleProfiles, mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES.forEach(c => {
+ *     const vis = (raw) => filterVisibleProfiles(raw, selectHiddenProfileIdsForAccount(c.state, c.userId));
+ *     const rawAfter = mergeProfileRenames(c.rawShared, c.renames);
+ *     const got = selectMeaningfulRegistryChangeIds(c.server, c.server, [], vis(c.rawShared), vis(rawAfter));
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES: Array<{
+  name: string;
+  userId: string;
+  rawShared: Profile[];
+  renames: Profile[];
+  state: ProfileRegistryState;
+  server: ServerProfileRecord[];
+  expected: string[];
+}> = [
+  {
+    name: "co-owned by A and B; A locally deleted it, raw shared list retains it for B; A's no-op round — hidden id is NOT meaningful activity",
+    userId: "userA",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    renames: [],
+    state: { family: { userA: { owned: true, locallyDeleted: true }, userB: { owned: true } } },
+    server: [
+      { profileId: "default", name: "Default", updatedAt: "x", deletedAt: null },
+      { profileId: "family", name: "Family", updatedAt: "x", deletedAt: null },
+    ],
+    expected: [],
+  },
+  {
+    name: "ordinary visible remote rename still counts",
+    userId: "userA",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    renames: [{ id: "family", name: "The Smiths" }],
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    server: [
+      { profileId: "default", name: "Default", updatedAt: "x", deletedAt: null },
+      { profileId: "family", name: "The Smiths", updatedAt: "y", deletedAt: null },
+    ],
+    expected: ["family"],
+  },
+];
+
+/**
+ * SH.7B — evidence for a push that may have COMMITTED without this client
+ * ever seeing its confirmation (lost PUT response, or a failed confirmatory
+ * GET). Display-only, account-qualified, ONE localStorage key PER PROFILE
+ * (`dwp:registrySync:{userId}:pending:{profileId}` = the pushed name), so
+ * evidence for different ids can never overwrite each other across tabs (no
+ * shared read-modify-write map). Written just before a push is attempted;
+ * consumed only by a CONDITIONAL delete (`consumePendingEvidenceIfMatches`:
+ * removed only while the stored name still equals the exact name being
+ * confirmed), so an older confirmation can never erase newer evidence — e.g.
+ * a later rename of the same id. Same-id writes are last-writer-wins, which
+ * is the desired "newest intent" behavior; the per-key Web Lock below makes
+ * each check-then-remove atomic across tabs where the API exists (same
+ * best-effort fallback as profileStorage.ts's local mutation locks). Never
+ * read by any sync decision.
+ */
+export type PendingEvidenceStore = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
+
+function pendingEvidencePrefix(userId: string): string {
+  return `dwp:registrySync:${userId}:pending:`;
+}
+
+export function pendingEvidenceKey(userId: string, profileId: string): string {
+  return `${pendingEvidencePrefix(userId)}${profileId}`;
+}
+
+export function setPendingEvidence(store: PendingEvidenceStore, userId: string, profileId: string, name: string): void {
+  store.setItem(pendingEvidenceKey(userId, profileId), name);
+}
+
+/** Removes the evidence only if it still holds exactly `name`; true when consumed. */
+export function consumePendingEvidenceIfMatches(
+  store: PendingEvidenceStore,
+  userId: string,
+  profileId: string,
+  name: string
+): boolean {
+  const key = pendingEvidenceKey(userId, profileId);
+  if (store.getItem(key) !== name) return false;
+  store.removeItem(key);
+  return true;
+}
+
+export function readPendingEvidence(store: PendingEvidenceStore, userId: string): Record<string, string> {
+  const prefix = pendingEvidencePrefix(userId);
+  const out: Record<string, string> = {};
+  for (let i = 0; i < store.length; i++) {
+    const key = store.key(i);
+    if (!key || !key.startsWith(prefix)) continue;
+    const value = store.getItem(key);
+    if (typeof value === "string") out[key.slice(prefix.length)] = value;
+  }
+  return out;
+}
+
+function withPendingEvidenceLock<T>(userId: string, profileId: string, fn: () => T): Promise<T> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.locks?.request) {
+      return navigator.locks.request(pendingEvidenceKey(userId, profileId), () => fn()).then((v) => v);
+    }
+  } catch {}
+  return Promise.resolve(fn());
+}
+
+async function addPendingRegistryConfirmations(userId: string, entries: Profile[]): Promise<void> {
+  if (typeof window === "undefined") return;
+  for (const e of entries) {
+    try {
+      await withPendingEvidenceLock(userId, e.id, () => setPendingEvidence(localStorage, userId, e.id, e.name));
+    } catch {}
+  }
+}
+
+async function consumePendingRegistryConfirmation(userId: string, profileId: string, name: string): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  try {
+    return await withPendingEvidenceLock(userId, profileId, () =>
+      consumePendingEvidenceIfMatches(localStorage, userId, profileId, name)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readPendingRegistryConfirmations(userId: string): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    return readPendingEvidence(localStorage, userId);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Pure: split a snapshot of unconfirmed-push evidence into entries an
+ * authoritative GET now confirms (active row with exactly the recorded name,
+ * id visible to this account) and entries to DROP without counting (id no
+ * longer visible to this account, e.g. locally deleted). Anything else is
+ * left in place for a later round. The caller consumes each returned entry
+ * with the conditional delete above and counts only entries actually
+ * consumed, so an operation counts once and newer evidence is never erased.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES, selectConfirmedPendingRegistryActivity } from "@/lib/profileRegistrySync";
+ *   DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES.forEach(c => {
+ *     const got = selectConfirmedPendingRegistryActivity(c.pending, c.authoritative, new Set(c.visibleIds));
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectConfirmedPendingRegistryActivity(
+  pending: Record<string, string>,
+  authoritativeServerProfiles: ServerProfileRecord[],
+  visibleIds: ReadonlySet<string>
+): { confirmed: Profile[]; dropped: Profile[] } {
+  const serverNames = new Map(authoritativeServerProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const confirmed: Profile[] = [];
+  const dropped: Profile[] = [];
+  for (const [id, name] of Object.entries(pending)) {
+    if (!visibleIds.has(id)) dropped.push({ id, name });
+    else if (serverNames.get(id) === name) confirmed.push({ id, name });
+  }
+  return { confirmed, dropped };
+}
+
+export const DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES: Array<{
+  name: string;
+  pending: Record<string, string>;
+  authoritative: ServerProfileRecord[];
+  visibleIds: string[];
+  expected: { confirmed: Profile[]; dropped: Profile[] };
+}> = [
+  {
+    name: "PUT committed but immediate confirmation failed; a later round's GET shows the registration — confirmed",
+    pending: { mom: "Mom" },
+    authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default", "mom"],
+    expected: { confirmed: [{ id: "mom", name: "Mom" }], dropped: [] },
+  },
+  {
+    name: "same for a rename: later GET already matches the pushed name (toPush is empty that round) — confirmed",
+    pending: { default: "Trip" },
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default"],
+    expected: { confirmed: [{ id: "default", name: "Trip" }], dropped: [] },
+  },
+  {
+    name: "subsequent fully converged round — evidence already consumed, nothing to count",
+    pending: {},
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default"],
+    expected: { confirmed: [], dropped: [] },
+  },
+  {
+    name: "not yet confirmed (server lacks it / has another name) — neither confirmed nor dropped, survives for a later round",
+    pending: { mom: "Mom", default: "Trip" },
+    authoritative: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default", "mom"],
+    expected: { confirmed: [], dropped: [] },
+  },
+  {
+    name: "id no longer visible to this account (locally deleted) — dropped without counting",
+    pending: { mom: "Mom" },
+    authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default"],
+    expected: { confirmed: [], dropped: [{ id: "mom", name: "Mom" }] },
+  },
+];
+
+/**
+ * Regression coverage for the per-profile, conditionally-consumed evidence
+ * store, run against an in-memory store. Each case replays `steps` in order
+ * (`set` = write evidence; `consume` = conditional delete, whose boolean
+ * result must equal `consumed`) and then compares the account's evidence.
+ *
+ * Run from Node:
+ *   import { DEV_PENDING_EVIDENCE_CASES, setPendingEvidence, consumePendingEvidenceIfMatches, readPendingEvidence } from "@/lib/profileRegistrySync";
+ *   DEV_PENDING_EVIDENCE_CASES.forEach(c => {
+ *     const m = new Map(); const store = { get length() { return m.size; }, key: (i) => [...m.keys()][i] ?? null, getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k) };
+ *     let ok = true;
+ *     for (const s of c.steps) {
+ *       if (s.op === "set") setPendingEvidence(store, s.userId ?? "u", s.id, s.name);
+ *       else ok = ok && consumePendingEvidenceIfMatches(store, s.userId ?? "u", s.id, s.name) === s.consumed;
+ *     }
+ *     const got = { u: readPendingEvidence(store, "u"), other: readPendingEvidence(store, "other") };
+ *     console.log(ok && JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_EVIDENCE_CASES: Array<{
+  name: string;
+  steps: Array<
+    | { op: "set"; id: string; name: string; userId?: string }
+    | { op: "consume"; id: string; name: string; consumed: boolean; userId?: string }
+  >;
+  expected: { u: Record<string, string>; other: Record<string, string> };
+}> = [
+  {
+    name: "stale older registration confirmation must NOT erase newer rename evidence (family: Family, then Disney Trip; older confirms 'Family')",
+    steps: [
+      { op: "set", id: "family", name: "Family" },
+      { op: "set", id: "family", name: "Disney Trip" },
+      { op: "consume", id: "family", name: "Family", consumed: false },
+    ],
+    expected: { u: { family: "Disney Trip" }, other: {} },
+  },
+  {
+    name: "normal one-time consumption when the stored name still matches",
+    steps: [
+      { op: "set", id: "family", name: "Family" },
+      { op: "consume", id: "family", name: "Family", consumed: true },
+      { op: "consume", id: "family", name: "Family", consumed: false },
+    ],
+    expected: { u: {}, other: {} },
+  },
+  {
+    name: "evidence for different profile ids is independent — consuming one leaves the other",
+    steps: [
+      { op: "set", id: "family", name: "Family" },
+      { op: "set", id: "default", name: "Trip" },
+      { op: "consume", id: "family", name: "Family", consumed: true },
+    ],
+    expected: { u: { default: "Trip" }, other: {} },
+  },
+  {
+    name: "account qualification — another account's evidence for the same id is untouched",
+    steps: [
+      { op: "set", id: "default", name: "Trip", userId: "other" },
+      { op: "set", id: "default", name: "Trip" },
+      { op: "consume", id: "default", name: "Trip", consumed: true },
+    ],
+    expected: { u: {}, other: { default: "Trip" } },
   },
 ];
 
@@ -2805,6 +3336,12 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
 
   const initialServerProfiles = await fetchServerProfiles();
   if (!isCurrent() || initialServerProfiles === null) return;
+  // SH.7B — this account's EFFECTIVE (visibility-filtered) list at round
+  // start, before ownership stamping below. Raw `getProfiles()` is not
+  // enough: an id already in the shared list because ANOTHER account owns it
+  // is hidden from this account until stamping makes it visible, which is a
+  // genuine discovery for this account.
+  const visibleBeforeRound = getVisibleProfiles(userId);
 
   // Codex P1 follow-up (4th round, bounded adjacency) — this snapshot feeds
   // BOTH the ADOPTION candidates below and (as a starting point only — see
@@ -2911,6 +3448,8 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const pushAttempted = batches.length > 0;
   let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
   if (pushAttempted) {
+    // SH.7B — evidence in case this push commits but its confirmation is lost.
+    await addPendingRegistryConfirmations(userId, toPush.map((p) => ({ id: p.id, name: p.name })));
     await sendAdoptionBatches(batches, pushProfilesToAdopt, isCurrent);
     if (!isCurrent()) return;
     reconfirmedServerProfiles = await fetchServerProfiles();
@@ -2991,6 +3530,19 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     () => getLocallyDeletedProfileIds(userId),
     adoptServerProfiles
   );
+  // SH.7B — meaningful-change ids, accumulated across the round's three
+  // effects (confirmed push, discovery, pulled rename); see
+  // selectMeaningfulRegistryChangeIds. Recorded only at the end, and only
+  // if this round is still current.
+  const changedIds = new Set(
+    selectMeaningfulRegistryChangeIds(
+      initialServerProfiles,
+      authoritativeServerProfiles,
+      toPush,
+      visibleBeforeRound,
+      getVisibleProfiles(userId)
+    )
+  );
 
   // SH.5 — rename propagation, pull side: an id THIS device already knows
   // about locally (so not discovery's job above) whose server name differs
@@ -3044,5 +3596,46 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     visibleLocalProfilesAtCommit,
     pendingRenameIdsAtCommit
   );
+  // SH.7B — both sides of this comparison are THIS ACCOUNT'S visible view
+  // (getVisibleProfiles), not the raw shared list `applyServerRenames`
+  // returns: an id hidden from this account (locally deleted here, retained
+  // in the shared list for a co-owning account) must never look "newly
+  // discovered" during an otherwise no-op round.
+  const visibleBeforeRenames = getVisibleProfiles(userId);
   await applyServerRenames(renamesToApply);
+  for (const id of selectMeaningfulRegistryChangeIds(
+    initialServerProfiles,
+    authoritativeServerProfiles,
+    [],
+    visibleBeforeRenames,
+    getVisibleProfiles(userId)
+  )) {
+    changedIds.add(id);
+  }
+  // A no-op round (nothing pushed-and-confirmed, discovered, or renamed)
+  // leaves changedIds empty and never refreshes "Last synced".
+  if (!isCurrent()) return;
+  // Confirmation of an earlier (or this round's) push, decided from the
+  // authoritative GET only; consumed here so it counts exactly once.
+  const { confirmed, dropped } = selectConfirmedPendingRegistryActivity(
+    readPendingRegistryConfirmations(userId),
+    authoritativeServerProfiles,
+    new Set(getVisibleProfiles(userId).map((p) => p.id))
+  );
+  // Each entry is consumed with the exact-name conditional delete; only a
+  // successful consume counts, so a concurrent tab or a newer rename's
+  // evidence is never double-counted or erased. Unconfirmed evidence is left
+  // untouched (no map rewrite).
+  // The current-round check runs BEFORE each consume; an entry already
+  // consumed is recorded (account-qualified, so safe) rather than lost.
+  const consumedIds: string[] = [];
+  for (const e of confirmed) {
+    if (!isCurrent()) break;
+    if (await consumePendingRegistryConfirmation(userId, e.id, e.name)) consumedIds.push(e.id);
+  }
+  for (const e of dropped) {
+    if (!isCurrent()) break;
+    await consumePendingRegistryConfirmation(userId, e.id, e.name);
+  }
+  recordRegistrySynced(userId, isCurrent() ? [...changedIds, ...consumedIds] : consumedIds);
 }
