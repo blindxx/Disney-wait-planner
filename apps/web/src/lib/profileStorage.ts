@@ -40,7 +40,58 @@ export type Profile = {
 // ===== CONSTANTS =====
 
 const ACTIVE_PROFILE_KEY = "dwp.activeProfile";
-const PROFILES_LIST_KEY = "dwp.profiles";
+// Codex finding — exported (was module-private) so pages can recognize this
+// exact key in a native `storage` event (which fires in every OTHER tab
+// when this key changes, but never in the tab that wrote it — see
+// PROFILE_NAME_CHANGED_EVENT's own doc for the same-tab half of this same
+// problem) rather than hardcoding the raw string "dwp.profiles" at each
+// call site.
+export const PROFILES_LIST_KEY = "dwp.profiles";
+
+/**
+ * SH.5 — rename propagation. `{ [profileId]: { name, renamedAt } }`: a
+ * profile id this device has locally renamed but has not yet confirmed the
+ * server's registry reflects. Deliberately NOT account-scoped (unlike
+ * `dwp.profileRegistryState`): it only ever answers "does the CURRENT local
+ * name for this id still need to be pushed", which is meaningful
+ * independent of which account's reconciliation round happens to do that
+ * pushing — the PUT itself is always scoped by the authenticated session's
+ * own userId server-side (see /api/sync/profiles's route doc), so this
+ * marker can never cause a cross-account write even if account B's round
+ * happens to be the one that clears an entry account A created.
+ */
+const PENDING_RENAMES_KEY = "dwp.profilePendingRenames";
+const PENDING_RENAMES_LOCK_NAME = "dwp:profilePendingRenames";
+
+/**
+ * Codex finding — same-tab notification that a PULLED profile rename
+ * (applyServerRenames below) just committed a genuinely different name
+ * into `dwp.profiles`. `localStorage.setItem` never fires the native
+ * `storage` event in the SAME tab that made the write (only OTHER tabs/
+ * windows observe it) — a mounted page that already read a profile's name
+ * into its own React state (plans/wait-times/lightning/page.tsx all hold
+ * `activeProfileName` this way) would otherwise keep displaying the STALE
+ * name indefinitely once a background reconciliation round (triggered from
+ * SessionProviderWrapper regardless of which page happens to be mounted)
+ * pulls a fresher name from another device, until the user reloads or
+ * navigates away and back. Mirrors the EXACT existing pattern
+ * syncHelper.ts's SYNC_STATE_CHANGED_EVENT/STALE_OPERATION_REJECTED_EVENT
+ * already establish for this same class of problem (a same-tab
+ * `window.dispatchEvent(new CustomEvent(...))`, consumed via a plain
+ * `window.addEventListener` in each page's own effect) rather than
+ * introducing a parallel notification mechanism.
+ *
+ * Codex finding — this is deliberately the SAME-TAB half only. The native
+ * `storage` event fires in every OTHER tab/window when `dwp.profiles`
+ * changes (but never this one), so consumers additionally listen for
+ * `window.addEventListener("storage", ...)` keyed on PROFILES_LIST_KEY to
+ * cover a rename pulled while a DIFFERENT tab on the same browser is
+ * mounted — the two together (this CustomEvent for same-tab,
+ * PROFILES_LIST_KEY's native `storage` event for cross-tab) are the
+ * complete same-browser notification story; neither alone covers both
+ * cases, and there is no third mechanism needed.
+ */
+export const PROFILE_NAME_CHANGED_EVENT = "dwp:profileNameChanged";
 
 /**
  * The canonical "always exists" profile id (see DEFAULT_PROFILE further
@@ -66,8 +117,14 @@ const PROFILES_LIST_KEY = "dwp.profiles";
  * the first place. `default` is exempted from both of those exclusion
  * queries specifically for this reason; every OTHER profile id keeps the
  * exact same cross-account exclusion semantics as before.
+ *
+ * Codex finding — exported (was module-private) so
+ * profileRegistrySync.ts's computeRenameBackfillCandidates can recognize
+ * this exact id for its own bootstrap-name special case: see
+ * DEFAULT_PROFILE_NAME's own doc for why `default` (and only `default`)
+ * needs one.
  */
-const CANONICAL_SHARED_PROFILE_ID = "default";
+export const CANONICAL_SHARED_PROFILE_ID = "default";
 
 // ===== LOCAL MUTATION SERIALIZATION (Codex P1 follow-up, 12th round) =====
 //
@@ -202,6 +259,16 @@ export const UNOWNED_ACCOUNT_KEY = "__unowned__";
 export type ProfileRegistryAccountState = {
   owned?: boolean;
   locallyDeleted?: boolean;
+  /**
+   * Codex finding — durable, one-time-only marker: has this account's
+   * reconciliation already run the pre-ledger rename backfill
+   * (computeRenameBackfillCandidates in profileRegistrySync.ts) for this
+   * profile id? Set the FIRST time a local/server name mismatch with no
+   * pending-rename marker is observed for this (profileId, accountKey) pair
+   * — see that function's own doc for why this must never re-trigger after
+   * its first (and only) intended application.
+   */
+  renameBackfilled?: boolean;
 };
 
 /** `{ [profileId]: { [accountKey]: ProfileRegistryAccountState } }` */
@@ -268,6 +335,7 @@ export function migrateProfileRegistryState(input: Record<string, unknown>): Pro
       const entry: ProfileRegistryAccountState = {};
       if (v.owned === true) entry.owned = true;
       if (v.locallyDeleted === true) entry.locallyDeleted = true;
+      if (v.renameBackfilled === true) entry.renameBackfilled = true;
       if (Object.keys(entry).length > 0) byAccount[accountKey] = entry;
     }
     if (Object.keys(byAccount).length > 0) migrated[profileId] = byAccount;
@@ -299,6 +367,11 @@ export const DEV_MIGRATE_PROFILE_REGISTRY_STATE_CASES: Array<{
     name: "already new-shape input — passes through unchanged (idempotent)",
     input: { family: { userA: { owned: true }, userB: { locallyDeleted: true } } },
     expected: { family: { userA: { owned: true }, userB: { locallyDeleted: true } } },
+  },
+  {
+    name: "Codex finding — a renameBackfilled fact passes through the field-by-field validation unchanged",
+    input: { default: { userA: { owned: true, renameBackfilled: true } } },
+    expected: { default: { userA: { owned: true, renameBackfilled: true } } },
   },
   {
     name: "empty input — empty result",
@@ -416,6 +489,160 @@ export function markProfileOwner(profileId: string, ownerUserId: string): Promis
     const updated = applyProfileOwnerStamp(state, profileId, ownerUserId);
     if (updated !== state) writeProfileRegistryState(updated);
   });
+}
+
+// ===== CODEX FINDING — PRE-LEDGER RENAME BACKFILL (ONE-TIME MIGRATION) =====
+//
+// dwp.profilePendingRenames (the rename ledger) did not always exist — an
+// existing user's `dwp.profiles` can already hold a local custom name that
+// predates it entirely, from back when renameProfile() was purely local and
+// never pushed anything server-side at all. The FIRST time such a device
+// reconciles under the new ledger, that local/server name mismatch has no
+// pending marker to explain it — structurally identical to "a DIFFERENT
+// device already pushed a rename I haven't pulled yet" — so without this,
+// selectServerRenamesToApply's own pull path (added earlier in this same
+// PR) would silently overwrite the user's real custom name with the
+// server's stale registered name. See computeRenameBackfillCandidates in
+// profileRegistrySync.ts for the actual decision logic this durable,
+// one-time-only marker exists to gate.
+
+/**
+ * Pure state transition: durably record that `accountKey`'s reconciliation
+ * has already run the pre-ledger rename backfill for `profileId` — mirrors
+ * applyProfileOwnerStamp's own idempotent, single-account write exactly
+ * (never touches a DIFFERENT account's own entry for the same profileId).
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_RENAME_BACKFILL_STAMP_CASES, applyRenameBackfillStamp } from "@/lib/profileStorage";
+ *   DEV_APPLY_RENAME_BACKFILL_STAMP_CASES.forEach(c => {
+ *     const got = applyRenameBackfillStamp(c.state, c.profileId, c.accountKey);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function applyRenameBackfillStamp(
+  state: ProfileRegistryState,
+  profileId: string,
+  accountKey: string
+): ProfileRegistryState {
+  if (state[profileId]?.[accountKey]?.renameBackfilled) return state;
+  return {
+    ...state,
+    [profileId]: {
+      ...state[profileId],
+      [accountKey]: { ...state[profileId]?.[accountKey], renameBackfilled: true },
+    },
+  };
+}
+
+export const DEV_APPLY_RENAME_BACKFILL_STAMP_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  accountKey: string;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "first backfill for this (profileId, accountKey) pair records the durable one-time marker",
+    state: {},
+    profileId: "default",
+    accountKey: "userA",
+    expected: { default: { userA: { renameBackfilled: true } } },
+  },
+  {
+    name: "re-stamping is idempotent and never disturbs this account's own OTHER facts (owned) for the same id",
+    state: { default: { userA: { owned: true } } },
+    profileId: "default",
+    accountKey: "userA",
+    expected: { default: { userA: { owned: true, renameBackfilled: true } } },
+  },
+  {
+    name: "stamping for one account never touches a DIFFERENT account's own entry for the identical id",
+    state: { default: { userB: { renameBackfilled: true } } },
+    profileId: "default",
+    accountKey: "userA",
+    expected: { default: { userB: { renameBackfilled: true }, userA: { renameBackfilled: true } } },
+  },
+];
+
+/**
+ * Durably record that `accountKey` has run the pre-ledger rename backfill
+ * for `profileId` — see applyRenameBackfillStamp's own doc for the pure
+ * transition this wraps. Called by profileRegistrySync.ts's reconciliation
+ * orchestrator immediately after backfilling a pending-rename marker for
+ * this exact (profileId, accountKey) pair, so it can never re-trigger for
+ * it again.
+ */
+export function markProfileRenameBackfilled(profileId: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PROFILE_REGISTRY_STATE_LOCK_NAME, () => {
+    const state = readProfileRegistryState();
+    const updated = applyRenameBackfillStamp(state, profileId, accountKey);
+    if (updated !== state) writeProfileRegistryState(updated);
+  });
+}
+
+/**
+ * Pure query: given the full per-`(profileId, accountKey)` provenance state,
+ * return every profile id `accountKey` has ALREADY run the pre-ledger
+ * rename backfill for — passed to profileRegistrySync.ts's
+ * computeRenameBackfillCandidates so it never re-proposes a backfill for an
+ * id already handled.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_RENAME_BACKFILLED_IDS_CASES, selectRenameBackfilledIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_SELECT_RENAME_BACKFILLED_IDS_CASES.forEach(c => {
+ *     const got = [...selectRenameBackfilledIdsForAccount(c.state, c.accountKey)].sort();
+ *     console.log(JSON.stringify(got) === JSON.stringify([...c.expected].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectRenameBackfilledIdsForAccount(
+  state: ProfileRegistryState,
+  accountKey: string
+): Set<string> {
+  const ids = new Set<string>();
+  for (const [id, byAccount] of Object.entries(state)) {
+    if (byAccount[accountKey]?.renameBackfilled) ids.add(id);
+  }
+  return ids;
+}
+
+export const DEV_SELECT_RENAME_BACKFILLED_IDS_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  accountKey: string;
+  expected: string[];
+}> = [
+  {
+    name: "empty state — nothing backfilled yet",
+    state: {},
+    accountKey: "userA",
+    expected: [],
+  },
+  {
+    name: "this account's own backfilled id is reported",
+    state: { default: { userA: { renameBackfilled: true } } },
+    accountKey: "userA",
+    expected: ["default"],
+  },
+  {
+    name: "a DIFFERENT account's own backfilled fact for the identical id is never reported for this account — each account's one-time guard is independent",
+    state: { default: { userB: { renameBackfilled: true } } },
+    accountKey: "userA",
+    expected: [],
+  },
+  {
+    name: "an id merely owned (not backfilled) is not reported",
+    state: { default: { userA: { owned: true } } },
+    accountKey: "userA",
+    expected: [],
+  },
+];
+
+/**
+ * Bulk read of every profile id `accountKey` has already run the pre-ledger
+ * rename backfill for — see selectRenameBackfilledIdsForAccount's own doc.
+ */
+export function getRenameBackfilledIds(accountKey: string): Set<string> {
+  return selectRenameBackfilledIdsForAccount(readProfileRegistryState(), accountKey);
 }
 
 /**
@@ -1529,6 +1756,22 @@ export function getVisibleProfiles(currentOwnerUserId: string): Profile[] {
 }
 
 const DEFAULT_PROFILE: Profile = { id: "default", name: "Default" };
+
+/**
+ * Codex finding — exported so profileRegistrySync.ts's
+ * computeRenameBackfillCandidates can recognize an UNTOUCHED, freshly
+ * auto-bootstrapped `default` entry. Every device auto-creates `default`
+ * locally with exactly this literal name (getProfiles()'s own
+ * default-presence guarantee) — never through the adopt/discover-and-copy
+ * flow other ids use, which always sets the local name to match whatever
+ * was discovered. That means a device that has genuinely never customized
+ * `default` locally is structurally indistinguishable, by mismatch alone,
+ * from a device whose local name is stale relative to a rename another
+ * device has ALREADY legitimately pushed — comparing against this literal
+ * name is what tells the two apart (see that function's own doc for the
+ * full rationale).
+ */
+export const DEFAULT_PROFILE_NAME = DEFAULT_PROFILE.name;
 
 /** Legacy single-user keys that get migrated into the Default namespace on first bootstrap. */
 const LEGACY_KEY_MAP: Record<string, string> = {
@@ -2697,6 +2940,16 @@ export async function createProfile(name: string, currentOwnerUserId: string | n
   // doc for why a DIFFERENT account's own suppression of the identical
   // literal id must never be cleared by this.
   await clearLocalDeletionMarker(outcome.id, scopeKey);
+  // Codex finding #3 — defensive belt-and-suspenders discard of THIS
+  // account's own pending-rename marker for `outcome.id`, on every
+  // create/reclaim: deleteProfile already discards it at delete time (the
+  // primary fix), but a create/reclaim landing on the identical normalized
+  // id is the ONE moment a stale marker from a PRIOR occupant of this id
+  // could otherwise be mistaken for a genuine pending rename of the NEW
+  // profile (computeProfilesToRename's own presence check, Codex finding
+  // #1's fix, only verifies the id is present again — which it now is).
+  // Never touches a DIFFERENT account's own entry for the identical id.
+  await discardProfileRenamePending(outcome.id, scopeKey);
   return outcome;
 }
 
@@ -2839,6 +3092,500 @@ export const DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES: Array<{
   },
 ];
 
+// ===== SH.5 RENAME PROPAGATION =====
+
+/** One device's not-yet-confirmed local rename fact for a single account. */
+export type PendingRename = { name: string; renamedAt: number };
+
+/**
+ * Flat, SINGLE-ACCOUNT view: `{ [profileId]: PendingRename }` — what
+ * profileRegistrySync.ts's computeProfilesToRename/selectServerRenamesToApply
+ * consume, already scoped to ONE account by getPendingProfileRenames below.
+ */
+export type PendingRenames = Record<string, PendingRename>;
+
+/**
+ * Codex account-isolation fix — raw on-disk shape:
+ * `{ [profileId]: { [accountKey]: PendingRename } }`, mirroring
+ * ProfileRegistryState's own per-`(profileId, accountKey)` provenance model
+ * (applyProfileOwnerStamp/applyLocalDeletionMarker above) for the IDENTICAL
+ * reason. Before this fix, the marker was keyed by profileId ALONE: account
+ * A renaming `default` on a shared browser wrote a single global
+ * `{ default: { name, renamedAt } }` entry with no account attached, so
+ * account B signing into the SAME browser afterward had its own
+ * reconcileProfileRegistry round read `getPendingProfileRenames()` and see
+ * A's marker as if it were B's OWN pending rename — B's round could then
+ * PUSH A's unconfirmed name to B's account's server row
+ * (computeProfilesToRename), and on success CLEAR A's marker entirely
+ * (clearProfileRenamePending), losing A's own rename with no way to retry
+ * it once A signs back in. This is especially likely for the canonical
+ * `default` id, which every account shares. Keying by `(profileId,
+ * accountKey)` instead means B's round only ever reads/writes `state[id][B]`
+ * — it can never observe, push, confirm, or clear A's own `state[id][A]`
+ * entry, so signing back in as A finds A's original marker untouched and
+ * still eligible for retry.
+ *
+ * `accountKey` is a real authenticated userId, or the shared
+ * UNOWNED_ACCOUNT_KEY sentinel for a rename made while signed out — inert
+ * for push purposes (reconcileProfileRegistry only ever runs authenticated,
+ * so nothing ever reads the UNOWNED bucket), kept only so a signed-out
+ * rename's bookkeeping follows the SAME structural shape as every other
+ * writer here rather than a special-cased one-off.
+ */
+type PendingRenamesByAccount = Record<string, Record<string, PendingRename>>;
+
+function readPendingRenamesByAccount(): PendingRenamesByAccount {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(PENDING_RENAMES_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: PendingRenamesByAccount = {};
+    for (const [profileId, byAccount] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!byAccount || typeof byAccount !== "object" || Array.isArray(byAccount)) continue;
+      const accounts: Record<string, PendingRename> = {};
+      for (const [accountKey, entry] of Object.entries(byAccount as Record<string, unknown>)) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as Record<string, unknown>;
+        if (typeof e.name === "string" && typeof e.renamedAt === "number") {
+          accounts[accountKey] = { name: e.name, renamedAt: e.renamedAt };
+        }
+      }
+      if (Object.keys(accounts).length > 0) out[profileId] = accounts;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function writePendingRenamesByAccount(state: PendingRenamesByAccount): void {
+  try {
+    localStorage.setItem(PENDING_RENAMES_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+/**
+ * Pure state transition: record `accountKey`'s own pending rename for
+ * `profileId`, returning the updated state. Never touches any OTHER
+ * account's own entry for the same profileId — mirrors
+ * applyProfileOwnerStamp/applyLocalDeletionMarker's own single-account
+ * write guarantee above, for the identical account-isolation reason.
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_PENDING_RENAME_CASES, applyPendingRename } from "@/lib/profileStorage";
+ *   DEV_APPLY_PENDING_RENAME_CASES.forEach(c => {
+ *     const got = applyPendingRename(c.state, c.profileId, c.accountKey, c.renameName, c.renamedAt);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function applyPendingRename(
+  state: PendingRenamesByAccount,
+  profileId: string,
+  accountKey: string,
+  renameName: string,
+  renamedAt: number
+): PendingRenamesByAccount {
+  return {
+    ...state,
+    [profileId]: { ...state[profileId], [accountKey]: { name: renameName, renamedAt } },
+  };
+}
+
+export const DEV_APPLY_PENDING_RENAME_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  profileId: string;
+  accountKey: string;
+  renameName: string;
+  renamedAt: number;
+  expected: PendingRenamesByAccount;
+}> = [
+  {
+    name: "recording a pending rename for a fresh profile id",
+    state: {},
+    profileId: "default",
+    accountKey: "userA",
+    renameName: "A's Family Trip",
+    renamedAt: 1,
+    expected: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+  },
+  {
+    name: "Codex account-isolation fix — A and B can each independently hold their own pending rename for the identical literal id",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userB",
+    renameName: "B's Family Trip",
+    renamedAt: 2,
+    expected: {
+      default: {
+        userA: { name: "A's Family Trip", renamedAt: 1 },
+        userB: { name: "B's Family Trip", renamedAt: 2 },
+      },
+    },
+  },
+  {
+    name: "a later rename by the SAME account overwrites only its own entry",
+    state: { default: { userA: { name: "Old Name", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userA",
+    renameName: "Newer Name",
+    renamedAt: 2,
+    expected: { default: { userA: { name: "Newer Name", renamedAt: 2 } } },
+  },
+];
+
+/**
+ * Pure query: project `state` down to `accountKey`'s OWN pending renames
+ * only — a DIFFERENT account's own entry for the same profileId is never
+ * included, so it can never be observed (and therefore never pushed,
+ * confirmed, or cleared) by `accountKey`'s reconciliation round. Returns
+ * the flat, single-account PendingRenames shape
+ * profileRegistrySync.ts's computeProfilesToRename/selectServerRenamesToApply
+ * already expect.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_PENDING_RENAMES_FOR_ACCOUNT_CASES, selectPendingRenamesForAccount } from "@/lib/profileStorage";
+ *   DEV_SELECT_PENDING_RENAMES_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = selectPendingRenamesForAccount(c.state, c.accountKey);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectPendingRenamesForAccount(state: PendingRenamesByAccount, accountKey: string): PendingRenames {
+  const out: PendingRenames = {};
+  for (const [profileId, byAccount] of Object.entries(state)) {
+    const entry = byAccount[accountKey];
+    if (entry) out[profileId] = entry;
+  }
+  return out;
+}
+
+export const DEV_SELECT_PENDING_RENAMES_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  accountKey: string;
+  expected: PendingRenames;
+}> = [
+  {
+    name: "empty state — nothing pending for anyone",
+    state: {},
+    accountKey: "userA",
+    expected: {},
+  },
+  {
+    name: "Codex account-isolation fix — B's own view never includes A's pending rename for the same id, even for the canonical 'default' id",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    accountKey: "userB",
+    expected: {},
+  },
+  {
+    name: "the originating account's own view still sees its pending rename",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    accountKey: "userA",
+    expected: { default: { name: "A's Family Trip", renamedAt: 1 } },
+  },
+  {
+    name: "each account's own view reflects only its own independent renames, across multiple ids",
+    state: {
+      default: { userA: { name: "A's Family Trip", renamedAt: 1 }, userB: { name: "B's Family Trip", renamedAt: 2 } },
+      mom: { userA: { name: "Mom (renamed)", renamedAt: 3 } },
+    },
+    accountKey: "userA",
+    expected: {
+      default: { name: "A's Family Trip", renamedAt: 1 },
+      mom: { name: "Mom (renamed)", renamedAt: 3 },
+    },
+  },
+];
+
+/**
+ * Pure state transition: clear ONLY `accountKey`'s own pending-rename
+ * marker for `profileId`, and only when it still matches `confirmedName` —
+ * mirrors this module's established "commit-time re-check" discipline
+ * (clearLocalDeletionMarkerForAccount's analogous single-account clear;
+ * see clearProfileRenamePending's own doc for why the name-match check
+ * itself matters). Leaves every OTHER account's own entry for the
+ * identical profileId completely untouched — this is precisely what makes
+ * it structurally impossible for account B's reconciliation round to clear
+ * account A's own pending rename, since B's round only ever calls this
+ * with `accountKey` equal to B's own userId.
+ *
+ * Run from Node:
+ *   import { DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES, clearPendingRenameForAccount } from "@/lib/profileStorage";
+ *   DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = clearPendingRenameForAccount(c.state, c.profileId, c.accountKey, c.confirmedName);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function clearPendingRenameForAccount(
+  state: PendingRenamesByAccount,
+  profileId: string,
+  accountKey: string,
+  confirmedName: string
+): PendingRenamesByAccount {
+  const entry = state[profileId]?.[accountKey];
+  if (!entry || entry.name !== confirmedName) return state;
+  const byAccount = { ...state[profileId] };
+  delete byAccount[accountKey];
+  const next = { ...state };
+  if (Object.keys(byAccount).length === 0) delete next[profileId];
+  else next[profileId] = byAccount;
+  return next;
+}
+
+export const DEV_CLEAR_PENDING_RENAME_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  profileId: string;
+  accountKey: string;
+  confirmedName: string;
+  expected: PendingRenamesByAccount;
+}> = [
+  {
+    name: "confirmed rename matching the pending marker clears it",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userA",
+    confirmedName: "A's Family Trip",
+    expected: {},
+  },
+  {
+    name: "Codex account-isolation fix — B can never clear A's own pending rename, even by coincidentally confirming the exact same name A is pending",
+    state: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+    profileId: "default",
+    accountKey: "userB",
+    confirmedName: "A's Family Trip",
+    expected: { default: { userA: { name: "A's Family Trip", renamedAt: 1 } } },
+  },
+  {
+    name: "a mismatched confirmed name (a newer local edit superseded it) leaves the marker standing for the next round",
+    state: { default: { userA: { name: "Even Newer Name", renamedAt: 2 } } },
+    profileId: "default",
+    accountKey: "userA",
+    confirmedName: "A's Family Trip",
+    expected: { default: { userA: { name: "Even Newer Name", renamedAt: 2 } } },
+  },
+  {
+    name: "clearing one account's entry preserves a different account's own independent entry for the identical id",
+    state: {
+      default: {
+        userA: { name: "A's Family Trip", renamedAt: 1 },
+        userB: { name: "B's Family Trip", renamedAt: 2 },
+      },
+    },
+    profileId: "default",
+    accountKey: "userA",
+    confirmedName: "A's Family Trip",
+    expected: { default: { userB: { name: "B's Family Trip", renamedAt: 2 } } },
+  },
+];
+
+/**
+ * Codex finding #3 — pure state transition: UNCONDITIONALLY discard
+ * `accountKey`'s own pending-rename marker for `profileId`, regardless of
+ * its current value. Distinct from clearPendingRenameForAccount above,
+ * which only clears when the marker still matches a specific CONFIRMED
+ * name (the reconciliation-confirmation use case): this is for the
+ * DELETE/RECREATE use case, where the marker's VALUE is irrelevant — the
+ * profile it names no longer exists (or is about to be treated as a fresh
+ * one under the same normalized id), so ANY pending rename intent for it
+ * is now obsolete, whatever name it happens to hold.
+ *
+ * Before this fix, deleting a profile left its pending-rename marker
+ * standing. Since `normalizeId()` is deterministic, a later create under
+ * the same display name (createProfile's own reclaim-or-reuse logic) can
+ * land on the IDENTICAL literal id — at which point a stale marker from
+ * the deleted profile would be indistinguishable from a genuine pending
+ * rename for the NEW profile: computeProfilesToRename's own presence
+ * check (Codex finding #1's fix, above) only verifies the id is present
+ * in the local list, which it now is again, so the OLD rename name would
+ * be pushed onto the NEW profile's server row.
+ *
+ * Never touches any OTHER account's own entry for the identical
+ * profileId — mirrors every other single-account write in this module.
+ *
+ * Run from Node:
+ *   import { DEV_DISCARD_PENDING_RENAME_FOR_ACCOUNT_CASES, discardPendingRenameForAccount } from "@/lib/profileStorage";
+ *   DEV_DISCARD_PENDING_RENAME_FOR_ACCOUNT_CASES.forEach(c => {
+ *     const got = discardPendingRenameForAccount(c.state, c.profileId, c.accountKey);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function discardPendingRenameForAccount(
+  state: PendingRenamesByAccount,
+  profileId: string,
+  accountKey: string
+): PendingRenamesByAccount {
+  const byAccount = state[profileId];
+  if (!byAccount || !(accountKey in byAccount)) return state;
+  const next = { ...byAccount };
+  delete next[accountKey];
+  const result = { ...state };
+  if (Object.keys(next).length === 0) delete result[profileId];
+  else result[profileId] = next;
+  return result;
+}
+
+export const DEV_DISCARD_PENDING_RENAME_FOR_ACCOUNT_CASES: Array<{
+  name: string;
+  state: PendingRenamesByAccount;
+  profileId: string;
+  accountKey: string;
+  expected: PendingRenamesByAccount;
+}> = [
+  {
+    name: "Codex finding #3 — deleting a profile discards this account's own pending rename for it, whatever name it holds (unlike clearPendingRenameForAccount, no name match is required)",
+    state: { family: { userA: { name: "The Smiths (never confirmed)", renamedAt: 1 } } },
+    profileId: "family",
+    accountKey: "userA",
+    expected: {},
+  },
+  {
+    name: "discarding one account's marker preserves a different account's own independent entry for the identical id",
+    state: {
+      family: {
+        userA: { name: "The Smiths", renamedAt: 1 },
+        userB: { name: "The Joneses", renamedAt: 2 },
+      },
+    },
+    profileId: "family",
+    accountKey: "userA",
+    expected: { family: { userB: { name: "The Joneses", renamedAt: 2 } } },
+  },
+  {
+    name: "no marker present for this account — state returned unchanged (same reference)",
+    state: { family: { userB: { name: "The Joneses", renamedAt: 2 } } },
+    profileId: "family",
+    accountKey: "userA",
+    expected: { family: { userB: { name: "The Joneses", renamedAt: 2 } } },
+  },
+  {
+    name: "unknown profileId — state returned unchanged",
+    state: {},
+    profileId: "family",
+    accountKey: "userA",
+    expected: {},
+  },
+];
+
+/**
+ * Composed end-to-end regression: the exact A -> B -> A shared-device
+ * scenario the account-isolation fix targets. A renames a profile
+ * (canonical `default` included); B signs into the SAME browser and must
+ * never see A's pending rename, and any attempt by B's own round to
+ * "confirm" it (even coincidentally matching A's own new name) must never
+ * clear it; switching back to A must find the original marker completely
+ * untouched, still eligible for A's own next reconciliation round to push
+ * and confirm.
+ *
+ * Run from Node:
+ *   import { DEV_PENDING_RENAME_ACCOUNT_ISOLATION_CASES, applyPendingRename, selectPendingRenamesForAccount, clearPendingRenameForAccount } from "@/lib/profileStorage";
+ *   DEV_PENDING_RENAME_ACCOUNT_ISOLATION_CASES.forEach(c => {
+ *     let state = applyPendingRename({}, c.profileId, c.originatingAccountKey, c.originatingName, 1);
+ *     const bView = selectPendingRenamesForAccount(state, c.otherAccountKey);
+ *     const bViewEmpty = Object.keys(bView).length === 0;
+ *     const afterBAttemptsClear = clearPendingRenameForAccount(state, c.profileId, c.otherAccountKey, c.originatingName);
+ *     const aUntouchedAfterB = JSON.stringify(afterBAttemptsClear) === JSON.stringify(state);
+ *     const aViewAfterSwitchBack = selectPendingRenamesForAccount(afterBAttemptsClear, c.originatingAccountKey);
+ *     const aStillPending = aViewAfterSwitchBack[c.profileId]?.name === c.originatingName;
+ *     const ok = bViewEmpty && aUntouchedAfterB && aStillPending;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_RENAME_ACCOUNT_ISOLATION_CASES: Array<{
+  name: string;
+  profileId: string;
+  originatingAccountKey: string;
+  originatingName: string;
+  otherAccountKey: string;
+}> = [
+  {
+    name: "Codex account-isolation fix — A renames canonical `default` on a shared browser; B signs in next and must not see, push, confirm, or clear A's pending rename; switching back to A preserves it for retry",
+    profileId: "default",
+    originatingAccountKey: "userA",
+    originatingName: "A's Family Trip",
+    otherAccountKey: "userB",
+  },
+  {
+    name: "same isolation guarantee for an ordinary (non-canonical) profile id",
+    profileId: "family",
+    originatingAccountKey: "userA",
+    originatingName: "The Smiths",
+    otherAccountKey: "userB",
+  },
+];
+
+/**
+ * Read `currentOwnerUserId`'s OWN pending renames only — see
+ * PendingRenamesByAccount/selectPendingRenamesForAccount's own docs for the
+ * account-isolation this enforces. Passed to profileRegistrySync.ts's
+ * computeProfilesToRename/selectServerRenamesToApply as plain input data.
+ */
+export function getPendingProfileRenames(currentOwnerUserId: string): PendingRenames {
+  return selectPendingRenamesForAccount(readPendingRenamesByAccount(), currentOwnerUserId);
+}
+
+/**
+ * Record `profileId` as needing its current `name` pushed to the server,
+ * scoped to `accountKey` (a real authenticated userId, or
+ * UNOWNED_ACCOUNT_KEY when signed out — see renameProfile's own call
+ * below). Serialized against every other pending-renames writer via its
+ * own lock (a separate key from `dwp.profiles`/`dwp.profileRegistryState`,
+ * so a rename's own bookkeeping never contends with either of those).
+ *
+ * Codex finding — also exported for profileRegistrySync.ts's reconciliation
+ * orchestrator to call directly when BACKFILLING a pre-ledger local rename
+ * (computeRenameBackfillCandidates) — the exact same durable marker a
+ * user-initiated renameProfile() call records, just recorded on the
+ * device's behalf for a customization that predates the ledger, instead of
+ * in response to a fresh user action.
+ */
+export function markProfileRenamePending(profileId: string, name: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
+    const state = readPendingRenamesByAccount();
+    writePendingRenamesByAccount(applyPendingRename(state, profileId, accountKey, name, Date.now()));
+  });
+}
+
+/**
+ * Clear `accountKey`'s own pending-rename marker for `profileId`, but ONLY
+ * when it still matches `confirmedName` — a fresh, commit-time re-check
+ * (mirrors this module's established "read again right before acting"
+ * pattern — commitDiscoveredProfiles in profileRegistrySync.ts) so a NEWER
+ * rename that landed after this round's push was sent, but before this
+ * clear runs, is never mistaken for confirmed and is left standing for the
+ * NEXT round to push and confirm on its own. Scoped to `accountKey` — see
+ * clearPendingRenameForAccount's own doc for why this is what makes it
+ * structurally impossible for one account's round to clear another
+ * account's own pending rename.
+ */
+export function clearProfileRenamePending(profileId: string, confirmedName: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
+    const state = readPendingRenamesByAccount();
+    const next = clearPendingRenameForAccount(state, profileId, accountKey, confirmedName);
+    if (next !== state) writePendingRenamesByAccount(next);
+  });
+}
+
+/**
+ * Codex finding #3 — unconditionally discard `accountKey`'s own
+ * pending-rename marker for `profileId`, whatever its current value — see
+ * discardPendingRenameForAccount's own doc. Called from deleteProfile (the
+ * marker is now obsolete — the profile it named is gone) and from
+ * createProfile (defensive belt-and-suspenders on every create/reclaim,
+ * mirroring exactly how clearLocalDeletionMarker is already called from
+ * both of those same two call sites for the SAME reason: never rely on a
+ * single call site alone to fully retire stale per-account provenance).
+ */
+function discardProfileRenamePending(profileId: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
+    const state = readPendingRenamesByAccount();
+    const next = discardPendingRenameForAccount(state, profileId, accountKey);
+    if (next !== state) writePendingRenamesByAccount(next);
+  });
+}
+
 /**
  * Rename an existing profile (name only — id stays stable).
  * No-op if the profile id does not exist or the name is empty.
@@ -2853,15 +3600,35 @@ export const DEV_RECREATE_IMMEDIATE_PROVENANCE_CASES: Array<{
  * the pre-rename name by committing a merge built from a stale read taken
  * before this rename landed — see adoptServerProfiles's own doc. Async as a
  * direct consequence; Settings' handleRenameProfile already awaits it.
+ *
+ * SH.5 — also marks `id` as needing its new name pushed to the server
+ * registry (markProfileRenamePending), closing the SH.4.1-era gap where a
+ * rename was local-only forever: profileRegistrySync.ts's
+ * reconcileProfileRegistry now reads this marker every round
+ * (computeProfilesToRename) and keeps retrying the push until a
+ * reconfirmed server read matches, exactly mirroring how a brand-new
+ * profile's own registration already self-retries every round via
+ * computeProfilesToAdopt's fresh "unknown to server" recomputation.
+ *
+ * Codex account-isolation fix — takes `currentOwnerUserId` (mirrors
+ * createProfile/deleteProfile's own signature: a real authenticated userId,
+ * or `null` when signed out, scoped internally to the shared
+ * UNOWNED_ACCOUNT_KEY sentinel) so the pending-rename marker this call
+ * records is scoped to the ACCOUNT THAT MADE THE RENAME, never a bare
+ * profileId a different account's reconciliation round could otherwise
+ * read, push, confirm, or clear — see PendingRenamesByAccount's own doc for
+ * the full rationale. Settings' handleRenameProfile passes its own
+ * `authenticatedUserId`.
  */
-export function renameProfile(id: string, name: string): Promise<void> {
+export function renameProfile(id: string, name: string, currentOwnerUserId: string | null = null): Promise<void> {
   const trimmed = sanitizeProfileName(name);
   if (!trimmed) return Promise.resolve();
+  const scopeKey = currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY;
   return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
     const profiles = getProfiles();
     const updated = profiles.map((p) => (p.id === id ? { ...p, name: trimmed } : p));
     writeProfiles(updated);
-  });
+  }).then(() => markProfileRenamePending(id, trimmed, scopeKey));
 }
 
 /**
@@ -3273,6 +4040,14 @@ export async function deleteProfile(id: string, currentOwnerUserId: string | nul
   // `user_planner` cloud planner data.
   await markProfileLocallyDeleted(id, scopeKey);
 
+  // Codex finding #3 — this account's own pending-rename intent for `id`
+  // (if any) is now obsolete: the profile it named is gone. Discarded
+  // unconditionally (whatever name it holds) so a later create/reclaim
+  // that lands on this SAME normalized id (createProfile also discards
+  // defensively, but this is the primary fix — see its own doc) can never
+  // have the deleted profile's stale rename mistaken for its own.
+  await discardProfileRenamePending(id, scopeKey);
+
   // If the deleted profile was active, explicitly persist fallback to
   // default. Compare raw localStorage directly rather than calling
   // getActiveProfileId(), because the two cleanup branches above leave the
@@ -3381,11 +4156,17 @@ export function getActiveProfileKeys(): {
 // device shows in its profile picker; SH.4.1 adds a durable, account-wide
 // registry behind it (`user_profiles` table, via /api/sync/profiles — see
 // profileRegistrySync.ts) so a second authenticated device can discover the
-// same ids/names. The two functions below are the ONLY seam between that
-// registry and this device's local list, and they are deliberately narrow:
-// additive-only, never renaming or removing an existing local entry. Any
-// tombstone/rename-propagation policy belongs to a later phase (SH.4.2/
-// SH.4.3), not here.
+// same ids/names. The two functions below are the DISCOVERY seam between
+// that registry and this device's local list, and they are deliberately
+// narrow: additive-only, never renaming or removing an existing local
+// entry. SH.5 adds a SEPARATE, explicit rename-propagation seam
+// (mergeProfileRenames/applyServerRenames further below, plus the pending-
+// rename bookkeeping near renameProfile) rather than loosening this
+// discovery seam's own additive-only contract — a brand-new id discovered
+// here still never carries a name update for an id ALREADY present
+// locally; only that separate seam ever touches an existing entry's name.
+// Full tombstone-propagation policy is still a later phase (SH.4.3), not
+// here.
 
 /**
  * Merge `candidates` (typically the account's ACTIVE server-known profiles
@@ -3577,6 +4358,179 @@ export function adoptServerProfiles(serverProfiles: Profile[]): Promise<Profile[
     const local = getProfiles();
     const merged = mergeProfilesAdditive(local, serverProfiles);
     if (merged.length !== local.length) writeProfiles(merged);
+    return merged;
+  });
+}
+
+/**
+ * SH.5 — pure merge: update `local`'s name for every id present in
+ * `renames`, leaving every other entry (and the array's order/length)
+ * untouched. This is the PULL-side counterpart to mergeProfilesAdditive:
+ * that function deliberately never updates an existing id's name (by
+ * design, for the general discovery case — see its own doc); this function
+ * exists specifically for profileRegistrySync.ts's
+ * selectServerRenamesToApply, which already excludes any id this device has
+ * its OWN unconfirmed pending rename for, so applying `renames` here can
+ * never clobber a local edit that simply hasn't been pushed yet.
+ *
+ * Run from Node:
+ *   import { DEV_MERGE_PROFILE_RENAMES_CASES, mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_MERGE_PROFILE_RENAMES_CASES.forEach(c => {
+ *     const got = mergeProfileRenames(c.local, c.renames);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function mergeProfileRenames(local: Profile[], renames: Profile[]): Profile[] {
+  if (renames.length === 0) return local;
+  const renameMap = new Map(renames.map((p) => [p.id, p.name]));
+  let changed = false;
+  const merged = local.map((p) => {
+    const newName = renameMap.get(p.id);
+    if (newName === undefined || newName === p.name) return p;
+    changed = true;
+    return { ...p, name: newName };
+  });
+  return changed ? merged : local;
+}
+
+export const DEV_MERGE_PROFILE_RENAMES_CASES: Array<{
+  name: string;
+  local: Profile[];
+  renames: Profile[];
+  expected: Profile[];
+}> = [
+  {
+    name: "server's newer name for an already-known id is applied locally",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Our Family Trip" }],
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "a rename for an id not present locally is simply ignored (discovery's job, not this function's)",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "mom", name: "Mom" }],
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "a rename matching the current local name is a no-op — same array reference returned",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Default" }],
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "no renames — local list returned unchanged",
+    local: [{ id: "default", name: "Default" }],
+    renames: [],
+    expected: [{ id: "default", name: "Default" }],
+  },
+  {
+    name: "multiple ids — only the ones present in both lists are updated, others untouched",
+    local: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom (old)" },
+      { id: "dad", name: "Dad" },
+    ],
+    renames: [
+      { id: "mom", name: "Mom (new)" },
+      { id: "unknown-id", name: "Ignored" },
+    ],
+    expected: [
+      { id: "default", name: "Default" },
+      { id: "mom", name: "Mom (new)" },
+      { id: "dad", name: "Dad" },
+    ],
+  },
+];
+
+/**
+ * Pure decision: did this merge actually change the profile list — i.e.
+ * should same-tab consumers be notified (PROFILE_NAME_CHANGED_EVENT)?
+ * mergeProfileRenames returns the SAME array reference when nothing
+ * changed (already-converged/no matching id — see its own doc), so a plain
+ * reference comparison costs nothing extra and never fires a spurious
+ * notification for a pull that changed nothing.
+ *
+ * Run from Node:
+ *   import { DEV_DID_PROFILE_LIST_CHANGE_CASES, didProfileListChange, mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_DID_PROFILE_LIST_CHANGE_CASES.forEach(c => {
+ *     const merged = mergeProfileRenames(c.local, c.renames);
+ *     const got = didProfileListChange(c.local, merged);
+ *     console.log(got === c.expectedChanged ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function didProfileListChange(before: Profile[], after: Profile[]): boolean {
+  return before !== after;
+}
+
+export const DEV_DID_PROFILE_LIST_CHANGE_CASES: Array<{
+  name: string;
+  local: Profile[];
+  renames: Profile[];
+  expectedChanged: boolean;
+}> = [
+  {
+    name: "Codex finding — a genuine pulled rename is detected as a change worth notifying same-tab consumers about",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Our Family Trip" }],
+    expectedChanged: true,
+  },
+  {
+    name: "a no-op pull (already converged) is never reported as a change — no spurious notification",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Default" }],
+    expectedChanged: false,
+  },
+  {
+    name: "a rename for an id not present locally changes nothing here either — discovery's own concern, not a rename notification",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "mom", name: "Mom" }],
+    expectedChanged: false,
+  },
+  {
+    name: "empty renames list — no change",
+    local: [{ id: "default", name: "Default" }],
+    renames: [],
+    expectedChanged: false,
+  },
+];
+
+/** Best-effort same-tab broadcast — see PROFILE_NAME_CHANGED_EVENT's own doc. Never throws. */
+function notifyProfileNameChanged(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(new CustomEvent(PROFILE_NAME_CHANGED_EVENT));
+  } catch {}
+}
+
+/**
+ * SH.5 — persist server-confirmed rename(s) for id(s) this device already
+ * knows about locally, applying profileRegistrySync.ts's
+ * selectServerRenamesToApply result. Serialized against every other
+ * `dwp.profiles` writer via the SAME lock adoptServerProfiles/createProfile/
+ * renameProfile/deleteProfile already use, for the identical read-modify-
+ * write-safety reason their own docs give.
+ *
+ * Codex finding — dispatches PROFILE_NAME_CHANGED_EVENT whenever this merge
+ * actually changes something (didProfileListChange), so every currently
+ * mounted page that already read a profile's name into its own React state
+ * (plans/wait-times/lightning/page.tsx's `activeProfileName`) can refresh
+ * it without requiring a reload or remount — see that event's own doc for
+ * why a native `storage` event can never do this for a SAME-tab write.
+ * This is the ONLY call site: renameProfile's own PUSH-side local write is
+ * never affected by this gap, since the SAME page that just called it
+ * (Settings) already re-derives its own `profiles` state immediately
+ * afterward, and no other page can be simultaneously mounted in the same
+ * tab to hold a stale copy of it.
+ */
+export function applyServerRenames(renames: Profile[]): Promise<Profile[]> {
+  if (renames.length === 0) return Promise.resolve(getProfiles());
+  return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
+    const local = getProfiles();
+    const merged = mergeProfileRenames(local, renames);
+    if (didProfileListChange(local, merged)) {
+      writeProfiles(merged);
+      notifyProfileNameChanged();
+    }
     return merged;
   });
 }

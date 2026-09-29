@@ -37,8 +37,14 @@ import {
   renameProfile,
   deleteProfile,
   getActiveProfileKeys,
+  PROFILE_NAME_CHANGED_EVENT,
+  PROFILES_LIST_KEY,
 } from "../../lib/profileStorage";
-import { reconcileProfileRegistry, shouldWithholdProfileControls } from "../../lib/profileRegistrySync";
+import {
+  reconcileProfileRegistry,
+  shouldWithholdProfileControls,
+  pushNewProfileRegistration,
+} from "../../lib/profileRegistrySync";
 
 // ============================================
 // CONSTANTS
@@ -143,6 +149,24 @@ export default function SettingsPage() {
   // deleteProfile's own `currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY` already
   // scopes the write side of this same provenance.
   const visibilityOwnerKey = authenticatedUserId ?? UNOWNED_ACCOUNT_KEY;
+  // Codex finding — a ref mirror of `visibilityOwnerKey`, kept fresh via the
+  // tiny effect below, mirrors the SAME established pattern this codebase
+  // already uses for keeping a MOUNT-ONLY (`[]` deps) effect's closure
+  // current (e.g. plans/wait-times/page.tsx's own selectedResortRef/
+  // selectedParkRef). The PROFILE_NAME_CHANGED_EVENT listener registered in
+  // the mount effect below never re-subscribes once auth resolves, so
+  // closing over `visibilityOwnerKey` directly would permanently bake in
+  // whatever it happened to be at mount — typically UNOWNED_ACCOUNT_KEY,
+  // since useSession() starts in "loading" before next-auth's own session
+  // fetch resolves (see the 11th-round doc above `authenticatedUserId`'s
+  // own definition for the identical timing concern). Reading `.current`
+  // instead means the listener always uses whichever owner key is CURRENTLY
+  // resolved at the moment a rename event actually fires, never a stale
+  // signed-out snapshot from before authentication resolved.
+  const visibilityOwnerKeyRef = useRef(visibilityOwnerKey);
+  useEffect(() => {
+    visibilityOwnerKeyRef.current = visibilityOwnerKey;
+  }, [visibilityOwnerKey]);
   const [emailInput, setEmailInput] = useState("");
   const [signInSent, setSignInSent] = useState(false);
   const [signInError, setSignInError] = useState("");
@@ -224,8 +248,39 @@ export default function SettingsPage() {
       setSyncState(getSyncStateForProfile(profileId));
     };
     window.addEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
+    // Codex finding — a background reconciliation round (e.g. the GLOBAL
+    // SessionProviderWrapper guard, not this page's own effect below) can
+    // pull a fresher profile name (profileStorage.ts's applyServerRenames)
+    // while Settings is already mounted; same-tab localStorage writes never
+    // fire the native `storage` event, so without this the picker and the
+    // "Syncing profile: X" label would keep showing the stale name — see
+    // PROFILE_NAME_CHANGED_EVENT's own doc. Reads visibilityOwnerKeyRef.current
+    // (see its own doc above), NOT the closed-over `visibilityOwnerKey`
+    // directly — this effect never re-subscribes once auth resolves, so the
+    // closed-over value would otherwise permanently bake in whatever was
+    // resolved at MOUNT time (typically the signed-out UNOWNED_ACCOUNT_KEY
+    // bucket, since useSession() starts in "loading"), refreshing the
+    // picker with the WRONG account's visibility for the rest of the page's
+    // lifetime even after authentication resolves.
+    const handleProfileNameChanged = () => {
+      setProfiles(getVisibleProfiles(visibilityOwnerKeyRef.current));
+    };
+    window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    // Codex finding — the CROSS-TAB half of the same problem: a rename
+    // pulled while a DIFFERENT tab on this browser is mounted writes
+    // `dwp.profiles` there, which fires the native `storage` event in every
+    // OTHER tab (never the tab that wrote it) — see PROFILES_LIST_KEY's own
+    // doc. Reuses the identical refresh (and the same
+    // visibilityOwnerKeyRef.current freshness fix) as the same-tab listener
+    // above rather than duplicating the logic.
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === PROFILES_LIST_KEY) handleProfileNameChanged();
+    };
+    window.addEventListener("storage", handleStorage);
     return () => {
       window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
+      window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 
@@ -436,6 +491,17 @@ export default function SettingsPage() {
     // Switch to the newly created profile immediately
     setActiveProfileIdInStorage(profile.id);
     setActiveProfileIdState(profile.id);
+    // SH.5 — attempt ONE immediate, awaited registration push before the
+    // reload below, rather than relying ENTIRELY on the next page load's
+    // own fire-and-forget reconciliation round to ever register this
+    // profile server-side — see pushNewProfileRegistration's own doc for
+    // why this closes a real single-point-of-failure window. Best-effort:
+    // this never throws, and the normal round on the reloaded page still
+    // runs afterward and will retry this exact id if this attempt's own
+    // request failed.
+    if (authenticatedUserId) {
+      await pushNewProfileRegistration(profile);
+    }
     location.reload();
   }
 
@@ -444,8 +510,22 @@ export default function SettingsPage() {
     if (!current) return;
     const name = window.prompt("Rename profile:", current.name);
     if (!name || !name.trim()) return;
-    await renameProfile(activeProfileId, name);
+    // Codex account-isolation fix — scope the pending-rename marker this
+    // rename records to the CURRENTLY authenticated account (or the shared
+    // unowned bucket when signed out), mirroring how handleAddProfile/
+    // handleDeleteProfile already scope createProfile/deleteProfile's own
+    // provenance writes — see renameProfile's own doc.
+    await renameProfile(activeProfileId, name, authenticatedUserId);
     setProfiles(getVisibleProfiles(visibilityOwnerKey));
+    // SH.5 — a rename doesn't reload the page (unlike Add/Delete), so
+    // nothing else would otherwise trigger a fresh reconciliation round to
+    // push it this session. Fire-and-forget, mirrors the SAME pattern
+    // ProfileRegistryReconciliationGuard already uses on every session
+    // resolution — reconcileProfileRegistry never throws and is safe to
+    // call redundantly.
+    if (authenticatedUserId) {
+      reconcileProfileRegistry(authenticatedUserId);
+    }
   }
 
   async function handleDeleteProfile() {

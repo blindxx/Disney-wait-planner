@@ -84,9 +84,18 @@
  *     response did. This closes the window where a commit that actually
  *     reached the server, but whose response didn't reach this client,
  *     would otherwise leave the id looking "unowned".
- *   - Renaming an id already known to the server is NOT propagated in
- *     either direction yet — SH.4.2 owns that policy. An id already present
- *     both locally and on the server keeps its LOCAL name untouched here.
+ *   - SH.5 — renaming an id already known to the server IS now propagated,
+ *     in both directions, as an addition alongside (not a replacement for)
+ *     SH.4.1's original additive adoption: a device's OWN pending local
+ *     rename (profileStorage.ts's getPendingProfileRenames) is pushed
+ *     (computeProfilesToRename) and retried every round until a
+ *     reconfirmed re-GET matches; a mismatch with NO pending marker (this
+ *     device never touched it — a DIFFERENT device renamed it) is pulled
+ *     instead (selectServerRenamesToApply), updating the local name to
+ *     match the server's. This is the ONLY case where an id already
+ *     present both locally and on the server has its LOCAL name touched by
+ *     reconciliation; discovery of a brand-new id (below) still never
+ *     rewrites an EXISTING local entry's name.
  *   - `dwp.activeProfile` is never read or written anywhere in this module
  *     — it stays entirely device-local, exactly as it does today.
  *   - New-profile id generation (collision-resistant ids independent of
@@ -122,8 +131,14 @@
  * settings/page.tsx), it does NOT need an unmount-time
  * setRegistryIdentity(null) of its own: advanceRegistryIdentity already
  * bumps the epoch on every actual identity transition (including through
- * null on sign-out), which is the only event that can legitimately
- * invalidate an in-flight round — see advanceRegistryIdentity's own doc.
+ * null on sign-out), which is the only event that can invalidate an
+ * in-flight round via the IDENTITY epoch — see advanceRegistryIdentity's
+ * own doc. (Codex finding #2 — a SEPARATE, round-sequencing guard also
+ * invalidates an in-flight round when a NEWER round for the SAME identity
+ * has started since, independent of any identity transition — see the
+ * "RECONCILIATION-ROUND STALE-RUN GUARD" section further below for why
+ * that gap existed and how it's closed; it does not change anything about
+ * this guard's own identity-transition responsibility described here.)
  * settings/page.tsx still calls reconcileProfileRegistry() itself (for a
  * prompt UI refresh while the page is open), but — Codex P1 fix — it must
  * NOT also call setRegistryIdentity() any more: since it no longer owns the
@@ -136,12 +151,26 @@
 
 import {
   type Profile,
+  type PendingRenames,
   getProfiles,
   filterVisibleProfiles,
   adoptServerProfiles,
   markProfileOwner,
   getLocallyDeletedProfileIds,
   getProfileIdsOwnedByOtherAccounts,
+  getPendingProfileRenames,
+  clearProfileRenamePending,
+  applyServerRenames,
+  applyPendingRename,
+  selectPendingRenamesForAccount,
+  clearPendingRenameForAccount,
+  discardPendingRenameForAccount,
+  mergeProfileRenames,
+  markProfileRenamePending,
+  markProfileRenameBackfilled,
+  getRenameBackfilledIds,
+  CANONICAL_SHARED_PROFILE_ID,
+  DEFAULT_PROFILE_NAME,
 } from "./profileStorage";
 import { validateProfileName, MAX_PROFILES_PER_ADOPTION_REQUEST } from "./syncIdentity";
 
@@ -343,6 +372,1185 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
   },
 ];
 
+// ===== SH.5 RENAME PROPAGATION =====
+
+/**
+ * Codex finding — ONE-TIME PRE-LEDGER RENAME BACKFILL. Given the server
+ * registry, this device's current local profiles, this account's own
+ * pending renames, and the ids this account has already run this exact
+ * backfill for before (profileStorage.ts's getRenameBackfilledIds — never
+ * re-applied for the same (profileId, accountKey) pair), compute the {id,
+ * name} pairs that must be durably recorded as pending renames BEFORE this
+ * round's normal push/pull machinery (computeProfilesToRename/
+ * selectServerRenamesToApply) ever runs.
+ *
+ * Why this exists: `dwp.profilePendingRenames` (the rename ledger) did not
+ * always exist. An existing user's `dwp.profiles` can already hold a local
+ * custom name that predates it — back when renameProfile() was purely
+ * local and never pushed anything server-side at all (see AGENTS.md's own
+ * "single maintained source of truth" history for this feature). The FIRST
+ * time such a device reconciles under the new ledger, that local/server
+ * mismatch has NO pending marker to explain it — structurally identical to
+ * "a DIFFERENT device already pushed a rename I haven't pulled yet" —
+ * so without this, selectServerRenamesToApply's own pull path would
+ * silently overwrite the user's real custom name with the server's stale
+ * registered one, the very first time they ever benefit from this feature.
+ *
+ * Returns TWO separate lists, not one — this is the Codex fix for a
+ * migration-completion gap:
+ *   - `toBackfillAsPending`: {id, name} pairs that must be durably recorded
+ *     as pending renames (a genuine local/server mismatch to preserve).
+ *   - `idsToMarkComplete`: EVERY id examined this round that is eligible for
+ *     the pre-ledger migration at all (locally known, server-known, not
+ *     already ledger-tracked, not already backfilled before) — regardless
+ *     of whether it turned out mismatched or already converged.
+ *
+ * Codex finding: an EARLIER version of this function only ever returned (and
+ * the caller only ever marked-complete) the mismatched subset. That left an
+ * already-converged, server-known id — e.g. a device that reconciles for the
+ * first time under the new ledger with local name already equal to the
+ * server's — permanently unmarked. If a DIFFERENT device later legitimately
+ * renamed that same id, THIS device would still see a "local != server"
+ * mismatch on some later round with no pending marker and no backfill stamp
+ * — structurally indistinguishable from genuine pre-ledger local intent — and
+ * would incorrectly re-propose the (by-then stale) local name as a backfill
+ * candidate, pushing it back over the other device's newer, legitimate
+ * rename. Marking completion for EVERY eligible id — converged or
+ * mismatched — the FIRST time it's examined ensures the one-time guard
+ * (`alreadyBackfilledIds`) always excludes it from then on, so this legacy
+ * backfill logic only ever fires during the actual upgrade transition and
+ * can never reinterpret a later remote rename as legacy local intent.
+ *
+ * An id is ELIGIBLE for migration completion (added to `idsToMarkComplete`)
+ * when ALL of:
+ *   - it is already locally known (in `localProfiles`, which callers pass
+ *     already filtered to this account's own visible list — an id this
+ *     account locally deleted is never eligible);
+ *   - the server ALREADY has an ACTIVE row for it (a not-yet-known id is
+ *     computeProfilesToAdopt's job — nothing to preserve against, since a
+ *     brand-new registration can't be "overwritten"; it stays eligible on a
+ *     later round once the server does know it);
+ *   - it has NO pending-rename marker yet (an id already tracked by the
+ *     ledger has nothing to backfill — the normal push/pull machinery
+ *     already owns it, and this function running again after its own
+ *     backfill already recorded a marker must be a no-op, not a
+ *     re-proposal);
+ *   - this exact (profileId, accountKey) pair has never been backfilled
+ *     before (the durable, one-time-only guard).
+ *
+ * Among ELIGIBLE ids, one is additionally added to `toBackfillAsPending`
+ * (a genuine customization to preserve) only when BOTH:
+ *   - its local name DIFFERS from the server's confirmed name (nothing to
+ *     preserve when they already agree — such an id still gets marked
+ *     complete, just with no pending marker);
+ *   - for the CANONICAL_SHARED_PROFILE_ID (`default`) SPECIFICALLY: the
+ *     local name is not simply DEFAULT_PROFILE_NAME, the literal, untouched
+ *     bootstrap value every device auto-creates `default` with (see that
+ *     constant's own doc). `default` is the ONE id every device creates
+ *     locally on its own, independent of the normal adopt/discover-and-
+ *     copy-name flow every OTHER id goes through — so a mismatch for it
+ *     can ALSO legitimately arise from a genuinely untouched device simply
+ *     not yet having pulled ANOTHER device's already-pushed rename (this
+ *     feature's own earlier rounds), which must still be pulled normally,
+ *     never mistaken for this device's own "customization" and pushed
+ *     back over it. Such a `default` mismatch is STILL added to
+ *     `idsToMarkComplete` (migration is complete either way — there's no
+ *     further pre-ledger local intent left to discover for it), just not to
+ *     `toBackfillAsPending`. A non-default id gets no equivalent bootstrap
+ *     check, because it has no equivalent auto-created "untouched" value to
+ *     detect — every non-default id this account locally holds got there
+ *     either by this device genuinely creating/renaming it, or by adopting
+ *     it with whatever name the server already had, so a later mismatch
+ *     ordinarily does mean local, self-initiated intent to preserve.
+ *
+ * Bounded scope, NOT a general conflict resolver: this is a one-time,
+ * best-effort migration heuristic for the transition off purely-local
+ * renames, not a mechanism for correctly resolving genuinely ambiguous,
+ * concurrent multi-device pre-SH.5 rename intent (e.g. two devices each
+ * carrying their OWN distinct customization for the same id, racing to be
+ * the first to reconcile post-upgrade). Like the separately-deferred
+ * simultaneous two-tab rename ordering race, resolving that ambiguity is
+ * explicitly out of scope here — this function does not attempt to add new
+ * conflict-detection or versioning architecture to arbitrate it. What it
+ * DOES guarantee, unconditionally, is the bounded, one-time nature of the
+ * migration itself: any id this function examines is judged exactly once
+ * per (profileId, accountKey) — `idsToMarkComplete`'s one-time guard — after
+ * which normal SH.5 rename reconciliation (computeProfilesToRename /
+ * selectServerRenamesToApply) exclusively governs it, so a later, ordinary
+ * (non-concurrent) remote rename is always pulled normally rather than
+ * re-examined by this legacy path.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES, computeRenameBackfillCandidates } from "@/lib/profileRegistrySync";
+ *   DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES.forEach(c => {
+ *     const got = computeRenameBackfillCandidates(c.serverProfiles, c.localProfiles, c.pendingRenames, c.alreadyBackfilledIds);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function computeRenameBackfillCandidates(
+  serverProfiles: ServerProfileRecord[],
+  localProfiles: Profile[],
+  pendingRenames: PendingRenames,
+  alreadyBackfilledIds: ReadonlySet<string>
+): { toBackfillAsPending: Profile[]; idsToMarkComplete: string[] } {
+  const serverNameById = new Map(serverProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const toBackfillAsPending: Profile[] = [];
+  const idsToMarkComplete: string[] = [];
+  for (const local of localProfiles) {
+    if (pendingRenames[local.id]) continue; // already tracked by the ledger — nothing to backfill
+    if (alreadyBackfilledIds.has(local.id)) continue; // one-time-only guard
+    const serverName = serverNameById.get(local.id);
+    if (serverName === undefined) continue; // not yet server-known — computeProfilesToAdopt's job
+    // Eligible for migration completion regardless of convergence — see
+    // this function's own doc for why converged ids must ALSO be marked.
+    idsToMarkComplete.push(local.id);
+    if (serverName === local.name) continue; // already converged, nothing to preserve as a pending rename
+    if (local.id === CANONICAL_SHARED_PROFILE_ID && local.name === DEFAULT_PROFILE_NAME) continue; // untouched bootstrap value, not a customization
+    toBackfillAsPending.push({ id: local.id, name: local.name });
+  }
+  return { toBackfillAsPending, idsToMarkComplete };
+}
+
+export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
+  name: string;
+  serverProfiles: ServerProfileRecord[];
+  localProfiles: Profile[];
+  pendingRenames: PendingRenames;
+  alreadyBackfilledIds: Set<string>;
+  expected: { toBackfillAsPending: Profile[]; idsToMarkComplete: string[] };
+}> = [
+  {
+    name: "the realistic existing-user flow — local `default` already has a custom name from before the ledger existed; the server still has the literal bootstrap name",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [{ id: "default", name: "Our Family Trip" }], idsToMarkComplete: ["default"] },
+  },
+  {
+    name: "a genuinely untouched device — local `default` is still the literal bootstrap name, but ANOTHER device already legitimately pushed a rename; must be PULLED normally, never mistaken for this device's own customization — still marked migration-complete since there is no further pre-ledger local intent to discover for it",
+    serverProfiles: [{ profileId: "default", name: "Renamed On Another Device", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [], idsToMarkComplete: ["default"] },
+  },
+  {
+    name: "a non-default id's local/server mismatch with no marker is treated as this device's own genuine pre-SH.5 customization and backfilled — non-default ids have no bootstrap-value exception the way `default` does",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [{ id: "family", name: "The Smiths" }], idsToMarkComplete: ["family"] },
+  },
+  {
+    name: "already backfilled once for this (id, account) — never proposed again, even though the mismatch (by itself) still looks identical",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(["default"]),
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
+  },
+  {
+    name: "a pending marker already exists for the id — the ledger already owns it, never a backfill candidate, and not re-marked complete (the ledger already covers it)",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
+  },
+  {
+    name: "id not yet known to the server at all — computeProfilesToAdopt's job, never a backfill or completion candidate yet",
+    serverProfiles: [],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
+  },
+  {
+    name: "Codex finding — local and server names already agree: nothing to backfill as pending, but STILL marked migration-complete so a later legitimate remote rename is never mistaken for stale local intent",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [], idsToMarkComplete: ["default"] },
+  },
+  {
+    name: "a tombstoned server row is never a backfill or completion target",
+    serverProfiles: [
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: "2026-02-01T00:00:00.000Z" },
+    ],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
+  },
+];
+
+/**
+ * Codex finding — composed end-to-end regression for the COMPLETE upgrade
+ * flow: an existing user's pre-ledger local rename is discovered, durably
+ * backfilled as a pending marker (never lost even if the round were
+ * interrupted right after), immediately picked up by THIS SAME round's own
+ * computeProfilesToRename (no extra round-trip needed), and once the push
+ * is confirmed, the one-time backfill guard AND the pending marker both end
+ * up exactly where a normal (non-backfilled) rename would leave them —
+ * proving the backfilled marker behaves identically to a fresh
+ * user-initiated rename from that point on, not a special, parallel path.
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES,
+ *     computeRenameBackfillCandidates,
+ *     computeProfilesToRename,
+ *     selectConfirmedPendingRenames,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyRenameBackfillStamp,
+ *     selectRenameBackfilledIdsForAccount,
+ *     applyPendingRename,
+ *     selectPendingRenamesForAccount,
+ *     clearPendingRenameForAccount,
+ *   } from "@/lib/profileStorage";
+ *   DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES.forEach(c => {
+ *     // Round 1 (first reconciliation ever under the new ledger): the
+ *     // mismatch is detected and durably backfilled BEFORE any push/pull.
+ *     let registryState = {};
+ *     let pendingState = {};
+ *     const alreadyBackfilled = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const { toBackfillAsPending, idsToMarkComplete } = computeRenameBackfillCandidates(c.serverProfiles, c.localProfiles, {}, alreadyBackfilled);
+ *     for (const candidate of toBackfillAsPending) {
+ *       pendingState = applyPendingRename(pendingState, candidate.id, c.accountKey, candidate.name, 1);
+ *     }
+ *     for (const id of idsToMarkComplete) {
+ *       registryState = applyRenameBackfillStamp(registryState, id, c.accountKey);
+ *     }
+ *     const localNamePreserved = c.localProfiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // SAME round: computeProfilesToRename immediately sees the freshly
+ *     // backfilled marker and proposes it for push — no extra round-trip.
+ *     const pendingForAccount = selectPendingRenamesForAccount(pendingState, c.accountKey);
+ *     const toRename = computeProfilesToRename(c.serverProfiles, c.localProfiles, pendingForAccount);
+ *
+ *     // Push succeeds and is confirmed; both the marker and the one-time
+ *     // guard end up exactly as a normal (non-backfilled) rename would leave them.
+ *     const authoritativeAfterPush = [{ profileId: c.profileId, name: c.localName, updatedAt: "x", deletedAt: null }];
+ *     const confirmed = selectConfirmedPendingRenames(pendingForAccount, authoritativeAfterPush);
+ *     pendingState = clearPendingRenameForAccount(pendingState, c.profileId, c.accountKey, c.localName);
+ *
+ *     // Round 2 (a later reconciliation): the one-time guard means the
+ *     // ALREADY-CONFIRMED id is never re-backfilled, even if some other
+ *     // unrelated mismatch existed transiently.
+ *     const stillBackfilledOnlyOnce = computeRenameBackfillCandidates(
+ *       authoritativeAfterPush, c.localProfiles, {}, selectRenameBackfilledIdsForAccount(registryState, c.accountKey)
+ *     );
+ *
+ *     const ok =
+ *       localNamePreserved === c.localName &&
+ *       JSON.stringify(toRename) === JSON.stringify([{ id: c.profileId, name: c.localName }]) &&
+ *       JSON.stringify(confirmed) === JSON.stringify([{ id: c.profileId, name: c.localName }]) &&
+ *       selectPendingRenamesForAccount(pendingState, c.accountKey)[c.profileId] === undefined &&
+ *       stillBackfilledOnlyOnce.toBackfillAsPending.length === 0 &&
+ *       stillBackfilledOnlyOnce.idsToMarkComplete.length === 0;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  localName: string;
+  serverProfiles: ServerProfileRecord[];
+  localProfiles: Profile[];
+}> = [
+  {
+    name: "Codex finding — the realistic existing-user flow: local `default` has a custom name from before the ledger existed, while the server still has the literal bootstrap 'Default' — the full upgrade round preserves it, pushes it, and confirms it exactly like an ordinary rename",
+    profileId: "default",
+    accountKey: "userA",
+    localName: "Our Family Trip",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "same guarantee for a pre-ledger rename of an ordinary (non-canonical) profile id",
+    profileId: "family",
+    accountKey: "userA",
+    localName: "The Smiths",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+  },
+];
+
+/**
+ * Codex finding — composed end-to-end regression for the specific migration-
+ * completion gap fixed above: an id that is ALREADY CONVERGED (local name ==
+ * server name) the very first time it's examined under the new ledger must
+ * still be marked migration-complete, so that a LATER, genuinely different
+ * device's legitimate rename of that same id is correctly PULLED on this
+ * device's next reconciliation — never re-proposed as a stale local backfill
+ * candidate that would push the old name back over the newer one.
+ *
+ * Round 1 (first post-upgrade reconciliation): local and server names for
+ * the id already agree. computeRenameBackfillCandidates must report it in
+ * `idsToMarkComplete` (migration done) while `toBackfillAsPending` stays
+ * empty (nothing to preserve — there was no divergent local customization).
+ *
+ * Round 2 (a later reconciliation, after another device renamed the SAME
+ * id on the server): this device's local copy is unchanged, since round 1
+ * converged and pushed nothing. Because round 1 already stamped the id
+ * complete, round 2's computeRenameBackfillCandidates must exclude it
+ * entirely (both lists empty) via the one-time `alreadyBackfilledIds`
+ * guard — proving it can never reinterpret the new remote rename as this
+ * device's own legacy local intent. selectServerRenamesToApply (the normal,
+ * unrelated pull path) must then correctly propose pulling the other
+ * device's newer name, exactly as it would for any ordinary remote rename.
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES,
+ *     computeRenameBackfillCandidates,
+ *     selectServerRenamesToApply,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyRenameBackfillStamp,
+ *     selectRenameBackfilledIdsForAccount,
+ *   } from "@/lib/profileStorage";
+ *   DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES.forEach(c => {
+ *     // Round 1: first post-upgrade reconciliation. Local already equals
+ *     // server — converged, nothing to preserve as a pending rename — but
+ *     // migration completion must still be recorded.
+ *     let registryState = {};
+ *     const alreadyBackfilled1 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round1 = computeRenameBackfillCandidates(c.serverProfilesRound1, c.localProfiles, {}, alreadyBackfilled1);
+ *     for (const id of round1.idsToMarkComplete) {
+ *       registryState = applyRenameBackfillStamp(registryState, id, c.accountKey);
+ *     }
+ *     const migrationMarkedComplete = selectRenameBackfilledIdsForAccount(registryState, c.accountKey).has(c.profileId);
+ *
+ *     // Round 2: another device legitimately renamed the same id on the
+ *     // server. This device's local copy is unchanged (round 1 pushed
+ *     // nothing). The one-time guard must exclude it from backfill
+ *     // consideration entirely, and the normal pull path must apply the
+ *     // newer remote name instead.
+ *     const alreadyBackfilled2 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round2 = computeRenameBackfillCandidates(c.serverProfilesRound2, c.localProfiles, {}, alreadyBackfilled2);
+ *     const round2Pulls = selectServerRenamesToApply(c.serverProfilesRound2, c.localProfiles, new Set());
+ *
+ *     const ok =
+ *       round1.toBackfillAsPending.length === 0 &&
+ *       JSON.stringify(round1.idsToMarkComplete) === JSON.stringify([c.profileId]) &&
+ *       migrationMarkedComplete &&
+ *       round2.toBackfillAsPending.length === 0 &&
+ *       round2.idsToMarkComplete.length === 0 &&
+ *       JSON.stringify(round2Pulls) === JSON.stringify([{ id: c.profileId, name: c.remoteRenamedName }]);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  localProfiles: Profile[];
+  serverProfilesRound1: ServerProfileRecord[];
+  serverProfilesRound2: ServerProfileRecord[];
+  remoteRenamedName: string;
+}> = [
+  {
+    name: "Codex finding — canonical `default`: converges on round 1 (migration marked complete with nothing pending), then another device renames it; round 2 correctly pulls the newer remote name instead of re-backfilling the stale local one",
+    profileId: "default",
+    accountKey: "userA",
+    localProfiles: [{ id: "default", name: "Family" }],
+    serverProfilesRound1: [{ profileId: "default", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    serverProfilesRound2: [{ profileId: "default", name: "The Smiths", updatedAt: "2026-02-01T00:00:00.000Z", deletedAt: null }],
+    remoteRenamedName: "The Smiths",
+  },
+  {
+    name: "same guarantee for an ordinary (non-canonical) profile id",
+    profileId: "family",
+    accountKey: "userA",
+    localProfiles: [{ id: "family", name: "Family" }],
+    serverProfilesRound1: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    serverProfilesRound2: [{ profileId: "family", name: "The Smiths", updatedAt: "2026-02-01T00:00:00.000Z", deletedAt: null }],
+    remoteRenamedName: "The Smiths",
+  },
+];
+
+/**
+ * Codex finding — composed end-to-end regression for the bounded pre-SH.5
+ * migration's `default` exception: a GENUINELY UNTOUCHED device (local
+ * `default` still the literal bootstrap `DEFAULT_PROFILE_NAME`) whose server
+ * `default` already carries a DIFFERENT device's genuine custom name must
+ * PULL that custom name normally, not treat its own untouched bootstrap
+ * value as something to preserve.
+ *
+ * Round 1 (first post-upgrade reconciliation): local `default` is still the
+ * literal bootstrap value; the server's `default` is already a custom name
+ * pushed by another device. `toBackfillAsPending` must stay empty (nothing
+ * of this device's own to preserve) while `idsToMarkComplete` still records
+ * `default` (migration is done either way — see this function's own doc).
+ * With no pending marker created, `selectServerRenamesToApply` — the normal,
+ * unrelated pull path — must then propose pulling the server's custom name,
+ * and merging it must actually update the local copy.
+ *
+ * Round 2 (immediately after, one-time-guard check): with `default` now
+ * marked complete AND locally updated to match the server, a second
+ * reconciliation must not re-propose it for backfill at all (both lists
+ * empty) — proving the migration ran exactly once.
+ *
+ * Round 3 (a later, ordinary remote rename after migration completion):
+ * some OTHER device renames `default` again. Because migration already
+ * completed in round 1, this is governed exclusively by normal SH.5
+ * reconciliation — `selectServerRenamesToApply` must pull it like any other
+ * remote rename, and `computeRenameBackfillCandidates` must still report
+ * `default` as fully excluded (never re-examined by this legacy path).
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_UNTOUCHED_DEFAULT_PULLS_SERVER_CUSTOM_NAME_CASES,
+ *     computeRenameBackfillCandidates,
+ *     selectServerRenamesToApply,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyRenameBackfillStamp,
+ *     selectRenameBackfilledIdsForAccount,
+ *     mergeProfileRenames,
+ *   } from "@/lib/profileStorage";
+ *   DEV_UNTOUCHED_DEFAULT_PULLS_SERVER_CUSTOM_NAME_CASES.forEach(c => {
+ *     // Round 1: untouched local `default`, server already has another
+ *     // device's genuine custom name. Nothing of this device's own to
+ *     // preserve, but migration completion is still recorded.
+ *     let registryState = {};
+ *     let localProfiles = c.localProfiles;
+ *     const alreadyBackfilled1 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round1 = computeRenameBackfillCandidates(c.serverProfilesRound1, localProfiles, {}, alreadyBackfilled1);
+ *     for (const id of round1.idsToMarkComplete) {
+ *       registryState = applyRenameBackfillStamp(registryState, id, c.accountKey);
+ *     }
+ *     const round1Pulls = selectServerRenamesToApply(c.serverProfilesRound1, localProfiles, new Set());
+ *     localProfiles = mergeProfileRenames(localProfiles, round1Pulls);
+ *     const nameAfterRound1 = localProfiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // Round 2: one-time-guard check — must not re-propose `default` at all.
+ *     const alreadyBackfilled2 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round2 = computeRenameBackfillCandidates(c.serverProfilesRound1, localProfiles, {}, alreadyBackfilled2);
+ *
+ *     // Round 3: a later, ordinary remote rename by some OTHER device —
+ *     // governed exclusively by normal SH.5 reconciliation from here on.
+ *     const round3 = computeRenameBackfillCandidates(c.serverProfilesRound3, localProfiles, {}, alreadyBackfilled2);
+ *     const round3Pulls = selectServerRenamesToApply(c.serverProfilesRound3, localProfiles, new Set());
+ *
+ *     const ok =
+ *       round1.toBackfillAsPending.length === 0 &&
+ *       JSON.stringify(round1.idsToMarkComplete) === JSON.stringify([c.profileId]) &&
+ *       JSON.stringify(round1Pulls) === JSON.stringify([{ id: c.profileId, name: c.firstCustomName }]) &&
+ *       nameAfterRound1 === c.firstCustomName &&
+ *       round2.toBackfillAsPending.length === 0 &&
+ *       round2.idsToMarkComplete.length === 0 &&
+ *       round3.toBackfillAsPending.length === 0 &&
+ *       round3.idsToMarkComplete.length === 0 &&
+ *       JSON.stringify(round3Pulls) === JSON.stringify([{ id: c.profileId, name: c.laterRemoteRenamedName }]);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_UNTOUCHED_DEFAULT_PULLS_SERVER_CUSTOM_NAME_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  localProfiles: Profile[];
+  serverProfilesRound1: ServerProfileRecord[];
+  firstCustomName: string;
+  serverProfilesRound3: ServerProfileRecord[];
+  laterRemoteRenamedName: string;
+}> = [
+  {
+    name: "Codex finding — a genuinely untouched device pulls another device's already-pushed custom `default` name during the bounded migration, never mistaking its own bootstrap value for customization; a later, ordinary remote rename after completion still pulls normally",
+    profileId: "default",
+    accountKey: "userA",
+    localProfiles: [{ id: "default", name: "Default" }],
+    serverProfilesRound1: [{ profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    firstCustomName: "Our Family Trip",
+    serverProfilesRound3: [{ profileId: "default", name: "The Smiths", updatedAt: "2026-03-01T00:00:00.000Z", deletedAt: null }],
+    laterRemoteRenamedName: "The Smiths",
+  },
+];
+
+/**
+ * Given the server registry and this device's current local profiles and
+ * own unconfirmed pending renames (profileStorage.ts's
+ * getPendingProfileRenames), compute the {id, name} pairs that should be
+ * PUSHED as rename updates this round — the PUSH-side counterpart to
+ * computeProfilesToAdopt, for an id the account's OWN server row ALREADY
+ * exists for (an id the server has never seen belongs to
+ * computeProfilesToAdopt instead; this function explicitly skips anything
+ * not already server-known).
+ *
+ * An id is proposed for rename ONLY when ALL of:
+ *   - it has a pending-rename entry (this device deliberately renamed it,
+ *     not merely observed a mismatch — see this module's own header doc for
+ *     why directionality matters: an id can equally be mismatched because
+ *     ANOTHER device renamed it, which must be PULLED, never overwritten by
+ *     a push from a device that never touched it — selectServerRenamesToApply
+ *     below owns that pull path);
+ *   - this device still has the profile locally at all (this account
+ *     deleted it, or it was never here — nothing left to push);
+ *   - the server ALREADY has an ACTIVE row for this id, SCOPED TO THIS
+ *     ACCOUNT (`serverProfiles` is this round's own GET response, which the
+ *     server itself already scopes by `user_id` — see /api/sync/profiles's
+ *     route doc). That row's mere existence IS this account's own
+ *     confirmed, unambiguous ownership of it, full stop — a not-yet-known
+ *     id is computeProfilesToAdopt's job, not a rename;
+ *   - the server's current name for it differs from the pending name
+ *     (nothing to push otherwise — already converged).
+ *
+ * Codex finding #1 — deliberately takes NO `ownedByOtherAccountIds`
+ * parameter, unlike computeProfilesToAdopt. That exclusion protects
+ * ADOPTION (a brand-new registration this account has never made before)
+ * from mistaking a legacy local id another account independently owns for
+ * an unclaimed one; a rename target has no such ambiguity to protect
+ * against, because it is ALWAYS already confirmed via THIS round's own
+ * `serverProfiles` — i.e. the server's own `user_id`-scoped row already
+ * proves the CURRENT account owns it, regardless of whether some OTHER
+ * account also, independently, owns the identical literal non-default id
+ * (profileStorage.ts's own module doc: two accounts can each legitimately
+ * own the same literal id). Reusing computeProfilesToAdopt's exclusion here
+ * previously blocked exactly that legitimate case — a confirmed rename for
+ * a co-owned id was silently dropped every round, forever, even though the
+ * account's own server row for it was right there in `serverProfiles`.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_COMPUTE_PROFILES_TO_RENAME_CASES, computeProfilesToRename } from "@/lib/profileRegistrySync";
+ *   DEV_COMPUTE_PROFILES_TO_RENAME_CASES.forEach(c => {
+ *     const got = computeProfilesToRename(c.serverProfiles, c.localProfiles, c.pendingRenames);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function computeProfilesToRename(
+  serverProfiles: ServerProfileRecord[],
+  localProfiles: Profile[],
+  pendingRenames: PendingRenames
+): Profile[] {
+  const serverNameById = new Map(serverProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const localIds = new Set(localProfiles.map((p) => p.id));
+  const out: Profile[] = [];
+  for (const [id, pending] of Object.entries(pendingRenames)) {
+    // Codex finding — presence, NOT name equality: `dwp.profiles` is a
+    // single SHARED local list, not per-account, so a DIFFERENT account's
+    // own legitimate pull (selectServerRenamesToApply/applyServerRenames)
+    // can freely overwrite the shared display name for an id this account
+    // ALSO has a pending rename for — most likely for the canonical
+    // `default` id, which every account shares. Requiring the shared name
+    // to still match this account's own pending value would strand that
+    // pending rename forever the instant another account's pull (or its
+    // own discovery) touched the same shared row. The pending marker
+    // itself (scoped per (profileId, accountKey) — see profileStorage.ts's
+    // PendingRenamesByAccount) is already the sole source of truth for
+    // "what THIS account still intends"; only genuine ABSENCE from the
+    // local list (this account deleted the profile, or it was never here)
+    // means there is nothing left to push.
+    if (!localIds.has(id)) continue;
+    const serverName = serverNameById.get(id);
+    if (serverName === undefined) continue; // not yet server-known — computeProfilesToAdopt's job
+    if (serverName === pending.name) continue; // already converged
+    out.push({ id, name: pending.name });
+  }
+  return out;
+}
+
+export const DEV_COMPUTE_PROFILES_TO_RENAME_CASES: Array<{
+  name: string;
+  serverProfiles: ServerProfileRecord[];
+  localProfiles: Profile[];
+  pendingRenames: PendingRenames;
+  expected: Profile[];
+}> = [
+  {
+    name: "a locally-renamed, already-server-known id is pushed",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "no pending rename for a mismatched id — never pushed here (that's a PULL, via selectServerRenamesToApply, not a push)",
+    serverProfiles: [{ profileId: "default", name: "Old Name (renamed elsewhere)", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenames: {},
+    expected: [],
+  },
+  {
+    name: "pending rename for an id NOT yet known to the server — skipped (computeProfilesToAdopt's job, avoids a duplicate push)",
+    serverProfiles: [],
+    localProfiles: [{ id: "mom", name: "Mom" }],
+    pendingRenames: { mom: { name: "Mom", renamedAt: 1 } },
+    expected: [],
+  },
+  {
+    name: "pending rename already matches server's current name — nothing to push, converged",
+    serverProfiles: [{ profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    expected: [],
+  },
+  {
+    name: "another account's legitimate pull already overwrote the SHARED local display name; this account's own pending rename is still pushed rather than abandoned (the shared dwp.profiles name is no longer proof of what THIS account intends — only the account-scoped pending marker is)",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Some Other Account's Name" }],
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "this account no longer has the profile locally at all (e.g. deleted it) — genuinely nothing to push, unlike a mere name mismatch above",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenames: { family: { name: "The Smiths", renamedAt: 1 } },
+    expected: [],
+  },
+  {
+    name: "an id NOT yet confirmed via this account's own serverProfiles is never pushed as a rename, even with a pending marker for it — computeProfilesToAdopt's job instead",
+    serverProfiles: [],
+    localProfiles: [{ id: "family", name: "My Rename" }],
+    pendingRenames: { family: { name: "My Rename", renamedAt: 1 } },
+    expected: [],
+  },
+  {
+    name: "Codex finding #1 — a NON-default id independently owned by another account TOO is still renamed for this account, because this round's own serverProfiles already confirms THIS account's active row for it; the old ownedByOtherAccountIds exclusion (removed) would have wrongly blocked this forever",
+    serverProfiles: [{ profileId: "family", name: "Old Family Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: { family: { name: "The Smiths", renamedAt: 1 } },
+    expected: [{ id: "family", name: "The Smiths" }],
+  },
+  {
+    name: "the canonical 'default' id's own rename is always pushable for this account once confirmed via serverProfiles",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+];
+
+/**
+ * Codex finding #2 — given this account's FULL pending-rename map and the
+ * (post-push, if any) authoritative server registry, return every {id,
+ * name} pair whose pending name is ALREADY confirmed by the server —
+ * regardless of whether that id was pushed THIS round.
+ *
+ * Before this fix, a pending marker was only ever checked for confirmation
+ * by iterating `toRename` — the ids computeProfilesToRename decided to
+ * PUSH this round. But computeProfilesToRename deliberately excludes an id
+ * whose server name ALREADY matches its pending name ("already converged —
+ * nothing to push"), so a marker that becomes satisfied WITHOUT this
+ * round's own push (e.g. a PREVIOUS round's PUT committed successfully,
+ * but that round's OWN confirmatory re-GET then failed —
+ * resolveAuthoritativeServerProfiles falls back to the pre-push snapshot
+ * in that case, leaving the marker standing) was never re-examined: a
+ * LATER round's plain initial GET already shows it converged, so nothing
+ * gets pushed, and nothing previously iterated the pending set on that
+ * path to notice the marker was already satisfied and clear it. This
+ * function checks the pending set DIRECTLY against whatever
+ * `authoritativeServerProfiles` this round actually has — independent of
+ * computeProfilesToRename's own "did I push it" decision — so a marker
+ * left over from a past confirmation failure is cleared the moment ANY
+ * later round observes the server already agrees, pushed or not.
+ *
+ * A tombstoned server row is never treated as confirming a rename (mirrors
+ * computeProfilesToRename's own `!p.deletedAt` filter) — a deleted
+ * profile's name is not this account's rename converging, whatever
+ * lingering `name` value the tombstoned row happens to carry.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_CONFIRMED_PENDING_RENAMES_CASES, selectConfirmedPendingRenames } from "@/lib/profileRegistrySync";
+ *   DEV_SELECT_CONFIRMED_PENDING_RENAMES_CASES.forEach(c => {
+ *     const got = selectConfirmedPendingRenames(c.pendingRenames, c.authoritativeServerProfiles);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectConfirmedPendingRenames(
+  pendingRenames: PendingRenames,
+  authoritativeServerProfiles: ServerProfileRecord[]
+): Profile[] {
+  const authoritativeNameById = new Map(
+    authoritativeServerProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name])
+  );
+  const out: Profile[] = [];
+  for (const [id, pending] of Object.entries(pendingRenames)) {
+    if (authoritativeNameById.get(id) === pending.name) {
+      out.push({ id, name: pending.name });
+    }
+  }
+  return out;
+}
+
+export const DEV_SELECT_CONFIRMED_PENDING_RENAMES_CASES: Array<{
+  name: string;
+  pendingRenames: PendingRenames;
+  authoritativeServerProfiles: ServerProfileRecord[];
+  expected: Profile[];
+}> = [
+  {
+    name: "Codex finding #2 — a marker left over from a PAST push whose own confirmation failed is now cleared once a LATER round's authoritative state simply already agrees, even though this round pushed nothing for it",
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    authoritativeServerProfiles: [
+      { profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "not yet confirmed — server name still differs — marker stays",
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    authoritativeServerProfiles: [
+      { profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expected: [],
+  },
+  {
+    name: "id not yet present server-side at all — nothing to confirm",
+    pendingRenames: { mom: { name: "Mom", renamedAt: 1 } },
+    authoritativeServerProfiles: [],
+    expected: [],
+  },
+  {
+    name: "a tombstoned server row is never treated as confirming a rename, even if its lingering name happens to match",
+    pendingRenames: { mom: { name: "Mom", renamedAt: 1 } },
+    authoritativeServerProfiles: [
+      { profileId: "mom", name: "Mom", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: "2026-02-01T00:00:00.000Z" },
+    ],
+    expected: [],
+  },
+  {
+    name: "multiple pending ids — only the ones the authoritative state actually confirms are returned",
+    pendingRenames: {
+      default: { name: "Our Family Trip", renamedAt: 1 },
+      mom: { name: "Mom (new)", renamedAt: 2 },
+    },
+    authoritativeServerProfiles: [
+      { profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+      { profileId: "mom", name: "Mom (old, not yet confirmed)", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "empty pending set — nothing to confirm",
+    pendingRenames: {},
+    authoritativeServerProfiles: [
+      { profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expected: [],
+  },
+];
+
+/**
+ * Given the (post-push, if any) authoritative server registry, this
+ * device's current local profiles, and the ids this device itself has an
+ * unconfirmed pending rename for, compute the {id, name} pairs that should
+ * be PULLED into the local profile list this round — the PULL-side
+ * counterpart to computeProfilesToRename. An id qualifies only when it is
+ * already locally known (an id not locally present is discovery's job —
+ * selectActiveServerProfiles/commitDiscoveredProfiles — not a rename), its
+ * server name differs from the local name, and this device does NOT have
+ * its own pending rename in flight for it (own-pending-rename ids are
+ * ALWAYS resolved via computeProfilesToRename's push + this round's own
+ * reconfirmed re-GET, never by blindly pulling a possibly-stale
+ * pre-push server snapshot over a local edit that hasn't been sent yet).
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_SERVER_RENAMES_TO_APPLY_CASES, selectServerRenamesToApply } from "@/lib/profileRegistrySync";
+ *   DEV_SELECT_SERVER_RENAMES_TO_APPLY_CASES.forEach(c => {
+ *     const got = selectServerRenamesToApply(c.serverProfiles, c.localProfiles, c.pendingRenameIds);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectServerRenamesToApply(
+  serverProfiles: ServerProfileRecord[],
+  localProfiles: Profile[],
+  pendingRenameIds: ReadonlySet<string>
+): Profile[] {
+  const localNameById = new Map(localProfiles.map((p) => [p.id, p.name]));
+  const out: Profile[] = [];
+  for (const sp of serverProfiles) {
+    if (sp.deletedAt) continue;
+    if (pendingRenameIds.has(sp.profileId)) continue; // this device's own unconfirmed rename wins locally for now
+    const localName = localNameById.get(sp.profileId);
+    if (localName === undefined) continue; // not locally known — discovery's job, not a rename
+    if (localName === sp.name) continue; // already converged
+    out.push({ id: sp.profileId, name: sp.name });
+  }
+  return out;
+}
+
+export const DEV_SELECT_SERVER_RENAMES_TO_APPLY_CASES: Array<{
+  name: string;
+  serverProfiles: ServerProfileRecord[];
+  localProfiles: Profile[];
+  pendingRenameIds: Set<string>;
+  expected: Profile[];
+}> = [
+  {
+    name: "SH.5 — the production repro: `default` was renamed on another device; this device pulls the server's newer name for its own already-bootstrapped `default` entry",
+    serverProfiles: [{ profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenameIds: new Set(),
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "this device has its OWN unconfirmed pending rename for the same id — never overwritten by a pull; the push path (computeProfilesToRename) owns it instead",
+    serverProfiles: [{ profileId: "default", name: "Old Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "My New Name" }],
+    pendingRenameIds: new Set(["default"]),
+    expected: [],
+  },
+  {
+    name: "an id not locally known at all is left to discovery, never proposed here",
+    serverProfiles: [{ profileId: "mom", name: "Mom", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenameIds: new Set(),
+    expected: [],
+  },
+  {
+    name: "a tombstoned server row is never pulled as a rename",
+    serverProfiles: [
+      { profileId: "mom", name: "Mom (server)", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: "2026-02-01T00:00:00.000Z" },
+    ],
+    localProfiles: [{ id: "mom", name: "Mom (local)" }],
+    pendingRenameIds: new Set(),
+    expected: [],
+  },
+  {
+    name: "names already match — nothing to pull",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenameIds: new Set(),
+    expected: [],
+  },
+];
+
+/**
+ * Codex finding on d7cfaff — composed regression proving the rename-PULL
+ * commit step must match against THIS account's own effective local view
+ * (filtered through its own local-deletion markers via
+ * profileStorage.ts's filterVisibleProfiles), never the raw shared
+ * `dwp.profiles` array — exactly like every other push/adopt computation in
+ * reconcileProfileRegistry already does.
+ *
+ * Scenario: `family` is co-owned — A and B each independently own the
+ * identical literal id (profileStorage.ts's own documented, supported case).
+ * A deletes `family` locally: it is hidden from A's OWN effective view, but
+ * NEVER removed from the one shared `dwp.profiles` array, because B still
+ * owns and displays it there under B's own retained name. A's own
+ * account-scoped server GET (`authoritativeServerProfiles`) can still show
+ * an ACTIVE row for `family` with some OTHER name (A's own account's server
+ * state, independent of B's) — id equality with the shared array's entry is
+ * all `selectServerRenamesToApply` needs to match on, with no account
+ * awareness of its own.
+ *
+ * Before the fix: matching against the RAW shared array would propose
+ * pulling A's own server name over B's retained shared entry — contaminating
+ * B's profile with a rename that belongs only to A's own (deleted,
+ * hidden-from-A) relationship to that id.
+ *
+ * After the fix: matching against `filterVisibleProfiles(rawSharedProfiles,
+ * locallyDeletedIdsForA)` excludes `family` from A's own candidate set
+ * entirely — A's reconciliation proposes nothing for it, and B's retained
+ * entry is left completely untouched.
+ *
+ * Run from Node:
+ *   import { DEV_CO_OWNED_DELETE_RENAME_PULL_ISOLATION_CASES, selectServerRenamesToApply } from "@/lib/profileRegistrySync";
+ *   import { filterVisibleProfiles } from "@/lib/profileStorage";
+ *   DEV_CO_OWNED_DELETE_RENAME_PULL_ISOLATION_CASES.forEach(c => {
+ *     const withoutFix = selectServerRenamesToApply(c.authoritativeServerProfilesForA, c.rawSharedProfiles, c.pendingRenameIds);
+ *     const visibleForA = filterVisibleProfiles(c.rawSharedProfiles, c.locallyDeletedIdsForA);
+ *     const withFix = selectServerRenamesToApply(c.authoritativeServerProfilesForA, visibleForA, c.pendingRenameIds);
+ *     const ok =
+ *       JSON.stringify(withoutFix) === JSON.stringify(c.expectedWithoutFix) &&
+ *       JSON.stringify(withFix) === JSON.stringify(c.expectedWithFix);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name, { withoutFix, withFix });
+ *   });
+ */
+export const DEV_CO_OWNED_DELETE_RENAME_PULL_ISOLATION_CASES: Array<{
+  name: string;
+  rawSharedProfiles: Profile[];
+  locallyDeletedIdsForA: Set<string>;
+  authoritativeServerProfilesForA: ServerProfileRecord[];
+  pendingRenameIds: Set<string>;
+  expectedWithoutFix: Profile[];
+  expectedWithFix: Profile[];
+}> = [
+  {
+    name: "Codex finding — A deleted co-owned `family` locally; B's retained shared entry must never receive A's own server-scoped rename",
+    rawSharedProfiles: [{ id: "family", name: "The Smiths" }],
+    locallyDeletedIdsForA: new Set(["family"]),
+    authoritativeServerProfilesForA: [
+      { profileId: "family", name: "Family Reunion", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pendingRenameIds: new Set(),
+    expectedWithoutFix: [{ id: "family", name: "Family Reunion" }],
+    expectedWithFix: [],
+  },
+  {
+    name: "same guarantee for the canonical `default` id — A deleted A's own relationship to it locally, but B's shared bootstrap `default` entry survives untouched",
+    rawSharedProfiles: [{ id: "default", name: "B's Trip" }],
+    locallyDeletedIdsForA: new Set(["default"]),
+    authoritativeServerProfilesForA: [
+      { profileId: "default", name: "A's Old Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pendingRenameIds: new Set(),
+    expectedWithoutFix: [{ id: "default", name: "A's Old Trip" }],
+    expectedWithFix: [],
+  },
+  {
+    name: "a DIFFERENT, non-deleted id in the same round is unaffected by A's deletion of `family` — the filter is scoped to the deleted id only, not a blanket suppression",
+    rawSharedProfiles: [
+      { id: "family", name: "The Smiths" },
+      { id: "vacation", name: "Old Vacation Name" },
+    ],
+    locallyDeletedIdsForA: new Set(["family"]),
+    authoritativeServerProfilesForA: [
+      { profileId: "family", name: "Family Reunion", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+      { profileId: "vacation", name: "New Vacation Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pendingRenameIds: new Set(),
+    expectedWithoutFix: [
+      { id: "family", name: "Family Reunion" },
+      { id: "vacation", name: "New Vacation Name" },
+    ],
+    expectedWithFix: [{ id: "vacation", name: "New Vacation Name" }],
+  },
+];
+
+/**
+ * Codex finding #1 — composed end-to-end regression for the COMPLETE
+ * A -> B -> A shared-device flow, exercising the SAME pure functions
+ * reconcileProfileRegistry itself calls (profileStorage.ts's
+ * applyPendingRename/selectPendingRenamesForAccount/
+ * clearPendingRenameForAccount/mergeProfileRenames, plus this module's own
+ * computeProfilesToRename/selectConfirmedPendingRenames) against a single
+ * shared, mutable `dwp.profiles`-style array — not just the isolated
+ * marker helpers PR #162's own account-isolation fix covered. Proves the
+ * account-scoped pending marker alone is not enough on its own: the SHARED
+ * local display name a different account's own legitimate pull can
+ * overwrite must never be mistaken for "A's rename no longer applies".
+ *
+ * Steps: (1) A renames the profile — updates the ONE shared local list AND
+ * records A's own pending marker; (2) B signs into the SAME browser and
+ * pulls B's OWN server-confirmed name for the identical id, legitimately
+ * overwriting the shared local list out from under A's still-unconfirmed
+ * rename; (3) switching back to A, A's reconciliation round must still
+ * compute a push for A's original intended name (computeProfilesToRename)
+ * despite the shared list no longer reading back A's own last local edit;
+ * (4) once A's push is confirmed, selectConfirmedPendingRenames clears
+ * ONLY A's own marker.
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_PENDING_RENAME_SURVIVES_CROSS_ACCOUNT_PULL_CASES,
+ *     computeProfilesToRename,
+ *     selectServerRenamesToApply,
+ *     selectConfirmedPendingRenames,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyPendingRename,
+ *     selectPendingRenamesForAccount,
+ *     clearPendingRenameForAccount,
+ *     mergeProfileRenames,
+ *   } from "@/lib/profileStorage";
+ *   DEV_PENDING_RENAME_SURVIVES_CROSS_ACCOUNT_PULL_CASES.forEach(c => {
+ *     // (1) A renames locally + records A's own pending marker.
+ *     let profiles = c.initialProfiles;
+ *     let pendingState = applyPendingRename({}, c.profileId, c.accountA, c.aIntendedName, 1);
+ *     profiles = profiles.map(p => p.id === c.profileId ? { ...p, name: c.aIntendedName } : p);
+ *
+ *     // (2) B signs in and legitimately pulls B's own server name, overwriting the SHARED list.
+ *     const bPending = new Set(Object.keys(selectPendingRenamesForAccount(pendingState, c.accountB)));
+ *     const bPulls = selectServerRenamesToApply(c.serverProfilesForB, profiles, bPending);
+ *     profiles = mergeProfileRenames(profiles, bPulls);
+ *     const sharedNameAfterB = profiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // (3) Switch back to A — A's own marker is untouched, and still pushable
+ *     // even though the shared list no longer reflects A's last local edit.
+ *     const aPending = selectPendingRenamesForAccount(pendingState, c.accountA);
+ *     const toRename = computeProfilesToRename(c.serverProfilesForA, profiles, aPending);
+ *
+ *     // (4) A's push is confirmed — only A's own marker is cleared.
+ *     const authoritativeAfterAPush = [{ profileId: c.profileId, name: c.aIntendedName, updatedAt: "x", deletedAt: null }];
+ *     const confirmed = selectConfirmedPendingRenames(aPending, authoritativeAfterAPush);
+ *     pendingState = clearPendingRenameForAccount(pendingState, c.profileId, c.accountA, c.aIntendedName);
+ *     const aStillPendingBeforeConfirm = Object.keys(bPending).length >= 0 && aPending[c.profileId]?.name === c.aIntendedName;
+ *
+ *     const ok =
+ *       sharedNameAfterB === c.expectedSharedNameAfterBPulls &&
+ *       JSON.stringify(toRename) === JSON.stringify(c.expectedAPush) &&
+ *       aStillPendingBeforeConfirm &&
+ *       JSON.stringify(confirmed) === JSON.stringify(c.expectedAPush) &&
+ *       selectPendingRenamesForAccount(pendingState, c.accountA)[c.profileId] === undefined;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_RENAME_SURVIVES_CROSS_ACCOUNT_PULL_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountA: string;
+  accountB: string;
+  aIntendedName: string;
+  initialProfiles: Profile[];
+  serverProfilesForA: ServerProfileRecord[];
+  serverProfilesForB: ServerProfileRecord[];
+  expectedSharedNameAfterBPulls: string;
+  expectedAPush: Profile[];
+}> = [
+  {
+    name: "Codex finding #1 — canonical `default`: A's pending rename survives B's own legitimate pull of the shared local name, and is still pushed once A reconciles again",
+    profileId: "default",
+    accountA: "userA",
+    accountB: "userB",
+    aIntendedName: "A's Family Trip",
+    initialProfiles: [{ id: "default", name: "Default" }],
+    // A's OWN server row hasn't been pushed to yet — still the old name.
+    serverProfilesForA: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    // B's OWN, entirely separate server row for the identical shared id.
+    serverProfilesForB: [
+      { profileId: "default", name: "B's Own Default Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expectedSharedNameAfterBPulls: "B's Own Default Name",
+    expectedAPush: [{ id: "default", name: "A's Family Trip" }],
+  },
+  {
+    name: "same guarantee for an ordinary (non-canonical) profile id",
+    profileId: "family",
+    accountA: "userA",
+    accountB: "userB",
+    aIntendedName: "The Smiths",
+    initialProfiles: [{ id: "family", name: "Family" }],
+    serverProfilesForA: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    serverProfilesForB: [
+      { profileId: "family", name: "B's Own Family Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    expectedSharedNameAfterBPulls: "B's Own Family Name",
+    expectedAPush: [{ id: "family", name: "The Smiths" }],
+  },
+];
+
+/**
+ * Codex finding #2 — composed end-to-end regression across TWO simulated
+ * reconciliation rounds: round N's push commits server-side but its OWN
+ * confirmatory re-GET fails (so `authoritativeServerProfiles` falls back
+ * to the pre-push snapshot per resolveAuthoritativeServerProfiles's own
+ * doc, leaving the marker standing); round N+1's plain initial GET already
+ * shows it converged, so computeProfilesToRename correctly proposes
+ * NOTHING to push (`toRename` empty) — proving the marker can ONLY be
+ * cleared via selectConfirmedPendingRenames checking the full pending set
+ * directly, never by iterating `toRename`.
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_PENDING_RENAME_CLEARED_WITHOUT_PUSH_CASES,
+ *     computeProfilesToRename,
+ *     resolveAuthoritativeServerProfiles,
+ *     selectConfirmedPendingRenames,
+ *   } from "@/lib/profileRegistrySync";
+ *   DEV_PENDING_RENAME_CLEARED_WITHOUT_PUSH_CASES.forEach(c => {
+ *     // Round N: server already committed the rename, but this round's own
+ *     // confirmatory re-GET failed — authoritative falls back to the STALE
+ *     // pre-push snapshot, so the marker is correctly left standing.
+ *     const roundNAuthoritative = resolveAuthoritativeServerProfiles(c.roundNInitialServerProfiles, true, null);
+ *     const roundNConfirmed = selectConfirmedPendingRenames(c.pendingRenames, roundNAuthoritative);
+ *
+ *     // Round N+1: a fresh plain GET now shows the true, already-converged
+ *     // state. Nothing gets pushed...
+ *     const roundNPlus1ToRename = computeProfilesToRename(c.roundNPlus1ServerProfiles, c.localProfiles, c.pendingRenames);
+ *     // ...but the marker must still be recognized as confirmed and cleared.
+ *     const roundNPlus1Authoritative = resolveAuthoritativeServerProfiles(c.roundNPlus1ServerProfiles, roundNPlus1ToRename.length > 0, null);
+ *     const roundNPlus1Confirmed = selectConfirmedPendingRenames(c.pendingRenames, roundNPlus1Authoritative);
+ *
+ *     const ok =
+ *       roundNConfirmed.length === 0 &&
+ *       roundNPlus1ToRename.length === 0 &&
+ *       JSON.stringify(roundNPlus1Confirmed) === JSON.stringify(c.expectedConfirmedAtRoundNPlus1);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_RENAME_CLEARED_WITHOUT_PUSH_CASES: Array<{
+  name: string;
+  pendingRenames: PendingRenames;
+  localProfiles: Profile[];
+  roundNInitialServerProfiles: ServerProfileRecord[];
+  roundNPlus1ServerProfiles: ServerProfileRecord[];
+  expectedConfirmedAtRoundNPlus1: Profile[];
+}> = [
+  {
+    name: "Codex finding #2 — a marker surviving a failed confirmatory re-GET is cleared by the NEXT round even though that round pushes nothing (already converged)",
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    roundNInitialServerProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    roundNPlus1ServerProfiles: [
+      { profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-02T00:00:00.000Z", deletedAt: null },
+    ],
+    expectedConfirmedAtRoundNPlus1: [{ id: "default", name: "Our Family Trip" }],
+  },
+];
+
+/**
+ * Codex finding #3 — composed end-to-end regression: delete a profile with
+ * an unconfirmed pending rename, then recreate a DIFFERENT profile that
+ * lands on the IDENTICAL normalized id (createProfile's own deterministic
+ * normalizeId()), and prove the next reconciliation round proposes nothing
+ * to push for it — the deleted profile's stale rename marker must not be
+ * mistaken for a genuine pending rename of its successor. Exercises the
+ * SAME pure functions deleteProfile/createProfile/reconcileProfileRegistry
+ * themselves call (profileStorage.ts's discardPendingRenameForAccount, this
+ * module's own computeProfilesToRename), not just the isolated marker
+ * helper.
+ *
+ * Run from Node:
+ *   import { DEV_STALE_RENAME_DISCARDED_ON_DELETE_RECREATE_CASES, computeProfilesToRename } from "@/lib/profileRegistrySync";
+ *   import { applyPendingRename, discardPendingRenameForAccount, selectPendingRenamesForAccount } from "@/lib/profileStorage";
+ *   DEV_STALE_RENAME_DISCARDED_ON_DELETE_RECREATE_CASES.forEach(c => {
+ *     // The original profile is renamed but the push never confirms before it's deleted.
+ *     let pendingState = applyPendingRename({}, c.profileId, c.accountKey, c.staleRenameName, 1);
+ *     // deleteProfile discards this account's own marker for it, unconditionally.
+ *     pendingState = discardPendingRenameForAccount(pendingState, c.profileId, c.accountKey);
+ *     // A later createProfile lands a DIFFERENT, brand-new profile on the identical normalized id.
+ *     const recreatedLocalProfiles = [{ id: c.profileId, name: c.recreatedProfileName }];
+ *     const pendingForAccount = selectPendingRenamesForAccount(pendingState, c.accountKey);
+ *     // The next reconciliation round must propose NOTHING to push for this id —
+ *     // no marker survived to push the stale name onto the new profile.
+ *     const toRename = computeProfilesToRename(c.serverProfiles, recreatedLocalProfiles, pendingForAccount);
+ *     const ok = Object.keys(pendingForAccount).length === 0 && toRename.length === 0;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_STALE_RENAME_DISCARDED_ON_DELETE_RECREATE_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  staleRenameName: string;
+  recreatedProfileName: string;
+  serverProfiles: ServerProfileRecord[];
+}> = [
+  {
+    name: "Codex finding #3 — a rename pending at delete time never resurfaces to rename the profile later recreated under the same id",
+    profileId: "family",
+    accountKey: "userA",
+    staleRenameName: "The Smiths (never confirmed, then deleted)",
+    recreatedProfileName: "The Garcias",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+  },
+  {
+    name: "same guarantee when the recreated profile happens to be given the EXACT SAME display name as the stale rename — still nothing pending, still nothing to push, since the new create's own name flows through computeProfilesToAdopt/normal push, not a leftover marker",
+    profileId: "family",
+    accountKey: "userA",
+    staleRenameName: "The Smiths",
+    recreatedProfileName: "The Smiths",
+    serverProfiles: [],
+  },
+];
+
 /**
  * Filters `candidates` down to entries whose name satisfies
  * syncIdentity.ts's shared MAX_PROFILE_NAME_LENGTH constraint, dropping any
@@ -427,7 +1635,11 @@ export const DEV_FILTER_ADOPTABLE_PROFILES_CASES: Array<{
  * filterAdoptableProfiles's job) or impose any smaller cap of its own;
  * every candidate is still sent, just across as many requests as needed.
  *
- * Pure — takes every input as a parameter.
+ * Pure — takes every input as a parameter. Generic over `T` (Codex finding
+ * #1) purely so the SAME chunking logic batches both plain adopt candidates
+ * and the richer `{ ...Profile, intent }` entries reconcileProfileRegistry
+ * now also sends for rename pushes — no behavioral difference for either
+ * shape.
  *
  * Run from Node:
  *   import { DEV_BATCH_PROFILES_FOR_ADOPTION_CASES, batchProfilesForAdoption } from "@/lib/profileRegistrySync";
@@ -436,9 +1648,9 @@ export const DEV_FILTER_ADOPTABLE_PROFILES_CASES: Array<{
  *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
  *   });
  */
-export function batchProfilesForAdoption(toAdopt: Profile[]): Profile[][] {
+export function batchProfilesForAdoption<T>(toAdopt: T[]): T[][] {
   if (toAdopt.length === 0) return [];
-  const batches: Profile[][] = [];
+  const batches: T[][] = [];
   for (let i = 0; i < toAdopt.length; i += MAX_PROFILES_PER_ADOPTION_REQUEST) {
     batches.push(toAdopt.slice(i, i + MAX_PROFILES_PER_ADOPTION_REQUEST));
   }
@@ -513,9 +1725,9 @@ export const DEV_BATCH_PROFILES_FOR_ADOPTION_CASES: Array<{
  *     console.log(ok ? "✓" : "✗ FAIL", c.name);
  *   }
  */
-export async function sendAdoptionBatches(
-  batches: Profile[][],
-  sendBatch: (batch: Profile[]) => Promise<void>,
+export async function sendAdoptionBatches<T>(
+  batches: T[][],
+  sendBatch: (batch: T[]) => Promise<void>,
   isCurrent: () => boolean
 ): Promise<boolean> {
   for (const batch of batches) {
@@ -823,6 +2035,162 @@ export const DEV_STALE_RUN_GUARD_CASES: Array<{
     expectedStillCurrent: false,
   },
 ];
+
+// ===== RECONCILIATION-ROUND STALE-RUN GUARD (Codex finding #2) =====
+//
+// isRegistryRunCurrent above catches an IDENTITY transition (A -> B, or
+// A -> signed-out) invalidating an in-flight round — but setRegistryIdentity
+// is a deliberate NO-OP when the identity does not actually change (see its
+// own doc: this is what lets a page re-render or remount under the SAME
+// user without spuriously invalidating other in-flight work). That no-op is
+// exactly the gap this closes: TWO overlapping reconcileProfileRegistry
+// calls for the SAME account — e.g. the global SessionProviderWrapper guard
+// and Settings' own page-local effect both firing around the same session
+// resolution, or a rename immediately followed by another trigger before
+// the first round's own network round-trips resolve — share the IDENTICAL
+// captured epoch throughout, so isRegistryRunCurrent alone cannot tell an
+// OLDER round apart from a NEWER one for the same identity. Without this,
+// an older round's own stale `authoritativeServerProfiles` snapshot could
+// resolve AFTER a newer round already applied a fresher one, and its own
+// final pull-application step (applyServerRenames) would silently restore
+// the older, already-superseded name locally.
+//
+// A plain, pure monotonic counter — NOT a revision/conflict engine, exactly
+// like the identity epoch above: it answers only "has a NEWER round started
+// since I began", never anything about what to merge.
+
+/**
+ * Pure staleness check: a round captured under `capturedRoundId` may still
+ * act only while no NEWER round (`latestRoundId`) has started since —
+ * mirrors isRegistryRunCurrent's own shape, one level down (round
+ * sequencing rather than identity). A later round for a DIFFERENT identity
+ * is already caught by isRegistryRunCurrent, so this check needs no
+ * identity awareness of its own — it fires equally for a same-identity or
+ * cross-identity newer round, which is harmless: either way, an OLDER round
+ * has no business committing its own stale snapshot once ANY newer round
+ * has begun.
+ *
+ * Run from Node:
+ *   import { DEV_RECONCILIATION_ROUND_STALE_GUARD_CASES, isReconciliationRoundCurrent } from "@/lib/profileRegistrySync";
+ *   DEV_RECONCILIATION_ROUND_STALE_GUARD_CASES.forEach(c => {
+ *     const got = isReconciliationRoundCurrent(c.latestRoundId, c.capturedRoundId);
+ *     console.log(got === c.expectedStillCurrent ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function isReconciliationRoundCurrent(latestRoundId: number, capturedRoundId: number): boolean {
+  return capturedRoundId === latestRoundId;
+}
+
+export const DEV_RECONCILIATION_ROUND_STALE_GUARD_CASES: Array<{
+  name: string;
+  capturedRoundId: number;
+  latestRoundId: number;
+  expectedStillCurrent: boolean;
+}> = [
+  {
+    name: "no newer round has started since this one began — still current",
+    capturedRoundId: 1,
+    latestRoundId: 1,
+    expectedStillCurrent: true,
+  },
+  {
+    name: "Codex finding #2 — a NEWER round (same or different identity) started after this one — this older round is stale",
+    capturedRoundId: 1,
+    latestRoundId: 2,
+    expectedStillCurrent: false,
+  },
+  {
+    name: "a round several generations behind the latest is still correctly stale",
+    capturedRoundId: 1,
+    latestRoundId: 5,
+    expectedStillCurrent: false,
+  },
+];
+
+/**
+ * Codex finding #2 — composed end-to-end regression: two overlapping
+ * SAME-ACCOUNT reconciliation rounds, where the OLDER round's own
+ * confirmatory work resolves AFTER the NEWER round has already applied its
+ * own (fresher) pull to the ONE shared local profile list. Proves the
+ * older round's own stale snapshot is never applied once round-sequencing
+ * marks it non-current — exercising the actual pull-application primitives
+ * reconcileProfileRegistry itself calls (this module's own
+ * selectServerRenamesToApply, profileStorage.ts's mergeProfileRenames), not
+ * just the isolated isReconciliationRoundCurrent guard above.
+ *
+ * Run from Node:
+ *   import { DEV_STALE_ROUND_NEVER_APPLIES_CASES, selectServerRenamesToApply, isReconciliationRoundCurrent } from "@/lib/profileRegistrySync";
+ *   import { mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_STALE_ROUND_NEVER_APPLIES_CASES.forEach(c => {
+ *     let profiles = c.initialProfiles;
+ *
+ *     // Round 1 starts (captures roundId 1) and computes its OWN
+ *     // authoritative snapshot from whatever the server showed AT THAT TIME.
+ *     const round1RoundId = 1;
+ *
+ *     // Round 2 starts (captures roundId 2 — now the latest) and runs to
+ *     // completion FIRST, applying its own fresher snapshot to the shared list.
+ *     const round2RoundId = 2;
+ *     const latestRoundIdAfterRound2 = round2RoundId;
+ *     const round2Pulls = selectServerRenamesToApply(c.round2AuthoritativeServerProfiles, profiles, new Set());
+ *     profiles = mergeProfileRenames(profiles, round2Pulls);
+ *     const nameAfterRound2 = profiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // Round 1 finally reaches its own final pull-application checkpoint —
+ *     // but a newer round (round 2) has since started, so it must skip.
+ *     const round1StillCurrent = isReconciliationRoundCurrent(latestRoundIdAfterRound2, round1RoundId);
+ *     if (round1StillCurrent) {
+ *       const round1Pulls = selectServerRenamesToApply(c.round1AuthoritativeServerProfiles, profiles, new Set());
+ *       profiles = mergeProfileRenames(profiles, round1Pulls);
+ *     }
+ *     const nameAfterRound1Checkpoint = profiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     const ok =
+ *       nameAfterRound2 === c.expectedNameAfterRound2 &&
+ *       round1StillCurrent === false &&
+ *       nameAfterRound1Checkpoint === c.expectedNameAfterRound2; // unchanged — round 1's stale pull never applied
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_STALE_ROUND_NEVER_APPLIES_CASES: Array<{
+  name: string;
+  profileId: string;
+  initialProfiles: Profile[];
+  round1AuthoritativeServerProfiles: ServerProfileRecord[];
+  round2AuthoritativeServerProfiles: ServerProfileRecord[];
+  expectedNameAfterRound2: string;
+}> = [
+  {
+    name: "Codex finding #2 — an older round's stale server-name snapshot never overwrites a newer round's already-applied fresher name",
+    profileId: "default",
+    initialProfiles: [{ id: "default", name: "Default" }],
+    // Round 1's OWN view, captured before round 2 ever ran — already stale by the time round 1 gets to act.
+    round1AuthoritativeServerProfiles: [
+      { profileId: "default", name: "Renamed On Another Device (mid-flight)", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    // Round 2's fresher, later view — this is the name that must survive.
+    round2AuthoritativeServerProfiles: [
+      { profileId: "default", name: "Renamed Again, Even Newer", updatedAt: "2026-01-02T00:00:00.000Z", deletedAt: null },
+    ],
+    expectedNameAfterRound2: "Renamed Again, Even Newer",
+  },
+];
+
+let latestReconciliationRoundId = 0;
+
+/**
+ * Starts a new reconciliation round: increments and returns the new
+ * latest-round id, which reconcileProfileRegistry captures for the
+ * lifetime of that one call. Called ONLY after the identity check already
+ * passed (see reconcileProfileRegistry's own early `return` above it), so
+ * a call that never even attempts a round (wrong/stale identity) can never
+ * spuriously bump this counter and invalidate a DIFFERENT, legitimately
+ * in-flight round for the current identity.
+ */
+function beginReconciliationRound(): number {
+  latestReconciliationRoundId += 1;
+  return latestReconciliationRoundId;
+}
 
 let registryIdentityState: RegistryIdentityState = { currentUserId: null, epoch: 0 };
 
@@ -1189,30 +2557,73 @@ async function fetchServerProfiles(): Promise<ServerProfileRecord[] | null> {
 }
 
 /**
- * Fire-and-forget push of the adopt-list. Codex P1 follow-up (2nd round) —
- * its outcome (success, non-2xx, a lost/malformed response, or a thrown
- * network error) is deliberately NEVER used to decide ownership:
- * reconcileProfileRegistry always re-confirms via a fresh, authoritative GET
- * afterward instead (see resolveAuthoritativeServerProfiles's own doc),
- * since a commit that reached the server but whose response never reached
- * this client must still be reflected, not treated as though it never
- * happened. Swallows all errors — best-effort, exactly like
+ * Codex finding #1 — a {id, name} pair tagged with the explicit INTENT
+ * this push carries: `"adopt"` for a brand-new candidate
+ * (computeProfilesToAdopt) that must be INSERT-ONLY server-side (never
+ * overwrite an existing row, even a stale/delayed adopt retry — see
+ * /api/sync/profiles's route doc), or `"rename"` for an id this account
+ * already has an explicit, local pending-rename marker for
+ * (computeProfilesToRename) and therefore deliberately intends to UPDATE.
+ * The server no longer infers this from "is the row already there" — a
+ * single conflict-free UPSERT could not otherwise tell "stale adopt retry
+ * for an id someone else just renamed" apart from "a genuine intentional
+ * rename", which is exactly what let an adoption silently overwrite an
+ * unrelated name before this fix.
+ */
+type ProfilePushEntry = Profile & { intent: "adopt" | "rename" };
+
+/**
+ * Fire-and-forget push of a batch of intent-tagged {id, name, intent}
+ * entries — SH.5: carries BOTH brand-new adoptions and rename updates for
+ * already-known ids in one request; /api/sync/profiles's PUT runs each
+ * intent through its OWN separate, differently-scoped query (see its own
+ * route doc) rather than inferring intent from conflict state. Codex P1
+ * follow-up (2nd round) — its outcome (success, non-2xx, a lost/malformed
+ * response, or a thrown network error) is deliberately NEVER used to decide
+ * ownership: reconcileProfileRegistry always re-confirms via a fresh,
+ * authoritative GET afterward instead (see resolveAuthoritativeServerProfiles's
+ * own doc), since a commit that reached the server but whose response never
+ * reached this client must still be reflected, not treated as though it
+ * never happened. Swallows all errors — best-effort, exactly like
  * scheduleSync()'s doPush() for planner sync.
  */
-async function pushProfilesToAdopt(toAdopt: Profile[]): Promise<void> {
+async function pushProfilesToAdopt(toAdopt: ProfilePushEntry[]): Promise<void> {
   if (toAdopt.length === 0) return;
   try {
     await fetch("/api/sync/profiles", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name })),
+        profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name, intent: p.intent })),
       }),
     });
   } catch {
     // Best-effort — the confirmatory re-GET below determines what actually
     // committed, regardless of what happened to this request/response.
   }
+}
+
+/**
+ * SH.5 — a single, immediate, best-effort registration push for ONE
+ * just-created profile, exported for settings/page.tsx's handleAddProfile
+ * to await BEFORE its own location.reload(). createProfile() already
+ * stamps LOCAL ownership provenance synchronously at create time (see its
+ * own doc in profileStorage.ts), but until this addition, the actual
+ * SERVER registration was deferred entirely to the NEXT full
+ * reconcileProfileRegistry round — which only runs on the freshly reloaded
+ * page, as a fire-and-forget effect with no visibility into whether it
+ * ever got a chance to complete before the user navigated away again. This
+ * closes that single-point-of-failure window with ONE extra, awaited
+ * attempt that runs BEFORE the reload — it does not replace the normal
+ * round, which still runs afterward exactly as before and will retry this
+ * exact id again if this attempt's own request fails, since
+ * computeProfilesToAdopt recomputes "unknown to the server" fresh every
+ * round regardless of what any previous attempt did. Always tagged
+ * `"adopt"` (Codex finding #1) — a brand-new profile has no pending-rename
+ * marker of its own yet, so this is never a rename push.
+ */
+export async function pushNewProfileRegistration(profile: Profile): Promise<void> {
+  await pushProfilesToAdopt([{ ...profile, intent: "adopt" }]);
 }
 
 /**
@@ -1377,7 +2788,20 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (typeof window === "undefined") return;
   if (registryIdentityState.currentUserId !== userId) return;
   const capturedEpoch = registryIdentityState.epoch;
-  const isCurrent = () => isRegistryRunCurrent(registryIdentityState, userId, capturedEpoch);
+  // Codex finding #2 — captured AFTER the identity check above, so a call
+  // that never even starts a round (wrong/stale identity) can't spuriously
+  // invalidate a different, legitimately in-flight round for the CURRENT
+  // identity. Folded into the SAME `isCurrent()` every existing checkpoint
+  // in this function already calls, so a newer round for this identity
+  // (e.g. an overlapping trigger from a second mount point) stops this
+  // older round at its very next checkpoint — including, critically, the
+  // final pull-application step, which is what could otherwise restore an
+  // already-superseded name locally. See isReconciliationRoundCurrent's own
+  // doc for why this needs no identity awareness of its own.
+  const capturedRoundId = beginReconciliationRound();
+  const isCurrent = () =>
+    isRegistryRunCurrent(registryIdentityState, userId, capturedEpoch) &&
+    isReconciliationRoundCurrent(latestReconciliationRoundId, capturedRoundId);
 
   const initialServerProfiles = await fetchServerProfiles();
   if (!isCurrent() || initialServerProfiles === null) return;
@@ -1403,7 +2827,86 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const toAdopt = filterAdoptableProfiles(
     computeProfilesToAdopt(initialServerProfiles, localProfiles, ownedByOtherAccountIds)
   );
-  const batches = batchProfilesForAdoption(toAdopt);
+  // SH.5 — rename propagation, push side: an id ALREADY known to the
+  // server whose CURRENT local name is this device's own unconfirmed
+  // rename (profileStorage.ts's getPendingProfileRenames) gets pushed
+  // alongside brand-new adoptions in the SAME batch — the server's UPSERT
+  // (see /api/sync/profiles's route doc) inserts an unknown id and updates
+  // an already-owned one identically, so both cases share one combined
+  // push/re-GET/reconfirm cycle below. See computeProfilesToRename's own
+  // doc for why only a PENDING (self-initiated) rename is ever pushed here
+  // — a mismatch with no pending marker means a DIFFERENT device renamed
+  // it, which is pulled further down (selectServerRenamesToApply), never
+  // pushed from here.
+  // Codex finding — ONE-TIME PRE-LEDGER RENAME BACKFILL, run BEFORE this
+  // round ever reads `pendingRenames` for the normal push/pull decisions
+  // below: an existing user's local custom name that predates
+  // `dwp.profilePendingRenames` entirely has no marker to protect it from
+  // selectServerRenamesToApply's own pull step (further down this
+  // function) mistaking it for a stale copy of ANOTHER device's already-
+  // pushed rename and silently overwriting it — see
+  // computeRenameBackfillCandidates's own doc for the full rationale and
+  // why the canonical `default` id needs its own bootstrap-name check.
+  // Durably marks a pending-rename marker for genuine mismatches (so a
+  // crash/interruption right after this still preserves the user's intent
+  // for the NEXT round to retry), then re-reads `pendingRenames` fresh so
+  // this SAME round's own toRename computation below immediately attempts
+  // to push it, rather than waiting a full extra round-trip.
+  //
+  // Codex finding — migration completion is marked for EVERY eligible id
+  // this round examines (`idsToMarkComplete`), not only the ones that
+  // needed a pending marker. An already-converged, server-known id left
+  // unmarked would remain indistinguishable from genuine pre-ledger local
+  // intent forever, so a LATER legitimate remote rename of that same id
+  // would be misread as this device's own stale customization and pushed
+  // back over the newer name. Marking completion here — the first round
+  // this id is ever eligible — ensures the one-time guard
+  // (`alreadyBackfilledIds`) excludes it on every later round, so this
+  // legacy backfill logic only ever fires during the actual upgrade
+  // transition. See computeRenameBackfillCandidates's own doc for the full
+  // rationale.
+  const alreadyBackfilledIds = getRenameBackfilledIds(userId);
+  const { toBackfillAsPending, idsToMarkComplete } = computeRenameBackfillCandidates(
+    initialServerProfiles,
+    localProfiles,
+    getPendingProfileRenames(userId),
+    alreadyBackfilledIds
+  );
+  for (const candidate of toBackfillAsPending) {
+    if (!isCurrent()) return;
+    await markProfileRenamePending(candidate.id, candidate.name, userId);
+  }
+  for (const id of idsToMarkComplete) {
+    if (!isCurrent()) return;
+    await markProfileRenameBackfilled(id, userId);
+  }
+  if (!isCurrent()) return;
+  // Codex account-isolation fix — scoped to THIS round's own `userId`:
+  // getPendingProfileRenames now returns only ids `userId` itself renamed,
+  // never a different account's own pending rename recorded on a shared
+  // browser (see profileStorage.ts's PendingRenamesByAccount doc). Read
+  // fresh here (not reused from the backfill computation above) so it
+  // reflects any marker the backfill pass just durably recorded.
+  const pendingRenames = getPendingProfileRenames(userId);
+  // Codex finding #1 — no ownedByOtherAccountIds argument: a rename target
+  // is always already confirmed via `initialServerProfiles` (this round's
+  // own user_id-scoped GET), which is unambiguous proof of THIS account's
+  // ownership regardless of whether some OTHER account also, independently,
+  // owns the identical literal id — see computeProfilesToRename's own doc.
+  const toRename = filterAdoptableProfiles(
+    computeProfilesToRename(initialServerProfiles, localProfiles, pendingRenames)
+  );
+  // Codex finding #1 — each entry is tagged with its own explicit intent so
+  // /api/sync/profiles's PUT can run adopt candidates through an
+  // INSERT-ONLY query and rename candidates through a separate, explicit
+  // UPDATE query, rather than inferring intent server-side from conflict
+  // state (which let a stale/delayed adopt retry silently overwrite an
+  // unrelated existing name — see the route's own doc).
+  const toPush: ProfilePushEntry[] = [
+    ...toAdopt.map((p) => ({ ...p, intent: "adopt" as const })),
+    ...toRename.map((p) => ({ ...p, intent: "rename" as const })),
+  ];
+  const batches = batchProfilesForAdoption(toPush);
 
   const pushAttempted = batches.length > 0;
   let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
@@ -1445,6 +2948,30 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   );
   if (!isCurrent()) return;
 
+  // SH.5 — rename propagation, push confirmation: clear THIS account's
+  // (`userId`'s) own pending-rename marker for every id whose name
+  // `authoritativeServerProfiles` already confirms. An id whose push
+  // failed, or whose reconfirmed name still doesn't match, simply keeps
+  // its marker — computeProfilesToRename will propose it again on the
+  // NEXT round, exactly like an adoption candidate that failed to
+  // register keeps getting proposed via computeProfilesToAdopt's own
+  // fresh recomputation.
+  // Codex finding #2 — checked against the FULL `pendingRenames` set
+  // (selectConfirmedPendingRenames), not just `toRename` (the ids THIS
+  // round decided to push): an id whose PUT committed in a PREVIOUS round
+  // but whose own confirmatory re-GET then failed can leave its marker
+  // standing even though the write genuinely landed; computeProfilesToRename
+  // correctly treats it as already-converged and pushes nothing for it —
+  // "nothing to push" is not the same as "already cleared", so it must
+  // still be checked here even when it was never in `toRename` this round.
+  // Codex account-isolation fix — scoping the clear to `userId` means this
+  // round can only ever clear ITS OWN pending rename, never a different
+  // account's (see profileStorage.ts's clearPendingRenameForAccount doc).
+  for (const confirmed of selectConfirmedPendingRenames(pendingRenames, authoritativeServerProfiles)) {
+    await clearProfileRenamePending(confirmed.id, confirmed.name, userId);
+  }
+  if (!isCurrent()) return;
+
   // Codex P2 follow-up (6th round) — deliberately NOT `locallyDeletedIds`
   // (the snapshot captured above, before this round's PUT/GET awaits):
   // commitDiscoveredProfiles re-reads this account's deletion markers
@@ -1464,4 +2991,58 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     () => getLocallyDeletedProfileIds(userId),
     adoptServerProfiles
   );
+
+  // SH.5 — rename propagation, pull side: an id THIS device already knows
+  // about locally (so not discovery's job above) whose server name differs
+  // from the local name, and that this device does NOT itself have an
+  // unconfirmed pending rename for (that case is the push path above,
+  // never overwritten by a pull), gets its LOCAL name updated to match the
+  // server's — this is what lets `default` (always already locally known
+  // from boot, on every device, before any network call — see
+  // profileStorage.ts's getProfiles/DEFAULT_PROFILE) actually pick up a
+  // custom name pushed from a DIFFERENT device, closing the gap
+  // mergeProfilesAdditive's own deliberate "never renames an existing
+  // entry" behavior leaves for genuine cross-device renames.
+  //
+  // `pendingRenameIds` is read fresh here, right before use — mirrors
+  // `commitDiscoveredProfiles`'s own "re-read at commit time" discipline —
+  // so a rename this device made WHILE the round's earlier awaits were in
+  // flight is honored rather than clobbered by a pull built from a stale
+  // pre-round snapshot.
+  if (!isCurrent()) return;
+  // Codex account-isolation fix — scoped to `userId`: a pull must only ever
+  // be suppressed by THIS account's own pending rename, never a different
+  // account's (which this account's reconciliation can no longer even see —
+  // see getPendingProfileRenames's own doc).
+  const pendingRenameIdsAtCommit = new Set(Object.keys(getPendingProfileRenames(userId)));
+  // Codex finding on d7cfaff — this step previously matched against the RAW
+  // shared `getProfiles()` list, unfiltered by this account's own
+  // local-deletion markers, unlike every other push/adopt computation in
+  // this round (`localProfiles` above is already filtered via
+  // filterVisibleProfiles). `dwp.profiles` is one shared array across
+  // accounts on the same browser — filterVisibleProfiles's own doc
+  // describes exactly why an id A deleted can still legitimately sit in
+  // that shared array, retained there because a CO-OWNING account B never
+  // deleted it. Without filtering here, this account's own server-scoped
+  // rename for that id (an id THIS account deleted, so has no business
+  // touching) would still match it by id in `getProfiles()` and get pushed
+  // through `applyServerRenames` into the ONE shared entry — contaminating
+  // B's retained, still-visible local copy with a rename intent that
+  // belongs only to A's own (deleted, hidden-from-A) relationship to that
+  // id. Filtering through this account's own local-deletion markers, freshly
+  // re-read right here (mirroring `pendingRenameIdsAtCommit` and
+  // `commitDiscoveredProfiles`'s own re-read-at-commit discipline, so a
+  // deletion made while this round's earlier awaits were in flight is
+  // honored too), makes this pull step see exactly the same "this account's
+  // own effective local view" as every other computation in this round —
+  // an id A deleted is simply absent from A's own rename-pull candidates,
+  // exactly as it already is absent from A's own adopt/rename-push
+  // candidates above.
+  const visibleLocalProfilesAtCommit = filterVisibleProfiles(getProfiles(), getLocallyDeletedProfileIds(userId));
+  const renamesToApply = selectServerRenamesToApply(
+    authoritativeServerProfiles,
+    visibleLocalProfilesAtCommit,
+    pendingRenameIdsAtCommit
+  );
+  await applyServerRenames(renamesToApply);
 }

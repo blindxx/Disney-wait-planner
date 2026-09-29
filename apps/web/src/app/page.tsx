@@ -20,7 +20,13 @@ import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-pl
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "../lib/profileStorage";
+import {
+  bootstrapProfiles,
+  getActiveProfileKeys,
+  getActiveProfile,
+  PROFILE_NAME_CHANGED_EVENT,
+  PROFILES_LIST_KEY,
+} from "../lib/profileStorage";
 
 // ============================================
 // CONSTANTS
@@ -252,6 +258,33 @@ export default function TodayPage() {
       }
     } catch {}
     setReady(true); // Reveal selectors only after state is correct — prevents flicker.
+  }, []);
+
+  // Codex finding — a background reconciliation round (e.g. the GLOBAL
+  // SessionProviderWrapper guard) can pull a fresher profile name
+  // (profileStorage.ts's applyServerRenames) while this page is already
+  // mounted; same-tab localStorage writes never fire the native `storage`
+  // event, so without this the "Profile: X" label above would keep
+  // showing the stale name until a reload/remount — see
+  // PROFILE_NAME_CHANGED_EVENT's own doc. Also covers the CROSS-TAB half of
+  // the same problem: a rename pulled while a DIFFERENT tab on this browser
+  // is mounted writes `dwp.profiles` there, which fires the native
+  // `storage` event in every OTHER tab (never the tab that wrote it) — see
+  // PROFILES_LIST_KEY's own doc. Both listeners perform the identical
+  // refresh, so they're co-located in one effect rather than duplicated.
+  useEffect(() => {
+    function handleProfileNameChanged() {
+      setActiveProfileName(getActiveProfile().name);
+    }
+    function handleStorage(e: StorageEvent) {
+      if (e.key === PROFILES_LIST_KEY) handleProfileNameChanged();
+    }
+    window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+      window.removeEventListener("storage", handleStorage);
+    };
   }, []);
 
   // When resort changes, switch park to first park of that resort and persist both.

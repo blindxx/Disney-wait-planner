@@ -108,6 +108,8 @@ import {
   buildNamespacedKey,
   resolveAccountScopedKey,
   adoptLegacyProfileValueIfSafe,
+  PROFILE_NAME_CHANGED_EVENT,
+  PROFILES_LIST_KEY,
 } from "@/lib/profileStorage";
 import { useSession } from "next-auth/react";
 import {
@@ -2039,6 +2041,15 @@ export default function PlansPage() {
   // independent of any pull.
   useEffect(() => {
     function onStorage(e: StorageEvent) {
+      // Codex finding — a profile rename PULLED while a DIFFERENT tab on
+      // this same browser is mounted writes `dwp.profiles` there; the
+      // native `storage` event fires in every OTHER tab (never the one that
+      // wrote it — see PROFILE_NAME_CHANGED_EVENT's own same-tab doc), so
+      // this is the cross-tab half of the same fix, reusing this page's
+      // own EXISTING `storage` listener rather than adding a new one.
+      if (e.key === PROFILES_LIST_KEY) {
+        setActiveProfileName(getActiveProfile().name);
+      }
       if (e.key === lightningKeyRef.current) {
         setLightningVersion((v) => v + 1);
       }
@@ -4179,6 +4190,21 @@ export default function PlansPage() {
     }
     window.addEventListener(STALE_OPERATION_REJECTED_EVENT, handleStaleOperationRejected);
     return () => window.removeEventListener(STALE_OPERATION_REJECTED_EVENT, handleStaleOperationRejected);
+  }, []);
+
+  // Codex finding — a background reconciliation round (e.g. the GLOBAL
+  // SessionProviderWrapper guard) can pull a fresher profile name
+  // (profileStorage.ts's applyServerRenames) while this page is already
+  // mounted; same-tab localStorage writes never fire the native `storage`
+  // event, so without this the "Profile: X" label would keep showing the
+  // stale name until a reload/remount — see PROFILE_NAME_CHANGED_EVENT's
+  // own doc.
+  useEffect(() => {
+    function handleProfileNameChanged() {
+      setActiveProfileName(getActiveProfile().name);
+    }
+    window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    return () => window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
   }, []);
 
   // Register a best-effort sendBeacon push on page unload.
