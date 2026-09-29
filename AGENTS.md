@@ -144,15 +144,18 @@ Invariants that must be preserved when touching this area:
   authenticated local planner content/sync-baseline storage by
   account-qualified keys (`dwp:{userId}:{profileId}:{baseKey}`; see
   `profileStorage.ts`, `syncHelper.ts`). Signed-out storage remains
-  device-local (`dwp:{profileId}:{baseKey}`). Not every sync key is
-  account-qualified: UI/coordination metadata such as
-  `dwp:sync:{profileId}:status` / `lastError` / `lastSyncedAt` and the
-  per-profile local-content-owner marker stay profile-keyed, and are
-  protected by the identity/transition guards (identity captured at
-  operation start, cancellation on auth/profile transitions, ownership
-  checks) rather than by key shape. One account's or profile's content,
-  sync state, or in-flight results must never be readable, writable, or
-  pushable under another's identity.
+  device-local (`dwp:{profileId}:{baseKey}`). One account's or profile's
+  planner content, and identity-scoped sync operations and their
+  in-flight results (identity captured at operation start, cancellation
+  on auth/profile transitions, ownership checks), must never be
+  readable, writable, or pushable under another's identity. This
+  guarantee does NOT extend to the profile-keyed UI/coordination
+  metadata — `dwp:sync:{profileId}:status` / `lastError` / `lastSyncedAt`
+  (and the per-profile local-content-owner marker): those are keyed by
+  profile ID only, so accounts sharing an ID (e.g. `default`) on one
+  browser share and can persist them across accounts. They are display/
+  coordination state, never planner content; do not treat them as
+  account-isolated or read them as proof of account-specific sync state.
 - **Active profile is device-local.** `dwp.activeProfile` is never
   cloud-synced. Only what value it may point at is corrected, against the
   current account's visible profile list.
