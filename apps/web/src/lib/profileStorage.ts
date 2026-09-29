@@ -58,6 +58,26 @@ const PENDING_RENAMES_KEY = "dwp.profilePendingRenames";
 const PENDING_RENAMES_LOCK_NAME = "dwp:profilePendingRenames";
 
 /**
+ * Codex finding — same-tab notification that a PULLED profile rename
+ * (applyServerRenames below) just committed a genuinely different name
+ * into `dwp.profiles`. `localStorage.setItem` never fires the native
+ * `storage` event in the SAME tab that made the write (only OTHER tabs/
+ * windows observe it) — a mounted page that already read a profile's name
+ * into its own React state (plans/wait-times/lightning/page.tsx all hold
+ * `activeProfileName` this way) would otherwise keep displaying the STALE
+ * name indefinitely once a background reconciliation round (triggered from
+ * SessionProviderWrapper regardless of which page happens to be mounted)
+ * pulls a fresher name from another device, until the user reloads or
+ * navigates away and back. Mirrors the EXACT existing pattern
+ * syncHelper.ts's SYNC_STATE_CHANGED_EVENT/STALE_OPERATION_REJECTED_EVENT
+ * already establish for this same class of problem (a same-tab
+ * `window.dispatchEvent(new CustomEvent(...))`, consumed via a plain
+ * `window.addEventListener` in each page's own effect) rather than
+ * introducing a parallel notification mechanism.
+ */
+export const PROFILE_NAME_CHANGED_EVENT = "dwp:profileNameChanged";
+
+/**
  * The canonical "always exists" profile id (see DEFAULT_PROFILE further
  * below) is a SPECIAL SHARED LOGICAL id, not an ordinary user-created
  * profile: every fresh device and every freshly authenticated account
@@ -4208,19 +4228,94 @@ export const DEV_MERGE_PROFILE_RENAMES_CASES: Array<{
 ];
 
 /**
+ * Pure decision: did this merge actually change the profile list — i.e.
+ * should same-tab consumers be notified (PROFILE_NAME_CHANGED_EVENT)?
+ * mergeProfileRenames returns the SAME array reference when nothing
+ * changed (already-converged/no matching id — see its own doc), so a plain
+ * reference comparison costs nothing extra and never fires a spurious
+ * notification for a pull that changed nothing.
+ *
+ * Run from Node:
+ *   import { DEV_DID_PROFILE_LIST_CHANGE_CASES, didProfileListChange, mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_DID_PROFILE_LIST_CHANGE_CASES.forEach(c => {
+ *     const merged = mergeProfileRenames(c.local, c.renames);
+ *     const got = didProfileListChange(c.local, merged);
+ *     console.log(got === c.expectedChanged ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function didProfileListChange(before: Profile[], after: Profile[]): boolean {
+  return before !== after;
+}
+
+export const DEV_DID_PROFILE_LIST_CHANGE_CASES: Array<{
+  name: string;
+  local: Profile[];
+  renames: Profile[];
+  expectedChanged: boolean;
+}> = [
+  {
+    name: "Codex finding — a genuine pulled rename is detected as a change worth notifying same-tab consumers about",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Our Family Trip" }],
+    expectedChanged: true,
+  },
+  {
+    name: "a no-op pull (already converged) is never reported as a change — no spurious notification",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "default", name: "Default" }],
+    expectedChanged: false,
+  },
+  {
+    name: "a rename for an id not present locally changes nothing here either — discovery's own concern, not a rename notification",
+    local: [{ id: "default", name: "Default" }],
+    renames: [{ id: "mom", name: "Mom" }],
+    expectedChanged: false,
+  },
+  {
+    name: "empty renames list — no change",
+    local: [{ id: "default", name: "Default" }],
+    renames: [],
+    expectedChanged: false,
+  },
+];
+
+/** Best-effort same-tab broadcast — see PROFILE_NAME_CHANGED_EVENT's own doc. Never throws. */
+function notifyProfileNameChanged(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.dispatchEvent(new CustomEvent(PROFILE_NAME_CHANGED_EVENT));
+  } catch {}
+}
+
+/**
  * SH.5 — persist server-confirmed rename(s) for id(s) this device already
  * knows about locally, applying profileRegistrySync.ts's
  * selectServerRenamesToApply result. Serialized against every other
  * `dwp.profiles` writer via the SAME lock adoptServerProfiles/createProfile/
  * renameProfile/deleteProfile already use, for the identical read-modify-
  * write-safety reason their own docs give.
+ *
+ * Codex finding — dispatches PROFILE_NAME_CHANGED_EVENT whenever this merge
+ * actually changes something (didProfileListChange), so every currently
+ * mounted page that already read a profile's name into its own React state
+ * (plans/wait-times/lightning/page.tsx's `activeProfileName`) can refresh
+ * it without requiring a reload or remount — see that event's own doc for
+ * why a native `storage` event can never do this for a SAME-tab write.
+ * This is the ONLY call site: renameProfile's own PUSH-side local write is
+ * never affected by this gap, since the SAME page that just called it
+ * (Settings) already re-derives its own `profiles` state immediately
+ * afterward, and no other page can be simultaneously mounted in the same
+ * tab to hold a stale copy of it.
  */
 export function applyServerRenames(renames: Profile[]): Promise<Profile[]> {
   if (renames.length === 0) return Promise.resolve(getProfiles());
   return withLocalMutationLock(PROFILES_LIST_LOCK_NAME, () => {
     const local = getProfiles();
     const merged = mergeProfileRenames(local, renames);
-    if (merged !== local) writeProfiles(merged);
+    if (didProfileListChange(local, merged)) {
+      writeProfiles(merged);
+      notifyProfileNameChanged();
+    }
     return merged;
   });
 }

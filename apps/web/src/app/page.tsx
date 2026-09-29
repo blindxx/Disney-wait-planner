@@ -20,7 +20,12 @@ import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-pl
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "../lib/profileStorage";
+import {
+  bootstrapProfiles,
+  getActiveProfileKeys,
+  getActiveProfile,
+  PROFILE_NAME_CHANGED_EVENT,
+} from "../lib/profileStorage";
 
 // ============================================
 // CONSTANTS
@@ -252,6 +257,21 @@ export default function TodayPage() {
       }
     } catch {}
     setReady(true); // Reveal selectors only after state is correct — prevents flicker.
+  }, []);
+
+  // Codex finding — a background reconciliation round (e.g. the GLOBAL
+  // SessionProviderWrapper guard) can pull a fresher profile name
+  // (profileStorage.ts's applyServerRenames) while this page is already
+  // mounted; same-tab localStorage writes never fire the native `storage`
+  // event, so without this the "Profile: X" label above would keep
+  // showing the stale name until a reload/remount — see
+  // PROFILE_NAME_CHANGED_EVENT's own doc.
+  useEffect(() => {
+    function handleProfileNameChanged() {
+      setActiveProfileName(getActiveProfile().name);
+    }
+    window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    return () => window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
   }, []);
 
   // When resort changes, switch park to first park of that resort and persist both.

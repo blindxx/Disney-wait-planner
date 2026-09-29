@@ -37,6 +37,7 @@ import {
   renameProfile,
   deleteProfile,
   getActiveProfileKeys,
+  PROFILE_NAME_CHANGED_EVENT,
 } from "../../lib/profileStorage";
 import {
   reconcileProfileRegistry,
@@ -228,8 +229,20 @@ export default function SettingsPage() {
       setSyncState(getSyncStateForProfile(profileId));
     };
     window.addEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
+    // Codex finding — a background reconciliation round (e.g. the GLOBAL
+    // SessionProviderWrapper guard, not this page's own effect below) can
+    // pull a fresher profile name (profileStorage.ts's applyServerRenames)
+    // while Settings is already mounted; same-tab localStorage writes never
+    // fire the native `storage` event, so without this the picker and the
+    // "Syncing profile: X" label would keep showing the stale name — see
+    // PROFILE_NAME_CHANGED_EVENT's own doc.
+    const handleProfileNameChanged = () => {
+      setProfiles(getVisibleProfiles(visibilityOwnerKey));
+    };
+    window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
     return () => {
       window.removeEventListener(SYNC_STATE_CHANGED_EVENT, handleSyncStateChanged);
+      window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
     };
   }, []);
 

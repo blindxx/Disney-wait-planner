@@ -35,7 +35,12 @@ import {
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
-import { bootstrapProfiles, getActiveProfileKeys, getActiveProfile } from "../../lib/profileStorage";
+import {
+  bootstrapProfiles,
+  getActiveProfileKeys,
+  getActiveProfile,
+  PROFILE_NAME_CHANGED_EVENT,
+} from "../../lib/profileStorage";
 import {
   PLANNED_CLOSURES,
   getClosureTiming,
@@ -551,6 +556,21 @@ export default function WaitTimesPage() {
     setSelectedResort(resort);
     setSelectedPark(park);
     setReady(true);
+  }, []);
+
+  // Codex finding — a background reconciliation round (e.g. the GLOBAL
+  // SessionProviderWrapper guard) can pull a fresher profile name
+  // (profileStorage.ts's applyServerRenames) while this page is already
+  // mounted; same-tab localStorage writes never fire the native `storage`
+  // event, so without this the "Profile: X" label above would keep
+  // showing the stale name until a reload/remount — see
+  // PROFILE_NAME_CHANGED_EVENT's own doc.
+  useEffect(() => {
+    function handleProfileNameChanged() {
+      setActiveProfileName(getActiveProfile().name);
+    }
+    window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
+    return () => window.removeEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
   }, []);
 
   /** Handle resort change — reset park to first in new resort, clear land filter, and persist.
