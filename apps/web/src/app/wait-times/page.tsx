@@ -48,6 +48,10 @@ import {
   formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
+import {
+  formatResortLocalTime,
+  getResortTimeZoneAbbreviation,
+} from "../../lib/resortTime";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -57,6 +61,34 @@ import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/ente
 // ============================================
 // RESORT + PARK CONSTANTS
 // ============================================
+
+/**
+ * Subtle resort-local clock. Owns its own tick state so a tick re-renders only
+ * this component — it never touches wait-data fetch/refresh/cache state.
+ * `now` starts null and is set on mount (no server/client time mismatch); the
+ * page only mounts this after hydration anyway.
+ */
+function ResortClock({ resort }: { resort: ResortId }) {
+  const [now, setNow] = useState<Date | null>(null);
+  useEffect(() => {
+    setNow(new Date());
+    const id = setInterval(() => setNow(new Date()), 15_000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div
+      aria-label={`${resort} local time`}
+      style={{ marginLeft: "auto", textAlign: "right", lineHeight: 1.25 }}
+    >
+      <div style={{ fontSize: "13px", fontWeight: 600, color: "#374151", minHeight: "16px" }}>
+        {now
+          ? `${formatResortLocalTime(resort, now)} ${getResortTimeZoneAbbreviation(resort, now)}`
+          : " "}
+      </div>
+      <div style={{ fontSize: "11px", color: "#9ca3af" }}>{resort} local time</div>
+    </div>
+  );
+}
 
 /** Parks grouped by resort */
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {
@@ -750,7 +782,7 @@ export default function WaitTimesPage() {
         {ready ? (
           <>
             {/* Resort Toggle — DLR | WDW */}
-            <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
               {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
                 <button
                   key={resortId}
@@ -765,6 +797,7 @@ export default function WaitTimesPage() {
                   {RESORT_LABELS[resortId]}
                 </button>
               ))}
+              <ResortClock resort={selectedResort} />
             </div>
 
             {/* Park Tabs — scoped to selected resort */}
