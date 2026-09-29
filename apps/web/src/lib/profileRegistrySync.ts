@@ -166,6 +166,11 @@ import {
   clearPendingRenameForAccount,
   discardPendingRenameForAccount,
   mergeProfileRenames,
+  markProfileRenamePending,
+  markProfileRenameBackfilled,
+  getRenameBackfilledIds,
+  CANONICAL_SHARED_PROFILE_ID,
+  DEFAULT_PROFILE_NAME,
 } from "./profileStorage";
 import { validateProfileName, MAX_PROFILES_PER_ADOPTION_REQUEST } from "./syncIdentity";
 
@@ -368,6 +373,257 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
 ];
 
 // ===== SH.5 RENAME PROPAGATION =====
+
+/**
+ * Codex finding — ONE-TIME PRE-LEDGER RENAME BACKFILL. Given the server
+ * registry, this device's current local profiles, this account's own
+ * pending renames, and the ids this account has already run this exact
+ * backfill for before (profileStorage.ts's getRenameBackfilledIds — never
+ * re-applied for the same (profileId, accountKey) pair), compute the {id,
+ * name} pairs that must be durably recorded as pending renames BEFORE this
+ * round's normal push/pull machinery (computeProfilesToRename/
+ * selectServerRenamesToApply) ever runs.
+ *
+ * Why this exists: `dwp.profilePendingRenames` (the rename ledger) did not
+ * always exist. An existing user's `dwp.profiles` can already hold a local
+ * custom name that predates it — back when renameProfile() was purely
+ * local and never pushed anything server-side at all (see AGENTS.md's own
+ * "single maintained source of truth" history for this feature). The FIRST
+ * time such a device reconciles under the new ledger, that local/server
+ * mismatch has NO pending marker to explain it — structurally identical to
+ * "a DIFFERENT device already pushed a rename I haven't pulled yet" —
+ * so without this, selectServerRenamesToApply's own pull path would
+ * silently overwrite the user's real custom name with the server's stale
+ * registered one, the very first time they ever benefit from this feature.
+ *
+ * An id is backfilled ONLY when ALL of:
+ *   - it is already locally known (in `localProfiles`, which callers pass
+ *     already filtered to this account's own visible list — an id this
+ *     account locally deleted is never a backfill candidate);
+ *   - the server ALREADY has an ACTIVE row for it (a not-yet-known id is
+ *     computeProfilesToAdopt's job — nothing to preserve against, since a
+ *     brand-new registration can't be "overwritten");
+ *   - its local name DIFFERS from the server's confirmed name (nothing to
+ *     backfill when they already agree);
+ *   - it has NO pending-rename marker yet (an id already tracked by the
+ *     ledger has nothing to backfill — the normal push/pull machinery
+ *     already owns it, and this function running again after its own
+ *     backfill already recorded a marker must be a no-op, not a
+ *     re-proposal);
+ *   - this exact (profileId, accountKey) pair has never been backfilled
+ *     before (the durable, one-time-only guard);
+ *   - for the CANONICAL_SHARED_PROFILE_ID (`default`) SPECIFICALLY: the
+ *     local name is not simply DEFAULT_PROFILE_NAME, the literal, untouched
+ *     bootstrap value every device auto-creates `default` with (see that
+ *     constant's own doc). `default` is the ONE id every device creates
+ *     locally on its own, independent of the normal adopt/discover-and-
+ *     copy-name flow every OTHER id goes through — so a mismatch for it
+ *     can ALSO legitimately arise from a genuinely untouched device simply
+ *     not yet having pulled ANOTHER device's already-pushed rename (this
+ *     feature's own earlier rounds), which must still be pulled normally,
+ *     never mistaken for this device's own "customization" and pushed
+ *     back over it. A NON-default id has no such ambiguity: under the
+ *     pre-ledger code, renameProfile() never pushed anything to the server
+ *     for ANY id, so the server's name for a non-default id can only ever
+ *     differ from a local copy this account already has BECAUSE this
+ *     device renamed it locally — there is no other way that mismatch
+ *     could have arisen.
+ *
+ * Pure — takes every input as a parameter.
+ *
+ * Run from Node:
+ *   import { DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES, computeRenameBackfillCandidates } from "@/lib/profileRegistrySync";
+ *   DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES.forEach(c => {
+ *     const got = computeRenameBackfillCandidates(c.serverProfiles, c.localProfiles, c.pendingRenames, c.alreadyBackfilledIds);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function computeRenameBackfillCandidates(
+  serverProfiles: ServerProfileRecord[],
+  localProfiles: Profile[],
+  pendingRenames: PendingRenames,
+  alreadyBackfilledIds: ReadonlySet<string>
+): Profile[] {
+  const serverNameById = new Map(serverProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const out: Profile[] = [];
+  for (const local of localProfiles) {
+    if (pendingRenames[local.id]) continue; // already tracked by the ledger — nothing to backfill
+    if (alreadyBackfilledIds.has(local.id)) continue; // one-time-only guard
+    const serverName = serverNameById.get(local.id);
+    if (serverName === undefined) continue; // not yet server-known — computeProfilesToAdopt's job
+    if (serverName === local.name) continue; // already converged, nothing to preserve
+    if (local.id === CANONICAL_SHARED_PROFILE_ID && local.name === DEFAULT_PROFILE_NAME) continue; // untouched bootstrap value, not a customization
+    out.push({ id: local.id, name: local.name });
+  }
+  return out;
+}
+
+export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
+  name: string;
+  serverProfiles: ServerProfileRecord[];
+  localProfiles: Profile[];
+  pendingRenames: PendingRenames;
+  alreadyBackfilledIds: Set<string>;
+  expected: Profile[];
+}> = [
+  {
+    name: "the realistic existing-user flow — local `default` already has a custom name from before the ledger existed; the server still has the literal bootstrap name",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "a genuinely untouched device — local `default` is still the literal bootstrap name, but ANOTHER device already legitimately pushed a rename; must be PULLED normally, never mistaken for this device's own customization",
+    serverProfiles: [{ profileId: "default", name: "Renamed On Another Device", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: [],
+  },
+  {
+    name: "a non-default id's local/server mismatch with no marker is always backfilled — under the pre-ledger code, no OTHER mechanism could have produced this mismatch",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: [{ id: "family", name: "The Smiths" }],
+  },
+  {
+    name: "already backfilled once for this (id, account) — never proposed again, even though the mismatch (by itself) still looks identical",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(["default"]),
+    expected: [],
+  },
+  {
+    name: "a pending marker already exists for the id — the ledger already owns it, never a backfill candidate",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+    pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
+    alreadyBackfilledIds: new Set(),
+    expected: [],
+  },
+  {
+    name: "id not yet known to the server at all — computeProfilesToAdopt's job, never a backfill candidate",
+    serverProfiles: [],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: [],
+  },
+  {
+    name: "local and server names already agree — nothing to backfill",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Default" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: [],
+  },
+  {
+    name: "a tombstoned server row is never a backfill target",
+    serverProfiles: [
+      { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: "2026-02-01T00:00:00.000Z" },
+    ],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+    pendingRenames: {},
+    alreadyBackfilledIds: new Set(),
+    expected: [],
+  },
+];
+
+/**
+ * Codex finding — composed end-to-end regression for the COMPLETE upgrade
+ * flow: an existing user's pre-ledger local rename is discovered, durably
+ * backfilled as a pending marker (never lost even if the round were
+ * interrupted right after), immediately picked up by THIS SAME round's own
+ * computeProfilesToRename (no extra round-trip needed), and once the push
+ * is confirmed, the one-time backfill guard AND the pending marker both end
+ * up exactly where a normal (non-backfilled) rename would leave them —
+ * proving the backfilled marker behaves identically to a fresh
+ * user-initiated rename from that point on, not a special, parallel path.
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES,
+ *     computeRenameBackfillCandidates,
+ *     computeProfilesToRename,
+ *     selectConfirmedPendingRenames,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyRenameBackfillStamp,
+ *     selectRenameBackfilledIdsForAccount,
+ *     applyPendingRename,
+ *     selectPendingRenamesForAccount,
+ *     clearPendingRenameForAccount,
+ *   } from "@/lib/profileStorage";
+ *   DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES.forEach(c => {
+ *     // Round 1 (first reconciliation ever under the new ledger): the
+ *     // mismatch is detected and durably backfilled BEFORE any push/pull.
+ *     let registryState = {};
+ *     let pendingState = {};
+ *     const alreadyBackfilled = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const backfillCandidates = computeRenameBackfillCandidates(c.serverProfiles, c.localProfiles, {}, alreadyBackfilled);
+ *     for (const candidate of backfillCandidates) {
+ *       pendingState = applyPendingRename(pendingState, candidate.id, c.accountKey, candidate.name, 1);
+ *       registryState = applyRenameBackfillStamp(registryState, candidate.id, c.accountKey);
+ *     }
+ *     const localNamePreserved = c.localProfiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // SAME round: computeProfilesToRename immediately sees the freshly
+ *     // backfilled marker and proposes it for push — no extra round-trip.
+ *     const pendingForAccount = selectPendingRenamesForAccount(pendingState, c.accountKey);
+ *     const toRename = computeProfilesToRename(c.serverProfiles, c.localProfiles, pendingForAccount);
+ *
+ *     // Push succeeds and is confirmed; both the marker and the one-time
+ *     // guard end up exactly as a normal (non-backfilled) rename would leave them.
+ *     const authoritativeAfterPush = [{ profileId: c.profileId, name: c.localName, updatedAt: "x", deletedAt: null }];
+ *     const confirmed = selectConfirmedPendingRenames(pendingForAccount, authoritativeAfterPush);
+ *     pendingState = clearPendingRenameForAccount(pendingState, c.profileId, c.accountKey, c.localName);
+ *
+ *     // Round 2 (a later reconciliation): the one-time guard means the
+ *     // ALREADY-CONFIRMED id is never re-backfilled, even if some other
+ *     // unrelated mismatch existed transiently.
+ *     const stillBackfilledOnlyOnce = computeRenameBackfillCandidates(
+ *       authoritativeAfterPush, c.localProfiles, {}, selectRenameBackfilledIdsForAccount(registryState, c.accountKey)
+ *     );
+ *
+ *     const ok =
+ *       localNamePreserved === c.localName &&
+ *       JSON.stringify(toRename) === JSON.stringify([{ id: c.profileId, name: c.localName }]) &&
+ *       JSON.stringify(confirmed) === JSON.stringify([{ id: c.profileId, name: c.localName }]) &&
+ *       selectPendingRenamesForAccount(pendingState, c.accountKey)[c.profileId] === undefined &&
+ *       stillBackfilledOnlyOnce.length === 0;
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  localName: string;
+  serverProfiles: ServerProfileRecord[];
+  localProfiles: Profile[];
+}> = [
+  {
+    name: "Codex finding — the realistic existing-user flow: local `default` has a custom name from before the ledger existed, while the server still has the literal bootstrap 'Default' — the full upgrade round preserves it, pushes it, and confirms it exactly like an ordinary rename",
+    profileId: "default",
+    accountKey: "userA",
+    localName: "Our Family Trip",
+    serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "default", name: "Our Family Trip" }],
+  },
+  {
+    name: "same guarantee for a pre-ledger rename of an ordinary (non-canonical) profile id",
+    profileId: "family",
+    accountKey: "userA",
+    localName: "The Smiths",
+    serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    localProfiles: [{ id: "family", name: "The Smiths" }],
+  },
+];
 
 /**
  * Given the server registry and this device's current local profiles and
@@ -2238,10 +2494,41 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // — a mismatch with no pending marker means a DIFFERENT device renamed
   // it, which is pulled further down (selectServerRenamesToApply), never
   // pushed from here.
+  // Codex finding — ONE-TIME PRE-LEDGER RENAME BACKFILL, run BEFORE this
+  // round ever reads `pendingRenames` for the normal push/pull decisions
+  // below: an existing user's local custom name that predates
+  // `dwp.profilePendingRenames` entirely has no marker to protect it from
+  // selectServerRenamesToApply's own pull step (further down this
+  // function) mistaking it for a stale copy of ANOTHER device's already-
+  // pushed rename and silently overwriting it — see
+  // computeRenameBackfillCandidates's own doc for the full rationale and
+  // why the canonical `default` id needs its own bootstrap-name check.
+  // Durably marks BOTH a pending-rename marker (so a crash/interruption
+  // right after this still preserves the user's intent for the NEXT round
+  // to retry) and the one-time backfill guard itself (so this can never
+  // re-propose the same (id, account) pair again), then re-reads
+  // `pendingRenames` fresh so this SAME round's own toRename computation
+  // below immediately attempts to push it, rather than waiting a full
+  // extra round-trip.
+  const alreadyBackfilledIds = getRenameBackfilledIds(userId);
+  const renameBackfillCandidates = computeRenameBackfillCandidates(
+    initialServerProfiles,
+    localProfiles,
+    getPendingProfileRenames(userId),
+    alreadyBackfilledIds
+  );
+  for (const candidate of renameBackfillCandidates) {
+    if (!isCurrent()) return;
+    await markProfileRenamePending(candidate.id, candidate.name, userId);
+    await markProfileRenameBackfilled(candidate.id, userId);
+  }
+  if (!isCurrent()) return;
   // Codex account-isolation fix — scoped to THIS round's own `userId`:
   // getPendingProfileRenames now returns only ids `userId` itself renamed,
   // never a different account's own pending rename recorded on a shared
-  // browser (see profileStorage.ts's PendingRenamesByAccount doc).
+  // browser (see profileStorage.ts's PendingRenamesByAccount doc). Read
+  // fresh here (not reused from the backfill computation above) so it
+  // reflects any marker the backfill pass just durably recorded.
   const pendingRenames = getPendingProfileRenames(userId);
   // Codex finding #1 — no ownedByOtherAccountIds argument: a rename target
   // is always already confirmed via `initialServerProfiles` (this round's

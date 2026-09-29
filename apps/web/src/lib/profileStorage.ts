@@ -117,8 +117,14 @@ export const PROFILE_NAME_CHANGED_EVENT = "dwp:profileNameChanged";
  * the first place. `default` is exempted from both of those exclusion
  * queries specifically for this reason; every OTHER profile id keeps the
  * exact same cross-account exclusion semantics as before.
+ *
+ * Codex finding — exported (was module-private) so
+ * profileRegistrySync.ts's computeRenameBackfillCandidates can recognize
+ * this exact id for its own bootstrap-name special case: see
+ * DEFAULT_PROFILE_NAME's own doc for why `default` (and only `default`)
+ * needs one.
  */
-const CANONICAL_SHARED_PROFILE_ID = "default";
+export const CANONICAL_SHARED_PROFILE_ID = "default";
 
 // ===== LOCAL MUTATION SERIALIZATION (Codex P1 follow-up, 12th round) =====
 //
@@ -253,6 +259,16 @@ export const UNOWNED_ACCOUNT_KEY = "__unowned__";
 export type ProfileRegistryAccountState = {
   owned?: boolean;
   locallyDeleted?: boolean;
+  /**
+   * Codex finding — durable, one-time-only marker: has this account's
+   * reconciliation already run the pre-ledger rename backfill
+   * (computeRenameBackfillCandidates in profileRegistrySync.ts) for this
+   * profile id? Set the FIRST time a local/server name mismatch with no
+   * pending-rename marker is observed for this (profileId, accountKey) pair
+   * — see that function's own doc for why this must never re-trigger after
+   * its first (and only) intended application.
+   */
+  renameBackfilled?: boolean;
 };
 
 /** `{ [profileId]: { [accountKey]: ProfileRegistryAccountState } }` */
@@ -319,6 +335,7 @@ export function migrateProfileRegistryState(input: Record<string, unknown>): Pro
       const entry: ProfileRegistryAccountState = {};
       if (v.owned === true) entry.owned = true;
       if (v.locallyDeleted === true) entry.locallyDeleted = true;
+      if (v.renameBackfilled === true) entry.renameBackfilled = true;
       if (Object.keys(entry).length > 0) byAccount[accountKey] = entry;
     }
     if (Object.keys(byAccount).length > 0) migrated[profileId] = byAccount;
@@ -350,6 +367,11 @@ export const DEV_MIGRATE_PROFILE_REGISTRY_STATE_CASES: Array<{
     name: "already new-shape input — passes through unchanged (idempotent)",
     input: { family: { userA: { owned: true }, userB: { locallyDeleted: true } } },
     expected: { family: { userA: { owned: true }, userB: { locallyDeleted: true } } },
+  },
+  {
+    name: "Codex finding — a renameBackfilled fact passes through the field-by-field validation unchanged",
+    input: { default: { userA: { owned: true, renameBackfilled: true } } },
+    expected: { default: { userA: { owned: true, renameBackfilled: true } } },
   },
   {
     name: "empty input — empty result",
@@ -467,6 +489,160 @@ export function markProfileOwner(profileId: string, ownerUserId: string): Promis
     const updated = applyProfileOwnerStamp(state, profileId, ownerUserId);
     if (updated !== state) writeProfileRegistryState(updated);
   });
+}
+
+// ===== CODEX FINDING — PRE-LEDGER RENAME BACKFILL (ONE-TIME MIGRATION) =====
+//
+// dwp.profilePendingRenames (the rename ledger) did not always exist — an
+// existing user's `dwp.profiles` can already hold a local custom name that
+// predates it entirely, from back when renameProfile() was purely local and
+// never pushed anything server-side at all. The FIRST time such a device
+// reconciles under the new ledger, that local/server name mismatch has no
+// pending marker to explain it — structurally identical to "a DIFFERENT
+// device already pushed a rename I haven't pulled yet" — so without this,
+// selectServerRenamesToApply's own pull path (added earlier in this same
+// PR) would silently overwrite the user's real custom name with the
+// server's stale registered name. See computeRenameBackfillCandidates in
+// profileRegistrySync.ts for the actual decision logic this durable,
+// one-time-only marker exists to gate.
+
+/**
+ * Pure state transition: durably record that `accountKey`'s reconciliation
+ * has already run the pre-ledger rename backfill for `profileId` — mirrors
+ * applyProfileOwnerStamp's own idempotent, single-account write exactly
+ * (never touches a DIFFERENT account's own entry for the same profileId).
+ *
+ * Run from Node:
+ *   import { DEV_APPLY_RENAME_BACKFILL_STAMP_CASES, applyRenameBackfillStamp } from "@/lib/profileStorage";
+ *   DEV_APPLY_RENAME_BACKFILL_STAMP_CASES.forEach(c => {
+ *     const got = applyRenameBackfillStamp(c.state, c.profileId, c.accountKey);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function applyRenameBackfillStamp(
+  state: ProfileRegistryState,
+  profileId: string,
+  accountKey: string
+): ProfileRegistryState {
+  if (state[profileId]?.[accountKey]?.renameBackfilled) return state;
+  return {
+    ...state,
+    [profileId]: {
+      ...state[profileId],
+      [accountKey]: { ...state[profileId]?.[accountKey], renameBackfilled: true },
+    },
+  };
+}
+
+export const DEV_APPLY_RENAME_BACKFILL_STAMP_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  profileId: string;
+  accountKey: string;
+  expected: ProfileRegistryState;
+}> = [
+  {
+    name: "first backfill for this (profileId, accountKey) pair records the durable one-time marker",
+    state: {},
+    profileId: "default",
+    accountKey: "userA",
+    expected: { default: { userA: { renameBackfilled: true } } },
+  },
+  {
+    name: "re-stamping is idempotent and never disturbs this account's own OTHER facts (owned) for the same id",
+    state: { default: { userA: { owned: true } } },
+    profileId: "default",
+    accountKey: "userA",
+    expected: { default: { userA: { owned: true, renameBackfilled: true } } },
+  },
+  {
+    name: "stamping for one account never touches a DIFFERENT account's own entry for the identical id",
+    state: { default: { userB: { renameBackfilled: true } } },
+    profileId: "default",
+    accountKey: "userA",
+    expected: { default: { userB: { renameBackfilled: true }, userA: { renameBackfilled: true } } },
+  },
+];
+
+/**
+ * Durably record that `accountKey` has run the pre-ledger rename backfill
+ * for `profileId` — see applyRenameBackfillStamp's own doc for the pure
+ * transition this wraps. Called by profileRegistrySync.ts's reconciliation
+ * orchestrator immediately after backfilling a pending-rename marker for
+ * this exact (profileId, accountKey) pair, so it can never re-trigger for
+ * it again.
+ */
+export function markProfileRenameBackfilled(profileId: string, accountKey: string): Promise<void> {
+  return withLocalMutationLock(PROFILE_REGISTRY_STATE_LOCK_NAME, () => {
+    const state = readProfileRegistryState();
+    const updated = applyRenameBackfillStamp(state, profileId, accountKey);
+    if (updated !== state) writeProfileRegistryState(updated);
+  });
+}
+
+/**
+ * Pure query: given the full per-`(profileId, accountKey)` provenance state,
+ * return every profile id `accountKey` has ALREADY run the pre-ledger
+ * rename backfill for — passed to profileRegistrySync.ts's
+ * computeRenameBackfillCandidates so it never re-proposes a backfill for an
+ * id already handled.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_RENAME_BACKFILLED_IDS_CASES, selectRenameBackfilledIdsForAccount } from "@/lib/profileStorage";
+ *   DEV_SELECT_RENAME_BACKFILLED_IDS_CASES.forEach(c => {
+ *     const got = [...selectRenameBackfilledIdsForAccount(c.state, c.accountKey)].sort();
+ *     console.log(JSON.stringify(got) === JSON.stringify([...c.expected].sort()) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectRenameBackfilledIdsForAccount(
+  state: ProfileRegistryState,
+  accountKey: string
+): Set<string> {
+  const ids = new Set<string>();
+  for (const [id, byAccount] of Object.entries(state)) {
+    if (byAccount[accountKey]?.renameBackfilled) ids.add(id);
+  }
+  return ids;
+}
+
+export const DEV_SELECT_RENAME_BACKFILLED_IDS_CASES: Array<{
+  name: string;
+  state: ProfileRegistryState;
+  accountKey: string;
+  expected: string[];
+}> = [
+  {
+    name: "empty state — nothing backfilled yet",
+    state: {},
+    accountKey: "userA",
+    expected: [],
+  },
+  {
+    name: "this account's own backfilled id is reported",
+    state: { default: { userA: { renameBackfilled: true } } },
+    accountKey: "userA",
+    expected: ["default"],
+  },
+  {
+    name: "a DIFFERENT account's own backfilled fact for the identical id is never reported for this account — each account's one-time guard is independent",
+    state: { default: { userB: { renameBackfilled: true } } },
+    accountKey: "userA",
+    expected: [],
+  },
+  {
+    name: "an id merely owned (not backfilled) is not reported",
+    state: { default: { userA: { owned: true } } },
+    accountKey: "userA",
+    expected: [],
+  },
+];
+
+/**
+ * Bulk read of every profile id `accountKey` has already run the pre-ledger
+ * rename backfill for — see selectRenameBackfilledIdsForAccount's own doc.
+ */
+export function getRenameBackfilledIds(accountKey: string): Set<string> {
+  return selectRenameBackfilledIdsForAccount(readProfileRegistryState(), accountKey);
 }
 
 /**
@@ -1580,6 +1756,22 @@ export function getVisibleProfiles(currentOwnerUserId: string): Profile[] {
 }
 
 const DEFAULT_PROFILE: Profile = { id: "default", name: "Default" };
+
+/**
+ * Codex finding — exported so profileRegistrySync.ts's
+ * computeRenameBackfillCandidates can recognize an UNTOUCHED, freshly
+ * auto-bootstrapped `default` entry. Every device auto-creates `default`
+ * locally with exactly this literal name (getProfiles()'s own
+ * default-presence guarantee) — never through the adopt/discover-and-copy
+ * flow other ids use, which always sets the local name to match whatever
+ * was discovered. That means a device that has genuinely never customized
+ * `default` locally is structurally indistinguishable, by mismatch alone,
+ * from a device whose local name is stale relative to a rename another
+ * device has ALREADY legitimately pushed — comparing against this literal
+ * name is what tells the two apart (see that function's own doc for the
+ * full rationale).
+ */
+export const DEFAULT_PROFILE_NAME = DEFAULT_PROFILE.name;
 
 /** Legacy single-user keys that get migrated into the Default namespace on first bootstrap. */
 const LEGACY_KEY_MAP: Record<string, string> = {
@@ -3341,8 +3533,15 @@ export function getPendingProfileRenames(currentOwnerUserId: string): PendingRen
  * below). Serialized against every other pending-renames writer via its
  * own lock (a separate key from `dwp.profiles`/`dwp.profileRegistryState`,
  * so a rename's own bookkeeping never contends with either of those).
+ *
+ * Codex finding — also exported for profileRegistrySync.ts's reconciliation
+ * orchestrator to call directly when BACKFILLING a pre-ledger local rename
+ * (computeRenameBackfillCandidates) — the exact same durable marker a
+ * user-initiated renameProfile() call records, just recorded on the
+ * device's behalf for a customization that predates the ledger, instead of
+ * in response to a fresh user action.
  */
-function markProfileRenamePending(profileId: string, name: string, accountKey: string): Promise<void> {
+export function markProfileRenamePending(profileId: string, name: string, accountKey: string): Promise<void> {
   return withLocalMutationLock(PENDING_RENAMES_LOCK_NAME, () => {
     const state = readPendingRenamesByAccount();
     writePendingRenamesByAccount(applyPendingRename(state, profileId, accountKey, name, Date.now()));
