@@ -2949,6 +2949,58 @@ export const DEV_REGISTRY_VISIBILITY_TRANSITION_CASES: Array<{
 ];
 
 /**
+ * SH.7B regression — the rename-stage comparison must use the current
+ * account's visible view on BOTH sides. Case 1: A and B co-own the id; A
+ * locally deleted it (hidden for A) while raw shared storage retains it for
+ * B; an otherwise no-op round for A must not count it. Case 2: an ordinary
+ * visible remote rename still counts.
+ *
+ * Run from Node:
+ *   import { DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES, selectMeaningfulRegistryChangeIds } from "@/lib/profileRegistrySync";
+ *   import { selectHiddenProfileIdsForAccount, filterVisibleProfiles, mergeProfileRenames } from "@/lib/profileStorage";
+ *   DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES.forEach(c => {
+ *     const vis = (raw) => filterVisibleProfiles(raw, selectHiddenProfileIdsForAccount(c.state, c.userId));
+ *     const rawAfter = mergeProfileRenames(c.rawShared, c.renames);
+ *     const got = selectMeaningfulRegistryChangeIds(c.server, c.server, [], vis(c.rawShared), vis(rawAfter));
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES: Array<{
+  name: string;
+  userId: string;
+  rawShared: Profile[];
+  renames: Profile[];
+  state: ProfileRegistryState;
+  server: ServerProfileRecord[];
+  expected: string[];
+}> = [
+  {
+    name: "co-owned by A and B; A locally deleted it, raw shared list retains it for B; A's no-op round — hidden id is NOT meaningful activity",
+    userId: "userA",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    renames: [],
+    state: { family: { userA: { owned: true, locallyDeleted: true }, userB: { owned: true } } },
+    server: [
+      { profileId: "default", name: "Default", updatedAt: "x", deletedAt: null },
+      { profileId: "family", name: "Family", updatedAt: "x", deletedAt: null },
+    ],
+    expected: [],
+  },
+  {
+    name: "ordinary visible remote rename still counts",
+    userId: "userA",
+    rawShared: [{ id: "default", name: "Default" }, { id: "family", name: "Family" }],
+    renames: [{ id: "family", name: "The Smiths" }],
+    state: { family: { userA: { owned: true }, userB: { owned: true } } },
+    server: [
+      { profileId: "default", name: "Default", updatedAt: "x", deletedAt: null },
+      { profileId: "family", name: "The Smiths", updatedAt: "y", deletedAt: null },
+    ],
+    expected: ["family"],
+  },
+];
+
+/**
  * Runs one round of registry reconciliation for `userId`, the authenticated
  * identity the caller has ALREADY bound via setRegistryIdentity(userId)
  * (called synchronously, immediately before this) — refuses to run at all
@@ -3300,13 +3352,19 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     visibleLocalProfilesAtCommit,
     pendingRenameIdsAtCommit
   );
-  const renamedMerge = await applyServerRenames(renamesToApply);
+  // SH.7B — both sides of this comparison are THIS ACCOUNT'S visible view
+  // (getVisibleProfiles), not the raw shared list `applyServerRenames`
+  // returns: an id hidden from this account (locally deleted here, retained
+  // in the shared list for a co-owning account) must never look "newly
+  // discovered" during an otherwise no-op round.
+  const visibleBeforeRenames = getVisibleProfiles(userId);
+  await applyServerRenames(renamesToApply);
   for (const id of selectMeaningfulRegistryChangeIds(
     initialServerProfiles,
     authoritativeServerProfiles,
     [],
-    visibleLocalProfilesAtCommit,
-    renamedMerge
+    visibleBeforeRenames,
+    getVisibleProfiles(userId)
   )) {
     changedIds.add(id);
   }
