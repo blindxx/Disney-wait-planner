@@ -1232,6 +1232,99 @@ export const DEV_SELECT_SERVER_RENAMES_TO_APPLY_CASES: Array<{
 ];
 
 /**
+ * Codex finding on d7cfaff — composed regression proving the rename-PULL
+ * commit step must match against THIS account's own effective local view
+ * (filtered through its own local-deletion markers via
+ * profileStorage.ts's filterVisibleProfiles), never the raw shared
+ * `dwp.profiles` array — exactly like every other push/adopt computation in
+ * reconcileProfileRegistry already does.
+ *
+ * Scenario: `family` is co-owned — A and B each independently own the
+ * identical literal id (profileStorage.ts's own documented, supported case).
+ * A deletes `family` locally: it is hidden from A's OWN effective view, but
+ * NEVER removed from the one shared `dwp.profiles` array, because B still
+ * owns and displays it there under B's own retained name. A's own
+ * account-scoped server GET (`authoritativeServerProfiles`) can still show
+ * an ACTIVE row for `family` with some OTHER name (A's own account's server
+ * state, independent of B's) — id equality with the shared array's entry is
+ * all `selectServerRenamesToApply` needs to match on, with no account
+ * awareness of its own.
+ *
+ * Before the fix: matching against the RAW shared array would propose
+ * pulling A's own server name over B's retained shared entry — contaminating
+ * B's profile with a rename that belongs only to A's own (deleted,
+ * hidden-from-A) relationship to that id.
+ *
+ * After the fix: matching against `filterVisibleProfiles(rawSharedProfiles,
+ * locallyDeletedIdsForA)` excludes `family` from A's own candidate set
+ * entirely — A's reconciliation proposes nothing for it, and B's retained
+ * entry is left completely untouched.
+ *
+ * Run from Node:
+ *   import { DEV_CO_OWNED_DELETE_RENAME_PULL_ISOLATION_CASES, selectServerRenamesToApply } from "@/lib/profileRegistrySync";
+ *   import { filterVisibleProfiles } from "@/lib/profileStorage";
+ *   DEV_CO_OWNED_DELETE_RENAME_PULL_ISOLATION_CASES.forEach(c => {
+ *     const withoutFix = selectServerRenamesToApply(c.authoritativeServerProfilesForA, c.rawSharedProfiles, c.pendingRenameIds);
+ *     const visibleForA = filterVisibleProfiles(c.rawSharedProfiles, c.locallyDeletedIdsForA);
+ *     const withFix = selectServerRenamesToApply(c.authoritativeServerProfilesForA, visibleForA, c.pendingRenameIds);
+ *     const ok =
+ *       JSON.stringify(withoutFix) === JSON.stringify(c.expectedWithoutFix) &&
+ *       JSON.stringify(withFix) === JSON.stringify(c.expectedWithFix);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name, { withoutFix, withFix });
+ *   });
+ */
+export const DEV_CO_OWNED_DELETE_RENAME_PULL_ISOLATION_CASES: Array<{
+  name: string;
+  rawSharedProfiles: Profile[];
+  locallyDeletedIdsForA: Set<string>;
+  authoritativeServerProfilesForA: ServerProfileRecord[];
+  pendingRenameIds: Set<string>;
+  expectedWithoutFix: Profile[];
+  expectedWithFix: Profile[];
+}> = [
+  {
+    name: "Codex finding — A deleted co-owned `family` locally; B's retained shared entry must never receive A's own server-scoped rename",
+    rawSharedProfiles: [{ id: "family", name: "The Smiths" }],
+    locallyDeletedIdsForA: new Set(["family"]),
+    authoritativeServerProfilesForA: [
+      { profileId: "family", name: "Family Reunion", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pendingRenameIds: new Set(),
+    expectedWithoutFix: [{ id: "family", name: "Family Reunion" }],
+    expectedWithFix: [],
+  },
+  {
+    name: "same guarantee for the canonical `default` id — A deleted A's own relationship to it locally, but B's shared bootstrap `default` entry survives untouched",
+    rawSharedProfiles: [{ id: "default", name: "B's Trip" }],
+    locallyDeletedIdsForA: new Set(["default"]),
+    authoritativeServerProfilesForA: [
+      { profileId: "default", name: "A's Old Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pendingRenameIds: new Set(),
+    expectedWithoutFix: [{ id: "default", name: "A's Old Trip" }],
+    expectedWithFix: [],
+  },
+  {
+    name: "a DIFFERENT, non-deleted id in the same round is unaffected by A's deletion of `family` — the filter is scoped to the deleted id only, not a blanket suppression",
+    rawSharedProfiles: [
+      { id: "family", name: "The Smiths" },
+      { id: "vacation", name: "Old Vacation Name" },
+    ],
+    locallyDeletedIdsForA: new Set(["family"]),
+    authoritativeServerProfilesForA: [
+      { profileId: "family", name: "Family Reunion", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+      { profileId: "vacation", name: "New Vacation Name", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null },
+    ],
+    pendingRenameIds: new Set(),
+    expectedWithoutFix: [
+      { id: "family", name: "Family Reunion" },
+      { id: "vacation", name: "New Vacation Name" },
+    ],
+    expectedWithFix: [{ id: "vacation", name: "New Vacation Name" }],
+  },
+];
+
+/**
  * Codex finding #1 — composed end-to-end regression for the COMPLETE
  * A -> B -> A shared-device flow, exercising the SAME pure functions
  * reconcileProfileRegistry itself calls (profileStorage.ts's
@@ -2922,6 +3015,34 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // account's (which this account's reconciliation can no longer even see —
   // see getPendingProfileRenames's own doc).
   const pendingRenameIdsAtCommit = new Set(Object.keys(getPendingProfileRenames(userId)));
-  const renamesToApply = selectServerRenamesToApply(authoritativeServerProfiles, getProfiles(), pendingRenameIdsAtCommit);
+  // Codex finding on d7cfaff — this step previously matched against the RAW
+  // shared `getProfiles()` list, unfiltered by this account's own
+  // local-deletion markers, unlike every other push/adopt computation in
+  // this round (`localProfiles` above is already filtered via
+  // filterVisibleProfiles). `dwp.profiles` is one shared array across
+  // accounts on the same browser — filterVisibleProfiles's own doc
+  // describes exactly why an id A deleted can still legitimately sit in
+  // that shared array, retained there because a CO-OWNING account B never
+  // deleted it. Without filtering here, this account's own server-scoped
+  // rename for that id (an id THIS account deleted, so has no business
+  // touching) would still match it by id in `getProfiles()` and get pushed
+  // through `applyServerRenames` into the ONE shared entry — contaminating
+  // B's retained, still-visible local copy with a rename intent that
+  // belongs only to A's own (deleted, hidden-from-A) relationship to that
+  // id. Filtering through this account's own local-deletion markers, freshly
+  // re-read right here (mirroring `pendingRenameIdsAtCommit` and
+  // `commitDiscoveredProfiles`'s own re-read-at-commit discipline, so a
+  // deletion made while this round's earlier awaits were in flight is
+  // honored too), makes this pull step see exactly the same "this account's
+  // own effective local view" as every other computation in this round —
+  // an id A deleted is simply absent from A's own rename-pull candidates,
+  // exactly as it already is absent from A's own adopt/rename-push
+  // candidates above.
+  const visibleLocalProfilesAtCommit = filterVisibleProfiles(getProfiles(), getLocallyDeletedProfileIds(userId));
+  const renamesToApply = selectServerRenamesToApply(
+    authoritativeServerProfiles,
+    visibleLocalProfilesAtCommit,
+    pendingRenameIdsAtCommit
+  );
   await applyServerRenames(renamesToApply);
 }
