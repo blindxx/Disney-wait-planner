@@ -19,6 +19,7 @@ import Link from "next/link";
 import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
+import ResortClock from "../components/ResortClock";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
 import {
   bootstrapProfiles,
@@ -204,7 +205,6 @@ export default function TodayPage() {
   // Mirror of dw:settings:* keys, kept in sync so isAlreadyDefault is reactive.
   const [settingsResort, setSettingsResort] = useState<ResortId>("DLR");
   const [settingsPark, setSettingsPark] = useState<ParkId>("disneyland");
-  const [currentTime, setCurrentTime] = useState("");
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
@@ -301,23 +301,6 @@ export default function TodayPage() {
     } catch {}
   }
 
-  // Update current time every minute
-  useEffect(() => {
-    const updateTime = () => {
-      const now = new Date();
-      const hours = now.getHours();
-      const minutes = now.getMinutes();
-      const ampm = hours >= 12 ? "PM" : "AM";
-      const displayHours = hours % 12 || 12;
-      const displayMinutes = minutes.toString().padStart(2, "0");
-      setCurrentTime(`${displayHours}:${displayMinutes} ${ampm}`);
-    };
-
-    updateTime();
-    const interval = setInterval(updateTime, 60000); // Update every minute
-    return () => clearInterval(interval);
-  }, []);
-
   // Fetch wait data for the selected resort+park on mount and on change.
   useEffect(() => {
     let cancelled = false;
@@ -397,16 +380,14 @@ export default function TodayPage() {
           )}
         </div>
 
-        {/* Current Time */}
-        <div
-          style={{
-            fontSize: "15px",
-            color: "#6b7280",
-            marginBottom: "20px",
-          }}
-        >
-          Now: {currentTime}
-        </div>
+        {/* Resort-local clock — shared with Wait Times. Mounted after
+            hydration so the stored resort (not the DLR default) sets the zone;
+            placeholder preserves layout height. */}
+        {ready ? (
+          <ResortClock resort={selectedResort} marginBottom={20} />
+        ) : (
+          <div style={{ height: 35, marginBottom: 20 }} />
+        )}
 
         {/* Resort + Park Selectors — only rendered after hydration to prevent
             a visible DLR→WDW flip when the stored selection differs from the

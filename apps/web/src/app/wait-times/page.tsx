@@ -48,6 +48,7 @@ import {
   formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
+import ResortClock from "../../components/ResortClock";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -829,6 +830,9 @@ export default function WaitTimesPage() {
                 Set as default
               </button>
             )}
+
+            {/* Resort-local clock — below park/default context, above filters */}
+            <ResortClock resort={selectedResort} />
           </>
         ) : (
           /* Skeleton placeholders preserve layout while hydration runs */
@@ -842,6 +846,7 @@ export default function WaitTimesPage() {
               <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
             </div>
             <div style={{ height: 20, marginBottom: "8px" }} />
+            <div style={{ height: 35, marginBottom: "12px" }} />
           </>
         )}
 
