@@ -37,7 +37,7 @@ export const LEGACY_ATTRACTION_WARNING = "⚠ No longer operating";
 export type RefurbishmentLine = { text: string; variant: "warning" | "info" };
 
 /** Minimal ISO "YYYY-MM-DD" calendar-date validator (rejects "2025-02-30", etc). */
-function isValidIsoCalendarDate(value: string): boolean {
+export function isValidIsoCalendarDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parts = value.split("-");
   const y = parseInt(parts[0], 10);
