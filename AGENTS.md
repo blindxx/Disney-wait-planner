@@ -149,13 +149,22 @@ Invariants that must be preserved when touching this area:
   in-flight results (identity captured at operation start, cancellation
   on auth/profile transitions, ownership checks), must never be
   readable, writable, or pushable under another's identity. This
-  guarantee does NOT extend to the profile-keyed UI/coordination
-  metadata — `dwp:sync:{profileId}:status` / `lastError` / `lastSyncedAt`
-  (and the per-profile local-content-owner marker): those are keyed by
-  profile ID only, so accounts sharing an ID (e.g. `default`) on one
-  browser share and can persist them across accounts. They are display/
-  coordination state, never planner content; do not treat them as
-  account-isolated or read them as proof of account-specific sync state.
+  guarantee does NOT extend to the display-only sync metadata
+  `dwp:sync:{profileId}:status` / `lastError` / `lastSyncedAt`: it is
+  keyed by profile ID only and is UI/coordination state, not
+  account-isolated, so accounts sharing an ID (e.g. `default`) on one
+  browser share it and it can persist across accounts. Do not read it as
+  account-specific sync state.
+  The per-profile local-content-owner marker (`getLocalContentOwner` /
+  `setLocalContentOwner` in `syncHelper.ts`) is a separate case: its key
+  is also profile-ID-only, but its *value* is the owning account's id —
+  deliberate identity-attribution evidence, set only after a pull's
+  coherent snapshot has durably landed. Safe legacy adoption
+  (`decideLegacyKeyAdoption` in `profileStorage.ts`) and the
+  foreign-content checks rely on it to keep one account from adopting or
+  pushing another account's local content. Treat it as account-specific
+  evidence, not display state, and preserve its set-only-after-durable-
+  pull semantics.
 - **Active profile is device-local.** `dwp.activeProfile` is never
   cloud-synced. Only what value it may point at is corrected, against the
   current account's visible profile list.
