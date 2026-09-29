@@ -148,6 +148,24 @@ export default function SettingsPage() {
   // deleteProfile's own `currentOwnerUserId ?? UNOWNED_ACCOUNT_KEY` already
   // scopes the write side of this same provenance.
   const visibilityOwnerKey = authenticatedUserId ?? UNOWNED_ACCOUNT_KEY;
+  // Codex finding — a ref mirror of `visibilityOwnerKey`, kept fresh via the
+  // tiny effect below, mirrors the SAME established pattern this codebase
+  // already uses for keeping a MOUNT-ONLY (`[]` deps) effect's closure
+  // current (e.g. plans/wait-times/page.tsx's own selectedResortRef/
+  // selectedParkRef). The PROFILE_NAME_CHANGED_EVENT listener registered in
+  // the mount effect below never re-subscribes once auth resolves, so
+  // closing over `visibilityOwnerKey` directly would permanently bake in
+  // whatever it happened to be at mount — typically UNOWNED_ACCOUNT_KEY,
+  // since useSession() starts in "loading" before next-auth's own session
+  // fetch resolves (see the 11th-round doc above `authenticatedUserId`'s
+  // own definition for the identical timing concern). Reading `.current`
+  // instead means the listener always uses whichever owner key is CURRENTLY
+  // resolved at the moment a rename event actually fires, never a stale
+  // signed-out snapshot from before authentication resolved.
+  const visibilityOwnerKeyRef = useRef(visibilityOwnerKey);
+  useEffect(() => {
+    visibilityOwnerKeyRef.current = visibilityOwnerKey;
+  }, [visibilityOwnerKey]);
   const [emailInput, setEmailInput] = useState("");
   const [signInSent, setSignInSent] = useState(false);
   const [signInError, setSignInError] = useState("");
@@ -235,9 +253,16 @@ export default function SettingsPage() {
     // while Settings is already mounted; same-tab localStorage writes never
     // fire the native `storage` event, so without this the picker and the
     // "Syncing profile: X" label would keep showing the stale name — see
-    // PROFILE_NAME_CHANGED_EVENT's own doc.
+    // PROFILE_NAME_CHANGED_EVENT's own doc. Reads visibilityOwnerKeyRef.current
+    // (see its own doc above), NOT the closed-over `visibilityOwnerKey`
+    // directly — this effect never re-subscribes once auth resolves, so the
+    // closed-over value would otherwise permanently bake in whatever was
+    // resolved at MOUNT time (typically the signed-out UNOWNED_ACCOUNT_KEY
+    // bucket, since useSession() starts in "loading"), refreshing the
+    // picker with the WRONG account's visibility for the rest of the page's
+    // lifetime even after authentication resolves.
     const handleProfileNameChanged = () => {
-      setProfiles(getVisibleProfiles(visibilityOwnerKey));
+      setProfiles(getVisibleProfiles(visibilityOwnerKeyRef.current));
     };
     window.addEventListener(PROFILE_NAME_CHANGED_EVENT, handleProfileNameChanged);
     return () => {
