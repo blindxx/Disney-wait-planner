@@ -105,10 +105,13 @@ maintained truth.
 
 Planner state (My Plans, Lightning Lane selections) is **local-first**:
 localStorage is the source of truth, and cloud sync (when signed in)
-mirrors it. Storage and sync state are **profile-scoped** — see
-`apps/web/src/lib/profileStorage.ts` (namespaced keys `dwp:{profileId}:{baseKey}`)
-and `apps/web/src/lib/syncHelper.ts` (debounced push, per-profile sync
-status keys, `pullPlanner()`).
+mirrors it. Storage is **profile-scoped**: authenticated planner content
+is account + profile qualified (`dwp:{userId}:{profileId}:{baseKey}`),
+while signed-out/unqualified storage is profile-scoped
+(`dwp:{profileId}:{baseKey}`) — see `apps/web/src/lib/profileStorage.ts`,
+and `apps/web/src/lib/syncHelper.ts` (debounced push, sync status keys,
+`pullPlanner()`). See "Sync architecture invariants" below for the
+isolation rules and what is and isn't account-isolated.
 
 Invariants that must be preserved when touching this area:
 - Scheduled/debounced work that has not yet started (e.g. a pending
@@ -120,7 +123,10 @@ Invariants that must be preserved when touching this area:
   fetch. Its results and status writes must remain tied to the profile
   captured when it started (`syncHelper.ts` captures `profileId` at
   push-start for exactly this reason), and completion from one
-  profile/session must never mutate another profile's state.
+  profile/session must never mutate another profile/account's planner
+  content or identity-scoped sync state. (The profile-keyed UI metadata
+  `status`/`lastError`/`lastSyncedAt` is tied to the captured profile but
+  is not account-isolated — see Sync architecture invariants.)
 - Preserve pull-before-push and stale-response protections around
   profile/auth transitions (e.g. `setSyncProfileId()` cancelling pending
   sync, `cancelScheduledSync()` on auth transitions, the caller pulling
@@ -158,13 +164,15 @@ Invariants that must be preserved when touching this area:
   The per-profile local-content-owner marker (`getLocalContentOwner` /
   `setLocalContentOwner` in `syncHelper.ts`) is a separate case: its key
   is also profile-ID-only, but its *value* is the owning account's id —
-  deliberate identity-attribution evidence, set only after a pull's
-  coherent snapshot has durably landed. Safe legacy adoption
+  deliberate identity-attribution evidence. It is established at two
+  boundaries, both after the content is durable: after a pull's coherent
+  snapshot has landed, and after a successful safe legacy adoption copy
+  (`adoptLegacyProfileValueIfSafe`). Safe legacy adoption
   (`decideLegacyKeyAdoption` in `profileStorage.ts`) and the
   foreign-content checks rely on it to keep one account from adopting or
   pushing another account's local content. Treat it as account-specific
-  evidence, not display state, and preserve its set-only-after-durable-
-  pull semantics.
+  evidence, not display state, and preserve both write boundaries (never
+  set it speculatively before content is durable).
 - **Active profile is device-local.** `dwp.activeProfile` is never
   cloud-synced. Only what value it may point at is corrected, against the
   current account's visible profile list.
@@ -186,9 +194,13 @@ Invariants that must be preserved when touching this area:
   (`markProfileLocallyDeleted` in `profileStorage.ts`) to keep it from
   being re-discovered there. The `deleted_at` column and the
   tombstone-aware read/adoption logic are groundwork only — never
-  document or rely on them as a cross-device delete path. Planner sync and
-  registry reconciliation are independent systems — neither calls into
-  the other; they share only the `profileId` key. Registry adoption is
+  document or rely on them as a cross-device delete path. Planner network sync
+  and registry reconciliation are separate endpoints/systems with
+  independent revision/reconciliation machinery — neither calls into the
+  other's sync path. They are not fully decoupled, though: safe legacy
+  adoption intentionally consults profile-registry provenance
+  (`isProfileUnclaimedByOtherAccount` over the local registry state) plus
+  the current user's ownership for cross-account safety; preserve that. Registry adoption is
   additive: a server-known id (active or tombstoned) is never overwritten
   or resurrected by a stale local copy, and a local id owned by a
   different account on this device is not adopted — except the canonical
