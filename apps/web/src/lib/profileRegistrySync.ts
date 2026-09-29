@@ -2588,18 +2588,34 @@ type ProfilePushEntry = Profile & { intent: "adopt" | "rename" };
  * scheduleSync()'s doPush() for planner sync.
  */
 async function pushProfilesToAdopt(toAdopt: ProfilePushEntry[]): Promise<void> {
-  if (toAdopt.length === 0) return;
+  await putProfiles(toAdopt);
+}
+
+/**
+ * The raw PUT behind pushProfilesToAdopt. Resolves with the response's
+ * `registered` ids, or null on any failure/empty batch. Reconciliation
+ * rounds ignore the result (see pushProfilesToAdopt's own doc); only
+ * pushNewProfileRegistration's display-only "Last synced" path reads it,
+ * and even there only alongside a confirmatory GET.
+ */
+async function putProfiles(toAdopt: ProfilePushEntry[]): Promise<string[] | null> {
+  if (toAdopt.length === 0) return null;
   try {
-    await fetch("/api/sync/profiles", {
+    const res = await fetch("/api/sync/profiles", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         profiles: toAdopt.map((p) => ({ profileId: p.id, name: p.name, intent: p.intent })),
       }),
     });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { registered?: unknown } | null;
+    if (!data || !Array.isArray(data.registered)) return null;
+    return data.registered.filter((id): id is string => typeof id === "string");
   } catch {
     // Best-effort — the confirmatory re-GET below determines what actually
     // committed, regardless of what happened to this request/response.
+    return null;
   }
 }
 
@@ -2622,8 +2638,18 @@ async function pushProfilesToAdopt(toAdopt: ProfilePushEntry[]): Promise<void> {
  * `"adopt"` (Codex finding #1) — a brand-new profile has no pending-rename
  * marker of its own yet, so this is never a rename push.
  */
-export async function pushNewProfileRegistration(profile: Profile): Promise<void> {
-  await pushProfilesToAdopt([{ ...profile, intent: "adopt" }]);
+export async function pushNewProfileRegistration(profile: Profile, userId?: string): Promise<void> {
+  const registered = await putProfiles([{ ...profile, intent: "adopt" }]);
+  // SH.7B — a registration this PUT reports as newly inserted counts as
+  // meaningful registry sync activity, but only once a fresh GET confirms
+  // the row (never from the PUT response alone) and only if the identity
+  // that started this is still the bound one.
+  if (!userId || !registered || !registered.includes(profile.id)) return;
+  const confirmed = await fetchServerProfiles();
+  if (registryIdentityState.currentUserId !== userId || confirmed === null) return;
+  if (confirmed.some((p) => !p.deletedAt && p.profileId === profile.id && p.name === profile.name)) {
+    recordRegistrySynced(userId, [profile.id]);
+  }
 }
 
 /**
@@ -2666,9 +2692,9 @@ export async function commitDiscoveredProfiles(
   authoritativeServerProfiles: ServerProfileRecord[],
   readLocallyDeletedIds: () => ReadonlySet<string>,
   mergeIntoLocal: (candidates: Profile[]) => void | Promise<void | Profile[]>
-): Promise<void> {
+): Promise<void | Profile[]> {
   const locallyDeletedIds = readLocallyDeletedIds();
-  await mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
+  return await mergeIntoLocal(selectActiveServerProfiles(authoritativeServerProfiles, locallyDeletedIds));
 }
 
 export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
@@ -2708,6 +2734,166 @@ export const DEV_COMMIT_DISCOVERED_PROFILES_CASES: Array<{
     // runner) ignores that and returns the NEWER commit-time set instead.
     locallyDeletedIdsAtCommitTime: new Set(["family"]),
     expectedMerged: [],
+  },
+];
+
+// ===== SH.7B REGISTRY "LAST SYNCED" PRESENTATION =====
+
+/**
+ * Same-tab event dispatched when a meaningful registry change is recorded
+ * (recordRegistrySynced). A presentation-only signal for Settings' "Last
+ * synced" row — deliberately separate from syncHelper.ts's
+ * SYNC_STATE_CHANGED_EVENT, so registry activity never touches planner sync
+ * state, status, or errors.
+ */
+export const PROFILE_REGISTRY_SYNCED_EVENT = "dwp:profileRegistrySynced";
+
+/**
+ * Display-only timestamp of the last MEANINGFUL registry change for a
+ * profile. Qualified by account (unlike planner's profile-only
+ * `dwp:sync:{profileId}:lastSyncedAt`), so it can't carry across accounts
+ * sharing an id like `default` on one browser. Never read by any sync logic.
+ */
+export function registryLastSyncedKey(userId: string, profileId: string): string {
+  return `dwp:registrySync:${userId}:${profileId}:lastSyncedAt`;
+}
+
+export function getRegistryLastSyncedAt(userId: string, profileId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return localStorage.getItem(registryLastSyncedKey(userId, profileId));
+  } catch {
+    return null;
+  }
+}
+
+function recordRegistrySynced(userId: string, profileIds: string[]): void {
+  if (typeof window === "undefined" || profileIds.length === 0) return;
+  const now = new Date().toISOString();
+  try {
+    for (const id of profileIds) localStorage.setItem(registryLastSyncedKey(userId, id), now);
+    window.dispatchEvent(new CustomEvent(PROFILE_REGISTRY_SYNCED_EVENT));
+  } catch {}
+}
+
+/**
+ * Pure: the profile ids a round MEANINGFULLY changed — the only ones that
+ * may refresh "Last synced". A request merely succeeding is never enough;
+ * an id counts only when:
+ *   - PUSHED (`pushed`, the adopt/rename entries this round sent): the
+ *     authoritative re-GET now shows that exact name on an active row, and
+ *     the round's initial GET did not (a new registration or a confirmed
+ *     rename); or
+ *   - DISCOVERED: absent from `localBefore`, present in `localAfter`, and an
+ *     active authoritative server row; or
+ *   - PULLED RENAME: in both lists with a different name, `localAfter`'s
+ *     name equal to the authoritative server name.
+ * A no-op round (everything already converged) returns []. Local deletion
+ * never appears here: it produces no server-side change and no entry.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES, selectMeaningfulRegistryChangeIds } from "@/lib/profileRegistrySync";
+ *   DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES.forEach(c => {
+ *     const got = selectMeaningfulRegistryChangeIds(c.initial, c.authoritative, c.pushed, c.localBefore, c.localAfter);
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectMeaningfulRegistryChangeIds(
+  initialServerProfiles: ServerProfileRecord[],
+  authoritativeServerProfiles: ServerProfileRecord[],
+  pushed: Profile[],
+  localBefore: Profile[],
+  localAfter: Profile[]
+): string[] {
+  const nameOf = (rows: ServerProfileRecord[]) =>
+    new Map(rows.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const initial = nameOf(initialServerProfiles);
+  const authoritative = nameOf(authoritativeServerProfiles);
+  const ids = new Set<string>();
+  for (const p of pushed) {
+    if (authoritative.get(p.id) === p.name && initial.get(p.id) !== p.name) ids.add(p.id);
+  }
+  const before = new Map(localBefore.map((p) => [p.id, p.name]));
+  for (const p of localAfter) {
+    const serverName = authoritative.get(p.id);
+    if (serverName === undefined) continue;
+    const beforeName = before.get(p.id);
+    if (beforeName === undefined || (beforeName !== p.name && serverName === p.name)) ids.add(p.id);
+  }
+  return [...ids];
+}
+
+export const DEV_SELECT_MEANINGFUL_REGISTRY_CHANGE_CASES: Array<{
+  name: string;
+  initial: ServerProfileRecord[];
+  authoritative: ServerProfileRecord[];
+  pushed: Profile[];
+  localBefore: Profile[];
+  localAfter: Profile[];
+  expected: string[];
+}> = [
+  {
+    name: "no-op round — converged everywhere, nothing pushed or changed locally",
+    initial: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }],
+    localAfter: [{ id: "default", name: "Default" }],
+    expected: [],
+  },
+  {
+    name: "confirmed new registration",
+    initial: [],
+    authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
+    pushed: [{ id: "mom", name: "Mom" }],
+    localBefore: [{ id: "mom", name: "Mom" }],
+    localAfter: [{ id: "mom", name: "Mom" }],
+    expected: ["mom"],
+  },
+  {
+    name: "push attempted but not confirmed by the re-GET — not meaningful",
+    initial: [],
+    authoritative: [],
+    pushed: [{ id: "mom", name: "Mom" }],
+    localBefore: [{ id: "mom", name: "Mom" }],
+    localAfter: [{ id: "mom", name: "Mom" }],
+    expected: [],
+  },
+  {
+    name: "confirmed rename push",
+    initial: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "y", deletedAt: null }],
+    pushed: [{ id: "default", name: "Trip" }],
+    localBefore: [{ id: "default", name: "Trip" }],
+    localAfter: [{ id: "default", name: "Trip" }],
+    expected: ["default"],
+  },
+  {
+    name: "remote profile discovered",
+    initial: [{ profileId: "dad", name: "Dad", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "dad", name: "Dad", updatedAt: "x", deletedAt: null }],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }],
+    localAfter: [{ id: "default", name: "Default" }, { id: "dad", name: "Dad" }],
+    expected: ["dad"],
+  },
+  {
+    name: "remote rename pulled",
+    initial: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }],
+    localAfter: [{ id: "default", name: "Trip" }],
+    expected: ["default"],
+  },
+  {
+    name: "local-only change with no server row (e.g. local delete) is never registry activity",
+    initial: [],
+    authoritative: [],
+    pushed: [],
+    localBefore: [{ id: "default", name: "Default" }, { id: "kid", name: "Kid" }],
+    localAfter: [{ id: "default", name: "Default" }],
+    expected: [],
   },
 ];
 
@@ -2986,10 +3172,24 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // so a concurrent local create/rename/delete can never be lost to a
   // stale reconciliation snapshot. commitDiscoveredProfiles's own await of
   // `mergeIntoLocal` propagates that here.
-  await commitDiscoveredProfiles(
+  const localBeforeDiscovery = getProfiles();
+  const discoveredMerge = await commitDiscoveredProfiles(
     authoritativeServerProfiles,
     () => getLocallyDeletedProfileIds(userId),
     adoptServerProfiles
+  );
+  // SH.7B — meaningful-change ids, accumulated across the round's three
+  // effects (confirmed push, discovery, pulled rename); see
+  // selectMeaningfulRegistryChangeIds. Recorded only at the end, and only
+  // if this round is still current.
+  const changedIds = new Set(
+    selectMeaningfulRegistryChangeIds(
+      initialServerProfiles,
+      authoritativeServerProfiles,
+      toPush,
+      localBeforeDiscovery,
+      Array.isArray(discoveredMerge) ? discoveredMerge : localBeforeDiscovery
+    )
   );
 
   // SH.5 — rename propagation, pull side: an id THIS device already knows
@@ -3044,5 +3244,18 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
     visibleLocalProfilesAtCommit,
     pendingRenameIdsAtCommit
   );
-  await applyServerRenames(renamesToApply);
+  const renamedMerge = await applyServerRenames(renamesToApply);
+  for (const id of selectMeaningfulRegistryChangeIds(
+    initialServerProfiles,
+    authoritativeServerProfiles,
+    [],
+    visibleLocalProfilesAtCommit,
+    renamedMerge
+  )) {
+    changedIds.add(id);
+  }
+  // A no-op round (nothing pushed-and-confirmed, discovered, or renamed)
+  // leaves changedIds empty and never refreshes "Last synced".
+  if (!isCurrent()) return;
+  recordRegistrySynced(userId, [...changedIds]);
 }
