@@ -166,9 +166,15 @@ Invariants that must be preserved when touching this area:
   prevention still apply.
 - **Profile registry is separate.** `user_profiles` (via
   `/api/sync/profiles`, reconciled client-side by `profileRegistrySync.ts`)
-  syncs profile *identity metadata* (id + name, with soft-delete
-  tombstones) across an account's devices. It never carries planner
-  content and has no revision/pending-op machinery. Planner sync and
+  syncs profile *identity metadata* (id + name) across an account's
+  devices. It never carries planner content and has no
+  revision/pending-op machinery. Profile deletion is NOT synchronized:
+  no code path sets `deleted_at` and there is no delete endpoint, so a
+  delete stays device-local, recorded per account on that device
+  (`markProfileLocallyDeleted` in `profileStorage.ts`) to keep it from
+  being re-discovered there. The `deleted_at` column and the
+  tombstone-aware read/adoption logic are groundwork only — never
+  document or rely on them as a cross-device delete path. Planner sync and
   registry reconciliation are independent systems — neither calls into
   the other; they share only the `profileId` key. Registry adoption is
   additive: a server-known id (active or tombstoned) is never overwritten
