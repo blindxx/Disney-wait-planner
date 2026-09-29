@@ -2646,7 +2646,7 @@ export async function pushNewProfileRegistration(profile: Profile, userId?: stri
   // then see the row already present with nothing left to push. The next
   // authoritative GET that shows this exact name completes it (once) — see
   // selectConfirmedPendingRegistryActivity.
-  if (userId) addPendingRegistryConfirmations(userId, [profile]);
+  if (userId) await addPendingRegistryConfirmations(userId, [profile]);
   const registered = await putProfiles([{ ...profile, intent: "adopt" }]);
   // Activity is recorded only once a fresh GET confirms the row (never from
   // the PUT response alone) and only if the identity that started this is
@@ -2655,8 +2655,11 @@ export async function pushNewProfileRegistration(profile: Profile, userId?: stri
   const confirmed = await fetchServerProfiles();
   if (registryIdentityState.currentUserId !== userId || confirmed === null) return;
   if (confirmed.some((p) => !p.deletedAt && p.profileId === profile.id && p.name === profile.name)) {
-    recordRegistrySynced(userId, [profile.id]);
-    removePendingRegistryConfirmations(userId, [profile.id]);
+    // Consumed only if the evidence still holds THIS name — a newer rename
+    // of the same id keeps its own evidence and records on its own confirmation.
+    if (await consumePendingRegistryConfirmation(userId, profile.id, profile.name)) {
+      recordRegistrySynced(userId, [profile.id]);
+    }
   }
 }
 
@@ -3009,62 +3012,104 @@ export const DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES: Array<{
 /**
  * SH.7B — evidence for a push that may have COMMITTED without this client
  * ever seeing its confirmation (lost PUT response, or a failed confirmatory
- * GET). Display-only, account-qualified `{ profileId: pushedName }`: written
- * just before a push is attempted, removed the moment an authoritative GET
- * confirms that exact name (which is also when "Last synced" is recorded —
- * once), so a later fully converged round finds nothing and records nothing.
- * Separate from the planner-style pending-rename ledger on purpose: that
- * marker covers renames only and is cleared by the same confirmation step,
- * and registrations have no marker at all. Never read by sync decisions.
+ * GET). Display-only, account-qualified, ONE localStorage key PER PROFILE
+ * (`dwp:registrySync:{userId}:pending:{profileId}` = the pushed name), so
+ * evidence for different ids can never overwrite each other across tabs (no
+ * shared read-modify-write map). Written just before a push is attempted;
+ * consumed only by a CONDITIONAL delete (`consumePendingEvidenceIfMatches`:
+ * removed only while the stored name still equals the exact name being
+ * confirmed), so an older confirmation can never erase newer evidence — e.g.
+ * a later rename of the same id. Same-id writes are last-writer-wins, which
+ * is the desired "newest intent" behavior; the per-key Web Lock below makes
+ * each check-then-remove atomic across tabs where the API exists (same
+ * best-effort fallback as profileStorage.ts's local mutation locks). Never
+ * read by any sync decision.
  */
-function pendingConfirmKey(userId: string): string {
-  return `dwp:registrySync:${userId}:pendingConfirm`;
+export type PendingEvidenceStore = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
+
+function pendingEvidencePrefix(userId: string): string {
+  return `dwp:registrySync:${userId}:pending:`;
+}
+
+export function pendingEvidenceKey(userId: string, profileId: string): string {
+  return `${pendingEvidencePrefix(userId)}${profileId}`;
+}
+
+export function setPendingEvidence(store: PendingEvidenceStore, userId: string, profileId: string, name: string): void {
+  store.setItem(pendingEvidenceKey(userId, profileId), name);
+}
+
+/** Removes the evidence only if it still holds exactly `name`; true when consumed. */
+export function consumePendingEvidenceIfMatches(
+  store: PendingEvidenceStore,
+  userId: string,
+  profileId: string,
+  name: string
+): boolean {
+  const key = pendingEvidenceKey(userId, profileId);
+  if (store.getItem(key) !== name) return false;
+  store.removeItem(key);
+  return true;
+}
+
+export function readPendingEvidence(store: PendingEvidenceStore, userId: string): Record<string, string> {
+  const prefix = pendingEvidencePrefix(userId);
+  const out: Record<string, string> = {};
+  for (let i = 0; i < store.length; i++) {
+    const key = store.key(i);
+    if (!key || !key.startsWith(prefix)) continue;
+    const value = store.getItem(key);
+    if (typeof value === "string") out[key.slice(prefix.length)] = value;
+  }
+  return out;
+}
+
+function withPendingEvidenceLock<T>(userId: string, profileId: string, fn: () => T): Promise<T> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.locks?.request) {
+      return navigator.locks.request(pendingEvidenceKey(userId, profileId), () => fn()).then((v) => v);
+    }
+  } catch {}
+  return Promise.resolve(fn());
+}
+
+async function addPendingRegistryConfirmations(userId: string, entries: Profile[]): Promise<void> {
+  if (typeof window === "undefined") return;
+  for (const e of entries) {
+    try {
+      await withPendingEvidenceLock(userId, e.id, () => setPendingEvidence(localStorage, userId, e.id, e.name));
+    } catch {}
+  }
+}
+
+async function consumePendingRegistryConfirmation(userId: string, profileId: string, name: string): Promise<boolean> {
+  if (typeof window === "undefined") return false;
+  try {
+    return await withPendingEvidenceLock(userId, profileId, () =>
+      consumePendingEvidenceIfMatches(localStorage, userId, profileId, name)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function readPendingRegistryConfirmations(userId: string): Record<string, string> {
   if (typeof window === "undefined") return {};
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(pendingConfirmKey(userId)) ?? "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === "string")) as Record<string, string>;
+    return readPendingEvidence(localStorage, userId);
   } catch {
     return {};
   }
 }
 
-function writePendingRegistryConfirmations(userId: string, pending: Record<string, string>): void {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(pendingConfirmKey(userId), JSON.stringify(pending));
-  } catch {}
-}
-
-function addPendingRegistryConfirmations(userId: string, entries: Profile[]): void {
-  if (entries.length === 0) return;
-  const pending = readPendingRegistryConfirmations(userId);
-  for (const e of entries) pending[e.id] = e.name;
-  writePendingRegistryConfirmations(userId, pending);
-}
-
-function removePendingRegistryConfirmations(userId: string, ids: string[]): void {
-  const pending = readPendingRegistryConfirmations(userId);
-  let changed = false;
-  for (const id of ids) {
-    if (id in pending) {
-      delete pending[id];
-      changed = true;
-    }
-  }
-  if (changed) writePendingRegistryConfirmations(userId, pending);
-}
-
 /**
- * Pure: split unconfirmed-push evidence into ids an authoritative GET now
- * confirms (active row with exactly the recorded name, and the id visible
- * to this account) and what remains. Confirmed entries are consumed, so an
- * operation counts exactly once. Entries whose id is no longer visible to
- * this account (e.g. locally deleted) are dropped without counting; other
- * unconfirmed entries are kept for a later round.
+ * Pure: split a snapshot of unconfirmed-push evidence into entries an
+ * authoritative GET now confirms (active row with exactly the recorded name,
+ * id visible to this account) and entries to DROP without counting (id no
+ * longer visible to this account, e.g. locally deleted). Anything else is
+ * left in place for a later round. The caller consumes each returned entry
+ * with the conditional delete above and counts only entries actually
+ * consumed, so an operation counts once and newer evidence is never erased.
  *
  * Run from Node:
  *   import { DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES, selectConfirmedPendingRegistryActivity } from "@/lib/profileRegistrySync";
@@ -3077,16 +3122,15 @@ export function selectConfirmedPendingRegistryActivity(
   pending: Record<string, string>,
   authoritativeServerProfiles: ServerProfileRecord[],
   visibleIds: ReadonlySet<string>
-): { confirmedIds: string[]; remaining: Record<string, string> } {
+): { confirmed: Profile[]; dropped: Profile[] } {
   const serverNames = new Map(authoritativeServerProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
-  const confirmedIds: string[] = [];
-  const remaining: Record<string, string> = {};
+  const confirmed: Profile[] = [];
+  const dropped: Profile[] = [];
   for (const [id, name] of Object.entries(pending)) {
-    if (!visibleIds.has(id)) continue;
-    if (serverNames.get(id) === name) confirmedIds.push(id);
-    else remaining[id] = name;
+    if (!visibleIds.has(id)) dropped.push({ id, name });
+    else if (serverNames.get(id) === name) confirmed.push({ id, name });
   }
-  return { confirmedIds, remaining };
+  return { confirmed, dropped };
 }
 
 export const DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES: Array<{
@@ -3094,42 +3138,107 @@ export const DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES: Array<{
   pending: Record<string, string>;
   authoritative: ServerProfileRecord[];
   visibleIds: string[];
-  expected: { confirmedIds: string[]; remaining: Record<string, string> };
+  expected: { confirmed: Profile[]; dropped: Profile[] };
 }> = [
   {
-    name: "PUT committed but immediate confirmation failed; a later round's GET shows the registration — counts once and is consumed",
+    name: "PUT committed but immediate confirmation failed; a later round's GET shows the registration — confirmed",
     pending: { mom: "Mom" },
     authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
     visibleIds: ["default", "mom"],
-    expected: { confirmedIds: ["mom"], remaining: {} },
+    expected: { confirmed: [{ id: "mom", name: "Mom" }], dropped: [] },
   },
   {
-    name: "same for a rename: later GET already matches the pushed name (toPush is empty that round) — counts once",
+    name: "same for a rename: later GET already matches the pushed name (toPush is empty that round) — confirmed",
     pending: { default: "Trip" },
     authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
     visibleIds: ["default"],
-    expected: { confirmedIds: ["default"], remaining: {} },
+    expected: { confirmed: [{ id: "default", name: "Trip" }], dropped: [] },
   },
   {
     name: "subsequent fully converged round — evidence already consumed, nothing to count",
     pending: {},
     authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
     visibleIds: ["default"],
-    expected: { confirmedIds: [], remaining: {} },
+    expected: { confirmed: [], dropped: [] },
   },
   {
-    name: "not yet confirmed (server still lacks it / has another name) — kept, never counted from the attempt alone",
+    name: "not yet confirmed (server lacks it / has another name) — neither confirmed nor dropped, survives for a later round",
     pending: { mom: "Mom", default: "Trip" },
     authoritative: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
     visibleIds: ["default", "mom"],
-    expected: { confirmedIds: [], remaining: { mom: "Mom", default: "Trip" } },
+    expected: { confirmed: [], dropped: [] },
   },
   {
     name: "id no longer visible to this account (locally deleted) — dropped without counting",
     pending: { mom: "Mom" },
     authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
     visibleIds: ["default"],
-    expected: { confirmedIds: [], remaining: {} },
+    expected: { confirmed: [], dropped: [{ id: "mom", name: "Mom" }] },
+  },
+];
+
+/**
+ * Regression coverage for the per-profile, conditionally-consumed evidence
+ * store, run against an in-memory store. Each case replays `steps` in order
+ * (`set` = write evidence; `consume` = conditional delete, whose boolean
+ * result must equal `consumed`) and then compares the account's evidence.
+ *
+ * Run from Node:
+ *   import { DEV_PENDING_EVIDENCE_CASES, setPendingEvidence, consumePendingEvidenceIfMatches, readPendingEvidence } from "@/lib/profileRegistrySync";
+ *   DEV_PENDING_EVIDENCE_CASES.forEach(c => {
+ *     const m = new Map(); const store = { get length() { return m.size; }, key: (i) => [...m.keys()][i] ?? null, getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k) };
+ *     let ok = true;
+ *     for (const s of c.steps) {
+ *       if (s.op === "set") setPendingEvidence(store, s.userId ?? "u", s.id, s.name);
+ *       else ok = ok && consumePendingEvidenceIfMatches(store, s.userId ?? "u", s.id, s.name) === s.consumed;
+ *     }
+ *     const got = { u: readPendingEvidence(store, "u"), other: readPendingEvidence(store, "other") };
+ *     console.log(ok && JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_PENDING_EVIDENCE_CASES: Array<{
+  name: string;
+  steps: Array<
+    | { op: "set"; id: string; name: string; userId?: string }
+    | { op: "consume"; id: string; name: string; consumed: boolean; userId?: string }
+  >;
+  expected: { u: Record<string, string>; other: Record<string, string> };
+}> = [
+  {
+    name: "stale older registration confirmation must NOT erase newer rename evidence (family: Family, then Disney Trip; older confirms 'Family')",
+    steps: [
+      { op: "set", id: "family", name: "Family" },
+      { op: "set", id: "family", name: "Disney Trip" },
+      { op: "consume", id: "family", name: "Family", consumed: false },
+    ],
+    expected: { u: { family: "Disney Trip" }, other: {} },
+  },
+  {
+    name: "normal one-time consumption when the stored name still matches",
+    steps: [
+      { op: "set", id: "family", name: "Family" },
+      { op: "consume", id: "family", name: "Family", consumed: true },
+      { op: "consume", id: "family", name: "Family", consumed: false },
+    ],
+    expected: { u: {}, other: {} },
+  },
+  {
+    name: "evidence for different profile ids is independent — consuming one leaves the other",
+    steps: [
+      { op: "set", id: "family", name: "Family" },
+      { op: "set", id: "default", name: "Trip" },
+      { op: "consume", id: "family", name: "Family", consumed: true },
+    ],
+    expected: { u: { default: "Trip" }, other: {} },
+  },
+  {
+    name: "account qualification — another account's evidence for the same id is untouched",
+    steps: [
+      { op: "set", id: "default", name: "Trip", userId: "other" },
+      { op: "set", id: "default", name: "Trip" },
+      { op: "consume", id: "default", name: "Trip", consumed: true },
+    ],
+    expected: { u: {}, other: { default: "Trip" } },
   },
 ];
 
@@ -3340,7 +3449,7 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
   if (pushAttempted) {
     // SH.7B — evidence in case this push commits but its confirmation is lost.
-    addPendingRegistryConfirmations(userId, toPush.map((p) => ({ id: p.id, name: p.name })));
+    await addPendingRegistryConfirmations(userId, toPush.map((p) => ({ id: p.id, name: p.name })));
     await sendAdoptionBatches(batches, pushProfilesToAdopt, isCurrent);
     if (!isCurrent()) return;
     reconfirmedServerProfiles = await fetchServerProfiles();
@@ -3508,12 +3617,25 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   if (!isCurrent()) return;
   // Confirmation of an earlier (or this round's) push, decided from the
   // authoritative GET only; consumed here so it counts exactly once.
-  const { confirmedIds, remaining } = selectConfirmedPendingRegistryActivity(
+  const { confirmed, dropped } = selectConfirmedPendingRegistryActivity(
     readPendingRegistryConfirmations(userId),
     authoritativeServerProfiles,
     new Set(getVisibleProfiles(userId).map((p) => p.id))
   );
-  for (const id of confirmedIds) changedIds.add(id);
-  writePendingRegistryConfirmations(userId, remaining);
-  recordRegistrySynced(userId, [...changedIds]);
+  // Each entry is consumed with the exact-name conditional delete; only a
+  // successful consume counts, so a concurrent tab or a newer rename's
+  // evidence is never double-counted or erased. Unconfirmed evidence is left
+  // untouched (no map rewrite).
+  // The current-round check runs BEFORE each consume; an entry already
+  // consumed is recorded (account-qualified, so safe) rather than lost.
+  const consumedIds: string[] = [];
+  for (const e of confirmed) {
+    if (!isCurrent()) break;
+    if (await consumePendingRegistryConfirmation(userId, e.id, e.name)) consumedIds.push(e.id);
+  }
+  for (const e of dropped) {
+    if (!isCurrent()) break;
+    await consumePendingRegistryConfirmation(userId, e.id, e.name);
+  }
+  recordRegistrySynced(userId, isCurrent() ? [...changedIds, ...consumedIds] : consumedIds);
 }
