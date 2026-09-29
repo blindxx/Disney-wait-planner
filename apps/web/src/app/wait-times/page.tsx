@@ -62,6 +62,12 @@ import {
 // RESORT + PARK CONSTANTS
 // ============================================
 
+/** User-facing subtext (presentation only; ResortId/timezone contracts unchanged). */
+const RESORT_CLOCK_LABELS: Record<ResortId, string> = {
+  WDW: "Disney World local time",
+  DLR: "Disneyland local time",
+};
+
 /**
  * Subtle resort-local clock. Owns its own tick state so a tick re-renders only
  * this component — it never touches wait-data fetch/refresh/cache state.
@@ -77,15 +83,15 @@ function ResortClock({ resort }: { resort: ResortId }) {
   }, []);
   return (
     <div
-      aria-label={`${resort} local time`}
-      style={{ marginLeft: "auto", textAlign: "right", lineHeight: 1.25 }}
+      aria-label={RESORT_CLOCK_LABELS[resort]}
+      style={{ marginBottom: "12px", lineHeight: 1.25 }}
     >
       <div style={{ fontSize: "13px", fontWeight: 600, color: "#374151", minHeight: "16px" }}>
         {now
           ? `${formatResortLocalTime(resort, now)} ${getResortTimeZoneAbbreviation(resort, now)}`
           : " "}
       </div>
-      <div style={{ fontSize: "11px", color: "#9ca3af" }}>{resort} local time</div>
+      <div style={{ fontSize: "11px", color: "#9ca3af" }}>{RESORT_CLOCK_LABELS[resort]}</div>
     </div>
   );
 }
@@ -782,7 +788,7 @@ export default function WaitTimesPage() {
         {ready ? (
           <>
             {/* Resort Toggle — DLR | WDW */}
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
+            <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
               {(Object.keys(RESORT_LABELS) as ResortId[]).map((resortId) => (
                 <button
                   key={resortId}
@@ -797,7 +803,6 @@ export default function WaitTimesPage() {
                   {RESORT_LABELS[resortId]}
                 </button>
               ))}
-              <ResortClock resort={selectedResort} />
             </div>
 
             {/* Park Tabs — scoped to selected resort */}
@@ -862,6 +867,9 @@ export default function WaitTimesPage() {
                 Set as default
               </button>
             )}
+
+            {/* Resort-local clock — below park/default context, above filters */}
+            <ResortClock resort={selectedResort} />
           </>
         ) : (
           /* Skeleton placeholders preserve layout while hydration runs */
@@ -875,6 +883,7 @@ export default function WaitTimesPage() {
               <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
             </div>
             <div style={{ height: 20, marginBottom: "8px" }} />
+            <div style={{ height: 30, marginBottom: "12px" }} />
           </>
         )}
 
