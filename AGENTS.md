@@ -173,20 +173,30 @@ Invariants that must be preserved when touching this area:
   the other; they share only the `profileId` key. Registry adoption is
   additive: a server-known id (active or tombstoned) is never overwritten
   or resurrected by a stale local copy, and a local id owned by a
-  different account on this device is not adopted.
+  different account on this device is not adopted — except the canonical
+  shared `default` profile (`CANONICAL_SHARED_PROFILE_ID` in
+  `profileStorage.ts`), which is exempt from that cross-account
+  exclusion: every account legitimately has its own `default`, so one
+  account's registration of it must never block another's. Its planner
+  content stays isolated by account + profile like any other id.
 - **Root authenticated-lifecycle guards.** `SessionProviderWrapper.tsx`
   (mounted once in the root layout, before page children) owns the
-  page-independent auth-transition behavior: correcting the active
-  profile (`ensureActiveProfileVisible`), safe legacy adoption of
-  unqualified local data into account-qualified keys
+  global, page-independent *baseline* authenticated lifecycle: correcting
+  the active profile (`ensureActiveProfileVisible`), safe legacy adoption
+  of unqualified local data into account-qualified keys
   (`adoptLegacyProfileValueIfSafe`), and starting registry
   reconciliation. While the session status is `loading` (unresolved
   identity), active-profile correction, legacy adoption, and
   reconciliation startup are all withheld, but the registry identity is
   still cleared (`setRegistryIdentity(null)`) so an in-flight
   reconciliation round from the prior account stops at its next
-  currency check. Pages must not reimplement or skip these; add new
-  required lifecycle behavior there rather than in a single page.
+  currency check. Some page-level calls are intentional supplements, not
+  duplicates, and must be kept: Plans/Lightning also call
+  `adoptLegacyProfileValueIfSafe` (idempotent, safe to repeat) as part of
+  retargeting their own storage identity, and Settings also calls
+  `reconcileProfileRegistry` for a prompt UI refresh. Do not remove them
+  on the assumption the root guards cover them; do not add new baseline
+  lifecycle behavior to a single page — put it in the root guards.
 - **Legacy compatibility.** Pre-account local data (unqualified keys,
   legacy `dwp.myPlans`-style values) and legacy server plans remain
   adoptable/readable only through the existing safe-adoption and
