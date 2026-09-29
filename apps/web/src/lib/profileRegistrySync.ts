@@ -2641,16 +2641,22 @@ async function putProfiles(toAdopt: ProfilePushEntry[]): Promise<string[] | null
  * marker of its own yet, so this is never a rename push.
  */
 export async function pushNewProfileRegistration(profile: Profile, userId?: string): Promise<void> {
+  // SH.7B — remember the attempt BEFORE the PUT: a PUT can commit while its
+  // response or the confirmatory GET below is lost, and a later round would
+  // then see the row already present with nothing left to push. The next
+  // authoritative GET that shows this exact name completes it (once) — see
+  // selectConfirmedPendingRegistryActivity.
+  if (userId) addPendingRegistryConfirmations(userId, [profile]);
   const registered = await putProfiles([{ ...profile, intent: "adopt" }]);
-  // SH.7B — a registration this PUT reports as newly inserted counts as
-  // meaningful registry sync activity, but only once a fresh GET confirms
-  // the row (never from the PUT response alone) and only if the identity
-  // that started this is still the bound one.
+  // Activity is recorded only once a fresh GET confirms the row (never from
+  // the PUT response alone) and only if the identity that started this is
+  // still the bound one.
   if (!userId || !registered || !registered.includes(profile.id)) return;
   const confirmed = await fetchServerProfiles();
   if (registryIdentityState.currentUserId !== userId || confirmed === null) return;
   if (confirmed.some((p) => !p.deletedAt && p.profileId === profile.id && p.name === profile.name)) {
     recordRegistrySynced(userId, [profile.id]);
+    removePendingRegistryConfirmations(userId, [profile.id]);
   }
 }
 
@@ -3001,6 +3007,133 @@ export const DEV_REGISTRY_RENAME_STAGE_VISIBILITY_CASES: Array<{
 ];
 
 /**
+ * SH.7B — evidence for a push that may have COMMITTED without this client
+ * ever seeing its confirmation (lost PUT response, or a failed confirmatory
+ * GET). Display-only, account-qualified `{ profileId: pushedName }`: written
+ * just before a push is attempted, removed the moment an authoritative GET
+ * confirms that exact name (which is also when "Last synced" is recorded —
+ * once), so a later fully converged round finds nothing and records nothing.
+ * Separate from the planner-style pending-rename ledger on purpose: that
+ * marker covers renames only and is cleared by the same confirmation step,
+ * and registrations have no marker at all. Never read by sync decisions.
+ */
+function pendingConfirmKey(userId: string): string {
+  return `dwp:registrySync:${userId}:pendingConfirm`;
+}
+
+function readPendingRegistryConfirmations(userId: string): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(pendingConfirmKey(userId)) ?? "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(([, v]) => typeof v === "string")) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function writePendingRegistryConfirmations(userId: string, pending: Record<string, string>): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(pendingConfirmKey(userId), JSON.stringify(pending));
+  } catch {}
+}
+
+function addPendingRegistryConfirmations(userId: string, entries: Profile[]): void {
+  if (entries.length === 0) return;
+  const pending = readPendingRegistryConfirmations(userId);
+  for (const e of entries) pending[e.id] = e.name;
+  writePendingRegistryConfirmations(userId, pending);
+}
+
+function removePendingRegistryConfirmations(userId: string, ids: string[]): void {
+  const pending = readPendingRegistryConfirmations(userId);
+  let changed = false;
+  for (const id of ids) {
+    if (id in pending) {
+      delete pending[id];
+      changed = true;
+    }
+  }
+  if (changed) writePendingRegistryConfirmations(userId, pending);
+}
+
+/**
+ * Pure: split unconfirmed-push evidence into ids an authoritative GET now
+ * confirms (active row with exactly the recorded name, and the id visible
+ * to this account) and what remains. Confirmed entries are consumed, so an
+ * operation counts exactly once. Entries whose id is no longer visible to
+ * this account (e.g. locally deleted) are dropped without counting; other
+ * unconfirmed entries are kept for a later round.
+ *
+ * Run from Node:
+ *   import { DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES, selectConfirmedPendingRegistryActivity } from "@/lib/profileRegistrySync";
+ *   DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES.forEach(c => {
+ *     const got = selectConfirmedPendingRegistryActivity(c.pending, c.authoritative, new Set(c.visibleIds));
+ *     console.log(JSON.stringify(got) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export function selectConfirmedPendingRegistryActivity(
+  pending: Record<string, string>,
+  authoritativeServerProfiles: ServerProfileRecord[],
+  visibleIds: ReadonlySet<string>
+): { confirmedIds: string[]; remaining: Record<string, string> } {
+  const serverNames = new Map(authoritativeServerProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
+  const confirmedIds: string[] = [];
+  const remaining: Record<string, string> = {};
+  for (const [id, name] of Object.entries(pending)) {
+    if (!visibleIds.has(id)) continue;
+    if (serverNames.get(id) === name) confirmedIds.push(id);
+    else remaining[id] = name;
+  }
+  return { confirmedIds, remaining };
+}
+
+export const DEV_SELECT_CONFIRMED_PENDING_REGISTRY_ACTIVITY_CASES: Array<{
+  name: string;
+  pending: Record<string, string>;
+  authoritative: ServerProfileRecord[];
+  visibleIds: string[];
+  expected: { confirmedIds: string[]; remaining: Record<string, string> };
+}> = [
+  {
+    name: "PUT committed but immediate confirmation failed; a later round's GET shows the registration — counts once and is consumed",
+    pending: { mom: "Mom" },
+    authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default", "mom"],
+    expected: { confirmedIds: ["mom"], remaining: {} },
+  },
+  {
+    name: "same for a rename: later GET already matches the pushed name (toPush is empty that round) — counts once",
+    pending: { default: "Trip" },
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default"],
+    expected: { confirmedIds: ["default"], remaining: {} },
+  },
+  {
+    name: "subsequent fully converged round — evidence already consumed, nothing to count",
+    pending: {},
+    authoritative: [{ profileId: "default", name: "Trip", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default"],
+    expected: { confirmedIds: [], remaining: {} },
+  },
+  {
+    name: "not yet confirmed (server still lacks it / has another name) — kept, never counted from the attempt alone",
+    pending: { mom: "Mom", default: "Trip" },
+    authoritative: [{ profileId: "default", name: "Default", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default", "mom"],
+    expected: { confirmedIds: [], remaining: { mom: "Mom", default: "Trip" } },
+  },
+  {
+    name: "id no longer visible to this account (locally deleted) — dropped without counting",
+    pending: { mom: "Mom" },
+    authoritative: [{ profileId: "mom", name: "Mom", updatedAt: "x", deletedAt: null }],
+    visibleIds: ["default"],
+    expected: { confirmedIds: [], remaining: {} },
+  },
+];
+
+/**
  * Runs one round of registry reconciliation for `userId`, the authenticated
  * identity the caller has ALREADY bound via setRegistryIdentity(userId)
  * (called synchronously, immediately before this) — refuses to run at all
@@ -3206,6 +3339,8 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   const pushAttempted = batches.length > 0;
   let reconfirmedServerProfiles: ServerProfileRecord[] | null = null;
   if (pushAttempted) {
+    // SH.7B — evidence in case this push commits but its confirmation is lost.
+    addPendingRegistryConfirmations(userId, toPush.map((p) => ({ id: p.id, name: p.name })));
     await sendAdoptionBatches(batches, pushProfilesToAdopt, isCurrent);
     if (!isCurrent()) return;
     reconfirmedServerProfiles = await fetchServerProfiles();
@@ -3371,5 +3506,14 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // A no-op round (nothing pushed-and-confirmed, discovered, or renamed)
   // leaves changedIds empty and never refreshes "Last synced".
   if (!isCurrent()) return;
+  // Confirmation of an earlier (or this round's) push, decided from the
+  // authoritative GET only; consumed here so it counts exactly once.
+  const { confirmedIds, remaining } = selectConfirmedPendingRegistryActivity(
+    readPendingRegistryConfirmations(userId),
+    authoritativeServerProfiles,
+    new Set(getVisibleProfiles(userId).map((p) => p.id))
+  );
+  for (const id of confirmedIds) changedIds.add(id);
+  writePendingRegistryConfirmations(userId, remaining);
   recordRegistrySynced(userId, [...changedIds]);
 }
