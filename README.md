@@ -38,8 +38,10 @@ The system enforces a strict boundary between live data and local planner state,
 
 ### Profiles & Sync
 
-- Multiple local profiles with isolated storage
-- Optional sign-in with cloud sync (pull-before-push, so cloud data is never silently overwritten)
+- Multiple profiles with isolated planner data
+- Optional sign-in with cloud sync across devices
+- Signed-in profiles and profile names are available across devices
+- Pull-before-push and conflict-safe sync protect cloud data from being silently overwritten
 
 ### Ask Tom
 
