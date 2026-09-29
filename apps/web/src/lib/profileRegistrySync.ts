@@ -456,12 +456,29 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
  *     back over it. Such a `default` mismatch is STILL added to
  *     `idsToMarkComplete` (migration is complete either way — there's no
  *     further pre-ledger local intent left to discover for it), just not to
- *     `toBackfillAsPending`. A NON-default id has no such ambiguity: under
- *     the pre-ledger code, renameProfile() never pushed anything to the
- *     server for ANY id, so the server's name for a non-default id can only
- *     ever differ from a local copy this account already has BECAUSE this
- *     device renamed it locally — there is no other way that mismatch could
- *     have arisen.
+ *     `toBackfillAsPending`. A non-default id gets no equivalent bootstrap
+ *     check, because it has no equivalent auto-created "untouched" value to
+ *     detect — every non-default id this account locally holds got there
+ *     either by this device genuinely creating/renaming it, or by adopting
+ *     it with whatever name the server already had, so a later mismatch
+ *     ordinarily does mean local, self-initiated intent to preserve.
+ *
+ * Bounded scope, NOT a general conflict resolver: this is a one-time,
+ * best-effort migration heuristic for the transition off purely-local
+ * renames, not a mechanism for correctly resolving genuinely ambiguous,
+ * concurrent multi-device pre-SH.5 rename intent (e.g. two devices each
+ * carrying their OWN distinct customization for the same id, racing to be
+ * the first to reconcile post-upgrade). Like the separately-deferred
+ * simultaneous two-tab rename ordering race, resolving that ambiguity is
+ * explicitly out of scope here — this function does not attempt to add new
+ * conflict-detection or versioning architecture to arbitrate it. What it
+ * DOES guarantee, unconditionally, is the bounded, one-time nature of the
+ * migration itself: any id this function examines is judged exactly once
+ * per (profileId, accountKey) — `idsToMarkComplete`'s one-time guard — after
+ * which normal SH.5 rename reconciliation (computeProfilesToRename /
+ * selectServerRenamesToApply) exclusively governs it, so a later, ordinary
+ * (non-concurrent) remote rename is always pulled normally rather than
+ * re-examined by this legacy path.
  *
  * Pure — takes every input as a parameter.
  *
@@ -521,7 +538,7 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
     expected: { toBackfillAsPending: [], idsToMarkComplete: ["default"] },
   },
   {
-    name: "a non-default id's local/server mismatch with no marker is always backfilled — under the pre-ledger code, no OTHER mechanism could have produced this mismatch",
+    name: "a non-default id's local/server mismatch with no marker is treated as this device's own genuine pre-SH.5 customization and backfilled — non-default ids have no bootstrap-value exception the way `default` does",
     serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "family", name: "The Smiths" }],
     pendingRenames: {},
@@ -757,6 +774,105 @@ export const DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES: Array<{
     serverProfilesRound1: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     serverProfilesRound2: [{ profileId: "family", name: "The Smiths", updatedAt: "2026-02-01T00:00:00.000Z", deletedAt: null }],
     remoteRenamedName: "The Smiths",
+  },
+];
+
+/**
+ * Codex finding — composed end-to-end regression for the bounded pre-SH.5
+ * migration's `default` exception: a GENUINELY UNTOUCHED device (local
+ * `default` still the literal bootstrap `DEFAULT_PROFILE_NAME`) whose server
+ * `default` already carries a DIFFERENT device's genuine custom name must
+ * PULL that custom name normally, not treat its own untouched bootstrap
+ * value as something to preserve.
+ *
+ * Round 1 (first post-upgrade reconciliation): local `default` is still the
+ * literal bootstrap value; the server's `default` is already a custom name
+ * pushed by another device. `toBackfillAsPending` must stay empty (nothing
+ * of this device's own to preserve) while `idsToMarkComplete` still records
+ * `default` (migration is done either way — see this function's own doc).
+ * With no pending marker created, `selectServerRenamesToApply` — the normal,
+ * unrelated pull path — must then propose pulling the server's custom name,
+ * and merging it must actually update the local copy.
+ *
+ * Round 2 (immediately after, one-time-guard check): with `default` now
+ * marked complete AND locally updated to match the server, a second
+ * reconciliation must not re-propose it for backfill at all (both lists
+ * empty) — proving the migration ran exactly once.
+ *
+ * Round 3 (a later, ordinary remote rename after migration completion):
+ * some OTHER device renames `default` again. Because migration already
+ * completed in round 1, this is governed exclusively by normal SH.5
+ * reconciliation — `selectServerRenamesToApply` must pull it like any other
+ * remote rename, and `computeRenameBackfillCandidates` must still report
+ * `default` as fully excluded (never re-examined by this legacy path).
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_UNTOUCHED_DEFAULT_PULLS_SERVER_CUSTOM_NAME_CASES,
+ *     computeRenameBackfillCandidates,
+ *     selectServerRenamesToApply,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyRenameBackfillStamp,
+ *     selectRenameBackfilledIdsForAccount,
+ *     mergeProfileRenames,
+ *   } from "@/lib/profileStorage";
+ *   DEV_UNTOUCHED_DEFAULT_PULLS_SERVER_CUSTOM_NAME_CASES.forEach(c => {
+ *     // Round 1: untouched local `default`, server already has another
+ *     // device's genuine custom name. Nothing of this device's own to
+ *     // preserve, but migration completion is still recorded.
+ *     let registryState = {};
+ *     let localProfiles = c.localProfiles;
+ *     const alreadyBackfilled1 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round1 = computeRenameBackfillCandidates(c.serverProfilesRound1, localProfiles, {}, alreadyBackfilled1);
+ *     for (const id of round1.idsToMarkComplete) {
+ *       registryState = applyRenameBackfillStamp(registryState, id, c.accountKey);
+ *     }
+ *     const round1Pulls = selectServerRenamesToApply(c.serverProfilesRound1, localProfiles, new Set());
+ *     localProfiles = mergeProfileRenames(localProfiles, round1Pulls);
+ *     const nameAfterRound1 = localProfiles.find(p => p.id === c.profileId)?.name;
+ *
+ *     // Round 2: one-time-guard check — must not re-propose `default` at all.
+ *     const alreadyBackfilled2 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round2 = computeRenameBackfillCandidates(c.serverProfilesRound1, localProfiles, {}, alreadyBackfilled2);
+ *
+ *     // Round 3: a later, ordinary remote rename by some OTHER device —
+ *     // governed exclusively by normal SH.5 reconciliation from here on.
+ *     const round3 = computeRenameBackfillCandidates(c.serverProfilesRound3, localProfiles, {}, alreadyBackfilled2);
+ *     const round3Pulls = selectServerRenamesToApply(c.serverProfilesRound3, localProfiles, new Set());
+ *
+ *     const ok =
+ *       round1.toBackfillAsPending.length === 0 &&
+ *       JSON.stringify(round1.idsToMarkComplete) === JSON.stringify([c.profileId]) &&
+ *       JSON.stringify(round1Pulls) === JSON.stringify([{ id: c.profileId, name: c.firstCustomName }]) &&
+ *       nameAfterRound1 === c.firstCustomName &&
+ *       round2.toBackfillAsPending.length === 0 &&
+ *       round2.idsToMarkComplete.length === 0 &&
+ *       round3.toBackfillAsPending.length === 0 &&
+ *       round3.idsToMarkComplete.length === 0 &&
+ *       JSON.stringify(round3Pulls) === JSON.stringify([{ id: c.profileId, name: c.laterRemoteRenamedName }]);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_UNTOUCHED_DEFAULT_PULLS_SERVER_CUSTOM_NAME_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  localProfiles: Profile[];
+  serverProfilesRound1: ServerProfileRecord[];
+  firstCustomName: string;
+  serverProfilesRound3: ServerProfileRecord[];
+  laterRemoteRenamedName: string;
+}> = [
+  {
+    name: "Codex finding — a genuinely untouched device pulls another device's already-pushed custom `default` name during the bounded migration, never mistaking its own bootstrap value for customization; a later, ordinary remote rename after completion still pulls normally",
+    profileId: "default",
+    accountKey: "userA",
+    localProfiles: [{ id: "default", name: "Default" }],
+    serverProfilesRound1: [{ profileId: "default", name: "Our Family Trip", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    firstCustomName: "Our Family Trip",
+    serverProfilesRound3: [{ profileId: "default", name: "The Smiths", updatedAt: "2026-03-01T00:00:00.000Z", deletedAt: null }],
+    laterRemoteRenamedName: "The Smiths",
   },
 ];
 
