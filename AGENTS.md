@@ -139,14 +139,20 @@ Invariants that must be preserved when touching this area:
 
 ### Sync architecture invariants
 
-- **Account + profile isolation.** Authenticated planner data is keyed by
-  account *and* profile: server rows by `(user_id, profile_id)`, and
-  authenticated local storage/sync state by account-qualified keys
-  (`dwp:{userId}:{profileId}:{baseKey}`; see `profileStorage.ts`,
-  `syncHelper.ts`). One account's or profile's data, sync state, or
-  in-flight results must never be readable, writable, or pushable under
-  another's identity. Signed-out storage remains device-local
-  (`dwp:{profileId}:{baseKey}`).
+- **Account + profile isolation.** Authenticated planner content is keyed
+  by account *and* profile: server rows by `(user_id, profile_id)`, and
+  authenticated local planner content/sync-baseline storage by
+  account-qualified keys (`dwp:{userId}:{profileId}:{baseKey}`; see
+  `profileStorage.ts`, `syncHelper.ts`). Signed-out storage remains
+  device-local (`dwp:{profileId}:{baseKey}`). Not every sync key is
+  account-qualified: UI/coordination metadata such as
+  `dwp:sync:{profileId}:status` / `lastError` / `lastSyncedAt` and the
+  per-profile local-content-owner marker stay profile-keyed, and are
+  protected by the identity/transition guards (identity captured at
+  operation start, cancellation on auth/profile transitions, ownership
+  checks) rather than by key shape. One account's or profile's content,
+  sync state, or in-flight results must never be readable, writable, or
+  pushable under another's identity.
 - **Active profile is device-local.** `dwp.activeProfile` is never
   cloud-synced. Only what value it may point at is corrected, against the
   current account's visible profile list.
@@ -174,9 +180,13 @@ Invariants that must be preserved when touching this area:
   profile (`ensureActiveProfileVisible`), safe legacy adoption of
   unqualified local data into account-qualified keys
   (`adoptLegacyProfileValueIfSafe`), and starting registry
-  reconciliation. It does nothing while the session is `loading`. Pages
-  must not reimplement or skip these; add new required lifecycle
-  behavior there rather than in a single page.
+  reconciliation. While the session status is `loading` (unresolved
+  identity), active-profile correction, legacy adoption, and
+  reconciliation startup are all withheld, but the registry identity is
+  still cleared (`setRegistryIdentity(null)`) so an in-flight
+  reconciliation round from the prior account stops at its next
+  currency check. Pages must not reimplement or skip these; add new
+  required lifecycle behavior there rather than in a single page.
 - **Legacy compatibility.** Pre-account local data (unqualified keys,
   legacy `dwp.myPlans`-style values) and legacy server plans remain
   adoptable/readable only through the existing safe-adoption and
