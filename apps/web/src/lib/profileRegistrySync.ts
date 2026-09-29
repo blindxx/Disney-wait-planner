@@ -396,22 +396,53 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
  * silently overwrite the user's real custom name with the server's stale
  * registered one, the very first time they ever benefit from this feature.
  *
- * An id is backfilled ONLY when ALL of:
+ * Returns TWO separate lists, not one — this is the Codex fix for a
+ * migration-completion gap:
+ *   - `toBackfillAsPending`: {id, name} pairs that must be durably recorded
+ *     as pending renames (a genuine local/server mismatch to preserve).
+ *   - `idsToMarkComplete`: EVERY id examined this round that is eligible for
+ *     the pre-ledger migration at all (locally known, server-known, not
+ *     already ledger-tracked, not already backfilled before) — regardless
+ *     of whether it turned out mismatched or already converged.
+ *
+ * Codex finding: an EARLIER version of this function only ever returned (and
+ * the caller only ever marked-complete) the mismatched subset. That left an
+ * already-converged, server-known id — e.g. a device that reconciles for the
+ * first time under the new ledger with local name already equal to the
+ * server's — permanently unmarked. If a DIFFERENT device later legitimately
+ * renamed that same id, THIS device would still see a "local != server"
+ * mismatch on some later round with no pending marker and no backfill stamp
+ * — structurally indistinguishable from genuine pre-ledger local intent — and
+ * would incorrectly re-propose the (by-then stale) local name as a backfill
+ * candidate, pushing it back over the other device's newer, legitimate
+ * rename. Marking completion for EVERY eligible id — converged or
+ * mismatched — the FIRST time it's examined ensures the one-time guard
+ * (`alreadyBackfilledIds`) always excludes it from then on, so this legacy
+ * backfill logic only ever fires during the actual upgrade transition and
+ * can never reinterpret a later remote rename as legacy local intent.
+ *
+ * An id is ELIGIBLE for migration completion (added to `idsToMarkComplete`)
+ * when ALL of:
  *   - it is already locally known (in `localProfiles`, which callers pass
  *     already filtered to this account's own visible list — an id this
- *     account locally deleted is never a backfill candidate);
+ *     account locally deleted is never eligible);
  *   - the server ALREADY has an ACTIVE row for it (a not-yet-known id is
  *     computeProfilesToAdopt's job — nothing to preserve against, since a
- *     brand-new registration can't be "overwritten");
- *   - its local name DIFFERS from the server's confirmed name (nothing to
- *     backfill when they already agree);
+ *     brand-new registration can't be "overwritten"; it stays eligible on a
+ *     later round once the server does know it);
  *   - it has NO pending-rename marker yet (an id already tracked by the
  *     ledger has nothing to backfill — the normal push/pull machinery
  *     already owns it, and this function running again after its own
  *     backfill already recorded a marker must be a no-op, not a
  *     re-proposal);
  *   - this exact (profileId, accountKey) pair has never been backfilled
- *     before (the durable, one-time-only guard);
+ *     before (the durable, one-time-only guard).
+ *
+ * Among ELIGIBLE ids, one is additionally added to `toBackfillAsPending`
+ * (a genuine customization to preserve) only when BOTH:
+ *   - its local name DIFFERS from the server's confirmed name (nothing to
+ *     preserve when they already agree — such an id still gets marked
+ *     complete, just with no pending marker);
  *   - for the CANONICAL_SHARED_PROFILE_ID (`default`) SPECIFICALLY: the
  *     local name is not simply DEFAULT_PROFILE_NAME, the literal, untouched
  *     bootstrap value every device auto-creates `default` with (see that
@@ -422,12 +453,15 @@ export const DEV_COMPUTE_PROFILES_TO_ADOPT_CASES: Array<{
  *     not yet having pulled ANOTHER device's already-pushed rename (this
  *     feature's own earlier rounds), which must still be pulled normally,
  *     never mistaken for this device's own "customization" and pushed
- *     back over it. A NON-default id has no such ambiguity: under the
- *     pre-ledger code, renameProfile() never pushed anything to the server
- *     for ANY id, so the server's name for a non-default id can only ever
- *     differ from a local copy this account already has BECAUSE this
- *     device renamed it locally — there is no other way that mismatch
- *     could have arisen.
+ *     back over it. Such a `default` mismatch is STILL added to
+ *     `idsToMarkComplete` (migration is complete either way — there's no
+ *     further pre-ledger local intent left to discover for it), just not to
+ *     `toBackfillAsPending`. A NON-default id has no such ambiguity: under
+ *     the pre-ledger code, renameProfile() never pushed anything to the
+ *     server for ANY id, so the server's name for a non-default id can only
+ *     ever differ from a local copy this account already has BECAUSE this
+ *     device renamed it locally — there is no other way that mismatch could
+ *     have arisen.
  *
  * Pure — takes every input as a parameter.
  *
@@ -443,19 +477,23 @@ export function computeRenameBackfillCandidates(
   localProfiles: Profile[],
   pendingRenames: PendingRenames,
   alreadyBackfilledIds: ReadonlySet<string>
-): Profile[] {
+): { toBackfillAsPending: Profile[]; idsToMarkComplete: string[] } {
   const serverNameById = new Map(serverProfiles.filter((p) => !p.deletedAt).map((p) => [p.profileId, p.name]));
-  const out: Profile[] = [];
+  const toBackfillAsPending: Profile[] = [];
+  const idsToMarkComplete: string[] = [];
   for (const local of localProfiles) {
     if (pendingRenames[local.id]) continue; // already tracked by the ledger — nothing to backfill
     if (alreadyBackfilledIds.has(local.id)) continue; // one-time-only guard
     const serverName = serverNameById.get(local.id);
     if (serverName === undefined) continue; // not yet server-known — computeProfilesToAdopt's job
-    if (serverName === local.name) continue; // already converged, nothing to preserve
+    // Eligible for migration completion regardless of convergence — see
+    // this function's own doc for why converged ids must ALSO be marked.
+    idsToMarkComplete.push(local.id);
+    if (serverName === local.name) continue; // already converged, nothing to preserve as a pending rename
     if (local.id === CANONICAL_SHARED_PROFILE_ID && local.name === DEFAULT_PROFILE_NAME) continue; // untouched bootstrap value, not a customization
-    out.push({ id: local.id, name: local.name });
+    toBackfillAsPending.push({ id: local.id, name: local.name });
   }
-  return out;
+  return { toBackfillAsPending, idsToMarkComplete };
 }
 
 export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
@@ -464,7 +502,7 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
   localProfiles: Profile[];
   pendingRenames: PendingRenames;
   alreadyBackfilledIds: Set<string>;
-  expected: Profile[];
+  expected: { toBackfillAsPending: Profile[]; idsToMarkComplete: string[] };
 }> = [
   {
     name: "the realistic existing-user flow — local `default` already has a custom name from before the ledger existed; the server still has the literal bootstrap name",
@@ -472,15 +510,15 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
     localProfiles: [{ id: "default", name: "Our Family Trip" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(),
-    expected: [{ id: "default", name: "Our Family Trip" }],
+    expected: { toBackfillAsPending: [{ id: "default", name: "Our Family Trip" }], idsToMarkComplete: ["default"] },
   },
   {
-    name: "a genuinely untouched device — local `default` is still the literal bootstrap name, but ANOTHER device already legitimately pushed a rename; must be PULLED normally, never mistaken for this device's own customization",
+    name: "a genuinely untouched device — local `default` is still the literal bootstrap name, but ANOTHER device already legitimately pushed a rename; must be PULLED normally, never mistaken for this device's own customization — still marked migration-complete since there is no further pre-ledger local intent to discover for it",
     serverProfiles: [{ profileId: "default", name: "Renamed On Another Device", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Default" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(),
-    expected: [],
+    expected: { toBackfillAsPending: [], idsToMarkComplete: ["default"] },
   },
   {
     name: "a non-default id's local/server mismatch with no marker is always backfilled — under the pre-ledger code, no OTHER mechanism could have produced this mismatch",
@@ -488,7 +526,7 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
     localProfiles: [{ id: "family", name: "The Smiths" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(),
-    expected: [{ id: "family", name: "The Smiths" }],
+    expected: { toBackfillAsPending: [{ id: "family", name: "The Smiths" }], idsToMarkComplete: ["family"] },
   },
   {
     name: "already backfilled once for this (id, account) — never proposed again, even though the mismatch (by itself) still looks identical",
@@ -496,41 +534,41 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
     localProfiles: [{ id: "default", name: "Our Family Trip" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(["default"]),
-    expected: [],
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
   },
   {
-    name: "a pending marker already exists for the id — the ledger already owns it, never a backfill candidate",
+    name: "a pending marker already exists for the id — the ledger already owns it, never a backfill candidate, and not re-marked complete (the ledger already covers it)",
     serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Our Family Trip" }],
     pendingRenames: { default: { name: "Our Family Trip", renamedAt: 1 } },
     alreadyBackfilledIds: new Set(),
-    expected: [],
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
   },
   {
-    name: "id not yet known to the server at all — computeProfilesToAdopt's job, never a backfill candidate",
+    name: "id not yet known to the server at all — computeProfilesToAdopt's job, never a backfill or completion candidate yet",
     serverProfiles: [],
     localProfiles: [{ id: "family", name: "The Smiths" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(),
-    expected: [],
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
   },
   {
-    name: "local and server names already agree — nothing to backfill",
+    name: "Codex finding — local and server names already agree: nothing to backfill as pending, but STILL marked migration-complete so a later legitimate remote rename is never mistaken for stale local intent",
     serverProfiles: [{ profileId: "default", name: "Default", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "default", name: "Default" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(),
-    expected: [],
+    expected: { toBackfillAsPending: [], idsToMarkComplete: ["default"] },
   },
   {
-    name: "a tombstoned server row is never a backfill target",
+    name: "a tombstoned server row is never a backfill or completion target",
     serverProfiles: [
       { profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: "2026-02-01T00:00:00.000Z" },
     ],
     localProfiles: [{ id: "family", name: "The Smiths" }],
     pendingRenames: {},
     alreadyBackfilledIds: new Set(),
-    expected: [],
+    expected: { toBackfillAsPending: [], idsToMarkComplete: [] },
   },
 ];
 
@@ -565,10 +603,12 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
  *     let registryState = {};
  *     let pendingState = {};
  *     const alreadyBackfilled = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
- *     const backfillCandidates = computeRenameBackfillCandidates(c.serverProfiles, c.localProfiles, {}, alreadyBackfilled);
- *     for (const candidate of backfillCandidates) {
+ *     const { toBackfillAsPending, idsToMarkComplete } = computeRenameBackfillCandidates(c.serverProfiles, c.localProfiles, {}, alreadyBackfilled);
+ *     for (const candidate of toBackfillAsPending) {
  *       pendingState = applyPendingRename(pendingState, candidate.id, c.accountKey, candidate.name, 1);
- *       registryState = applyRenameBackfillStamp(registryState, candidate.id, c.accountKey);
+ *     }
+ *     for (const id of idsToMarkComplete) {
+ *       registryState = applyRenameBackfillStamp(registryState, id, c.accountKey);
  *     }
  *     const localNamePreserved = c.localProfiles.find(p => p.id === c.profileId)?.name;
  *
@@ -595,7 +635,8 @@ export const DEV_COMPUTE_RENAME_BACKFILL_CANDIDATES_CASES: Array<{
  *       JSON.stringify(toRename) === JSON.stringify([{ id: c.profileId, name: c.localName }]) &&
  *       JSON.stringify(confirmed) === JSON.stringify([{ id: c.profileId, name: c.localName }]) &&
  *       selectPendingRenamesForAccount(pendingState, c.accountKey)[c.profileId] === undefined &&
- *       stillBackfilledOnlyOnce.length === 0;
+ *       stillBackfilledOnlyOnce.toBackfillAsPending.length === 0 &&
+ *       stillBackfilledOnlyOnce.idsToMarkComplete.length === 0;
  *     console.log(ok ? "✓" : "✗ FAIL", c.name);
  *   });
  */
@@ -622,6 +663,100 @@ export const DEV_RENAME_BACKFILL_UPGRADE_FLOW_CASES: Array<{
     localName: "The Smiths",
     serverProfiles: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
     localProfiles: [{ id: "family", name: "The Smiths" }],
+  },
+];
+
+/**
+ * Codex finding — composed end-to-end regression for the specific migration-
+ * completion gap fixed above: an id that is ALREADY CONVERGED (local name ==
+ * server name) the very first time it's examined under the new ledger must
+ * still be marked migration-complete, so that a LATER, genuinely different
+ * device's legitimate rename of that same id is correctly PULLED on this
+ * device's next reconciliation — never re-proposed as a stale local backfill
+ * candidate that would push the old name back over the newer one.
+ *
+ * Round 1 (first post-upgrade reconciliation): local and server names for
+ * the id already agree. computeRenameBackfillCandidates must report it in
+ * `idsToMarkComplete` (migration done) while `toBackfillAsPending` stays
+ * empty (nothing to preserve — there was no divergent local customization).
+ *
+ * Round 2 (a later reconciliation, after another device renamed the SAME
+ * id on the server): this device's local copy is unchanged, since round 1
+ * converged and pushed nothing. Because round 1 already stamped the id
+ * complete, round 2's computeRenameBackfillCandidates must exclude it
+ * entirely (both lists empty) via the one-time `alreadyBackfilledIds`
+ * guard — proving it can never reinterpret the new remote rename as this
+ * device's own legacy local intent. selectServerRenamesToApply (the normal,
+ * unrelated pull path) must then correctly propose pulling the other
+ * device's newer name, exactly as it would for any ordinary remote rename.
+ *
+ * Run from Node:
+ *   import {
+ *     DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES,
+ *     computeRenameBackfillCandidates,
+ *     selectServerRenamesToApply,
+ *   } from "@/lib/profileRegistrySync";
+ *   import {
+ *     applyRenameBackfillStamp,
+ *     selectRenameBackfilledIdsForAccount,
+ *   } from "@/lib/profileStorage";
+ *   DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES.forEach(c => {
+ *     // Round 1: first post-upgrade reconciliation. Local already equals
+ *     // server — converged, nothing to preserve as a pending rename — but
+ *     // migration completion must still be recorded.
+ *     let registryState = {};
+ *     const alreadyBackfilled1 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round1 = computeRenameBackfillCandidates(c.serverProfilesRound1, c.localProfiles, {}, alreadyBackfilled1);
+ *     for (const id of round1.idsToMarkComplete) {
+ *       registryState = applyRenameBackfillStamp(registryState, id, c.accountKey);
+ *     }
+ *     const migrationMarkedComplete = selectRenameBackfilledIdsForAccount(registryState, c.accountKey).has(c.profileId);
+ *
+ *     // Round 2: another device legitimately renamed the same id on the
+ *     // server. This device's local copy is unchanged (round 1 pushed
+ *     // nothing). The one-time guard must exclude it from backfill
+ *     // consideration entirely, and the normal pull path must apply the
+ *     // newer remote name instead.
+ *     const alreadyBackfilled2 = selectRenameBackfilledIdsForAccount(registryState, c.accountKey);
+ *     const round2 = computeRenameBackfillCandidates(c.serverProfilesRound2, c.localProfiles, {}, alreadyBackfilled2);
+ *     const round2Pulls = selectServerRenamesToApply(c.serverProfilesRound2, c.localProfiles, new Set());
+ *
+ *     const ok =
+ *       round1.toBackfillAsPending.length === 0 &&
+ *       JSON.stringify(round1.idsToMarkComplete) === JSON.stringify([c.profileId]) &&
+ *       migrationMarkedComplete &&
+ *       round2.toBackfillAsPending.length === 0 &&
+ *       round2.idsToMarkComplete.length === 0 &&
+ *       JSON.stringify(round2Pulls) === JSON.stringify([{ id: c.profileId, name: c.remoteRenamedName }]);
+ *     console.log(ok ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_CONVERGED_BACKFILL_THEN_REMOTE_RENAME_PULLED_CASES: Array<{
+  name: string;
+  profileId: string;
+  accountKey: string;
+  localProfiles: Profile[];
+  serverProfilesRound1: ServerProfileRecord[];
+  serverProfilesRound2: ServerProfileRecord[];
+  remoteRenamedName: string;
+}> = [
+  {
+    name: "Codex finding — canonical `default`: converges on round 1 (migration marked complete with nothing pending), then another device renames it; round 2 correctly pulls the newer remote name instead of re-backfilling the stale local one",
+    profileId: "default",
+    accountKey: "userA",
+    localProfiles: [{ id: "default", name: "Family" }],
+    serverProfilesRound1: [{ profileId: "default", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    serverProfilesRound2: [{ profileId: "default", name: "The Smiths", updatedAt: "2026-02-01T00:00:00.000Z", deletedAt: null }],
+    remoteRenamedName: "The Smiths",
+  },
+  {
+    name: "same guarantee for an ordinary (non-canonical) profile id",
+    profileId: "family",
+    accountKey: "userA",
+    localProfiles: [{ id: "family", name: "Family" }],
+    serverProfilesRound1: [{ profileId: "family", name: "Family", updatedAt: "2026-01-01T00:00:00.000Z", deletedAt: null }],
+    serverProfilesRound2: [{ profileId: "family", name: "The Smiths", updatedAt: "2026-02-01T00:00:00.000Z", deletedAt: null }],
+    remoteRenamedName: "The Smiths",
   },
 ];
 
@@ -2503,24 +2638,38 @@ export async function reconcileProfileRegistry(userId: string): Promise<void> {
   // pushed rename and silently overwriting it — see
   // computeRenameBackfillCandidates's own doc for the full rationale and
   // why the canonical `default` id needs its own bootstrap-name check.
-  // Durably marks BOTH a pending-rename marker (so a crash/interruption
-  // right after this still preserves the user's intent for the NEXT round
-  // to retry) and the one-time backfill guard itself (so this can never
-  // re-propose the same (id, account) pair again), then re-reads
-  // `pendingRenames` fresh so this SAME round's own toRename computation
-  // below immediately attempts to push it, rather than waiting a full
-  // extra round-trip.
+  // Durably marks a pending-rename marker for genuine mismatches (so a
+  // crash/interruption right after this still preserves the user's intent
+  // for the NEXT round to retry), then re-reads `pendingRenames` fresh so
+  // this SAME round's own toRename computation below immediately attempts
+  // to push it, rather than waiting a full extra round-trip.
+  //
+  // Codex finding — migration completion is marked for EVERY eligible id
+  // this round examines (`idsToMarkComplete`), not only the ones that
+  // needed a pending marker. An already-converged, server-known id left
+  // unmarked would remain indistinguishable from genuine pre-ledger local
+  // intent forever, so a LATER legitimate remote rename of that same id
+  // would be misread as this device's own stale customization and pushed
+  // back over the newer name. Marking completion here — the first round
+  // this id is ever eligible — ensures the one-time guard
+  // (`alreadyBackfilledIds`) excludes it on every later round, so this
+  // legacy backfill logic only ever fires during the actual upgrade
+  // transition. See computeRenameBackfillCandidates's own doc for the full
+  // rationale.
   const alreadyBackfilledIds = getRenameBackfilledIds(userId);
-  const renameBackfillCandidates = computeRenameBackfillCandidates(
+  const { toBackfillAsPending, idsToMarkComplete } = computeRenameBackfillCandidates(
     initialServerProfiles,
     localProfiles,
     getPendingProfileRenames(userId),
     alreadyBackfilledIds
   );
-  for (const candidate of renameBackfillCandidates) {
+  for (const candidate of toBackfillAsPending) {
     if (!isCurrent()) return;
     await markProfileRenamePending(candidate.id, candidate.name, userId);
-    await markProfileRenameBackfilled(candidate.id, userId);
+  }
+  for (const id of idsToMarkComplete) {
+    if (!isCurrent()) return;
+    await markProfileRenameBackfilled(id, userId);
   }
   if (!isCurrent()) return;
   // Codex account-isolation fix — scoped to THIS round's own `userId`:
