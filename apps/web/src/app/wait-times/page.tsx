@@ -48,10 +48,7 @@ import {
   formatClosureDateRangeForDisplay,
 } from "@/lib/plannedClosures";
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
-import {
-  formatResortLocalTime,
-  getResortTimeZoneAbbreviation,
-} from "../../lib/resortTime";
+import ResortClock from "../../components/ResortClock";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -61,40 +58,6 @@ import {
 // ============================================
 // RESORT + PARK CONSTANTS
 // ============================================
-
-/** User-facing subtext (presentation only; ResortId/timezone contracts unchanged). */
-const RESORT_CLOCK_LABELS: Record<ResortId, string> = {
-  WDW: "Disney World local time",
-  DLR: "Disneyland local time",
-};
-
-/**
- * Subtle resort-local clock. Owns its own tick state so a tick re-renders only
- * this component — it never touches wait-data fetch/refresh/cache state.
- * `now` starts null and is set on mount (no server/client time mismatch); the
- * page only mounts this after hydration anyway.
- */
-function ResortClock({ resort }: { resort: ResortId }) {
-  const [now, setNow] = useState<Date | null>(null);
-  useEffect(() => {
-    setNow(new Date());
-    const id = setInterval(() => setNow(new Date()), 15_000);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <div
-      aria-label={RESORT_CLOCK_LABELS[resort]}
-      style={{ marginBottom: "12px", lineHeight: 1.25 }}
-    >
-      <div style={{ fontSize: "13px", fontWeight: 600, color: "#374151", minHeight: "16px" }}>
-        {now
-          ? `${formatResortLocalTime(resort, now)} ${getResortTimeZoneAbbreviation(resort, now)}`
-          : " "}
-      </div>
-      <div style={{ fontSize: "11px", color: "#9ca3af" }}>{RESORT_CLOCK_LABELS[resort]}</div>
-    </div>
-  );
-}
 
 /** Parks grouped by resort */
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {
@@ -883,7 +846,7 @@ export default function WaitTimesPage() {
               <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
             </div>
             <div style={{ height: 20, marginBottom: "8px" }} />
-            <div style={{ height: 30, marginBottom: "12px" }} />
+            <div style={{ height: 35, marginBottom: "12px" }} />
           </>
         )}
 
