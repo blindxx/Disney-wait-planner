@@ -45,6 +45,7 @@ import {
   shouldWithholdProfileControls,
   pushNewProfileRegistration,
   getRegistryLastSyncedAt,
+  registryLastSyncedKey,
   PROFILE_REGISTRY_SYNCED_EVENT,
 } from "../../lib/profileRegistrySync";
 
@@ -199,8 +200,20 @@ export default function SettingsPage() {
     }
     const refresh = () => setRegistryLastSyncedAt(getRegistryLastSyncedAt(authenticatedUserId, activeProfileId));
     refresh();
+    // Cross-tab half: same-tab localStorage writes never fire `storage`, so
+    // the custom event above covers this tab and `storage` covers others.
+    // Only this exact account+profile key is reacted to (e.key === null is
+    // a clear() — also refresh).
+    const registryKey = registryLastSyncedKey(authenticatedUserId, activeProfileId);
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === null || e.key === registryKey) refresh();
+    };
     window.addEventListener(PROFILE_REGISTRY_SYNCED_EVENT, refresh);
-    return () => window.removeEventListener(PROFILE_REGISTRY_SYNCED_EVENT, refresh);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(PROFILE_REGISTRY_SYNCED_EVENT, refresh);
+      window.removeEventListener("storage", handleStorage);
+    };
   }, [authenticatedUserId, activeProfileId]);
   const displayedLastSyncedAt = [displayedSyncState.lastSyncedAt, registryLastSyncedAt]
     .filter((t): t is string => !!t)
