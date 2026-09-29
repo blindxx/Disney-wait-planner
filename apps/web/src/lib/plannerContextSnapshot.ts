@@ -63,6 +63,7 @@ import { resolveIdentityKey, RIDE_TO_PARK_DLR, RIDE_TO_PARK_WDW, PARK_TO_RESORT,
 import { resolveDiningKey } from "./diningSuggestions";
 import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { resolveExperienceKey } from "./experienceSuggestions";
+import { isValidIsoCalendarDate } from "./plannerWarnings";
 import { resolvePlannerItemEffectiveType, getPlannerItemMetadata } from "./plannerItemMetadata";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
@@ -239,19 +240,46 @@ function readDays(key: string): string[] {
   return ["day-1"];
 }
 
-function readDayMeta(key: string): Record<string, { label?: string; date?: string }> {
-  const parsed = readJson(key);
+// Exported solely so DEV_READ_DAY_META_CASES below can exercise it. Tom must
+// only ever be given a usable planner date: cloud pull and backup restore
+// persist dayMeta dates that only passed a structural YYYY-MM-DD check, so
+// this reader (which reads raw storage) applies the same strict calendar
+// validation My Plans/Lightning apply on their own reads.
+export function readDayMeta(key: string): Record<string, { label?: string; date?: string }> {
+  return sanitizeDayMetaForSnapshot(readJson(key));
+}
+
+export function sanitizeDayMetaForSnapshot(parsed: unknown): Record<string, { label?: string; date?: string }> {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const result: Record<string, { label?: string; date?: string }> = {};
   for (const [dayId, rawMeta] of Object.entries(parsed as Record<string, unknown>)) {
     if (!rawMeta || typeof rawMeta !== "object") continue;
     const m = rawMeta as Record<string, unknown>;
     const label = typeof m.label === "string" && m.label.trim() ? m.label.trim() : undefined;
-    const date = typeof m.date === "string" && m.date.trim() ? m.date.trim() : undefined;
+    const trimmedDate = typeof m.date === "string" ? m.date.trim() : "";
+    const date = isValidIsoCalendarDate(trimmedDate) ? trimmedDate : undefined;
     if (label || date) result[dayId] = { label, date };
   }
   return result;
 }
+
+/**
+ * Reference cases for sanitizeDayMetaForSnapshot(). Run from Node:
+ *   import { DEV_SANITIZE_DAY_META_SNAPSHOT_CASES, sanitizeDayMetaForSnapshot } from "@/lib/plannerContextSnapshot";
+ *   DEV_SANITIZE_DAY_META_SNAPSHOT_CASES.forEach(c => {
+ *     console.log(JSON.stringify(sanitizeDayMetaForSnapshot(c.raw)) === JSON.stringify(c.expected) ? "✓" : "✗ FAIL", c.name);
+ *   });
+ */
+export const DEV_SANITIZE_DAY_META_SNAPSHOT_CASES: Array<{
+  name: string;
+  raw: unknown;
+  expected: Record<string, { label?: string; date?: string }>;
+}> = [
+  { name: "valid date passes", raw: { "day-1": { date: "2026-02-28" } }, expected: { "day-1": { date: "2026-02-28" } } },
+  { name: "impossible date 2026-02-30 dropped (no label -> entry dropped)", raw: { "day-1": { date: "2026-02-30" } }, expected: {} },
+  { name: "impossible date dropped, label kept", raw: { "day-1": { label: "Arrival", date: "2026-02-30" } }, expected: { "day-1": { label: "Arrival" } } },
+  { name: "undated legacy entry unchanged", raw: { "day-2": { label: "MK" } }, expected: { "day-2": { label: "MK" } } },
+];
 
 function readDayParks(key: string): Record<string, string> {
   const parsed = readJson(key);
