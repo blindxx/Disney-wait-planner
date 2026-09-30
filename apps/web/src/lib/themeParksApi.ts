@@ -4,8 +4,9 @@
  * Provider boundary for Phase 12 showtime/schedule work. Queue-Times stays
  * the attraction wait provider (liveWaitApi.ts, untouched); DWP's catalog
  * stays the canonical identity authority. ThemeParks UUIDs are integration
- * metadata (themeParksProviders.ts). Do not import this from browser code —
- * later consumers reach it through a DWP route/server component.
+ * metadata (themeParksProviders.ts). SERVER-ONLY: `import "server-only"`
+ * (Next.js pattern) makes a Client Component import fail at build time; later
+ * consumers reach this through a DWP route/server component.
  *
  * Operations (only what showtime/schedule work needs):
  *   getDestinations()            GET /destinations          (discovery)
@@ -34,6 +35,7 @@
  * 1h) with a client-wide backoff: no network calls until it elapses.
  */
 
+import "server-only";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import {
@@ -579,6 +581,14 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     return p as Promise<ThemeParksResult<T>>;
   }
 
+  /** Response must describe the entity DWP asked for, else invalid_payload (never cached under that key). */
+  const forEntity =
+    <T extends { entityId: string }>(requested: string, normalize: (body: unknown) => T | null) =>
+    (body: unknown): T | null => {
+      const data = normalize(body);
+      return data && data.entityId.toLowerCase() === requested.toLowerCase() ? data : null;
+    };
+
   const badId = (id: string): ThemeParksError | null =>
     UUID_RE.test(id) ? null : { kind: "invalid_request", message: "ThemeParks entity id must be a UUID" };
 
@@ -588,13 +598,13 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     getEntity(entityId: string): Promise<ThemeParksResult<ThemeParksEntity>> {
       const bad = badId(entityId);
       if (bad) return Promise.resolve({ ok: false, error: bad });
-      return request(`/entity/${entityId}`, "static", normalizeEntity);
+      return request(`/entity/${entityId}`, "static", forEntity(entityId, normalizeEntity));
     },
 
     getLive(entityId: string): Promise<ThemeParksResult<ThemeParksLive>> {
       const bad = badId(entityId);
       if (bad) return Promise.resolve({ ok: false, error: bad });
-      return request(`/entity/${entityId}/live`, "live", normalizeLive);
+      return request(`/entity/${entityId}/live`, "live", forEntity(entityId, normalizeLive));
     },
 
     /** No `month` → provider's upcoming-schedule window. */
@@ -612,7 +622,7 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
         }
         suffix = `/${year}/${String(m).padStart(2, "0")}`;
       }
-      return request(`/entity/${entityId}/schedule${suffix}`, "schedule", normalizeSchedule);
+      return request(`/entity/${entityId}/schedule${suffix}`, "schedule", forEntity(entityId, normalizeSchedule));
     },
 
     /** Checks configured WDW/DLR destination + park UUIDs still exist upstream. */
@@ -657,7 +667,8 @@ export const themeParks: ThemeParksClient = createThemeParksClient();
 
 /**
  * Offline scenarios against a stubbed fetch (no network). Run manually, e.g.
- * via tsx:
+ * via tsx with the react-server condition (so `server-only` is inert):
+ *   NODE_OPTIONS=--conditions=react-server npx tsx script.ts
  *   import { runDevThemeParksApiCases } from "@/lib/themeParksApi";
  *   console.log(await runDevThemeParksApiCases()); // [] when everything passes
  * Returns the labels of failing cases.
@@ -874,6 +885,35 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   { const { client } = mk(() => devRes(200, { ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: [{ type: "P", startTime: "bad" }] }] }));
     const r = await client.getLive(DEV_PARK);
     check("showtime drift with no cache → invalid_payload failure", !r.ok && r.error.kind === "invalid_payload"); }
+
+  // Requested-entity identity: response id must equal the requested UUID.
+  const OTHER_PARK = THEMEPARKS_PARKS.hs.entityId;
+  { const { client, calls } = mk(() => devRes(200, DEV_LIVE));
+    const r = await client.getLive(DEV_PARK.toUpperCase());
+    check("identity: matching response id accepted (case-insensitive)", r.ok && r.data.entityId === DEV_PARK && calls.length === 1); }
+  for (const [label, body, call] of [
+    ["live", DEV_LIVE, (c: ThemeParksClient) => c.getLive(OTHER_PARK)],
+    ["schedule", DEV_SCHEDULE, (c: ThemeParksClient) => c.getSchedule(OTHER_PARK)],
+    ["entity", { id: DEV_PARK, name: "MK", entityType: "PARK", timezone: "America/New_York" }, (c: ThemeParksClient) => c.getEntity(OTHER_PARK)],
+  ] as const) {
+    const { client } = mk(() => devRes(200, body));
+    const r = await call(client);
+    check(`identity: mismatched ${label} id, no cache → invalid_payload`, !r.ok && r.error.kind === "invalid_payload");
+    const again = await call(client);
+    check(`identity: mismatched ${label} id never cached under requested key`, !again.ok);
+  }
+  { let wrong = false;
+    const { client } = mk(() => devRes(200, wrong ? { ...DEV_LIVE, id: OTHER_PARK } : DEV_LIVE));
+    await client.getLive(DEV_PARK); wrong = true; t += TTL.live.fresh + 1;
+    const r = await client.getLive(DEV_PARK);
+    check("identity: mismatched refresh → correct cached data as stale",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entityId === DEV_PARK && r.data.entries.length === 2); }
+  { let wrong = false;
+    const { client } = mk(() => devRes(200, wrong ? { ...DEV_SCHEDULE, id: OTHER_PARK } : DEV_SCHEDULE));
+    await client.getSchedule(DEV_PARK); wrong = true; t += TTL.schedule.fresh + 1;
+    const r = await client.getSchedule(DEV_PARK);
+    check("identity: mismatched schedule refresh → stale correct data",
+      r.ok && r.meta.origin === "stale" && r.data.entityId === DEV_PARK); }
 
   // Body-consumption timeout: headers arrive, body stalls.
   { const stall = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
