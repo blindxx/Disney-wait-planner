@@ -309,6 +309,19 @@ closure — it exists for closures that matter for trip planning:
   rather than proposing every short refurbishment as a planned-closure
   data update.
 
+## ThemeParks.wiki provider
+
+- `apps/web/src/lib/themeParksApi.ts` is the only ThemeParks.wiki client
+  (server-side; never call the provider from browser code). Queue-Times
+  remains the attraction wait provider; the DWP catalog remains canonical
+  identity/metadata authority. ThemeParks UUIDs
+  (`themeParksProviders.ts`) are integration metadata only.
+- Never fabricate schedules/showtimes: valid-empty is `ok` with empty
+  arrays, failure is a typed error; stale-if-error data is flagged.
+- Any UI showing ThemeParks.wiki data renders `ThemeParksAttribution`.
+- DEV checks: `runDevThemeParksProviderCases()` /
+  `runDevThemeParksApiCases()` (run manually; return failing labels).
+
 ## Tom integration
 
 ### Architecture
