@@ -253,18 +253,28 @@ export function normalizeLive(body: unknown): ThemeParksLive | null {
     const ename = str(e.name);
     const entityType = str(e.entityType);
     if (!id || !ename || !entityType) { droppedEntries++; continue; }
+    // `showtimes` is optional (absent for most non-show entities), but when
+    // present it must be an array. Empty = valid-empty; partially valid keeps
+    // the valid showtimes (dropped ones counted); non-empty with zero valid
+    // showtimes (or a non-array value) is schema drift, so the ENTRY is
+    // rejected rather than cached as `showtimes: []`. If that leaves no valid
+    // entries the whole payload fails (invalid_payload → stale-if-error).
     const showtimes: ThemeParksShowtime[] = [];
-    if (Array.isArray(e.showtimes)) {
+    let entryDroppedShowtimes = 0;
+    if (e.showtimes !== undefined && e.showtimes !== null) {
+      if (!Array.isArray(e.showtimes)) { droppedEntries++; continue; }
       for (const s of e.showtimes) {
         const startTime = isObj(s) ? asOffsetTimestamp(s.startTime) : null;
-        if (!isObj(s) || !startTime) { droppedShowtimes++; continue; }
+        if (!isObj(s) || !startTime) { entryDroppedShowtimes++; continue; }
         showtimes.push({
           type: str(s.type),
           startTime,
           endTime: asOffsetTimestamp(s.endTime),
         });
       }
+      if (e.showtimes.length > 0 && showtimes.length === 0) { droppedEntries++; continue; }
     }
+    droppedShowtimes += entryDroppedShowtimes;
     entries.push({
       entityId: id,
       name: ename,
@@ -742,6 +752,21 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   check("live: impossible-date showtime dropped",
     normalizeLive({ ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: [{ type: "P", startTime: "2026-02-30T10:00:00-04:00" }, { type: "P", startTime: "2026-09-30T10:00:00-04:00" }] }] })?.entries[0].showtimes.length === 1);
 
+  // Nested showtimes: empty valid-empty; partial keeps valid + counts dropped; wholly malformed rejects the entry/payload.
+  const showEntry = (showtimes: unknown) => ({ ...DEV_LIVE.liveData[0], showtimes });
+  const goodShowtime = { type: "Performance Time", startTime: "2026-09-30T10:50:00-04:00", endTime: "2026-09-30T10:50:00-04:00" };
+  const badShowtimes = [{ type: "P", startTime: "2026-02-30T10:00:00-04:00" }, { type: "P" }, "x", null];
+  const liveWith = (...entries: unknown[]) => normalizeLive({ ...DEV_LIVE, liveData: entries });
+  { const r = liveWith(showEntry([]));
+    check("showtimes: empty array valid-empty", r?.entries.length === 1 && r.entries[0].showtimes.length === 0 && r.droppedShowtimes === 0 && r.droppedEntries === 0); }
+  check("showtimes: absent valid-empty", liveWith({ ...DEV_LIVE.liveData[0], showtimes: undefined })?.entries[0].showtimes.length === 0);
+  { const r = liveWith(showEntry([goodShowtime, ...badShowtimes]));
+    check("showtimes: partial keeps valid, counts dropped", r?.entries[0].showtimes.length === 1 && r.droppedShowtimes === 4 && r.droppedEntries === 0); }
+  { const r = liveWith(showEntry(badShowtimes), DEV_LIVE.liveData[1]);
+    check("showtimes: wholly malformed rejects entry, others kept",
+      r?.entries.length === 1 && r.entries[0].name === "Closed Show" && r.droppedEntries === 1 && r.droppedShowtimes === 0); }
+  check("showtimes: non-array value rejects entry", liveWith(showEntry("10:50 AM"), DEV_LIVE.liveData[1])?.entries.length === 1);
+  check("showtimes: only entry wholly malformed → payload invalid", liveWith(showEntry(badShowtimes)) === null);
   // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
   const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
   const goodPark = { id: DEV_PARK, name: "MK" };
@@ -827,6 +852,21 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     const r = await client.getDestinations();
     check("parks drift → stale valid discovery, not empty parks",
       r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.destinations[0].parks.length === 1); }
+
+  // Showtime schema drift must not replace previously validated showtimes with an empty success.
+  { let drift = false;
+    const driftLive = { ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: [{ type: "Performance Time", startTime: 1785000000 }] }] };
+    const { client } = mk(() => devRes(200, drift ? driftLive : { ...DEV_LIVE, liveData: [DEV_LIVE.liveData[0]] }));
+    await client.getLive(DEV_PARK); drift = true; t += TTL.live.fresh + 1;
+    const r = await client.getLive(DEV_PARK);
+    check("showtime drift → stale showtimes preserved, not empty success",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries[0].showtimes.length === 1);
+    t += TTL.live.maxStale + 1;
+    const g = await client.getLive(DEV_PARK);
+    check("showtime drift past max stale → invalid_payload", !g.ok && g.error.kind === "invalid_payload"); }
+  { const { client } = mk(() => devRes(200, { ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: [{ type: "P", startTime: "bad" }] }] }));
+    const r = await client.getLive(DEV_PARK);
+    check("showtime drift with no cache → invalid_payload failure", !r.ok && r.error.kind === "invalid_payload"); }
 
   // Body-consumption timeout: headers arrive, body stalls.
   { const stall = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
