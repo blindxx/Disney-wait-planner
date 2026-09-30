@@ -185,6 +185,27 @@ export function resolveAttractionIdentityKey(
   return null;
 }
 
+/**
+ * True when `name` resolves (exact/alias only — never containment) to an
+ * ACTIVE attraction the catalog itself marks `reclassifiedFromEntertainment`
+ * (Phase 12 Entertainment→Attraction move). Identity-wide, like the
+ * Experience override: resolved against both resorts, never gated on a
+ * resort hint, since it is a permanent identity fact. Sourced from the
+ * mock catalog's own flag — no separate name list. Used by the shared
+ * effective-type boundary so historical `type:"entertainment"` items
+ * resolve as Attractions without rewriting persisted data.
+ */
+export function isReclassifiedFromEntertainmentAttraction(name: string): boolean {
+  for (const resort of ["DLR", "WDW"] as const) {
+    const key = resolveAttractionIdentityKey(name, resort);
+    if (!key) continue;
+    if (mockAttractionWaits.some(
+      (a) => a.resortId === resort && a.reclassifiedFromEntertainment && normalizeKey(a.name) === key,
+    )) return true;
+  }
+  return false;
+}
+
 export type AttractionContext = {
   resortId: ResortId;
   parkId: ParkId | null;

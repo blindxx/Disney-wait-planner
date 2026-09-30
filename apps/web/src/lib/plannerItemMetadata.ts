@@ -52,7 +52,7 @@
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import type { PlannerItemType } from "./plansTransfer";
-import { getAttractionContext } from "./legacyAttractions";
+import { getAttractionContext, isReclassifiedFromEntertainmentAttraction } from "./legacyAttractions";
 import { getDiningContext, inferPlannerItemType } from "./diningSuggestions";
 import { getEntertainmentContext } from "./entertainmentSuggestions";
 import { getExperienceContext, resolveExperienceKey, isReclassifiedFromEntertainmentKey } from "./experienceSuggestions";
@@ -148,6 +148,10 @@ function stripTrailingTimeForInference(name: string): string {
  *      skips the (irrelevant, for this check) per-resort validation step —
  *      it still requires an exact/alias/containment match against the real
  *      catalog, so unrelated names are never swept in.
+ *      Phase 12 analogue: an explicit "entertainment" raw type on an
+ *      attraction the catalog flags reclassifiedFromEntertainment (Tiki
+ *      Room, Country Bear, PhilharMagic, Turtle Talk) resolves to
+ *      "attraction" (isReclassifiedFromEntertainmentAttraction()).
  *   2. An explicit, already-trusted stored type — "dining", "entertainment",
  *      or "experience" — is preserved as-is. ("attraction" is deliberately
  *      NOT trusted here: it has always been the universal pre-Phase-9
@@ -174,6 +178,14 @@ export function resolvePlannerItemEffectiveType(
     return "experience";
   }
 
+  // Phase 12: identity-wide Entertainment→Attraction override. A stored/
+  // imported "entertainment" type for one of the reclassified attractions
+  // resolves as "attraction". Only an explicit "entertainment" raw type is
+  // overridden (a dining/experience raw type is left to its own precedence).
+  if (rawType === "entertainment" && isReclassifiedFromEntertainmentAttraction(cleanedName)) {
+    return "attraction";
+  }
+
   if (rawType === "dining" || rawType === "entertainment" || rawType === "experience") {
     return rawType;
   }
@@ -190,6 +202,12 @@ export function getPlannerItemMetadata(
   type: PlannerItemType,
   resort: ResortId,
 ): PlannerItemMetadata {
+  // Defense in depth for callers holding a raw stored type: a historical
+  // "entertainment" item for a Phase 12 reclassified attraction resolves as
+  // an attraction (same rule as resolvePlannerItemEffectiveType).
+  if (type === "entertainment" && isReclassifiedFromEntertainmentAttraction(name)) {
+    type = "attraction";
+  }
   switch (type) {
     case "attraction": {
       const ctx = getAttractionContext(name, resort);
@@ -506,6 +524,48 @@ export const DEV_PLANNER_ITEM_METADATA_CASES: Array<{
     resort: "WDW",
     expected: { type: "experience", resortId: "WDW" },
   },
+  {
+    description: "Phase 12 reclassified Enchanted Tiki Room (WDW) with stale entertainment type -> attraction + park/land",
+    name: "Enchanted Tiki Room",
+    type: "entertainment",
+    resort: "WDW",
+    expected: { type: "attraction", resortId: "WDW", canonicalName: "Enchanted Tiki Room", parkId: "mk", land: "Adventureland", lifecycle: "active" },
+  },
+  {
+    description: "Phase 12 reclassified Enchanted Tiki Room (DLR) with stale entertainment type -> attraction + park/land",
+    name: "Enchanted Tiki Room",
+    type: "entertainment",
+    resort: "DLR",
+    expected: { type: "attraction", resortId: "DLR", canonicalName: "Enchanted Tiki Room", parkId: "disneyland", land: "Adventureland", lifecycle: "active" },
+  },
+  {
+    description: "Phase 12 reclassified Country Bear Musical Jamboree (WDW) with stale entertainment type -> attraction + park/land",
+    name: "Country Bear Musical Jamboree",
+    type: "entertainment",
+    resort: "WDW",
+    expected: { type: "attraction", resortId: "WDW", canonicalName: "Country Bear Musical Jamboree", parkId: "mk", land: "Frontierland", lifecycle: "active" },
+  },
+  {
+    description: "Phase 12 reclassified Mickey's PhilharMagic (WDW) with stale entertainment type -> attraction + park/land",
+    name: "Mickey's PhilharMagic",
+    type: "entertainment",
+    resort: "WDW",
+    expected: { type: "attraction", resortId: "WDW", canonicalName: "Mickey's PhilharMagic", parkId: "mk", land: "Fantasyland", lifecycle: "active" },
+  },
+  {
+    description: "Phase 12 reclassified Turtle Talk with Crush (WDW) with stale entertainment type -> attraction + park/land",
+    name: "Turtle Talk with Crush",
+    type: "entertainment",
+    resort: "WDW",
+    expected: { type: "attraction", resortId: "WDW", canonicalName: "Turtle Talk with Crush", parkId: "epcot", land: "World Nature", lifecycle: "active" },
+  },
+  {
+    description: "Phase 12 reclassified Turtle Talk with Crush (DLR) with stale entertainment type -> attraction + park/land",
+    name: "Turtle Talk with Crush",
+    type: "entertainment",
+    resort: "DLR",
+    expected: { type: "attraction", resortId: "DLR", canonicalName: "Turtle Talk with Crush", parkId: "dca", land: "Hollywood Land", lifecycle: "active" },
+  },
 ];
 
 /**
@@ -756,5 +816,66 @@ export const DEV_RESOLVE_PLANNER_ITEM_EFFECTIVE_TYPE_CASES: Array<{
     name: "Blue Bayou Restaurant",
     resort: "WDW",
     expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified Enchanted Tiki Room + stored entertainment (WDW) -> attraction",
+    rawType: "entertainment",
+    name: "Enchanted Tiki Room",
+    resort: "WDW",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified Enchanted Tiki Room + stored entertainment (DLR) -> attraction",
+    rawType: "entertainment",
+    name: "Enchanted Tiki Room",
+    resort: "DLR",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified Country Bear Musical Jamboree + stored entertainment (WDW) -> attraction",
+    rawType: "entertainment",
+    name: "Country Bear Musical Jamboree",
+    resort: "WDW",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified Mickey's PhilharMagic + stored entertainment (WDW) -> attraction",
+    rawType: "entertainment",
+    name: "Mickey's PhilharMagic",
+    resort: "WDW",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified Turtle Talk with Crush + stored entertainment (WDW) -> attraction",
+    rawType: "entertainment",
+    name: "Turtle Talk with Crush",
+    resort: "WDW",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified Turtle Talk with Crush + stored entertainment (DLR) -> attraction",
+    rawType: "entertainment",
+    name: "Turtle Talk with Crush",
+    resort: "DLR",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 Country Bear alias + stored entertainment, no resort hint -> attraction",
+    rawType: "entertainment",
+    name: "Country Bear Jamboree",
+    expected: "attraction",
+  },
+  {
+    description: "Phase 12 reclassified name with trailing time + stored entertainment -> attraction",
+    rawType: "entertainment",
+    name: "Mickey's PhilharMagic 10:30 AM",
+    expected: "attraction",
+  },
+  {
+    description: "genuine entertainment (Happily Ever After) + stored entertainment is unchanged",
+    rawType: "entertainment",
+    name: "Happily Ever After",
+    resort: "WDW",
+    expected: "entertainment",
   },
 ];

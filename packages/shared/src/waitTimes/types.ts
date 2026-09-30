@@ -50,4 +50,11 @@ export type AttractionWait = {
    * `waitMins`, `status`, or `updatedAt`.
    */
   waitSource: "live" | "fallback";
+  /**
+   * Marks an attraction that was historically catalogued as Entertainment
+   * (Phase 12 taxonomy move). Plans saved before the move may still carry
+   * `type: "entertainment"`; the planner's effective-type resolver reads this
+   * flag so those items resolve as Attractions. Catalog metadata only.
+   */
+  reclassifiedFromEntertainment?: true;
 };

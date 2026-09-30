@@ -6,8 +6,8 @@
  * Queue/repeating-cycle attractions only (Phase 12 boundary: discrete
  * scheduled performances are Entertainment) — no parades, fireworks,
  * character meets, galleries, trails, or play areas.
- * Structural catalog entries without a curated wait omit `waitMins`; the
- * default applies only until a live Queue-Times match overlays real data.
+ * Structural catalog entries without a curated wait set `waitMins: null`
+ * (unknown) until a live Queue-Times match overlays real data.
  */
 
 import type { AttractionWait, ParkId, ResortId, WaitStatus } from "./types";
@@ -35,6 +35,11 @@ type RideDef = {
   status?: WaitStatus;
   /** Typical wait in minutes (null when non-OPERATING) */
   waitMins?: number | null;
+  /**
+   * Approved historical Entertainment→Attraction (Phase 12) reclassification
+   * marker — see AttractionWait.reclassifiedFromEntertainment.
+   */
+  reclassifiedFromEntertainment?: true;
 };
 
 /** Expand a compact ride definition into a full AttractionWait object. */
@@ -53,12 +58,15 @@ function toAttractionWait(
     resortId,
     parkId,
     status,
-    waitMins: status === "OPERATING" ? (ride.waitMins ?? 15) : null,
+    // Omitted → 15-minute placeholder; an explicit null on an OPERATING
+    // ride means "no known wait" and is preserved (UI renders "—").
+    waitMins: status === "OPERATING" ? (ride.waitMins === undefined ? 15 : ride.waitMins) : null,
     // Mock data is DWP's own fallback wait, never live Queue-Times data.
     // liveWaitApi.ts's overlay explicitly sets "live" on any mock ride it
     // successfully matches to a live Queue-Times record.
     waitSource: "fallback",
     updatedAt: recentTimestamp(index % 5),
+    ...(ride.reclassifiedFromEntertainment ? { reclassifiedFromEntertainment: true as const } : {}),
   };
 }
 
@@ -79,6 +87,9 @@ const DISNEYLAND_RIDES: RideDef[] = [
     id: "dl-enchanted-tiki-room",
     name: "Enchanted Tiki Room",
     land: "Adventureland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
   },
   {
     id: "dl-indiana-jones",
@@ -401,6 +412,9 @@ const DCA_RIDES: RideDef[] = [
     id: "dca-turtle-talk-with-crush",
     name: "Turtle Talk with Crush",
     land: "Hollywood Land",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
   },
   {
     id: "dca-monsters-inc",
@@ -460,6 +474,9 @@ const MK_RIDES: RideDef[] = [
     id: "mk-enchanted-tiki-room",
     name: "Enchanted Tiki Room",
     land: "Adventureland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
   },
   {
     id: "mk-jungle-cruise",
@@ -485,6 +502,9 @@ const MK_RIDES: RideDef[] = [
     id: "mk-country-bear-musical-jamboree",
     name: "Country Bear Musical Jamboree",
     land: "Frontierland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
   },
   {
     id: "mk-tianas-bayou",
@@ -504,6 +524,8 @@ const MK_RIDES: RideDef[] = [
     id: "mk-hall-of-presidents",
     name: "The Hall of Presidents",
     land: "Liberty Square",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
   },
   {
     id: "mk-haunted-mansion",
@@ -517,11 +539,16 @@ const MK_RIDES: RideDef[] = [
     id: "mk-enchanted-tales-with-belle",
     name: "Enchanted Tales with Belle",
     land: "Fantasyland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
   },
   {
     id: "mk-mickeys-philharmagic",
     name: "Mickey's PhilharMagic",
     land: "Fantasyland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
   },
   {
     id: "mk-its-a-small-world",
@@ -659,6 +686,9 @@ const EPCOT_RIDES: RideDef[] = [
     id: "epcot-turtle-talk-with-crush",
     name: "Turtle Talk with Crush",
     land: "World Nature",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
   },
   {
     id: "epcot-soarin",
