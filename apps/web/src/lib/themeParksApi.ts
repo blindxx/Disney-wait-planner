@@ -286,7 +286,7 @@ export function normalizeLive(body: unknown): ThemeParksLive | null {
       for (const s of e.showtimes) {
         const startTime = isObj(s) ? asOffsetTimestamp(s.startTime) : null;
         const endTime = isObj(s) ? optionalField(s.endTime, asOffsetTimestamp) : null;
-        if (!isObj(s) || !startTime || endTime === INVALID) { entryDroppedShowtimes++; continue; }
+        if (!isObj(s) || !startTime || endTime === INVALID || endsBeforeStart(startTime, endTime)) { entryDroppedShowtimes++; continue; }
         showtimes.push({ type: str(s.type), startTime, endTime });
       }
       if (e.showtimes.length > 0 && showtimes.length === 0) { droppedEntries++; continue; }
@@ -338,7 +338,8 @@ function normalizeScheduleEntries(
     // (past-midnight closes), so it is deliberately not compared.
     if (
       !date || !isValidIsoCalendarDate(date) || !type || !openingTime || !closingTime ||
-      lastUpdated === INVALID || openingTime.slice(0, 10) !== date
+      lastUpdated === INVALID || openingTime.slice(0, 10) !== date ||
+      endsBeforeStart(openingTime, closingTime)
     ) {
       dropped++;
       continue;
@@ -387,6 +388,11 @@ export function normalizeSchedule(body: unknown): ThemeParksSchedule | null {
     if (body.parks.length > 0 && parks.length === 0) return null;
   }
   return { entityId, name, timeZone, entries: own.entries, parks, droppedEntries: dropped };
+}
+
+/** True when both endpoints parse and the end instant precedes the start instant (equal is fine). */
+function endsBeforeStart(start: string, end: string | null): boolean {
+  return end !== null && Date.parse(end) < Date.parse(start);
 }
 
 /** Retry-After (delta-seconds or HTTP-date) → ms; default 60s, clamped 1s–1h. */
@@ -558,9 +564,15 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
         httpStatus: res.status,
         retryAfterMs,
       };
-      blockedUntil = t1 + retryAfterMs;
-      blockedError = error;
-      return fail(error, cached, cls);
+      // Client-wide backoff is monotonic: concurrent responses may arrive in any
+      // order, and a later shorter Retry-After must never shorten an active
+      // longer deadline (the error travels with the deadline that wins).
+      if (t1 + retryAfterMs > blockedUntil) {
+        blockedUntil = t1 + retryAfterMs;
+        blockedError = error;
+      }
+      const effective = blockedError ?? error;
+      return fail({ ...effective, retryAfterMs: Math.max(0, blockedUntil - t1) }, cached, cls);
     }
     if (res.status === 404) {
       return fail({ kind: "not_found", message: "ThemeParks entity not found", httpStatus: 404 }, cached, cls);
@@ -852,6 +864,27 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     check("schedule: Z-suffixed openingTime compares on its own date part", sched({ ...base, date: "2026-09-30", openingTime: "2026-09-30T13:00:00Z", closingTime: "2026-10-01T02:00:00Z" })?.entries.length === 1);
     const destMix = normalizeSchedule(destDoc([{ id: DEV_PARK, name: "MK", schedule: [{ ...base, date: "2026-09-30" }] }, { id: THEMEPARKS_PARKS.hs.entityId, name: "HS", schedule: [{ ...base, date: "2026-10-05" }] }]));
     check("schedule: destination park with only mismatched dates dropped, others kept", destMix?.parks.length === 1 && destMix.parks[0].entityId === DEV_PARK); }
+  // Provider intervals: end before start rejected (parsed instants); equal ok; next-day close ok.
+  { const lv = (showtimes: unknown[]) => liveWith(showEntry(showtimes), DEV_LIVE.liveData[1]);
+    const shows = (r: ReturnType<typeof normalizeLive>) => r?.entries[0].showtimes.length;
+    check("showtime: end before start dropped (partial)", ((r) => shows(r) === 1 && r?.droppedShowtimes === 1)(lv([goodShowtime, st({ startTime: "2026-09-30T10:50:00-04:00", endTime: "2026-09-30T10:49:59-04:00" })])));
+    check("showtime: equal endpoints accepted", shows(lv([st({ endTime: goodShowtime.startTime })])) === 1);
+    check("showtime: later end accepted", shows(lv([st({ endTime: "2026-09-30T11:30:00-04:00" })])) === 1);
+    check("showtime: compares instants across offsets (not strings)",
+      shows(lv([st({ startTime: "2026-09-30T10:00:00-04:00", endTime: "2026-09-30T14:30:00Z" })])) === 1 &&
+      liveWith(showEntry([st({ startTime: "2026-09-30T10:00:00-04:00", endTime: "2026-09-30T13:30:00Z" })])) === null);
+    check("showtime: all end-before-start → entry rejected → payload invalid",
+      liveWith(showEntry([st({ endTime: "2026-09-30T09:00:00-04:00" })])) === null);
+    const sb = { date: "2026-09-30", type: "OPERATING" };
+    const sc = (...schedule: unknown[]) => normalizeSchedule({ ...DEV_SCHEDULE, schedule });
+    check("schedule: closing before opening dropped (partial keeps valid)",
+      ((r) => r?.entries.length === 1 && r.droppedEntries === 1)(sc({ ...sb, openingTime: "2026-09-30T09:00:00-04:00", closingTime: "2026-09-30T22:00:00-04:00" }, { ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-09-30T09:00:00-04:00" })));
+    check("schedule: equal opening/closing accepted", sc({ ...sb, openingTime: "2026-09-30T09:00:00-04:00", closingTime: "2026-09-30T09:00:00-04:00" })?.entries.length === 1);
+    check("schedule: next-day close accepted", sc({ ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-10-01T02:00:00-04:00" })?.entries.length === 1);
+    check("schedule: all closing-before-opening → payload invalid", sc({ ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-09-30T21:59:59-04:00" }) === null);
+    check("schedule: compares instants across offsets",
+      sc({ ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-10-01T01:59:00Z" }) === null &&
+      sc({ ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-10-01T02:01:00Z" })?.entries.length === 1); }
   // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
   const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
   const goodPark = { id: DEV_PARK, name: "MK" };
@@ -1009,6 +1042,37 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     const r = await client.getSchedule(DEV_PARK);
     check("schedule date drift refresh → stale valid schedule preserved",
       r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries.length === 1 && r.data.entries[0].date === "2026-09-30"); }
+
+  // Interval drift on refresh preserves valid stale data.
+  { let drift = false;
+    const badSched = { ...DEV_SCHEDULE, schedule: [{ ...DEV_SCHEDULE.schedule[1], closingTime: "2026-09-30T08:00:00-04:00" }] };
+    const goodSched = { ...DEV_SCHEDULE, schedule: [DEV_SCHEDULE.schedule[1]] };
+    const { client } = mk(() => devRes(200, drift ? badSched : goodSched));
+    await client.getSchedule(DEV_PARK); drift = true; t += TTL.schedule.fresh + 1;
+    const r = await client.getSchedule(DEV_PARK);
+    check("schedule interval drift refresh → stale valid schedule",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries[0].closingTime === "2026-09-30T22:00:00-04:00"); }
+  { let drift = false;
+    const { client } = mk(() => devRes(200, { ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: [drift ? st({ endTime: "2026-09-30T09:00:00-04:00" }) : goodShowtime] }] }));
+    await client.getLive(DEV_PARK); drift = true; t += TTL.live.fresh + 1;
+    const r = await client.getLive(DEV_PARK);
+    check("showtime interval drift refresh → stale showtimes preserved",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries[0].showtimes.length === 1); }
+
+  // Retry-After backoff is monotonic across concurrent 429s (either arrival order).
+  for (const [label, first, second] of [["longer→shorter", "120", "30"], ["shorter→longer", "30", "120"]] as const) {
+    const { client, calls } = mk((u) => devRes(429, {}, { "retry-after": u.includes("/live") ? first : second }));
+    const [a, b] = await Promise.all([client.getLive(DEV_PARK), client.getSchedule(DEV_PARK)]);
+    // The first response can only report what was known when it arrived; the later one must report the longest.
+    check(`retry-after ${label}: later response reports the effective (longest) deadline`,
+      !a.ok && !b.ok && a.error.kind === "rate_limited" && b.error.retryAfterMs === 120_000 && a.error.retryAfterMs === Number(first) * 1000);
+    const c = await client.getEntity(DEV_PARK);
+    check(`retry-after ${label}: backoff holds at longest deadline, no new fetch`, !c.ok && c.error.kind === "rate_limited" && c.error.retryAfterMs === 120_000 && calls.length === 2);
+    t += 60_000; const d = await client.getEntity(DEV_PARK);
+    check(`retry-after ${label}: still blocked after shorter window elapsed`, !d.ok && d.error.retryAfterMs === 60_000 && calls.length === 2);
+    t += 60_001; await client.getEntity(DEV_PARK);
+    check(`retry-after ${label}: resumes after longest deadline`, calls.length === 3);
+  }
 
   // Body-consumption timeout: headers arrive, body stalls.
   { const stall = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
