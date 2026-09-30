@@ -17,7 +17,7 @@ import { inferPlansContext } from "@/lib/plansContextInference";
 import { resolveDiningKey, getDiningContext, DINING_PLACES } from "@/lib/diningSuggestions";
 import { resolveEntertainmentKey, getEntertainmentParkId } from "@/lib/entertainmentSuggestions";
 import { resolveExperienceKey, getExperienceContext } from "@/lib/experienceSuggestions";
-import { resolveAttractionIdentityKey, getAttractionContext } from "@/lib/legacyAttractions";
+import { resolveAttractionIdentityKey, getAttractionContext, isReclassifiedFromEntertainmentAttraction } from "@/lib/legacyAttractions";
 import {
   capturePreFetchDomainSnapshot,
   resolvePostFetchDomainBaseline,
@@ -1563,7 +1563,14 @@ export function computeCrossDayChecks(
     const byComposite = new Map<string, CompositeEntry>();
 
     for (const entry of entries) {
-      const resolved = resolveAttractionKey(entry.name, entry.dayId, entry.type ?? "attraction");
+      // Phase 12: a historical "entertainment" item for a reclassified
+      // attraction groups under the attraction identity (so it still pairs
+      // with attraction-typed copies of the same ride).
+      const entryType =
+        entry.type === "entertainment" && isReclassifiedFromEntertainmentAttraction(stripTrailingTimeForInference(entry.name))
+          ? "attraction"
+          : entry.type ?? "attraction";
+      const resolved = resolveAttractionKey(entry.name, entry.dayId, entryType);
       if (!resolved) continue;
       if (!byComposite.has(resolved.compositeKey)) {
         byComposite.set(resolved.compositeKey, { name: entry.name, dayIds: new Set(), timesByDay: new Map() });

@@ -65,6 +65,7 @@ import { resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { resolveExperienceKey } from "./experienceSuggestions";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import { resolvePlannerItemEffectiveType, getPlannerItemMetadata } from "./plannerItemMetadata";
+import { isReclassifiedFromEntertainmentAttraction } from "./legacyAttractions";
 
 /** Hard cap on plan/Lightning items included per dataset, to keep the payload compact. */
 const MAX_ITEMS = 200;
@@ -530,6 +531,12 @@ export function resolveCanonicalIdentity(
 ): string {
   const cleaned = stripTrailingTimeForInference(name);
 
+  // Phase 12: a historical "entertainment" type on a reclassified attraction
+  // groups under the attraction identity.
+  if (type === "entertainment" && isReclassifiedFromEntertainmentAttraction(cleaned)) {
+    type = "attraction";
+  }
+
   if (type === "dining") {
     const key = resolveDiningKey(cleaned, resortHint);
     if (key) return `dining:${key}`;
@@ -653,6 +660,22 @@ export const DEV_RESOLVE_CANONICAL_IDENTITY_CASES: Array<{
     resortHint: undefined,
     dayId: "day-5",
     expected: "attraction:ambiguous:day-5:space mountain",
+  },
+  {
+    description: "Phase 12 stale entertainment Tiki Room (WDW) groups under the attraction key",
+    name: "Enchanted Tiki Room",
+    type: "entertainment",
+    resortHint: "WDW",
+    dayId: "day-1",
+    expected: "attraction:enchanted tiki room",
+  },
+  {
+    description: "Phase 12 stale entertainment Country Bear alias groups with the canonical attraction key",
+    name: "Country Bear Jamboree",
+    type: "entertainment",
+    resortHint: "WDW",
+    dayId: "day-2",
+    expected: "attraction:country bear musical jamboree",
   },
 ];
 

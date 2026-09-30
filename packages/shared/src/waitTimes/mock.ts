@@ -3,8 +3,11 @@
  * Provides realistic sample data for development and testing.
  * In production, this would be replaced with real API data.
  *
- * RIDES ONLY — no shows, parades, fireworks, character meets,
- * galleries, walkthroughs, trails, or play areas.
+ * Queue/repeating-cycle attractions only (Phase 12 boundary: discrete
+ * scheduled performances are Entertainment) — no parades, fireworks,
+ * character meets, galleries, trails, or play areas.
+ * Structural catalog entries without a curated wait set `waitMins: null`
+ * (unknown) until a live Queue-Times match overlays real data.
  */
 
 import type { AttractionWait, ParkId, ResortId, WaitStatus } from "./types";
@@ -32,6 +35,11 @@ type RideDef = {
   status?: WaitStatus;
   /** Typical wait in minutes (null when non-OPERATING) */
   waitMins?: number | null;
+  /**
+   * Approved historical Entertainment→Attraction (Phase 12) reclassification
+   * marker — see AttractionWait.reclassifiedFromEntertainment.
+   */
+  reclassifiedFromEntertainment?: true;
 };
 
 /** Expand a compact ride definition into a full AttractionWait object. */
@@ -50,12 +58,15 @@ function toAttractionWait(
     resortId,
     parkId,
     status,
-    waitMins: status === "OPERATING" ? (ride.waitMins ?? 15) : null,
+    // Omitted → 15-minute placeholder; an explicit null on an OPERATING
+    // ride means "no known wait" and is preserved (UI renders "—").
+    waitMins: status === "OPERATING" ? (ride.waitMins === undefined ? 15 : ride.waitMins) : null,
     // Mock data is DWP's own fallback wait, never live Queue-Times data.
     // liveWaitApi.ts's overlay explicitly sets "live" on any mock ride it
     // successfully matches to a live Queue-Times record.
     waitSource: "fallback",
     updatedAt: recentTimestamp(index % 5),
+    ...(ride.reclassifiedFromEntertainment ? { reclassifiedFromEntertainment: true as const } : {}),
   };
 }
 
@@ -72,6 +83,14 @@ const DISNEYLAND_RIDES: RideDef[] = [
     waitMins: 10,
   },
   // ---- Adventureland ----
+  {
+    id: "dl-enchanted-tiki-room",
+    name: "Enchanted Tiki Room",
+    land: "Adventureland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
+  },
   {
     id: "dl-indiana-jones",
     name: "Indiana Jones\u2122 Adventure",
@@ -390,6 +409,14 @@ const DCA_RIDES: RideDef[] = [
 
   // ---- Hollywood Land ----
   {
+    id: "dca-turtle-talk-with-crush",
+    name: "Turtle Talk with Crush",
+    land: "Hollywood Land",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
+  },
+  {
     id: "dca-monsters-inc",
     name: "Monsters, Inc. Mike & Sulley to the Rescue!",
     land: "Hollywood Land",
@@ -444,6 +471,14 @@ const MK_RIDES: RideDef[] = [
 
   // ---- Adventureland ----
   {
+    id: "mk-enchanted-tiki-room",
+    name: "Enchanted Tiki Room",
+    land: "Adventureland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
+  },
+  {
     id: "mk-jungle-cruise",
     name: "Jungle Cruise",
     land: "Adventureland",
@@ -464,6 +499,14 @@ const MK_RIDES: RideDef[] = [
 
   // ---- Frontierland ----
   {
+    id: "mk-country-bear-musical-jamboree",
+    name: "Country Bear Musical Jamboree",
+    land: "Frontierland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
+  },
+  {
     id: "mk-tianas-bayou",
     name: "Tiana\u2019s Bayou Adventure",
     land: "Frontierland",
@@ -478,6 +521,13 @@ const MK_RIDES: RideDef[] = [
 
   // ---- Liberty Square ----
   {
+    id: "mk-hall-of-presidents",
+    name: "The Hall of Presidents",
+    land: "Liberty Square",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+  },
+  {
     id: "mk-haunted-mansion",
     name: "Haunted Mansion",
     land: "Liberty Square",
@@ -485,6 +535,21 @@ const MK_RIDES: RideDef[] = [
   },
 
   // ---- Fantasyland ----
+  {
+    id: "mk-enchanted-tales-with-belle",
+    name: "Enchanted Tales with Belle",
+    land: "Fantasyland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+  },
+  {
+    id: "mk-mickeys-philharmagic",
+    name: "Mickey's PhilharMagic",
+    land: "Fantasyland",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
+  },
   {
     id: "mk-its-a-small-world",
     name: "\"it's a small world\"",
@@ -617,6 +682,14 @@ const EPCOT_RIDES: RideDef[] = [
   },
 
   // ---- World Nature ----
+  {
+    id: "epcot-turtle-talk-with-crush",
+    name: "Turtle Talk with Crush",
+    land: "World Nature",
+    // Structural entry: no curated wait (unknown, not a fake default) until live data overlays one.
+    waitMins: null,
+    reclassifiedFromEntertainment: true,
+  },
   {
     id: "epcot-soarin",
     name: "Soarin\u2019 Across America",

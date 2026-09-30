@@ -139,8 +139,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "World of Color", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "regular" },
   { name: "Wondrous Journeys", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Magic Happens Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
-  { name: "Enchanted Tiki Room", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Adventureland", availabilityType: "regular" },
-  { name: "Turtle Talk with Crush", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
   { name: "Paint the Night", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
   { name: "Halloween Screams", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Believe... in Holiday Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
@@ -169,9 +167,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Happily Ever After", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Disney Starlight: Dream the Night Away", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Festival of Fantasy Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
-  { name: "Mickey's PhilharMagic", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland", availabilityType: "regular" },
-  { name: "Enchanted Tiki Room", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Adventureland", availabilityType: "regular" },
-  { name: "Country Bear Musical Jamboree", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Frontierland", availabilityType: "regular" },
   { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
@@ -181,7 +176,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- EPCOT ----
-  { name: "Turtle Talk with Crush", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Nature", availabilityType: "regular" },
   { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "regular" },
 
   // ---- Hollywood Studios ----
@@ -314,8 +308,6 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "disney starlight": "disney starlight dream the night away",
   "boo to you": "mickeys boo to you halloween parade",
   "christmastime parade": "mickeys once upon a christmastime parade",
-  "tiki room": "enchanted tiki room",
-  "country bear jamboree": "country bear musical jamboree",
   "fotf": "festival of fantasy parade",
   "magic happens": "magic happens parade",
   "adventure friends cavalcade": "disney adventure friends cavalcade",
