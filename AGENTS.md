@@ -319,8 +319,18 @@ closure — it exists for closures that matter for trip planning:
 - Never fabricate schedules/showtimes: valid-empty is `ok` with empty
   arrays, failure is a typed error; stale-if-error data is flagged.
 - Any UI showing ThemeParks.wiki data renders `ThemeParksAttribution`.
+- `getChildren(id)` (`/entity/{id}/children`, static 6h cache) is the
+  identity-discovery source — `/live` omits dormant/seasonal entities.
+- DWP Entertainment → ThemeParks UUID mapping lives only in
+  `themeParksEntertainmentMapping.ts`: explicit, park-qualified (names repeat
+  across parks), every active Entertainment entry mapped or intentionally
+  unmapped with a reason, no runtime name-based remapping. Drift surfaces via
+  `verifyEntertainmentMapping()` findings; provider-only SHOW entities are
+  preserved in its `providerOnly` report, never auto-added to DWP catalogs.
 - DEV checks: `runDevThemeParksProviderCases()` /
-  `runDevThemeParksApiCases()` (run manually; return failing labels).
+  `runDevThemeParksApiCases()` /
+  `runDevThemeParksEntertainmentMappingCases()` (run manually; return failing
+  labels).
 
 ## Tom integration
 

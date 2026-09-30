@@ -11,9 +11,12 @@
  * Operations (only what showtime/schedule work needs):
  *   getDestinations()            GET /destinations          (discovery)
  *   getEntity(id)                GET /entity/{id}           (timezone/identity)
+ *   getChildren(id)              GET /entity/{id}/children  (identity discovery)
  *   getLive(id)                  GET /entity/{id}/live      (status + showtimes)
  *   getSchedule(id, {year,month}?) GET /entity/{id}/schedule[/{y}/{m}]
  *   verifyProviderIdentity()     discovery vs. configured WDW/DLR ids
+ *   verifyEntertainmentMapping() DWP Entertainment → provider UUID audit
+ *                                (themeParksEntertainmentMapping.ts)
  *
  * Every response is validated + normalized here; raw payloads never leave
  * this module (unused fields — queue, forecast, dining, purchases/pricing —
@@ -24,7 +27,7 @@
  * typed error. There are no synthetic schedules/showtimes.
  *
  * Caching (in-memory, per server instance), endpoint-aware:
- *   destinations/entity  fresh 6h,  stale-if-error up to 7d
+ *   destinations/entity/children  fresh 6h,  stale-if-error up to 7d
  *   schedule             fresh 15m, stale-if-error up to 6h
  *   live                 fresh 60s, stale-if-error up to 10m
  * A stale hit is only served when the refresh failed, and is flagged
@@ -38,6 +41,10 @@
 import "server-only";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
+import {
+  verifyEntertainmentMapping,
+  type EntertainmentMappingReport,
+} from "./themeParksEntertainmentMapping";
 import {
   THEMEPARKS_API_BASE_URL,
   THEMEPARKS_DESTINATIONS,
@@ -93,6 +100,34 @@ export interface ThemeParksEntity {
   entityType: string;
   timeZone: string | null;
   parentId: string | null;
+}
+
+export interface ThemeParksChild {
+  entityId: string;
+  name: string;
+  /** ATTRACTION | SHOW | RESTAURANT | ... (provider value, verbatim). */
+  entityType: string;
+  /** Provider parent UUID (the park, for a park's children). */
+  parentId: string | null;
+  externalId: string | null;
+  slug: string | null;
+  location: { latitude: number; longitude: number } | null;
+}
+
+/**
+ * A park/destination's children. Unlike `/live`, this lists entities that
+ * exist in the provider's entity database whether or not they currently
+ * have live data, so dormant/seasonal entities still appear (identity
+ * discovery). No status/showtimes live here.
+ */
+export interface ThemeParksChildren {
+  entityId: string;
+  name: string;
+  entityType: string;
+  timeZone: string | null;
+  children: ThemeParksChild[];
+  /** Malformed/duplicate child records discarded during validation. */
+  droppedEntries: number;
 }
 
 export interface ThemeParksShowtime {
@@ -257,6 +292,48 @@ export function normalizeEntity(body: unknown): ThemeParksEntity | null {
     timeZone: str(body.timezone),
     parentId,
   };
+}
+
+function finiteNumber(v: unknown, min: number, max: number): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? v : null;
+}
+
+export function normalizeChildren(body: unknown): ThemeParksChildren | null {
+  if (!isObj(body) || !Array.isArray(body.children)) return null;
+  const entityId = asId(body.id);
+  const name = str(body.name);
+  const entityType = str(body.entityType);
+  if (!entityId || !name || !entityType) return null;
+  const children: ThemeParksChild[] = [];
+  const seen = new Set<string>();
+  let droppedEntries = 0;
+  for (const c of body.children) {
+    if (!isObj(c)) { droppedEntries++; continue; }
+    const id = asId(c.id);
+    const cname = str(c.name);
+    const ctype = str(c.entityType);
+    // Identity fields (id/parentId) reject the record when malformed; a
+    // repeated id is ambiguous identity, so the first wins and the repeat is counted.
+    const parentId = optionalField(c.parentId, asId);
+    if (!id || !cname || !ctype || parentId === INVALID || seen.has(id)) { droppedEntries++; continue; }
+    seen.add(id);
+    // Low-impact metadata stays permissive: a malformed value becomes null.
+    const loc = isObj(c.location) ? c.location : null;
+    const latitude = loc ? finiteNumber(loc.latitude, -90, 90) : null;
+    const longitude = loc ? finiteNumber(loc.longitude, -180, 180) : null;
+    children.push({
+      entityId: id,
+      name: cname,
+      entityType: ctype,
+      parentId,
+      externalId: str(c.externalId),
+      slug: str(c.slug),
+      location: latitude !== null && longitude !== null ? { latitude, longitude } : null,
+    });
+  }
+  // Empty children is valid-empty; non-empty with zero valid entries is schema drift.
+  if (body.children.length > 0 && children.length === 0) return null;
+  return { entityId, name, entityType, timeZone: str(body.timezone), children, droppedEntries };
 }
 
 export function normalizeLive(body: unknown): ThemeParksLive | null {
@@ -691,6 +768,14 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       return request(`/entity/${entityId}`, "static", forEntity(entityId, normalizeEntity));
     },
 
+    /** Static entity metadata (6h fresh); includes dormant/seasonal entities that `/live` omits. */
+    getChildren(requestedId: string): Promise<ThemeParksResult<ThemeParksChildren>> {
+      const bad = badId(requestedId);
+      if (bad) return Promise.resolve({ ok: false, error: bad });
+      const entityId = requestedId.toLowerCase(); // canonical: one cache key + identity compare per entity
+      return request(`/entity/${entityId}/children`, "static", forEntity(entityId, normalizeChildren));
+    },
+
     getLive(requestedId: string): Promise<ThemeParksResult<ThemeParksLive>> {
       const bad = badId(requestedId);
       if (bad) return Promise.resolve({ ok: false, error: bad });
@@ -742,6 +827,34 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
         }
       }
       return { ok: true, data: { ok: mismatches.length === 0, mismatches }, meta: res.meta };
+    },
+
+    /**
+     * Fetches every configured park's children and audits the DWP
+     * Entertainment → provider UUID mapping against them (pure verifier in
+     * themeParksEntertainmentMapping.ts). Any park failure is returned as that
+     * typed error — never a partial/optimistic report. If any park was served
+     * stale the aggregate is flagged stale (oldest data, first stale reason).
+     */
+    async verifyEntertainmentMapping(): Promise<ThemeParksResult<EntertainmentMappingReport>> {
+      const parkIds = Object.keys(THEMEPARKS_PARKS) as ParkId[];
+      const results = await Promise.all(parkIds.map((p) => this.getChildren(THEMEPARKS_PARKS[p].entityId)));
+      const byPark: Partial<Record<ParkId, ThemeParksChildren>> = {};
+      const metas: ThemeParksMeta[] = [];
+      for (let i = 0; i < parkIds.length; i++) {
+        const r = results[i];
+        if (!r.ok) return r;
+        byPark[parkIds[i]] = r.data;
+        metas.push(r.meta);
+      }
+      const stale = metas.find((m) => m.origin === "stale");
+      const meta: ThemeParksMeta = {
+        origin: stale ? "stale" : metas.some((m) => m.origin === "network") ? "network" : metas.every((m) => m.origin === "cache") ? "cache" : "revalidated",
+        fetchedAt: Math.min(...metas.map((m) => m.fetchedAt)),
+        etag: null,
+        ...(stale?.staleReason ? { staleReason: stale.staleReason } : {}),
+      };
+      return { ok: true, data: verifyEntertainmentMapping(byPark), meta };
     },
 
     /** Test/diagnostic hook: drop caches and backoff. */
@@ -976,6 +1089,61 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
       const r = await client.getSchedule(DEV_PARK);
       check("non-monthly: multi-month window unchanged (no month filtering)",
         r.ok && r.data.entries.length === 3 && r.data.droppedEntries === 0 && calls[0].url.endsWith(`/entity/${DEV_PARK}/schedule`)); } }
+  // Children (Phase 12.2): strict identity, permissive metadata, valid-empty vs drift.
+  { const CH = "92524eb7-4ee5-4eab-936c-2eb8e6eb0ecd";
+    const kid = (extra: Record<string, unknown> = {}) => ({ id: CH, name: "Show", entityType: "SHOW", externalId: "1;entityType=Entertainment", parentId: DEV_PARK, slug: null, location: { latitude: 28.4, longitude: -81.5 }, ...extra });
+    const doc = (children: unknown) => ({ id: DEV_PARK, name: "Magic Kingdom Park", entityType: "PARK", timezone: "America/New_York", children });
+    const n = normalizeChildren(doc([kid()]));
+    check("children: preserves id/name/type/parent/externalId/location", n?.children.length === 1 && n.entityId === DEV_PARK && n.timeZone === "America/New_York" &&
+      n.children[0].entityId === CH && n.children[0].entityType === "SHOW" && n.children[0].parentId === DEV_PARK && n.children[0].externalId === "1;entityType=Entertainment" && n.children[0].location?.latitude === 28.4);
+    check("children: valid-empty ok", normalizeChildren(doc([]))?.children.length === 0);
+    check("children: missing/non-array children or bad doc id invalid", normalizeChildren({ ...doc([]), children: undefined }) === null && normalizeChildren(doc("x")) === null && normalizeChildren({ ...doc([kid()]), id: "nope" }) === null && normalizeChildren([]) === null);
+    check("children: uuids lowercased", normalizeChildren(doc([kid({ id: CH.toUpperCase(), parentId: DEV_PARK.toUpperCase() })]))?.children[0].entityId === CH && normalizeChildren(doc([kid({ parentId: DEV_PARK.toUpperCase() })]))?.children[0].parentId === DEV_PARK);
+    { const r = normalizeChildren(doc([kid(), kid({ id: "bad" }), kid({ id: "a0613b70-293f-4a5b-8169-357be1777c62", name: "" }), kid({ id: "c1f39c15-7845-46b5-b6fd-2ae368a32a37", parentId: "zzz" }), "x", null]));
+      check("children: partial malformed keeps valid, counts dropped (bad id/name/parentId/non-object)", r?.children.length === 1 && r.droppedEntries === 5); }
+    check("children: wholly malformed → invalid", normalizeChildren(doc([{ nope: 1 }, "x"])) === null);
+    { const r = normalizeChildren(doc([kid(), kid({ name: "Dupe" })]));
+      check("children: repeated id dropped (first wins, counted)", r?.children.length === 1 && r.children[0].name === "Show" && r.droppedEntries === 1); }
+    check("children: absent/null parentId allowed", normalizeChildren(doc([kid({ parentId: null })]))?.children[0].parentId === null && normalizeChildren(doc([{ ...kid(), parentId: undefined }]))?.children[0].parentId === null);
+    { const r = normalizeChildren(doc([kid({ location: { latitude: 999, longitude: 1 }, slug: 5, externalId: 7 })]));
+      check("children: low-impact metadata permissive (bad location/slug/externalId → null)", r?.children[0].location === null && r.children[0].slug === null && r.children[0].externalId === null); }
+    check("children: raw extras not leaked", !("queue" in (normalizeChildren(doc([{ ...kid(), queue: {} }]))?.children[0] ?? {})));
+    { const { client, calls } = mk(() => devRes(200, doc([kid()]), { etag: 'W/"c"' }));
+      const [a, b] = await Promise.all([client.getChildren(DEV_PARK.toUpperCase()), client.getChildren(DEV_PARK)]);
+      t += 60 * 60_000; const c = await client.getChildren(DEV_PARK);
+      check("children: path, dedupe, cached as static (still fresh after 1h)", a.ok && b.ok && calls.length === 1 && calls[0].url.endsWith(`/entity/${DEV_PARK}/children`) && c.ok && c.meta.origin === "cache" && calls.length === 1);
+      t += TTL.static.fresh;
+      let cm = 0; const { client: c2, calls: calls2 } = mk((_u, _i) => (cm++ === 0 ? devRes(200, doc([kid()]), { etag: 'W/"c"' }) : devRes(304, null)));
+      await c2.getChildren(DEV_PARK); t += TTL.static.fresh + 1;
+      const rv = await c2.getChildren(DEV_PARK);
+      check("children: ETag revalidation after static TTL", rv.ok && rv.meta.origin === "revalidated" && (calls2[1].init.headers as Record<string, string>)["If-None-Match"] === 'W/"c"'); }
+    { const { client, calls } = mk(() => devRes(200, doc([])));
+      const r = await client.getChildren("nope");
+      check("children: bad id rejected without fetch", !r.ok && r.error.kind === "invalid_request" && calls.length === 0); }
+    { const { client } = mk(() => devRes(200, { ...doc([kid()]), id: THEMEPARKS_PARKS.hs.entityId }));
+      const r = await client.getChildren(DEV_PARK);
+      check("children: mismatched response id → invalid_payload", !r.ok && r.error.kind === "invalid_payload"); }
+    { let drift = false;
+      const { client } = mk(() => devRes(200, drift ? doc([{ nope: 1 }]) : doc([kid()])));
+      await client.getChildren(DEV_PARK); drift = true; t += TTL.static.fresh + 1;
+      const r = await client.getChildren(DEV_PARK);
+      check("children: drift refresh → stale valid children preserved", r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.children.length === 1); }
+    { let fail = false;
+      const { client } = mk(() => (fail ? devRes(500, {}) : devRes(200, doc([kid()]))));
+      await client.getChildren(DEV_PARK); fail = true; t += TTL.static.fresh + 1;
+      const s = await client.getChildren(DEV_PARK);
+      check("children: stale-if-error flagged; 7d bound", s.ok && s.meta.origin === "stale");
+      t += TTL.static.maxStale + 1;
+      check("children: stale beyond 7d → error", !(await client.getChildren(DEV_PARK)).ok); }
+    { const { client } = mk(() => devRes(404, {}));
+      const r = await client.getChildren(DEV_PARK); check("children: 404 → not_found", !r.ok && r.error.kind === "not_found"); }
+    // verifyEntertainmentMapping wrapper: any park failure is a typed failure, never a partial report.
+    { const { client } = mk((u) => (u.includes(THEMEPARKS_PARKS.ak.entityId) ? devRes(500, {}) : devRes(200, { id: u.split("/entity/")[1].split("/")[0], name: "P", entityType: "PARK", children: [] })));
+      const r = await client.verifyEntertainmentMapping();
+      check("verifyEntertainmentMapping: one park failing → typed error, no partial report", !r.ok && r.error.kind === "http"); }
+    { const { client } = mk((u) => { const id = u.split("/entity/")[1].split("/")[0]; return devRes(200, { id, name: "P", entityType: "PARK", children: [] }); });
+      const r = await client.verifyEntertainmentMapping();
+      check("verifyEntertainmentMapping: empty provider children → mapped entries flagged entity_missing (not ok)", r.ok && !r.data.ok && r.data.findings.some((f) => f.kind === "entity_missing")); } }
   // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
   const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
   const goodPark = { id: DEV_PARK, name: "MK" };
