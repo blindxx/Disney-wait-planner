@@ -60,6 +60,8 @@ Tom does **not** edit your plans, generate or optimize itineraries, reason about
 
 Live attraction wait times are powered by the Queue-Times API, accessed through a server-side proxy rather than called directly from the browser. All wait data flows through a single unified path (`liveWaitApi.ts`), which returns the same shape regardless of source and falls back to a mock dataset if live data is disabled or unavailable — so the UI never breaks on a live-data outage.
 
+A separate, server-side ThemeParks.wiki (Free API) provider foundation (`themeParksProviders.ts`, `themeParksApi.ts`) is groundwork for upcoming showtime/park-schedule features. It does not affect Queue-Times wait data, is not yet consumed by any page, and needs no environment variables. Surfaces that display ThemeParks.wiki data must show the linked attribution via `components/ThemeParksAttribution.tsx` ("Powered by ThemeParks.wiki").
+
 ---
 
 ## 🏗 Architecture
