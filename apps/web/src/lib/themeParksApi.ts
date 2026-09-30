@@ -390,6 +390,39 @@ export function normalizeSchedule(body: unknown): ThemeParksSchedule | null {
   return { entityId, name, timeZone, entries: own.entries, parks, droppedEntries: dropped };
 }
 
+/**
+ * Monthly-request boundary check (NOT part of normalizeScheduleEntries: the
+ * non-monthly window legitimately spans months). Keeps only entries whose
+ * `date` is in the requested year/month, counting the rest as dropped. Same
+ * array contract as elsewhere: empty = valid-empty, partly in-month = keep the
+ * in-month entries, non-empty with zero in-month = invalid (null). Applies to
+ * top-level entries and each nested park's entries (a park whose non-empty
+ * schedule is wholly out-of-month is dropped; all parks dropped = invalid).
+ */
+export function restrictScheduleToMonth(
+  schedule: ThemeParksSchedule,
+  year: number,
+  month: number,
+): ThemeParksSchedule | null {
+  const prefix = `${year}-${String(month).padStart(2, "0")}-`;
+  const filter = (entries: ThemeParksScheduleEntry[]) => {
+    const kept = entries.filter((e) => e.date.startsWith(prefix));
+    return entries.length > 0 && kept.length === 0 ? null : { kept, dropped: entries.length - kept.length };
+  };
+  const own = filter(schedule.entries);
+  if (!own) return null;
+  let dropped = schedule.droppedEntries + own.dropped;
+  const parks: ThemeParksParkSchedule[] = [];
+  for (const p of schedule.parks) {
+    const r = filter(p.entries);
+    if (!r) { dropped += p.entries.length; continue; }
+    dropped += r.dropped;
+    parks.push({ ...p, entries: r.kept });
+  }
+  if (schedule.parks.length > 0 && parks.length === 0) return null;
+  return { ...schedule, entries: own.kept, parks, droppedEntries: dropped };
+}
+
 /** True when both endpoints parse and the end instant precedes the start instant (equal is fine). */
 function endsBeforeStart(start: string, end: string | null): boolean {
   return end !== null && Date.parse(end) < Date.parse(start);
@@ -664,7 +697,13 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
         }
         suffix = `/${year}/${String(m).padStart(2, "0")}`;
       }
-      return request(`/entity/${entityId}/schedule${suffix}`, "schedule", forEntity(entityId, normalizeSchedule));
+      const normalize = month
+        ? (body: unknown) => {
+            const sch = normalizeSchedule(body);
+            return sch && restrictScheduleToMonth(sch, month.year, month.month);
+          }
+        : normalizeSchedule;
+      return request(`/entity/${entityId}/schedule${suffix}`, "schedule", forEntity(entityId, normalize));
     },
 
     /** Checks configured WDW/DLR destination + park UUIDs still exist upstream. */
@@ -885,6 +924,41 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     check("schedule: compares instants across offsets",
       sc({ ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-10-01T01:59:00Z" }) === null &&
       sc({ ...sb, openingTime: "2026-09-30T22:00:00-04:00", closingTime: "2026-10-01T02:01:00Z" })?.entries.length === 1); }
+  // Monthly requests: entries must belong to the requested year/month (request boundary only).
+  { const oct = (d: string) => ({ date: d, type: "OPERATING", openingTime: `${d}T09:00:00-04:00`, closingTime: `${d}T22:00:00-04:00` });
+    const doc = (schedule: unknown[]) => ({ ...DEV_SCHEDULE, schedule });
+    const monthly = async (body: unknown) => {
+      const { client, calls } = mk(() => devRes(200, body));
+      return { r: await client.getSchedule(DEV_PARK, { year: 2026, month: 10 }), calls };
+    };
+    { const { r, calls } = await monthly(doc([oct("2026-10-01"), oct("2026-10-31")]));
+      check("monthly: requested-month entries accepted", r.ok && r.data.entries.length === 2 && r.data.droppedEntries === 0 && calls[0].url.endsWith("/schedule/2026/10")); }
+    { const { r } = await monthly(doc([oct("2026-10-01"), oct("2026-11-01"), oct("2025-10-05"), oct("2026-09-30")]));
+      check("monthly: mixed keeps requested-month entries, drops others (year and month both checked)",
+        r.ok && r.data.entries.length === 1 && r.data.entries[0].date === "2026-10-01" && r.data.droppedEntries === 3); }
+    { const { r } = await monthly(doc([oct("2026-11-01")]));
+      check("monthly: wholly out-of-month → invalid_payload", !r.ok && r.error.kind === "invalid_payload"); }
+    { const { r } = await monthly(doc([]));
+      check("monthly: genuinely empty is valid-empty", r.ok && r.data.entries.length === 0); }
+    const dest = (parks: unknown[]) => ({ id: DEV_PARK, name: "WDW", timezone: "America/New_York", parks });
+    const mkPark = (id: string, dates: string[]) => ({ id, name: id, schedule: dates.map(oct) });
+    { const { r } = await monthly(dest([mkPark(DEV_PARK, ["2026-10-02", "2026-11-02"]), mkPark(THEMEPARKS_PARKS.hs.entityId, ["2026-11-03"])]));
+      check("monthly: nested parks — mixed kept, wholly out-of-month park dropped",
+        r.ok && r.data.parks.length === 1 && r.data.parks[0].entries.length === 1 && r.data.parks[0].entries[0].date === "2026-10-02"); }
+    { const { r } = await monthly(dest([mkPark(DEV_PARK, ["2026-11-02"]), mkPark(THEMEPARKS_PARKS.hs.entityId, ["2026-09-03"])]));
+      check("monthly: nested parks all wholly out-of-month → invalid_payload", !r.ok && r.error.kind === "invalid_payload"); }
+    { const { r } = await monthly(dest([mkPark(DEV_PARK, []), mkPark(THEMEPARKS_PARKS.hs.entityId, ["2026-10-03"])]));
+      check("monthly: nested park with empty schedule stays valid-empty", r.ok && r.data.parks.length === 2); }
+    { let drift = false;
+      const { client } = mk(() => devRes(200, drift ? doc([oct("2026-11-01")]) : doc([oct("2026-10-01")])));
+      await client.getSchedule(DEV_PARK, { year: 2026, month: 10 }); drift = true; t += TTL.schedule.fresh + 1;
+      const r = await client.getSchedule(DEV_PARK, { year: 2026, month: 10 });
+      check("monthly: wholly out-of-month refresh → stale valid month preserved",
+        r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries[0].date === "2026-10-01"); }
+    { const { client, calls } = mk(() => devRes(200, doc([oct("2026-10-01"), oct("2026-11-01"), oct("2026-12-01")])));
+      const r = await client.getSchedule(DEV_PARK);
+      check("non-monthly: multi-month window unchanged (no month filtering)",
+        r.ok && r.data.entries.length === 3 && r.data.droppedEntries === 0 && calls[0].url.endsWith(`/entity/${DEV_PARK}/schedule`)); } }
   // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
   const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
   const goodPark = { id: DEV_PARK, name: "MK" };
@@ -917,12 +991,12 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   // ETag revalidation (304) after TTL.
   { let n = 0;
     const { client, calls } = mk((_u, init) => (n++ === 0 ? devRes(200, DEV_SCHEDULE, { etag: 'W/"s"' }) : devRes(304, null)));
-    await client.getSchedule(DEV_PARK, { year: 2026, month: 10 });
+    await client.getSchedule(DEV_PARK, { year: 2026, month: 9 });
     t += TTL.schedule.fresh + 1;
-    const r = await client.getSchedule(DEV_PARK, { year: 2026, month: 10 });
+    const r = await client.getSchedule(DEV_PARK, { year: 2026, month: 9 });
     const inm = (calls[1].init.headers as Record<string, string>)["If-None-Match"];
     check("etag: If-None-Match sent, 304 revalidates", inm === 'W/"s"' && r.ok && r.meta.origin === "revalidated" && r.data.entries.length === 2);
-    check("schedule month path", calls[0].url.endsWith(`/entity/${DEV_PARK}/schedule/2026/10`)); }
+    check("schedule month path", calls[0].url.endsWith(`/entity/${DEV_PARK}/schedule/2026/09`)); }
 
   // 429 + Retry-After: backoff blocks network; failure w/o cache is an error (no fabrication).
   { const { client, calls } = mk(() => devRes(429, {}, { "retry-after": "120" }));
