@@ -332,7 +332,14 @@ function normalizeScheduleEntries(
     const openingTime = asOffsetTimestamp(s.openingTime);
     const closingTime = asOffsetTimestamp(s.closingTime);
     const lastUpdated = optionalField(s.lastUpdated, asOffsetTimestamp);
-    if (!date || !isValidIsoCalendarDate(date) || !type || !openingTime || !closingTime || lastUpdated === INVALID) {
+    // The entry's `date` must be the resort-local calendar date its opening
+    // starts on (timestamps keep their own offset, so the date part is the
+    // local date). closingTime may legitimately fall on a later date
+    // (past-midnight closes), so it is deliberately not compared.
+    if (
+      !date || !isValidIsoCalendarDate(date) || !type || !openingTime || !closingTime ||
+      lastUpdated === INVALID || openingTime.slice(0, 10) !== date
+    ) {
       dropped++;
       continue;
     }
@@ -833,6 +840,18 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   check("permissive metadata stays permissive (status/externalId/timezone/type)",
     ((r) => r?.entries[0].status === null && r.entries[0].externalId === null && r.timeZone === null)(liveWith({ ...DEV_LIVE.liveData[0], status: 5, externalId: 7 }) && normalizeLive({ ...DEV_LIVE, timezone: 3, liveData: [{ ...DEV_LIVE.liveData[0], status: 5, externalId: 7 }] })));
 
+  // Schedule date must equal the calendar-date portion of openingTime; closingTime may cross midnight.
+  { const base = { type: "OPERATING", openingTime: "2026-09-30T09:00:00-04:00", closingTime: "2026-09-30T22:00:00-04:00" };
+    const sched = (...schedule: unknown[]) => normalizeSchedule({ ...DEV_SCHEDULE, schedule });
+    check("schedule: date matches openingTime date accepted", sched({ ...base, date: "2026-09-30" })?.entries.length === 1);
+    check("schedule: date ≠ openingTime date rejected (partial keeps others)",
+      ((r) => r?.entries.length === 1 && r.droppedEntries === 1)(sched({ ...base, date: "2026-09-30" }, { ...base, date: "2026-10-01" })));
+    check("schedule: only mismatched entries → payload invalid", sched({ ...base, date: "2026-10-01" }) === null);
+    check("schedule: closingTime crossing midnight accepted",
+      sched({ ...base, date: "2026-09-30", closingTime: "2026-10-01T01:00:00-04:00" })?.entries[0].closingTime === "2026-10-01T01:00:00-04:00");
+    check("schedule: Z-suffixed openingTime compares on its own date part", sched({ ...base, date: "2026-09-30", openingTime: "2026-09-30T13:00:00Z", closingTime: "2026-10-01T02:00:00Z" })?.entries.length === 1);
+    const destMix = normalizeSchedule(destDoc([{ id: DEV_PARK, name: "MK", schedule: [{ ...base, date: "2026-09-30" }] }, { id: THEMEPARKS_PARKS.hs.entityId, name: "HS", schedule: [{ ...base, date: "2026-10-05" }] }]));
+    check("schedule: destination park with only mismatched dates dropped, others kept", destMix?.parks.length === 1 && destMix.parks[0].entityId === DEV_PARK); }
   // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
   const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
   const goodPark = { id: DEV_PARK, name: "MK" };
@@ -980,6 +999,16 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     await client.getLive(DEV_PARK.toUpperCase()); const r = await client.getLive(DEV_PARK);
     check("uuid: differently-cased requests share one canonical cache key; upper-case body id accepted",
       r.ok && r.meta.origin === "cache" && calls.length === 1 && calls[0].url.endsWith(`/entity/${DEV_PARK}/live`)); }
+
+  // Date/openingTime drift on refresh preserves the valid stale schedule.
+  { let drift = false;
+    const good = { ...DEV_SCHEDULE, schedule: [DEV_SCHEDULE.schedule[1]] };
+    const bad = { ...DEV_SCHEDULE, schedule: [{ ...DEV_SCHEDULE.schedule[1], date: "2026-10-01" }] };
+    const { client } = mk(() => devRes(200, drift ? bad : good));
+    await client.getSchedule(DEV_PARK); drift = true; t += TTL.schedule.fresh + 1;
+    const r = await client.getSchedule(DEV_PARK);
+    check("schedule date drift refresh → stale valid schedule preserved",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries.length === 1 && r.data.entries[0].date === "2026-09-30"); }
 
   // Body-consumption timeout: headers arrive, body stalls.
   { const stall = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
