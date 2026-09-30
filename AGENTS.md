@@ -261,6 +261,24 @@ compatibility with import/export, cloud sync restore, and profile
 duplication — those all depend on plan items continuing to resolve
 against the same canonical identities over time.
 
+## Catalog taxonomy
+
+- DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)
+  are intentional product subsets, not mirrors of provider taxonomy or
+  content. Provider entities (ThemeParks.wiki, Queue-Times) must not
+  automatically become DWP catalog entries.
+- Phase 12 convention (subject to reassessment after Phase 12):
+  **Attraction** = a queue/repeating-cycle experience generally available
+  throughout operating hours; **Entertainment** = a discrete scheduled
+  performance where showtime is the useful planning constraint. An entry
+  lives in exactly one active catalog — no duplicate active identities.
+- Character meets and roaming entertainment stay excluded from the curated
+  Entertainment catalog unless explicitly approved as exceptions.
+- Provider-discovered content may be preserved (e.g. the `providerOnly`
+  report) for broader/future catalog experiences without automatically
+  entering curated planner/Smart Entry surfaces.
+- Do not introduce a subjective "plan-worthy" inclusion rule.
+
 ## Wait/closure correctness
 
 `apps/web/src/lib/liveWaitApi.ts`, `apps/web/src/lib/plannedClosures.ts`,

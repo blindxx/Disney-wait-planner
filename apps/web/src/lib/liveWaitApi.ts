@@ -340,6 +340,10 @@ const ALIASES_WDW = new Map<string, string>([
   ["kali river",                                 "kali river rapids"],
   // Magic Carpets of Aladdin (Magic Kingdom) — API includes leading "The"
   ["the magic carpets of aladdin",               "magic carpets of aladdin"],
+  // Enchanted Tiki Room — Queue-Times uses the "Walt Disney's" possessive name;
+  // DWP canonical identity stays "Enchanted Tiki Room" (Phase 12 reclassification
+  // from Entertainment preserves the existing identity saved plans resolve to).
+  ["walt disney's enchanted tiki room",          "enchanted tiki room"],
   // Walt Disney's Carousel of Progress (Magic Kingdom) — common shortenings
   ["carousel of progress",                       "walt disney's carousel of progress"],
   ["cop",                                        "walt disney's carousel of progress"],
@@ -410,6 +414,10 @@ const ALIASES_DLR = new Map<string, string>([
   // "it's a small world" (Disneyland) — mock name has surrounding typographic quotes;
   // Queue-Times omits them. Both sides normalized, value retains the literal " chars.
   ["it's a small world",                         "\"it's a small world\""],
+  // Enchanted Tiki Room — Queue-Times uses the "Walt Disney's" possessive name;
+  // DWP canonical identity stays "Enchanted Tiki Room" (Phase 12 reclassification
+  // from Entertainment preserves the existing identity saved plans resolve to).
+  ["walt disney's enchanted tiki room",          "enchanted tiki room"],
   // Soarin' Across America (DCA) — canonical as of July 2026.
   // Queue-Times may still return old names; alias them all to the new canonical.
   ["soarin' over california",                    "soarin' across america"],
@@ -1426,3 +1434,34 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
     },
   },
 ];
+
+const DEV_PHASE12_ATTRACTIONS: Array<{ resortId: ResortId; parkId: ParkId; id: string; qtName: string; land: string }> = [
+  { resortId: "WDW", parkId: "mk", id: "mk-hall-of-presidents", qtName: "The Hall of Presidents", land: "Liberty Square" },
+  { resortId: "WDW", parkId: "mk", id: "mk-enchanted-tales-with-belle", qtName: "Enchanted Tales with Belle", land: "Fantasyland" },
+  { resortId: "WDW", parkId: "mk", id: "mk-enchanted-tiki-room", qtName: "Walt Disney's Enchanted Tiki Room", land: "Adventureland" },
+  { resortId: "DLR", parkId: "disneyland", id: "dl-enchanted-tiki-room", qtName: "Walt Disney's Enchanted Tiki Room", land: "Adventureland" },
+  { resortId: "WDW", parkId: "mk", id: "mk-country-bear-musical-jamboree", qtName: "Country Bear Musical Jamboree", land: "Frontierland" },
+  { resortId: "WDW", parkId: "mk", id: "mk-mickeys-philharmagic", qtName: "Mickey's PhilharMagic", land: "Fantasyland" },
+  { resortId: "WDW", parkId: "epcot", id: "epcot-turtle-talk-with-crush", qtName: "Turtle Talk With Crush", land: "World Nature" },
+  { resortId: "DLR", parkId: "dca", id: "dca-turtle-talk-with-crush", qtName: "Turtle Talk with Crush", land: "Hollywood Land" },
+];
+
+// Phase 12 taxonomy cleanup: each reclassified/added attraction resolves to
+// exactly one canonical card as a live Queue-Times match (provider names as
+// observed 2026-09-30).
+DEV_QUEUE_TIMES_DEDUPE_CASES.push(
+  ...DEV_PHASE12_ATTRACTIONS.map((c) => ({
+    description: `Phase 12 attraction ${c.id} resolves live from Queue-Times "${c.qtName}"`,
+    resortId: c.resortId,
+    parkId: c.parkId,
+    body: { lands: [{ id: 1, name: c.land, rides: [devQTRide(9000, c.qtName, true, 25, "2026-01-01T12:00:00Z")] }] },
+    check: (result: AttractionWait[]): string | null => {
+      const matches = result.filter((a) => a.id === c.id);
+      if (matches.length !== 1) return `expected exactly 1 card, got ${matches.length}`;
+      if (matches[0].waitSource !== "live") return `expected waitSource "live", got ${matches[0].waitSource}`;
+      if (matches[0].waitMins !== 25) return `expected live wait 25, got ${matches[0].waitMins}`;
+      if (matches[0].land !== c.land) return `expected land ${c.land}, got ${matches[0].land}`;
+      return null;
+    },
+  })),
+);

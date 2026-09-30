@@ -98,6 +98,8 @@ export const ALIASES_DLR: Record<string, string> = {
   rotr:  "star wars rise of the resistance",
   mmrr:  "mickey minnies runaway railway",
   btmrr: "big thunder mountain railroad",
+  // Enchanted Tiki Room (Disneyland Park) — provider/possessive name → canonical
+  "walt disneys enchanted tiki room": "enchanted tiki room",
   btmr:  "big thunder mountain railroad",
   potc:  "pirates of the caribbean",
   iasw:  "its a small world",
@@ -365,6 +367,10 @@ export const ALIASES_WDW: Record<string, string> = {
   "magic carpet":                "magic carpets of aladdin",
   "magic carpets":               "magic carpets of aladdin",
 
+  // ---- Phase 12: Country Bear / Tiki Room (moved from Entertainment aliases) ----
+  "country bear jamboree":            "country bear musical jamboree",
+  "walt disneys enchanted tiki room": "enchanted tiki room",
+
   // ---- Walt Disney's Carousel of Progress (MK Tomorrowland) ----
   // "cop" is a single token — stage-2 can't reach it without an alias.
   "cop":                              "walt disneys carousel of progress",
@@ -481,6 +487,10 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "Soarin' Across America",    resort: "DLR", expectedKey: "soarin across america" }, // stage-1 exact match (new canonical)
   { input: "Soarin' Over California",   resort: "DLR", expectedKey: "soarin across america" }, // back-compat
   { input: "Soarin' Around the World",  resort: "DLR", expectedKey: "soarin across america" }, // back-compat
+  // Phase 12 reclassified attractions (Entertainment → Attraction)
+  { input: "Walt Disney's Enchanted Tiki Room", resort: "DLR", expectedKey: "enchanted tiki room" },
+  { input: "Walt Disney's Enchanted Tiki Room", resort: "WDW", expectedKey: "enchanted tiki room" },
+  { input: "country bear jamboree",  resort: "WDW", expectedKey: "country bear musical jamboree" },
   // WDW
   { input: "everest",                resort: "WDW", expectedKey: "expedition everest" },
   { input: "expedition",             resort: "WDW", expectedKey: "expedition everest" },

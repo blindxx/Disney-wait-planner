@@ -10,9 +10,9 @@
  *
  * Model
  * - One explicit disposition per ACTIVE DWP entertainment entry, keyed by
- *   (park, name) — never by name alone: "Fantasmic!", "Enchanted Tiki Room",
- *   "Turtle Talk with Crush" and "Disney Jr. Mickey Mouse Clubhouse Live!"
- *   each exist in two parks/resorts and stay distinct.
+ *   (park, name) — never by name alone: "Fantasmic!" and
+ *   "Disney Jr. Mickey Mouse Clubhouse Live!" each exist in two
+ *   parks/resorts and stay distinct.
  *   - "mapped":   one or more provider refs (a DWP offering can be presented
  *                 as more than one provider entity, e.g. Halloween Screams
  *                 "with Fireworks"/"with Projections", or Bluey as both a
@@ -20,6 +20,10 @@
  *   - "unmapped": intentionally no provider entity, with a reason (dormant /
  *                 seasonal / not present in the provider's park children).
  * - Legacy-only entertainment (LEGACY_ENTERTAINMENT_PLACES) is out of scope.
+ * - Attractions are out of scope: Enchanted Tiki Room, Country Bear Musical
+ *   Jamboree, Mickey's PhilharMagic and Turtle Talk with Crush were
+ *   reclassified to the Attractions catalog (Phase 12 boundary) and carry no
+ *   mapping here. No attraction-level ThemeParks mapping exists yet.
  * - No runtime fuzzy/name-based remapping: lookups are exact-key against this
  *   table. Provider drift (entity gone, moved park, changed type, renamed)
  *   surfaces as a finding from `verifyEntertainmentMapping`; it never
@@ -125,7 +129,6 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Fantasmic!", "disneyland", show("8c36ff0b-3a32-4d7b-9388-0516c19277db", "Fantasmic!")),
   unmapped("Wondrous Journeys", "disneyland", NOT_IN_PROVIDER),
   unmapped("Magic Happens Parade", "disneyland", `${NOT_IN_PROVIDER}; returns summer 2027`),
-  mapped("Enchanted Tiki Room", "disneyland", attraction("106c1e5a-a5e7-42d7-96ab-bc100d8faf71", "Walt Disney's Enchanted Tiki Room")),
   unmapped("Paint the Night", "disneyland", NOT_IN_PROVIDER),
   mapped(
     "Halloween Screams", "disneyland",
@@ -146,7 +149,6 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
 
   // ---- Disney California Adventure ----
   mapped("World of Color", "dca", show("e46d8982-4991-4b9e-8e4a-b519d3ca6060", "World of Color – ONE")),
-  mapped("Turtle Talk with Crush", "dca", attraction("7561bcd8-18ea-4e3f-89d5-c905b7ba3d42", "Turtle Talk with Crush")),
   unmapped("Frightfully Fun Parade", "dca", `${NOT_IN_PROVIDER}; replaced for 2026 by Madame Leota's Swinging Wake`),
   unmapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", NOT_IN_PROVIDER),
   mapped(
@@ -158,9 +160,6 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Happily Ever After", "mk", show("22b78ed9-a692-47cb-b6a4-6d1224ff67e3", "Happily Ever After")),
   mapped("Disney Starlight: Dream the Night Away", "mk", show("d69261dc-62b8-434c-83bd-93649b43c408", "Disney Starlight: Dream the Night Away")),
   mapped("Festival of Fantasy Parade", "mk", show("ee56b2f3-fd49-4a29-ae1a-2d321549a633", "Disney Festival of Fantasy Parade")),
-  mapped("Mickey's PhilharMagic", "mk", attraction("7c5e1e02-3a44-4151-9005-44066d5ba1da", "Mickey's PhilharMagic")),
-  mapped("Enchanted Tiki Room", "mk", attraction("6fd1e225-53a0-4a80-a577-4bbc9a471075", "Walt Disney's Enchanted Tiki Room")),
-  mapped("Country Bear Musical Jamboree", "mk", attraction("0f57cecf-5502-4503-8bc3-ba84d3708ace", "Country Bear Musical Jamboree")),
   mapped("Disney Adventure Friends Cavalcade", "mk", show("f819079e-644e-4fce-bda3-26b899ac7027", "Disney Adventure Friends Cavalcade")),
   mapped("Mickey's Boo-To-You Halloween Parade", "mk", show("5c00cd7c-b207-4d9d-9c8c-a8d418fc5425", "Mickey’s Boo-To-You Halloween Parade at Mickey's Not-So-Scary Halloween Party")),
   unmapped("Mickey's Once Upon a Christmastime Parade", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
@@ -170,7 +169,6 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   unmapped("Mickey's Most Merriest Celebration", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
 
   // ---- EPCOT ----
-  mapped("Turtle Talk with Crush", "epcot", attraction("57acb522-a6fc-4aa4-a80e-21f21f317250", "Turtle Talk With Crush")),
   mapped("Luminous The Symphony of Us", "epcot", show("3dbf1ff2-eee0-44a9-8cd9-22bf920e81e9", "Luminous The Symphony of Us")),
 
   // ---- Hollywood Studios ----
@@ -431,7 +429,7 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
 
   // Duplicate-name isolation
   const dupe = (name: string) => ENTERTAINMENT_PLACES.filter((p) => p.name === name).map((p) => p.parkId!);
-  for (const name of ["Fantasmic!", "Enchanted Tiki Room", "Turtle Talk with Crush", "Disney Jr. Mickey Mouse Clubhouse Live!"]) {
+  for (const name of ["Fantasmic!", "Disney Jr. Mickey Mouse Clubhouse Live!"]) {
     const parks = dupe(name);
     const refs = parks.flatMap((p) => getThemeParksEntertainmentRefs(name, p).map((r) => r.entityId));
     check(`duplicate names: "${name}" keyed per park (${parks.join("/")}) with no shared ref`,

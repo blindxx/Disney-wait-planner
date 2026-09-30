@@ -3,8 +3,11 @@
  * Provides realistic sample data for development and testing.
  * In production, this would be replaced with real API data.
  *
- * RIDES ONLY — no shows, parades, fireworks, character meets,
- * galleries, walkthroughs, trails, or play areas.
+ * Queue/repeating-cycle attractions only (Phase 12 boundary: discrete
+ * scheduled performances are Entertainment) — no parades, fireworks,
+ * character meets, galleries, trails, or play areas.
+ * Structural catalog entries without a curated wait omit `waitMins`; the
+ * default applies only until a live Queue-Times match overlays real data.
  */
 
 import type { AttractionWait, ParkId, ResortId, WaitStatus } from "./types";
@@ -72,6 +75,11 @@ const DISNEYLAND_RIDES: RideDef[] = [
     waitMins: 10,
   },
   // ---- Adventureland ----
+  {
+    id: "dl-enchanted-tiki-room",
+    name: "Enchanted Tiki Room",
+    land: "Adventureland",
+  },
   {
     id: "dl-indiana-jones",
     name: "Indiana Jones\u2122 Adventure",
@@ -390,6 +398,11 @@ const DCA_RIDES: RideDef[] = [
 
   // ---- Hollywood Land ----
   {
+    id: "dca-turtle-talk-with-crush",
+    name: "Turtle Talk with Crush",
+    land: "Hollywood Land",
+  },
+  {
     id: "dca-monsters-inc",
     name: "Monsters, Inc. Mike & Sulley to the Rescue!",
     land: "Hollywood Land",
@@ -444,6 +457,11 @@ const MK_RIDES: RideDef[] = [
 
   // ---- Adventureland ----
   {
+    id: "mk-enchanted-tiki-room",
+    name: "Enchanted Tiki Room",
+    land: "Adventureland",
+  },
+  {
     id: "mk-jungle-cruise",
     name: "Jungle Cruise",
     land: "Adventureland",
@@ -464,6 +482,11 @@ const MK_RIDES: RideDef[] = [
 
   // ---- Frontierland ----
   {
+    id: "mk-country-bear-musical-jamboree",
+    name: "Country Bear Musical Jamboree",
+    land: "Frontierland",
+  },
+  {
     id: "mk-tianas-bayou",
     name: "Tiana\u2019s Bayou Adventure",
     land: "Frontierland",
@@ -478,6 +501,11 @@ const MK_RIDES: RideDef[] = [
 
   // ---- Liberty Square ----
   {
+    id: "mk-hall-of-presidents",
+    name: "The Hall of Presidents",
+    land: "Liberty Square",
+  },
+  {
     id: "mk-haunted-mansion",
     name: "Haunted Mansion",
     land: "Liberty Square",
@@ -485,6 +513,16 @@ const MK_RIDES: RideDef[] = [
   },
 
   // ---- Fantasyland ----
+  {
+    id: "mk-enchanted-tales-with-belle",
+    name: "Enchanted Tales with Belle",
+    land: "Fantasyland",
+  },
+  {
+    id: "mk-mickeys-philharmagic",
+    name: "Mickey's PhilharMagic",
+    land: "Fantasyland",
+  },
   {
     id: "mk-its-a-small-world",
     name: "\"it's a small world\"",
@@ -617,6 +655,11 @@ const EPCOT_RIDES: RideDef[] = [
   },
 
   // ---- World Nature ----
+  {
+    id: "epcot-turtle-talk-with-crush",
+    name: "Turtle Talk with Crush",
+    land: "World Nature",
+  },
   {
     id: "epcot-soarin",
     name: "Soarin\u2019 Across America",
