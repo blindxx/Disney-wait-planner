@@ -211,6 +211,8 @@ export function normalizeDestinations(body: unknown): { destinations: ThemeParks
     }
     destinations.push({ entityId, name, slug: str(d.slug), parks });
   }
+  // Non-empty provider array with zero valid entries = schema drift, not empty data.
+  if (body.destinations.length > 0 && destinations.length === 0) return null;
   return { destinations };
 }
 
@@ -266,6 +268,8 @@ export function normalizeLive(body: unknown): ThemeParksLive | null {
       showtimes,
     });
   }
+  // Genuinely empty liveData is valid-empty; non-empty with zero valid entries is not.
+  if (body.liveData.length > 0 && entries.length === 0) return null;
   return {
     entityId,
     name,
@@ -301,6 +305,8 @@ function normalizeScheduleEntries(
       lastUpdated: asOffsetTimestamp(s.lastUpdated),
     });
   }
+  // Empty array is valid-empty; non-empty with zero valid entries is invalid.
+  if (raw.length > 0 && entries.length === 0) return null;
   return { entries, dropped };
 }
 
@@ -331,6 +337,7 @@ export function normalizeSchedule(body: unknown): ThemeParksSchedule | null {
         entries: pe.entries,
       });
     }
+    if (body.parks.length > 0 && parks.length === 0) return null;
   }
   return { entityId, name, timeZone, entries: own.entries, parks, droppedEntries: dropped };
 }
@@ -663,6 +670,22 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   check("schedule: garbage invalid", normalizeSchedule({ id: DEV_PARK, name: "x" }) === null && normalizeSchedule([]) === null);
   const dsch = normalizeSchedule({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", timezone: "America/New_York", parks: [{ id: DEV_PARK, name: "MK", timezone: null, schedule: DEV_SCHEDULE.schedule }] });
   check("schedule: destination parks inherit zone", dsch?.parks[0].timeZone === "America/New_York" && dsch.parks[0].entries.length === 2);
+  // Array contract: empty => valid-empty; some valid => ok + dropped; non-empty, zero valid => invalid.
+  const junk = [{ nope: 1 }, "x", null];
+  const goodDest = { id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", parks: [] };
+  check("destinations: empty array valid-empty", normalizeDestinations({ destinations: [] })?.destinations.length === 0);
+  check("destinations: partial malformed ok", normalizeDestinations({ destinations: [goodDest, ...junk] })?.destinations.length === 1);
+  check("destinations: wholly malformed invalid", normalizeDestinations({ destinations: junk }) === null);
+  check("live: partial malformed ok", normalizeLive({ ...DEV_LIVE, liveData: [DEV_LIVE.liveData[1], ...junk] })?.entries.length === 1);
+  check("live: wholly malformed invalid", normalizeLive({ ...DEV_LIVE, liveData: junk }) === null);
+  check("schedule: wholly malformed invalid", normalizeSchedule({ ...DEV_SCHEDULE, schedule: junk }) === null
+    && normalizeSchedule({ ...DEV_SCHEDULE, schedule: [DEV_SCHEDULE.schedule[2], DEV_SCHEDULE.schedule[3]] }) === null);
+  const destDoc = (parks: unknown[]) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", timezone: "America/New_York", parks });
+  check("schedule: destination parks empty valid-empty", normalizeSchedule(destDoc([]))?.parks.length === 0);
+  check("schedule: destination park wholly malformed schedule dropped, others kept",
+    normalizeSchedule(destDoc([{ id: DEV_PARK, name: "MK", schedule: DEV_SCHEDULE.schedule }, { id: THEMEPARKS_PARKS.hs.entityId, name: "HS", schedule: junk }]))?.parks.length === 1);
+  check("schedule: destination parks all malformed invalid",
+    normalizeSchedule(destDoc([{ id: DEV_PARK, name: "MK", schedule: junk }, ...junk])) === null);
   check("retry-after seconds/date/default/clamp",
     parseRetryAfterMs("30", 0) === 30_000 && parseRetryAfterMs(new Date(90_000).toUTCString(), 0) === 90_000 &&
     parseRetryAfterMs(null, 0) === 60_000 && parseRetryAfterMs("999999", 0) === 3_600_000 && parseRetryAfterMs("0", 0) === 1000);
@@ -709,6 +732,25 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     t += TTL.live.maxStale + 1;
     const g = await client.getLive(DEV_PARK);
     check("stale beyond max age → error", !g.ok && g.error.kind === "http"); }
+
+  // Wholly malformed refresh must not overwrite valid cache with an empty success.
+  { let bad = false;
+    const { client } = mk(() => devRes(200, bad ? { ...DEV_LIVE, liveData: [{ nope: 1 }] } : DEV_LIVE));
+    await client.getLive(DEV_PARK); bad = true; t += TTL.live.fresh + 1;
+    const s = await client.getLive(DEV_PARK);
+    check("malformed refresh → stale valid data, not empty success",
+      s.ok && s.meta.origin === "stale" && s.meta.staleReason?.kind === "invalid_payload" && s.data.entries.length === 2);
+    const after = await client.getLive(DEV_PARK);
+    check("malformed refresh did not replace cache", after.ok && after.data.entries.length === 2 && after.meta.origin === "stale");
+    t += TTL.live.maxStale + 1;
+    const g = await client.getLive(DEV_PARK);
+    check("malformed refresh past max stale → invalid_payload", !g.ok && g.error.kind === "invalid_payload"); }
+  { const { client } = mk(() => devRes(200, { ...DEV_LIVE, liveData: [{ nope: 1 }] }));
+    const r = await client.getLive(DEV_PARK);
+    check("malformed with no cache → invalid_payload failure", !r.ok && r.error.kind === "invalid_payload"); }
+  { const { client } = mk(() => devRes(200, { destinations: [{ nope: 1 }] }));
+    const r = await client.getDestinations();
+    check("malformed discovery → invalid_payload", !r.ok && r.error.kind === "invalid_payload"); }
 
   // Failure taxonomy.
   { const { client } = mk(() => devRes(404, {}));
