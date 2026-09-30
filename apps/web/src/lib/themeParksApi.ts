@@ -423,6 +423,20 @@ export function restrictScheduleToMonth(
   return { ...schedule, entries: own.kept, parks, droppedEntries: dropped };
 }
 
+/**
+ * Release a response body that will not be consumed so the connection isn't
+ * held open. Best-effort and non-blocking: cancellation is started
+ * synchronously, and neither a sync throw nor an async rejection may replace
+ * the provider error the caller is about to return.
+ */
+function releaseBody(res: Response): void {
+  try {
+    void Promise.resolve(res.body?.cancel()).catch(() => {});
+  } catch {
+    /* ignore: cleanup must never alter the typed provider error */
+  }
+}
+
 /** True when both endpoints parse and the end instant precedes the start instant (equal is fine). */
 function endsBeforeStart(start: string, end: string | null): boolean {
   return end !== null && Date.parse(end) < Date.parse(start);
@@ -584,6 +598,9 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     }
 
     const t1 = now();
+    // Single cleanup point: every non-2xx path below (304 revalidation, 429/503,
+    // 404, generic HTTP) is status-only and never reads the body.
+    if (res.status === 304 || !res.ok) releaseBody(res);
     if (res.status === 304 && cached) {
       const entry = { ...cached, fetchedAt: t1, freshUntil: t1 + TTL[cls].fresh };
       remember(key, entry);
@@ -1161,6 +1178,49 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     const r = await client.getLive(DEV_PARK);
     check("stalled body refresh → stale-if-error with timeout reason",
       r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "timeout" && r.data.entries.length === 2); }
+
+  // Response-body release on status-only error paths (single shared point).
+  { const tracked = (status: number, headers: Record<string, string> = {}, cancelRejects = false) => {
+      const flag = { cancelled: false };
+      const body = new ReadableStream({
+        start() { /* never enqueues */ },
+        cancel() { flag.cancelled = true; if (cancelRejects) throw new Error("cancel boom"); },
+      });
+      return { flag, res: new Response(body, { status, headers }) };
+    };
+    const cases: Array<[string, number, Record<string, string>, (r: ThemeParksResult<unknown>) => boolean]> = [
+      ["429", 429, { "retry-after": "45" }, (r) => !r.ok && r.error.kind === "rate_limited" && r.error.httpStatus === 429 && r.error.retryAfterMs === 45_000],
+      ["503", 503, { "retry-after": "20" }, (r) => !r.ok && r.error.kind === "http" && r.error.httpStatus === 503 && r.error.retryAfterMs === 20_000],
+      ["404", 404, {}, (r) => !r.ok && r.error.kind === "not_found" && r.error.httpStatus === 404],
+      ["500", 500, {}, (r) => !r.ok && r.error.kind === "http" && r.error.httpStatus === 500],
+    ];
+    for (const [label, status, headers, expectOk] of cases) {
+      for (const rejects of [false, true]) {
+        const t1 = tracked(status, headers, rejects);
+        const { client } = mk(() => t1.res);
+        const r = await client.getLive(DEV_PARK);
+        check(`body release: ${label} cancels body${rejects ? " (cancel throws) and keeps typed error" : " with typed semantics intact"}`, t1.flag.cancelled && expectOk(r));
+      }
+    }
+    { const t1 = tracked(429, { "retry-after": "60" }, true);
+      const { client, calls } = mk(() => t1.res);
+      await client.getLive(DEV_PARK); const again = await client.getSchedule(DEV_PARK);
+      check("body release: backoff still blocks further calls after cancel", !again.ok && again.error.kind === "rate_limited" && calls.length === 1); }
+    { let n = 0; const err = tracked(500);
+      const { client } = mk(() => (n++ === 0 ? devRes(200, DEV_LIVE) : err.res));
+      await client.getLive(DEV_PARK); t += TTL.live.fresh + 1;
+      const r = await client.getLive(DEV_PARK);
+      check("body release: 500 refresh cancels body and stale-if-error preserved", err.flag.cancelled && r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "http"); }
+    { let n = 0; // 304 has no body by spec; revalidation path must be unaffected by the shared release
+      const { client } = mk(() => (n++ === 0 ? devRes(200, DEV_LIVE, { etag: 'W/"y"' }) : devRes(304, null)));
+      await client.getLive(DEV_PARK); t += TTL.live.fresh + 1;
+      const r = await client.getLive(DEV_PARK);
+      check("body release: 304 revalidation still works", r.ok && r.meta.origin === "revalidated"); }
+    { const ok = tracked(200);
+      const okBody = new Response(JSON.stringify(DEV_LIVE), { status: 200 });
+      const { client } = mk(() => okBody);
+      const r = await client.getLive(DEV_PARK);
+      check("body release: successful body-consuming path unchanged", r.ok && r.meta.origin === "network" && r.data.entries.length === 2 && ok.flag.cancelled === false); } }
 
   // Failure taxonomy.
   { const { client } = mk(() => devRes(404, {}));
