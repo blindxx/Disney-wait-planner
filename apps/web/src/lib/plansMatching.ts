@@ -100,6 +100,10 @@ export const ALIASES_DLR: Record<string, string> = {
   btmrr: "big thunder mountain railroad",
   // Enchanted Tiki Room (Disneyland Park) — provider/possessive name → canonical
   "walt disneys enchanted tiki room": "enchanted tiki room",
+  // Historical Entertainment-era shorthand, preserved after the Phase 12 move
+  // so stale type:"entertainment" plans still resolve (see
+  // resolvePlannerItemEffectiveType).
+  "tiki room":                    "enchanted tiki room",
   btmr:  "big thunder mountain railroad",
   potc:  "pirates of the caribbean",
   iasw:  "its a small world",
@@ -370,6 +374,7 @@ export const ALIASES_WDW: Record<string, string> = {
   // ---- Phase 12: Country Bear / Tiki Room (moved from Entertainment aliases) ----
   "country bear jamboree":            "country bear musical jamboree",
   "walt disneys enchanted tiki room": "enchanted tiki room",
+  "tiki room":                        "enchanted tiki room", // historical Entertainment-era shorthand
 
   // ---- Walt Disney's Carousel of Progress (MK Tomorrowland) ----
   // "cop" is a single token — stage-2 can't reach it without an alias.
@@ -491,6 +496,8 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "Walt Disney's Enchanted Tiki Room", resort: "DLR", expectedKey: "enchanted tiki room" },
   { input: "Walt Disney's Enchanted Tiki Room", resort: "WDW", expectedKey: "enchanted tiki room" },
   { input: "country bear jamboree",  resort: "WDW", expectedKey: "country bear musical jamboree" },
+  { input: "Tiki Room",              resort: "WDW", expectedKey: "enchanted tiki room" },
+  { input: "Tiki Room",              resort: "DLR", expectedKey: "enchanted tiki room" },
   // WDW
   { input: "everest",                resort: "WDW", expectedKey: "expedition everest" },
   { input: "expedition",             resort: "WDW", expectedKey: "expedition everest" },

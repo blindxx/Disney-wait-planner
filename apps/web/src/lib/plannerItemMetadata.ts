@@ -566,6 +566,20 @@ export const DEV_PLANNER_ITEM_METADATA_CASES: Array<{
     resort: "DLR",
     expected: { type: "attraction", resortId: "DLR", canonicalName: "Turtle Talk with Crush", parkId: "dca", land: "Hollywood Land", lifecycle: "active" },
   },
+  {
+    description: "historical 'Tiki Room' shorthand + stale entertainment (WDW) -> attraction + park/land",
+    name: "Tiki Room",
+    type: "entertainment",
+    resort: "WDW",
+    expected: { type: "attraction", resortId: "WDW", canonicalName: "Enchanted Tiki Room", parkId: "mk", land: "Adventureland", lifecycle: "active" },
+  },
+  {
+    description: "historical 'Tiki Room' shorthand + stale entertainment (DLR) -> attraction + park/land",
+    name: "Tiki Room",
+    type: "entertainment",
+    resort: "DLR",
+    expected: { type: "attraction", resortId: "DLR", canonicalName: "Enchanted Tiki Room", parkId: "disneyland", land: "Adventureland", lifecycle: "active" },
+  },
 ];
 
 /**
@@ -877,5 +891,26 @@ export const DEV_RESOLVE_PLANNER_ITEM_EFFECTIVE_TYPE_CASES: Array<{
     name: "Happily Ever After",
     resort: "WDW",
     expected: "entertainment",
+  },
+  {
+    description: "historical 'Tiki Room' shorthand + stored entertainment (WDW) -> attraction",
+    rawType: "entertainment",
+    name: "Tiki Room",
+    resort: "WDW",
+    expected: "attraction",
+  },
+  {
+    description: "historical 'Tiki Room' shorthand + stored entertainment (DLR) -> attraction",
+    rawType: "entertainment",
+    name: "Tiki Room",
+    resort: "DLR",
+    expected: "attraction",
+  },
+  {
+    description: "historical 'Tiki Room' shorthand + stored entertainment (none) -> attraction",
+    rawType: "entertainment",
+    name: "Tiki Room",
+    resort: undefined,
+    expected: "attraction",
   },
 ];
