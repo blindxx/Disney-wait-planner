@@ -169,7 +169,7 @@ export interface ThemeParksIdentityReport {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OFFSET_TIMESTAMP_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
 type Obj = Record<string, unknown>;
 
@@ -179,10 +179,15 @@ function isObj(v: unknown): v is Obj {
 function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() !== "" ? v : null;
 }
-/** Offset-aware (or Z) ISO timestamp that actually parses; else null. */
+/**
+ * Offset-aware (or Z) ISO timestamp with in-range time/offset fields and a
+ * real calendar date (Date.parse alone would roll 2026-02-30 into March);
+ * returned verbatim, else null.
+ */
 export function asOffsetTimestamp(v: unknown): string | null {
   const s = str(v);
-  if (!s || !OFFSET_TIMESTAMP_RE.test(s) || Number.isNaN(Date.parse(s))) {
+  const m = s ? OFFSET_TIMESTAMP_RE.exec(s) : null;
+  if (!s || !m || !isValidIsoCalendarDate(m[1]) || Number.isNaN(Date.parse(s))) {
     return null;
   }
   return s;
@@ -200,15 +205,18 @@ export function normalizeDestinations(body: unknown): { destinations: ThemeParks
     const entityId = asId(d.id);
     const name = str(d.name);
     if (!entityId || !name) continue;
+    // Provider contract: every destination carries a `parks` array. Missing /
+    // non-array, or non-empty with zero valid parks, is schema drift: the
+    // destination is invalid (never a silent `parks: []`). Empty = valid-empty.
+    if (!Array.isArray(d.parks)) continue;
     const parks: ThemeParksDestination["parks"] = [];
-    if (Array.isArray(d.parks)) {
-      for (const p of d.parks) {
-        if (!isObj(p)) continue;
-        const pid = asId(p.id);
-        const pname = str(p.name);
-        if (pid && pname) parks.push({ entityId: pid, name: pname });
-      }
+    for (const p of d.parks) {
+      if (!isObj(p)) continue;
+      const pid = asId(p.id);
+      const pname = str(p.name);
+      if (pid && pname) parks.push({ entityId: pid, name: pname });
     }
+    if (d.parks.length > 0 && parks.length === 0) continue;
     destinations.push({ entityId, name, slug: str(d.slug), parks });
   }
   // Non-empty provider array with zero valid entries = schema drift, not empty data.
@@ -426,11 +434,32 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     return { ok: false, error };
   }
 
+  /**
+   * The abort timer spans the whole exchange — headers AND body consumption —
+   * so a stalled body resolves as a typed timeout (with stale-if-error) and
+   * never leaves the in-flight dedupe entry hanging.
+   */
   async function network(
     key: string,
     path: string,
     cls: TtlClass,
     normalize: (body: unknown) => unknown | null,
+  ): Promise<ThemeParksResult<unknown>> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await networkOnce(key, path, cls, normalize, controller);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function networkOnce(
+    key: string,
+    path: string,
+    cls: TtlClass,
+    normalize: (body: unknown) => unknown | null,
+    controller: AbortController,
   ): Promise<ThemeParksResult<unknown>> {
     const cached = cache.get(key);
     const t0 = now();
@@ -444,26 +473,36 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     };
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Rejects on abort so a stalled fetch/body settles even if the underlying
+    // stream ignores the signal.
+    const aborted = new Promise<never>((_, reject) => {
+      controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+    aborted.catch(() => {});
+    const timeoutError = (): ThemeParksError => ({
+      kind: "timeout",
+      message: `ThemeParks request timed out after ${timeoutMs}ms`,
+    });
+
     let res: Response;
     try {
-      res = await fetchImpl(`${baseUrl}${path}`, {
-        headers,
-        signal: controller.signal,
-        cache: "no-store",
-      });
+      res = await Promise.race([
+        fetchImpl(`${baseUrl}${path}`, {
+          headers,
+          signal: controller.signal,
+          cache: "no-store",
+        }),
+        aborted,
+      ]);
     } catch (e) {
-      const aborted = controller.signal.aborted || (e instanceof Error && e.name === "AbortError");
+      const wasAborted = controller.signal.aborted || (e instanceof Error && e.name === "AbortError");
       return fail(
-        aborted
-          ? { kind: "timeout", message: `ThemeParks request timed out after ${timeoutMs}ms` }
+        wasAborted
+          ? timeoutError()
           : { kind: "network", message: e instanceof Error ? e.message : "network failure" },
         cached,
         cls,
       );
-    } finally {
-      clearTimeout(timer);
     }
 
     const t1 = now();
@@ -493,8 +532,9 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
 
     let body: unknown;
     try {
-      body = await res.json();
+      body = await Promise.race([res.json(), aborted]);
     } catch {
+      if (controller.signal.aborted) return fail(timeoutError(), cached, cls);
       return fail({ kind: "invalid_payload", message: "ThemeParks response was not valid JSON" }, cached, cls);
     }
     const data = normalize(body);
@@ -686,6 +726,33 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     normalizeSchedule(destDoc([{ id: DEV_PARK, name: "MK", schedule: DEV_SCHEDULE.schedule }, { id: THEMEPARKS_PARKS.hs.entityId, name: "HS", schedule: junk }]))?.parks.length === 1);
   check("schedule: destination parks all malformed invalid",
     normalizeSchedule(destDoc([{ id: DEV_PARK, name: "MK", schedule: junk }, ...junk])) === null);
+  // Timestamp validation: calendar-impossible dates rejected; valid offset/Z kept verbatim.
+  check("timestamp: valid offset + Z preserved verbatim",
+    asOffsetTimestamp("2026-09-30T10:50:00-04:00") === "2026-09-30T10:50:00-04:00" &&
+    asOffsetTimestamp("2026-09-30T04:01:56.507Z") === "2026-09-30T04:01:56.507Z" &&
+    asOffsetTimestamp("2028-02-29T09:00:00-08:00") === "2028-02-29T09:00:00-08:00");
+  check("timestamp: calendar-impossible dates rejected",
+    asOffsetTimestamp("2026-02-30T10:00:00-04:00") === null && asOffsetTimestamp("2026-13-01T10:00:00Z") === null &&
+    asOffsetTimestamp("2026-04-31T10:00:00Z") === null && asOffsetTimestamp("2027-02-29T10:00:00Z") === null);
+  check("timestamp: out-of-range time/offset + offset-less rejected",
+    asOffsetTimestamp("2026-09-30T24:00:00-04:00") === null && asOffsetTimestamp("2026-09-30T10:60:00Z") === null &&
+    asOffsetTimestamp("2026-09-30T10:00:00+25:00") === null && asOffsetTimestamp("2026-09-30T10:00:00") === null);
+  check("schedule: impossible-date timestamp entry dropped",
+    normalizeSchedule({ ...DEV_SCHEDULE, schedule: [DEV_SCHEDULE.schedule[1], { date: "2026-10-02", type: "OPERATING", openingTime: "2026-02-30T09:00:00-04:00", closingTime: "2026-10-02T22:00:00-04:00" }] })?.entries.length === 1);
+  check("live: impossible-date showtime dropped",
+    normalizeLive({ ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: [{ type: "P", startTime: "2026-02-30T10:00:00-04:00" }, { type: "P", startTime: "2026-09-30T10:00:00-04:00" }] }] })?.entries[0].showtimes.length === 1);
+
+  // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
+  const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
+  const goodPark = { id: DEV_PARK, name: "MK" };
+  check("discovery parks: empty array valid-empty", normalizeDestinations({ destinations: [destWith([])] })?.destinations[0].parks.length === 0);
+  check("discovery parks: partial malformed retains valid", normalizeDestinations({ destinations: [destWith([goodPark, ...junk])] })?.destinations[0].parks.length === 1);
+  check("discovery parks: non-empty zero-valid → invalid", normalizeDestinations({ destinations: [destWith(junk)] }) === null);
+  check("discovery parks: missing → invalid", normalizeDestinations({ destinations: [destWith(undefined)] }) === null);
+  check("discovery parks: non-array → invalid", normalizeDestinations({ destinations: [destWith("parks")] }) === null);
+  check("discovery parks: one bad destination dropped, others kept",
+    normalizeDestinations({ destinations: [destWith(junk), { ...destWith([goodPark]), id: THEMEPARKS_DESTINATIONS.DLR.entityId }] })?.destinations.length === 1);
+
   check("retry-after seconds/date/default/clamp",
     parseRetryAfterMs("30", 0) === 30_000 && parseRetryAfterMs(new Date(90_000).toUTCString(), 0) === 90_000 &&
     parseRetryAfterMs(null, 0) === 60_000 && parseRetryAfterMs("999999", 0) === 3_600_000 && parseRetryAfterMs("0", 0) === 1000);
@@ -751,6 +818,29 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   { const { client } = mk(() => devRes(200, { destinations: [{ nope: 1 }] }));
     const r = await client.getDestinations();
     check("malformed discovery → invalid_payload", !r.ok && r.error.kind === "invalid_payload"); }
+
+  // Nested-parks drift must not replace a previously validated discovery cache.
+  { let drift = false;
+    const okDests = { destinations: [{ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", parks: [{ id: DEV_PARK, name: "MK" }] }] };
+    const { client } = mk(() => devRes(200, drift ? { destinations: [{ ...okDests.destinations[0], parks: [{ nope: 1 }] }] } : okDests));
+    await client.getDestinations(); drift = true; t += TTL.static.fresh + 1;
+    const r = await client.getDestinations();
+    check("parks drift → stale valid discovery, not empty parks",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.destinations[0].parks.length === 1); }
+
+  // Body-consumption timeout: headers arrive, body stalls.
+  { const stall = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
+    const { client, calls } = mk(stall, { timeoutMs: 20 });
+    const [a, b] = await Promise.all([client.getLive(DEV_PARK), client.getLive(DEV_PARK)]);
+    check("stalled body → typed timeout (deduped, not hanging)", !a.ok && a.error.kind === "timeout" && !b.ok && b.error.kind === "timeout" && calls.length === 1);
+    const c = await client.getLive(DEV_PARK);
+    check("in-flight entry cleared after body timeout (next call fetches)", !c.ok && c.error.kind === "timeout" && calls.length === 2); }
+  { let stallNow = false;
+    const { client } = mk(() => (stallNow ? new Response(new ReadableStream({ start() {} }), { status: 200 }) : devRes(200, DEV_LIVE)), { timeoutMs: 20 });
+    await client.getLive(DEV_PARK); stallNow = true; t += TTL.live.fresh + 1;
+    const r = await client.getLive(DEV_PARK);
+    check("stalled body refresh → stale-if-error with timeout reason",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "timeout" && r.data.entries.length === 2); }
 
   // Failure taxonomy.
   { const { client } = mk(() => devRes(404, {}));
