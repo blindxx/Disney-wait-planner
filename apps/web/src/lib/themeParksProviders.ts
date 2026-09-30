@@ -99,10 +99,10 @@ export function getThemeParksPark(parkId: ParkId): ThemeParksParkConfig {
   return THEMEPARKS_PARKS[parkId];
 }
 
-/** Provider park UUID → DWP park id, or null when not a configured park. */
+/** Provider park UUID (any case) → DWP park id, or null when not a configured park. */
 export function resolveDwpParkFromThemeParksId(entityId: string): ParkId | null {
   for (const [parkId, cfg] of Object.entries(THEMEPARKS_PARKS)) {
-    if (cfg.entityId === entityId) return parkId as ParkId;
+    if (cfg.entityId === entityId.toLowerCase()) return parkId as ParkId;
   }
   return null;
 }
@@ -112,7 +112,7 @@ export function resolveDwpResortFromThemeParksId(
   entityId: string,
 ): ResortId | null {
   for (const resort of Object.keys(THEMEPARKS_DESTINATIONS) as ResortId[]) {
-    if (THEMEPARKS_DESTINATIONS[resort].entityId === entityId) return resort;
+    if (THEMEPARKS_DESTINATIONS[resort].entityId === entityId.toLowerCase()) return resort;
   }
   return null;
 }
@@ -148,6 +148,19 @@ export const DEV_THEMEPARKS_PROVIDER_CASES: Array<{
       const tp = Object.keys(THEMEPARKS_PARKS).sort().join(",");
       return dwp === tp;
     },
+  },
+  {
+    label: "configured UUIDs are lowercase-canonical (matches asId output)",
+    check: () =>
+      [...Object.values(THEMEPARKS_DESTINATIONS), ...Object.values(THEMEPARKS_PARKS)].every(
+        (c) => c.entityId === c.entityId.toLowerCase(),
+      ),
+  },
+  {
+    label: "resolution is case-insensitive",
+    check: () =>
+      resolveDwpParkFromThemeParksId(THEMEPARKS_PARKS.mk.entityId.toUpperCase()) === "mk" &&
+      resolveDwpResortFromThemeParksId(THEMEPARKS_DESTINATIONS.DLR.entityId.toUpperCase()) === "DLR",
   },
   {
     label: "provider park UUIDs are unique and well-formed",

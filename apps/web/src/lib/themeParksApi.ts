@@ -194,9 +194,25 @@ export function asOffsetTimestamp(v: unknown): string | null {
   }
   return s;
 }
+/** Valid UUID, canonicalized to lowercase so identity comparison is case-stable. */
 function asId(v: unknown): string | null {
   const s = str(v);
-  return s && UUID_RE.test(s) ? s : null;
+  return s && UUID_RE.test(s) ? s.toLowerCase() : null;
+}
+
+/**
+ * Shared optional-field rule for values that carry identity or time/freshness
+ * meaning. Absent (`undefined`) or explicit `null` is allowed and yields
+ * `null`; a supplied value that fails `parse` yields `INVALID` so the caller
+ * rejects the containing record instead of silently degrading it to "absent".
+ * Low-impact metadata (names, descriptions, status, zone, externalId, showtime
+ * `type`) intentionally stays permissive via plain `str()`.
+ */
+const INVALID = Symbol("invalid");
+function optionalField<T>(raw: unknown, parse: (v: unknown) => T | null): T | null | typeof INVALID {
+  if (raw === undefined || raw === null) return null;
+  const parsed = parse(raw);
+  return parsed === null ? INVALID : parsed;
 }
 
 export function normalizeDestinations(body: unknown): { destinations: ThemeParksDestination[] } | null {
@@ -232,12 +248,14 @@ export function normalizeEntity(body: unknown): ThemeParksEntity | null {
   const name = str(body.name);
   const entityType = str(body.entityType);
   if (!entityId || !name || !entityType) return null;
+  const parentId = optionalField(body.parentId, asId);
+  if (parentId === INVALID) return null;
   return {
     entityId,
     name,
     entityType,
     timeZone: str(body.timezone),
-    parentId: asId(body.parentId),
+    parentId,
   };
 }
 
@@ -267,24 +285,25 @@ export function normalizeLive(body: unknown): ThemeParksLive | null {
       if (!Array.isArray(e.showtimes)) { droppedEntries++; continue; }
       for (const s of e.showtimes) {
         const startTime = isObj(s) ? asOffsetTimestamp(s.startTime) : null;
-        if (!isObj(s) || !startTime) { entryDroppedShowtimes++; continue; }
-        showtimes.push({
-          type: str(s.type),
-          startTime,
-          endTime: asOffsetTimestamp(s.endTime),
-        });
+        const endTime = isObj(s) ? optionalField(s.endTime, asOffsetTimestamp) : null;
+        if (!isObj(s) || !startTime || endTime === INVALID) { entryDroppedShowtimes++; continue; }
+        showtimes.push({ type: str(s.type), startTime, endTime });
       }
       if (e.showtimes.length > 0 && showtimes.length === 0) { droppedEntries++; continue; }
     }
+    // Identity/freshness fields: absent/null ok, malformed supplied value rejects the entry.
+    const parkId = optionalField(e.parkId, asId);
+    const lastUpdated = optionalField(e.lastUpdated, asOffsetTimestamp);
+    if (parkId === INVALID || lastUpdated === INVALID) { droppedEntries++; continue; }
     droppedShowtimes += entryDroppedShowtimes;
     entries.push({
       entityId: id,
       name: ename,
       entityType,
-      parkId: asId(e.parkId),
+      parkId,
       externalId: str(e.externalId),
       status: str(e.status),
-      lastUpdated: asOffsetTimestamp(e.lastUpdated),
+      lastUpdated,
       showtimes,
     });
   }
@@ -312,7 +331,8 @@ function normalizeScheduleEntries(
     const type = str(s.type);
     const openingTime = asOffsetTimestamp(s.openingTime);
     const closingTime = asOffsetTimestamp(s.closingTime);
-    if (!date || !isValidIsoCalendarDate(date) || !type || !openingTime || !closingTime) {
+    const lastUpdated = optionalField(s.lastUpdated, asOffsetTimestamp);
+    if (!date || !isValidIsoCalendarDate(date) || !type || !openingTime || !closingTime || lastUpdated === INVALID) {
       dropped++;
       continue;
     }
@@ -322,7 +342,7 @@ function normalizeScheduleEntries(
       openingTime,
       closingTime,
       description: str(s.description),
-      lastUpdated: asOffsetTimestamp(s.lastUpdated),
+      lastUpdated,
     });
   }
   // Empty array is valid-empty; non-empty with zero valid entries is invalid.
@@ -586,7 +606,7 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     <T extends { entityId: string }>(requested: string, normalize: (body: unknown) => T | null) =>
     (body: unknown): T | null => {
       const data = normalize(body);
-      return data && data.entityId.toLowerCase() === requested.toLowerCase() ? data : null;
+      return data && data.entityId === requested ? data : null;
     };
 
   const badId = (id: string): ThemeParksError | null =>
@@ -595,25 +615,28 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
   return {
     getDestinations: () => request("/destinations", "static", normalizeDestinations),
 
-    getEntity(entityId: string): Promise<ThemeParksResult<ThemeParksEntity>> {
-      const bad = badId(entityId);
+    getEntity(requestedId: string): Promise<ThemeParksResult<ThemeParksEntity>> {
+      const bad = badId(requestedId);
       if (bad) return Promise.resolve({ ok: false, error: bad });
+      const entityId = requestedId.toLowerCase(); // canonical: one cache key + identity compare per entity
       return request(`/entity/${entityId}`, "static", forEntity(entityId, normalizeEntity));
     },
 
-    getLive(entityId: string): Promise<ThemeParksResult<ThemeParksLive>> {
-      const bad = badId(entityId);
+    getLive(requestedId: string): Promise<ThemeParksResult<ThemeParksLive>> {
+      const bad = badId(requestedId);
       if (bad) return Promise.resolve({ ok: false, error: bad });
+      const entityId = requestedId.toLowerCase(); // canonical: one cache key + identity compare per entity
       return request(`/entity/${entityId}/live`, "live", forEntity(entityId, normalizeLive));
     },
 
     /** No `month` → provider's upcoming-schedule window. */
     getSchedule(
-      entityId: string,
+      requestedId: string,
       month?: { year: number; month: number },
     ): Promise<ThemeParksResult<ThemeParksSchedule>> {
-      const bad = badId(entityId);
+      const bad = badId(requestedId);
       if (bad) return Promise.resolve({ ok: false, error: bad });
+      const entityId = requestedId.toLowerCase(); // canonical: one cache key + identity compare per entity
       let suffix = "";
       if (month) {
         const { year, month: m } = month;
@@ -779,6 +802,37 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   check("showtimes: explicit null rejects entry (not silently empty)", liveWith(showEntry(null), DEV_LIVE.liveData[1])?.entries.length === 1 && liveWith(showEntry(null)) === null);
   check("showtimes: non-array value rejects entry", liveWith(showEntry("10:50 AM"), DEV_LIVE.liveData[1])?.entries.length === 1);
   check("showtimes: only entry wholly malformed → payload invalid", liveWith(showEntry(badShowtimes)) === null);
+  // Shared optional-field rule: absent/null ok; malformed supplied value rejects the record.
+  const UP = DEV_PARK.toUpperCase();
+  const SHOW_ID = "a0613b70-293f-4a5b-8169-357be1777c62";
+  const st = (extra: Record<string, unknown>) => ({ ...goodShowtime, ...extra });
+  check("uuid: asId output lowercased (live entry + park ids)",
+    liveWith({ ...DEV_LIVE.liveData[0], id: SHOW_ID.toUpperCase(), parkId: UP })?.entries[0].parkId === DEV_PARK &&
+    liveWith({ ...DEV_LIVE.liveData[0], id: SHOW_ID.toUpperCase() })?.entries[0].entityId === SHOW_ID);
+  check("uuid: discovery ids lowercased", normalizeDestinations({ destinations: [{ ...goodDest, id: goodDest.id.toUpperCase() }] })?.destinations[0].entityId === goodDest.id);
+  check("endTime: absent and null allowed", ((r) => r?.entries[0].showtimes.length === 2 && r.entries[0].showtimes.every((x) => x.endTime === null))(
+    liveWith(showEntry([{ startTime: goodShowtime.startTime }, st({ endTime: null })]))));
+  check("endTime: valid preserved verbatim", liveWith(showEntry([goodShowtime]))?.entries[0].showtimes[0].endTime === goodShowtime.endTime);
+  { const r = liveWith(showEntry([goodShowtime, st({ endTime: "2026-02-30T10:00:00-04:00" }), st({ endTime: "soon" }), st({ endTime: 5 }), st({ endTime: "" })]));
+    check("endTime: malformed non-null drops the showtime (partial)", r?.entries[0].showtimes.length === 1 && r.droppedShowtimes === 4); }
+  check("endTime: all showtimes malformed endTime → entry rejected, payload invalid",
+    liveWith(showEntry([st({ endTime: "soon" })])) === null && liveWith(showEntry([st({ endTime: "soon" })]), DEV_LIVE.liveData[1])?.entries.length === 1);
+  check("lastUpdated: absent/null allowed", liveWith({ ...DEV_LIVE.liveData[0], lastUpdated: null }, { ...DEV_LIVE.liveData[1] })?.entries.length === 2);
+  check("lastUpdated: malformed supplied rejects live entry", liveWith({ ...DEV_LIVE.liveData[0], lastUpdated: "yesterday" }, DEV_LIVE.liveData[1])?.entries.length === 1);
+  check("parkId: absent/null allowed; malformed supplied rejects entry",
+    liveWith({ ...DEV_LIVE.liveData[0], parkId: null }, { ...DEV_LIVE.liveData[1], parkId: undefined })?.entries.length === 2 &&
+    liveWith({ ...DEV_LIVE.liveData[0], parkId: "not-a-uuid" }, DEV_LIVE.liveData[1])?.entries.length === 1 &&
+    liveWith({ ...DEV_LIVE.liveData[0], parkId: "" }) === null);
+  const entDoc = { id: DEV_PARK, name: "MK", entityType: "PARK", timezone: "America/New_York" };
+  check("parentId: absent/null allowed; malformed supplied rejects entity",
+    normalizeEntity(entDoc)?.parentId === null && normalizeEntity({ ...entDoc, parentId: null })?.parentId === null &&
+    normalizeEntity({ ...entDoc, parentId: THEMEPARKS_DESTINATIONS.WDW.entityId.toUpperCase() })?.parentId === THEMEPARKS_DESTINATIONS.WDW.entityId &&
+    normalizeEntity({ ...entDoc, parentId: "bogus" }) === null);
+  check("schedule lastUpdated: absent/null allowed, malformed drops entry",
+    normalizeSchedule({ ...DEV_SCHEDULE, schedule: [{ ...DEV_SCHEDULE.schedule[1], lastUpdated: null }, { ...DEV_SCHEDULE.schedule[1], lastUpdated: "2026-09-30T04:01:56.507Z" }, { ...DEV_SCHEDULE.schedule[1], lastUpdated: "bad" }] })?.entries.length === 2);
+  check("permissive metadata stays permissive (status/externalId/timezone/type)",
+    ((r) => r?.entries[0].status === null && r.entries[0].externalId === null && r.timeZone === null)(liveWith({ ...DEV_LIVE.liveData[0], status: 5, externalId: 7 }) && normalizeLive({ ...DEV_LIVE, timezone: 3, liveData: [{ ...DEV_LIVE.liveData[0], status: 5, externalId: 7 }] })));
+
   // Nested discovery parks: empty valid-empty; partial retained; non-empty zero-valid / missing / non-array invalid.
   const destWith = (parks: unknown) => ({ id: THEMEPARKS_DESTINATIONS.WDW.entityId, name: "WDW", slug: "wdw", ...(parks === undefined ? {} : { parks }) });
   const goodPark = { id: DEV_PARK, name: "MK" };
@@ -914,6 +968,18 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     const r = await client.getSchedule(DEV_PARK);
     check("identity: mismatched schedule refresh → stale correct data",
       r.ok && r.meta.origin === "stale" && r.data.entityId === DEV_PARK); }
+
+  // endTime drift must not replace validated showtimes; UUID casing is canonical across requests.
+  { let drift = false;
+    const { client } = mk(() => devRes(200, { ...DEV_LIVE, liveData: [{ ...DEV_LIVE.liveData[0], showtimes: drift ? [st({ endTime: "soon" })] : [goodShowtime] }] }));
+    await client.getLive(DEV_PARK); drift = true; t += TTL.live.fresh + 1;
+    const r = await client.getLive(DEV_PARK);
+    check("endTime drift refresh → stale showtimes preserved",
+      r.ok && r.meta.origin === "stale" && r.meta.staleReason?.kind === "invalid_payload" && r.data.entries[0].showtimes.length === 1); }
+  { const { client, calls } = mk(() => devRes(200, { ...DEV_LIVE, id: DEV_PARK.toUpperCase() }));
+    await client.getLive(DEV_PARK.toUpperCase()); const r = await client.getLive(DEV_PARK);
+    check("uuid: differently-cased requests share one canonical cache key; upper-case body id accepted",
+      r.ok && r.meta.origin === "cache" && calls.length === 1 && calls[0].url.endsWith(`/entity/${DEV_PARK}/live`)); }
 
   // Body-consumption timeout: headers arrive, body stalls.
   { const stall = () => new Response(new ReadableStream({ start() { /* never enqueues or closes */ } }), { status: 200 });
