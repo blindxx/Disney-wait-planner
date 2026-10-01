@@ -49,6 +49,11 @@ import {
 } from "@/lib/plannedClosures";
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 import ResortClock from "../../components/ResortClock";
+import ThemeParksAttribution from "../../components/ThemeParksAttribution";
+import type {
+  EntertainmentShowtimeEntry,
+  ParkEntertainmentShowtimes,
+} from "../../lib/entertainmentShowtimes";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -423,7 +428,24 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
  * (there is no wait time to show). Layout and spacing adapt via the
  * .entertainment-card CSS class (mirrors .wait-card's grid/border rules).
  */
-function EntertainmentCard({ entertainment }: { entertainment: EntertainmentPlace }) {
+function EntertainmentCard({
+  entertainment,
+  showtime,
+  stale,
+}: {
+  entertainment: EntertainmentPlace;
+  showtime?: EntertainmentShowtimeEntry;
+  stale?: boolean;
+}) {
+  // Unmapped / not-yet-loaded entries render no showtime line at all.
+  const upcoming =
+    showtime?.status === "upcoming" ? showtime.performances.filter((p) => !p.passed) : [];
+  const showtimeText =
+    !showtime || showtime.status === "unmapped"
+      ? null
+      : showtime.status === "upcoming"
+        ? upcoming.map((p) => p.localTime).join(" · ")
+        : showtime.message;
   return (
     <div className="entertainment-card">
       <div
@@ -450,6 +472,19 @@ function EntertainmentCard({ entertainment }: { entertainment: EntertainmentPlac
           }}
         >
           {entertainment.land}
+        </div>
+      )}
+      {showtimeText && (
+        <div
+          style={{
+            fontSize: "13px",
+            lineHeight: "1.3",
+            color: showtime?.status === "upcoming" ? "#374151" : "#9ca3af",
+            marginTop: "4px",
+          }}
+        >
+          {showtimeText}
+          {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
     </div>
@@ -681,6 +716,24 @@ export default function WaitTimesPage() {
 
   /** Parks available for the currently selected resort */
   const resortParks = RESORT_PARKS[selectedResort];
+
+  // Phase 12.3 — normalized showtimes for the selected park (server-side
+  // ThemeParks.wiki boundary). Keyed by park so a response for a previous park
+  // can never render against the current one; failures leave it null.
+  const [showtimes, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? (r.json() as Promise<ParkEntertainmentShowtimes>) : null))
+        .then((d) => { if (!cancelled && d && d.parkId === selectedPark) setShowtimes(d); })
+        .catch(() => {});
+    };
+    setShowtimes(null);
+    load();
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [selectedPark]);
 
   /** Entertainment for the currently selected park, from the canonical catalog. */
   const parkEntertainment = useMemo(
@@ -1016,13 +1069,23 @@ export default function WaitTimesPage() {
                   marginBottom: "10px",
                 }}
               >
-                Plan-worthy entertainment for this park. Check the official Disney app or website for current schedules and showtimes.
+                Plan-worthy entertainment for this park. Check the official Disney app or website to confirm showtimes.
               </p>
               <div className="entertainment-grid">
                 {entertainment.map((show) => (
-                  <EntertainmentCard key={show.name} entertainment={show} />
+                  <EntertainmentCard
+                    key={show.name}
+                    entertainment={show}
+                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    stale={showtimes?.stale}
+                  />
                 ))}
               </div>
+              {showtimes && !showtimes.error && (
+                <div style={{ marginTop: "8px" }}>
+                  <ThemeParksAttribution />
+                </div>
+              )}
             </div>
           );
         })()}
