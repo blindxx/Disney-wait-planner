@@ -727,6 +727,8 @@ export default function WaitTimesPage() {
   // responses for a park that is no longer selected.
   const [showtimesRaw, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
   useEffect(() => {
+    // Wait for stored park hydration so the first request uses the real park.
+    if (!ready) return;
     let cancelled = false;
     const load = () => {
       fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
@@ -738,7 +740,7 @@ export default function WaitTimesPage() {
     load();
     const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [selectedPark]);
+  }, [ready, selectedPark]);
   const showtimes = showtimesForDisplay(showtimesRaw);
 
   /** Entertainment for the currently selected park, from the canonical catalog. */

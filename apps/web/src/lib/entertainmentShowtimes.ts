@@ -127,7 +127,7 @@ export interface EntertainmentShowtimeEntry {
   message: string | null;
   /**
    * True when completeness is uncertain: a mapped ref was absent from the live
-   * payload, a ref had malformed showtime records dropped by validation, or an
+   * payload, the payload was fetched on a different resort-local day, a ref had malformed showtime records dropped by validation, or an
    * unrecognized-type showtime falls on today. `performances`
    * may then be partial; with none, the status is `unavailable`.
    */
@@ -155,6 +155,8 @@ export interface ParkEntertainmentShowtimes {
   localDate: string;
   /** ISO instant the passed/upcoming split was computed against. */
   asOf: string;
+  /** Resort-local date the provider payload was fetched on; null on failure. A value ≠ `localDate` makes every mapped schedule incomplete. */
+  fetchedLocalDate: string | null;
   /** True iff the data is stale-if-error (provider refresh failed). */
   stale: boolean;
   /** Provider response metadata; null when the provider call failed outright. */
@@ -224,6 +226,7 @@ function entryFromMapping(
   resort: ResortId,
   localDate: string,
   nowMs: number,
+  payloadCurrent: boolean,
 ): EntertainmentShowtimeEntry {
   const base = { dwpName: m.dwpName, parkId: m.parkId };
   if (m.disposition === "unmapped") {
@@ -255,7 +258,7 @@ function entryFromMapping(
     raw.push(...showtimes);
   }
   const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
-  const incomplete = anyAbsent || anyDropped || unrecognizedTypes.length > 0;
+  const incomplete = anyAbsent || anyDropped || !payloadCurrent || unrecognizedTypes.length > 0;
   let status: EntertainmentShowtimeStatus;
   if (performances.some((p) => !p.passed)) status = "upcoming"; // a known upcoming show is real even if the schedule is partial
   // "No more showtimes" / "none posted" are completeness claims: only complete data may make them.
@@ -277,6 +280,11 @@ export function normalizeParkEntertainmentShowtimes(
   const localDate = getResortLocalDate(resort, instant);
   const nowMs = instant.getTime();
   const live = result.ok ? result.data : null;
+  // A cached/stale payload fetched on another resort-local day (e.g. just after
+  // midnight) cannot vouch that today's schedule is complete. Same-day cache
+  // and stale-if-error are unaffected.
+  const fetchedLocalDate = result.ok ? getResortLocalDate(resort, new Date(result.meta.fetchedAt)) : null;
+  const payloadCurrent = fetchedLocalDate === localDate;
   const entries: EntertainmentShowtimeEntry[] = [];
   for (const place of ENTERTAINMENT_PLACES) {
     if (place.parkId !== parkId) continue;
@@ -286,13 +294,14 @@ export function normalizeParkEntertainmentShowtimes(
       entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: null, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: "No provider disposition" });
       continue;
     }
-    entries.push(entryFromMapping(m, live, resort, localDate, nowMs));
+    entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent));
   }
   return {
     parkId,
     resort,
     localDate,
     asOf: instant.toISOString(),
+    fetchedLocalDate,
     stale: result.ok && result.meta.origin === "stale",
     meta: result.ok
       ? { origin: result.meta.origin, fetchedAt: result.meta.fetchedAt, ...(result.meta.staleReason ? { staleReason: result.meta.staleReason } : {}) }
@@ -367,10 +376,10 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
   const st = (startTime: string, type: string | null = "Performance Time", endTime: string | null = null): ThemeParksShowtime => ({ type, startTime, endTime });
   const entry = (entityId: string, showtimes: ThemeParksShowtime[], status = "OPERATING", droppedShowtimes = 0) =>
     ({ entityId, name: "x", entityType: "SHOW", parkId: null, externalId: null, status, lastUpdated: "2020-01-01T00:00:00Z", showtimes, droppedShowtimes });
-  const live = (entries: ReturnType<typeof entry>[]): ThemeParksResult<ThemeParksLive> => ({
+  const live = (entries: ReturnType<typeof entry>[], fetchedAt?: number): ThemeParksResult<ThemeParksLive> => ({
     ok: true,
     data: { entityId: "p", name: "p", timeZone: null, entries, droppedEntries: 0, droppedShowtimes: 0 },
-    meta: { origin: "network", fetchedAt: 1, etag: null },
+    meta: { origin: "network", fetchedAt: fetchedAt ?? NOW.getTime(), etag: null },
   });
   const find = (r: ParkEntertainmentShowtimes, name: string) => r.entries.find((e) => e.dwpName === name)!;
 
@@ -460,6 +469,43 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     check("known performance + unknown type → performances kept, flagged incomplete",
       m.status === "upcoming" && m.performances.length === 1 && m.incomplete && m.unrecognizedTypes.length === 1);
   }
+  // Cross-date provider payloads (cached just after resort-local midnight) cannot vouch for today
+  {
+    const ms = (iso: string) => new Date(iso).getTime();
+    // WDW: now 12:30 AM EDT Oct 2 (04:30Z); payload fetched 11:30 PM EDT Oct 1 (03:30Z) vs 12:10 AM EDT Oct 2 (04:10Z)
+    const wNow = new Date("2026-10-02T04:30:00Z");
+    const prior = normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])], ms("2026-10-02T03:30:00Z")), wNow);
+    check("WDW prior-day payload: fetchedLocalDate reported, empty → unavailable (not none_posted)",
+      prior.localDate === "2026-10-02" && prior.fetchedLocalDate === "2026-10-01" && find(prior, "Happily Ever After").status === "unavailable" && find(prior, "Happily Ever After").incomplete);
+    const sameDay = normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])], ms("2026-10-02T04:10:00Z")), wNow);
+    check("WDW same-day payload (after local midnight) → none_posted", sameDay.fetchedLocalDate === "2026-10-02" && find(sameDay, "Happily Ever After").status === "none_posted");
+    const priorPast = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-02T00:05:00-04:00")])], ms("2026-10-02T03:30:00Z")), new Date("2026-10-02T05:00:00Z")), "Happily Ever After");
+    check("WDW prior-day payload, all passed → unavailable, not all_passed", priorPast.status === "unavailable" && priorPast.incomplete);
+    const priorUp = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-02T09:00:00-04:00")])], ms("2026-10-02T03:30:00Z")), wNow), "Happily Ever After");
+    check("WDW prior-day payload with a known upcoming performance → upcoming + incomplete", priorUp.status === "upcoming" && priorUp.incomplete);
+    // UTC date equals the resort date here, but local dates differ: 11:30 PM EDT Oct 1 is Oct 2 in UTC — local date must decide
+    const utcTrap = normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])], ms("2026-10-02T03:30:00Z")), new Date("2026-10-02T03:45:00Z"));
+    check("WDW uses resort-local (not UTC) date for fetchedAt: same local day → none_posted", utcTrap.localDate === "2026-10-01" && utcTrap.fetchedLocalDate === "2026-10-01" && find(utcTrap, "Happily Ever After").status === "none_posted");
+    // DLR: now 12:30 AM PDT Oct 2 (07:30Z); fetched 11:30 PM PDT Oct 1 (06:30Z) vs 12:10 AM PDT Oct 2 (07:10Z)
+    const dNow = new Date("2026-10-02T07:30:00Z");
+    const dPrior = normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_FW, []), entry(HALLOWEEN_PR, [])], ms("2026-10-02T06:30:00Z")), dNow);
+    check("DLR prior-day payload → unavailable", dPrior.fetchedLocalDate === "2026-10-01" && find(dPrior, "Halloween Screams").status === "unavailable");
+    const dSame = normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_FW, []), entry(HALLOWEEN_PR, [])], ms("2026-10-02T07:10:00Z")), dNow);
+    check("DLR same-day payload → none_posted", find(dSame, "Halloween Screams").status === "none_posted");
+    // 02:30Z Oct 2 is 7:30 PM PDT Oct 1 (still same local day as the payload's 6:00 PM PDT fetch)
+    const dEve = normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_FW, []), entry(HALLOWEEN_PR, [])], ms("2026-10-02T01:00:00Z")), new Date("2026-10-02T02:30:00Z"));
+    check("DLR evening: UTC date rolled but resort-local date matches → none_posted", dEve.localDate === "2026-10-01" && find(dEve, "Halloween Screams").status === "none_posted");
+    // Stale-if-error from the same local day keeps working; from a prior day it is incomplete
+    const mkStale = (fetchedAt: number): ThemeParksResult<ThemeParksLive> => ({
+      ...live([entry(HAPPILY, [])], fetchedAt) as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>,
+      meta: { origin: "stale", fetchedAt, etag: null, staleReason: { kind: "http", message: "503", httpStatus: 503 } },
+    });
+    const sSame = normalizeParkEntertainmentShowtimes("mk", mkStale(ms("2026-10-02T04:10:00Z")), wNow);
+    check("same-day stale-if-error: still flagged stale, none_posted", sSame.stale && find(sSame, "Happily Ever After").status === "none_posted");
+    const sPrior = normalizeParkEntertainmentShowtimes("mk", mkStale(ms("2026-10-02T03:30:00Z")), wNow);
+    check("prior-day stale-if-error: flagged stale and unavailable", sPrior.stale && find(sPrior, "Happily Ever After").status === "unavailable");
+    check("failure has no fetchedLocalDate", normalizeParkEntertainmentShowtimes("mk", { ok: false, error: { kind: "timeout", message: "t" } }, wNow).fetchedLocalDate === null);
+  }
   // all_passed is a completeness claim: only complete schedules may make it
   {
     const past = [st("2026-10-01T09:00:00-04:00"), st("2026-10-01T10:00:00-04:00")];
@@ -543,7 +589,7 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
   {
     const stale: ThemeParksResult<ThemeParksLive> = {
       ...live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")])]) as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>,
-      meta: { origin: "stale", fetchedAt: 5, etag: null, staleReason: { kind: "http", message: "503", httpStatus: 503 } },
+      meta: { origin: "stale", fetchedAt: NOW.getTime(), etag: null, staleReason: { kind: "http", message: "503", httpStatus: 503 } },
     };
     const r = normalizeParkEntertainmentShowtimes("mk", stale, NOW);
     check("stale: flagged with reason, data kept", r.stale && r.meta?.origin === "stale" && r.meta.staleReason?.kind === "http" && find(r, "Happily Ever After").status === "upcoming");
