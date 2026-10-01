@@ -65,7 +65,30 @@ export function getResortTimeZoneAbbreviation(
   return parts.find((p) => p.type === "timeZoneName")?.value ?? "";
 }
 
-export type PlannerDateRelation = "past" | "today" | "future";
+/**
+ * Pure calendar-date arithmetic on "YYYY-MM-DD" (no zone, no DST): `days`
+ * may be negative; month/year boundaries roll correctly. Null if `date`
+ * is not a valid calendar date.
+ */
+export function addDaysToLocalDate(date: string, days: number): string | null {
+  if (!isValidIsoCalendarDate(date) || !Number.isInteger(days)) return null;
+  const [y, m, d] = date.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/** Calendar-date label such as "Sat, Oct 3" (weekday of the date itself; null if invalid). */
+export function formatLocalDateLabel(date: string): string | null {
+  if (!isValidIsoCalendarDate(date)) return null;
+  const [y, m, d] = date.split("-").map(Number);
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  }).format(new Date(Date.UTC(y, m - 1, d)));
+}
+
+export type PlannerDateRelation ="past" | "today" | "future";
 
 /**
  * Compare a planner "YYYY-MM-DD" with the resort-local today.

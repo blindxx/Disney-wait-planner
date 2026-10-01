@@ -50,6 +50,13 @@ import {
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 import ResortClock from "../../components/ResortClock";
 import ThemeParksAttribution from "../../components/ThemeParksAttribution";
+import ParkHoursLine from "../../components/ParkHoursLine";
+import {
+  describeParkHours,
+  parkHoursForDisplay,
+  resolveParkHoursResponse,
+  type ParkHours,
+} from "../../lib/parkHours";
 import {
   PARTIAL_SHOWTIMES_NOTE,
   entryDisplayAt,
@@ -765,6 +772,35 @@ export default function WaitTimesPage() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [ready, selectedPark]);
+  // Phase 12.4 — normalized park hours for the selected park (server-side
+  // ThemeParks schedule boundary, independent of the showtimes/Queue-Times
+  // requests). Same lifecycle as showtimes: latest-request-wins, park-change
+  // cancel, visibility refresh + guarded 120 s poll (the server-side client's
+  // 15 min schedule cache absorbs repeats). A failure never keeps old hours.
+  const [parkHoursRaw, setParkHours] = useState<ParkHours | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let latestRequest = 0;
+    const load = () => {
+      const token = ++latestRequest;
+      fetch(`/api/park-hours?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((body) => { if (!cancelled && token === latestRequest) setParkHours(resolveParkHoursResponse(selectedPark, body)); });
+    };
+    setParkHours(null);
+    load();
+    const onVisible = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [ready, selectedPark]);
+
   // Display clock: re-evaluates passed performances and resort-local date
   // rollover as time advances (same 15 s cadence as ResortClock) and
   // immediately when the tab becomes visible. Display-only — it never triggers
@@ -782,6 +818,12 @@ export default function WaitTimesPage() {
   // Never use retained state from a previously selected park.
   const showtimesCurrent = showtimesForDisplay(showtimesRaw, displayNow);
   const showtimes = showtimesCurrent && showtimesCurrent.parkId === selectedPark ? showtimesCurrent : null;
+
+  // Never show hours retained from a previously selected park or resort-local day.
+  const parkHoursCurrent = parkHoursForDisplay(parkHoursRaw, displayNow);
+  const parkHours = parkHoursCurrent && parkHoursCurrent.parkId === selectedPark ? parkHoursCurrent : null;
+  // ThemeParks.wiki attribution is owed whenever its schedule data is presented.
+  const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
 
   /** Entertainment for the currently selected park, from the canonical catalog. */
   const parkEntertainment = useMemo(
@@ -942,7 +984,8 @@ export default function WaitTimesPage() {
             )}
 
             {/* Resort-local clock — below park/default context, above filters */}
-            <ResortClock resort={selectedResort} />
+            <ResortClock resort={selectedResort} marginBottom={4} />
+            <ParkHoursLine data={parkHours} />
           </>
         ) : (
           /* Skeleton placeholders preserve layout while hydration runs */
@@ -1265,8 +1308,8 @@ export default function WaitTimesPage() {
         })()}
       </div>
 
-      {/* Attribution — Queue-Times (live data enabled) and ThemeParks.wiki (showtimes presented) */}
-      {(LIVE_ENABLED || showtimesPresented) && (
+      {/* Attribution — Queue-Times (live data enabled) and ThemeParks.wiki (showtimes and/or park hours presented) */}
+      {(LIVE_ENABLED || showtimesPresented || parkHoursPresented) && (
         <div
           style={{
             marginTop: "16px",
@@ -1290,10 +1333,10 @@ export default function WaitTimesPage() {
               </a>
             </>
           )}
-          {LIVE_ENABLED && showtimesPresented && " • "}
-          {showtimesPresented && (
+          {LIVE_ENABLED && (showtimesPresented || parkHoursPresented) && " • "}
+          {(showtimesPresented || parkHoursPresented) && (
             <>
-              Showtimes powered by{" "}
+              {parkHoursPresented && showtimesPresented ? "Park hours and showtimes" : parkHoursPresented ? "Park hours" : "Showtimes"} powered by{" "}
               <ThemeParksAttribution
                 linkOnly
                 style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
