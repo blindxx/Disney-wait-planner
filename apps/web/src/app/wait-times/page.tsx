@@ -435,15 +435,17 @@ function EntertainmentCard({
   entertainment,
   showtime,
   stale,
+  now,
 }: {
   entertainment: EntertainmentPlace;
   showtime?: EntertainmentShowtimeEntry;
   stale?: boolean;
+  now: Date;
 }) {
   // Unmapped / not-yet-loaded entries render no showtime line at all. Passed
   // performances are omitted (re-evaluated at render); complete normalized data
   // is untouched.
-  const display = showtime && showtime.status !== "unmapped" ? entryDisplayAt(showtime) : null;
+  const display = showtime && showtime.status !== "unmapped" ? entryDisplayAt(showtime, now) : null;
   const showtimeText = !display
     ? null
     : display.status === "upcoming"
@@ -748,8 +750,22 @@ export default function WaitTimesPage() {
     const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
     return () => { cancelled = true; clearInterval(id); };
   }, [ready, selectedPark]);
+  // Display clock: re-evaluates passed performances and resort-local date
+  // rollover as time advances (same 15 s cadence as ResortClock) and
+  // immediately when the tab becomes visible. Display-only — it never triggers
+  // provider requests (those stay on the 120 s poll above).
+  const [displayNow, setDisplayNow] = useState(() => new Date());
+  useEffect(() => {
+    const tick = () => setDisplayNow(new Date());
+    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+    tick();
+    const id = setInterval(() => { if (document.visibilityState === "visible") tick(); }, 15_000);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+
   // Never use retained state from a previously selected park.
-  const showtimesCurrent = showtimesForDisplay(showtimesRaw);
+  const showtimesCurrent = showtimesForDisplay(showtimesRaw, displayNow);
   const showtimes = showtimesCurrent && showtimesCurrent.parkId === selectedPark ? showtimesCurrent : null;
 
   /** Entertainment for the currently selected park, from the canonical catalog. */
@@ -1104,6 +1120,7 @@ export default function WaitTimesPage() {
                     entertainment={show}
                     showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
                     stale={showtimes?.stale}
+                    now={displayNow}
                   />
                 ))}
               </div>

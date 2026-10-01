@@ -684,6 +684,15 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const rolled = showtimesForDisplay(good, new Date("2026-10-02T04:30:00Z")); // 12:30 AM EDT Oct 2
     check("page: resort-local date rollover → unavailable, not yesterday's showtimes",
       !!rolled && rolled !== good && find(rolled, "Happily Ever After").status === "unavailable" && rolled.localDate === "2026-10-02");
+    // Clock-driven re-evaluation boundaries (the page ticks these every 15 s and on tab visibility)
+    check("display clock: 11:59:59 PM EDT still shows today's data", showtimesForDisplay(good, new Date("2026-10-02T03:59:59Z")) === good);
+    check("display clock: exactly resort-local midnight stops showing prior-day data", showtimesForDisplay(good, new Date("2026-10-02T04:00:00Z")) !== good);
+    const dlrGood = normalizeParkEntertainmentShowtimes("disneyland", live([entry("8c36ff0b-3a32-4d7b-9388-0516c19277db", [st("2026-10-01T20:00:00-07:00")])], new Date("2026-10-01T20:00:00Z").getTime()), new Date("2026-10-01T20:00:00Z"));
+    check("display clock: DLR keeps the day until PDT midnight (UTC midnight is irrelevant)",
+      showtimesForDisplay(dlrGood, new Date("2026-10-02T06:59:59Z")) === dlrGood && showtimesForDisplay(dlrGood, new Date("2026-10-02T07:00:00Z")) !== dlrGood);
+    const ended = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T14:30:00-04:00", "Performance Time", "2026-10-01T15:30:00-04:00")])]), NOW), "Happily Ever After");
+    check("display clock: performance disappears the instant after its end, not before",
+      entryDisplayAt(ended, new Date("2026-10-01T19:30:00Z")).remaining.length === 1 && entryDisplayAt(ended, new Date("2026-10-01T19:30:00.001Z")).remaining.length === 0);
     check("page: no data → null (loading)", showtimesForDisplay(null, NOW) === null);
   }
   return failures;
