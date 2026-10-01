@@ -730,11 +730,15 @@ export default function WaitTimesPage() {
     // Wait for stored park hydration so the first request uses the real park.
     if (!ready) return;
     let cancelled = false;
+    // Latest-request-wins: overlapping polls (a slow earlier request finishing
+    // after a newer one) must not overwrite newer data or failure state.
+    let latestRequest = 0;
     const load = () => {
+      const token = ++latestRequest;
       fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null)
-        .then((body) => { if (!cancelled) setShowtimes(resolveShowtimesResponse(selectedPark, body)); });
+        .then((body) => { if (!cancelled && token === latestRequest) setShowtimes(resolveShowtimesResponse(selectedPark, body)); });
     };
     setShowtimes(null);
     load();
