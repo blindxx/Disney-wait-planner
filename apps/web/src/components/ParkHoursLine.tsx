@@ -20,7 +20,7 @@ export default function ParkHoursLine({ data }: { data: ParkHours | null }) {
       </div>
       {d.nextLine && <div>{d.nextLine}</div>}
       {d.extras.length > 0 && (
-        <div style={{ fontSize: "12px", color: "#6b7280" }}>{d.extras.join(" · ")}</div>
+        <div style={{ fontSize: "12px", color: "#6b7280" }}>{d.extras.join(" • ")}</div>
       )}
     </div>
   );
