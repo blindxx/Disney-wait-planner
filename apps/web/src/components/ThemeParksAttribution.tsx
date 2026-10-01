@@ -7,14 +7,18 @@
  */
 
 import {
+  THEMEPARKS_ATTRIBUTION_NAME,
   THEMEPARKS_ATTRIBUTION_TEXT,
   THEMEPARKS_ATTRIBUTION_URL,
 } from "../lib/themeParksProviders";
 
 export default function ThemeParksAttribution({
   style,
+  linkOnly = false,
 }: {
   style?: React.CSSProperties;
+  /** Render only the linked "ThemeParks.wiki" name, for use inside a sentence ("Showtimes powered by …"). */
+  linkOnly?: boolean;
 }) {
   return (
     <a
@@ -23,7 +27,7 @@ export default function ThemeParksAttribution({
       rel="noopener noreferrer"
       style={{ fontSize: 12, color: "inherit", opacity: 0.7, ...style }}
     >
-      {THEMEPARKS_ATTRIBUTION_TEXT}
+      {linkOnly ? THEMEPARKS_ATTRIBUTION_NAME : THEMEPARKS_ATTRIBUTION_TEXT}
     </a>
   );
 }

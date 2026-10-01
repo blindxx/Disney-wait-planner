@@ -26,7 +26,8 @@ import { RESORT_TIME_ZONES } from "./resortTime";
 export const THEMEPARKS_API_BASE_URL = "https://api.themeparks.wiki/v1";
 
 /** Free-tier attribution: linked "Powered by ThemeParks.wiki". */
-export const THEMEPARKS_ATTRIBUTION_TEXT = "Powered by ThemeParks.wiki";
+export const THEMEPARKS_ATTRIBUTION_NAME = "ThemeParks.wiki";
+export const THEMEPARKS_ATTRIBUTION_TEXT = `Powered by ${THEMEPARKS_ATTRIBUTION_NAME}`;
 export const THEMEPARKS_ATTRIBUTION_URL = "https://themeparks.wiki";
 
 export interface ThemeParksDestinationConfig {

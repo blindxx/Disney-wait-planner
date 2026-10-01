@@ -446,7 +446,7 @@ function EntertainmentCard({
     !showtime || showtime.status === "unmapped"
       ? null
       : showtime.status === "upcoming"
-        ? upcoming.map((p) => p.localTime).join(" · ")
+        ? upcoming.map((p) => p.localTime).join(" • ")
         : showtime.message;
   return (
     <div className="entertainment-card">
@@ -752,6 +752,15 @@ export default function WaitTimesPage() {
     () => getEntertainmentForPark(selectedPark),
     [selectedPark],
   );
+
+  // ThemeParks.wiki attribution is owed whenever its data is presented: a
+  // successful response and at least one visible entry the provider was asked about.
+  const showtimesPresented =
+    !!showtimes &&
+    !showtimes.error &&
+    showtimes.entries.some(
+      (e) => e.status !== "unmapped" && (!selectedLand || parkEntertainment.some((p) => p.name === e.dwpName && p.land === selectedLand)),
+    );
 
   /**
    * Unique sorted land names for the selected park — union of attraction
@@ -1093,11 +1102,6 @@ export default function WaitTimesPage() {
                   />
                 ))}
               </div>
-              {showtimes && !showtimes.error && (
-                <div style={{ marginTop: "8px" }}>
-                  <ThemeParksAttribution />
-                </div>
-              )}
             </div>
           );
         })()}
@@ -1224,25 +1228,41 @@ export default function WaitTimesPage() {
         })()}
       </div>
 
-      {/* Attribution — shown only when live data is enabled */}
-      {LIVE_ENABLED && (
+      {/* Attribution — Queue-Times (live data enabled) and ThemeParks.wiki (showtimes presented) */}
+      {(LIVE_ENABLED || showtimesPresented) && (
         <div
           style={{
             marginTop: "16px",
+            padding: "0 16px",
             textAlign: "center",
             fontSize: "12px",
+            lineHeight: 1.5,
             color: "#9ca3af",
           }}
         >
-          Wait times powered by{" "}
-          <a
-            href="https://queue-times.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "#6b7280", textDecoration: "underline" }}
-          >
-            Queue-Times.com
-          </a>
+          {LIVE_ENABLED && (
+            <>
+              Wait times powered by{" "}
+              <a
+                href="https://queue-times.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#6b7280", textDecoration: "underline" }}
+              >
+                Queue-Times.com
+              </a>
+            </>
+          )}
+          {LIVE_ENABLED && showtimesPresented && " • "}
+          {showtimesPresented && (
+            <>
+              Showtimes powered by{" "}
+              <ThemeParksAttribution
+                linkOnly
+                style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
+              />
+            </>
+          )}
         </div>
       )}
     </>
