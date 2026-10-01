@@ -49,6 +49,15 @@ import {
 } from "@/lib/plannedClosures";
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 import ResortClock from "../../components/ResortClock";
+import ThemeParksAttribution from "../../components/ThemeParksAttribution";
+import {
+  PARTIAL_SHOWTIMES_NOTE,
+  entryDisplayAt,
+  resolveShowtimesResponse,
+  showtimesForDisplay,
+  type EntertainmentShowtimeEntry,
+  type ParkEntertainmentShowtimes,
+} from "../../lib/entertainmentShowtimes";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -423,7 +432,28 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
  * (there is no wait time to show). Layout and spacing adapt via the
  * .entertainment-card CSS class (mirrors .wait-card's grid/border rules).
  */
-function EntertainmentCard({ entertainment }: { entertainment: EntertainmentPlace }) {
+function EntertainmentCard({
+  entertainment,
+  showtime,
+  stale,
+  now,
+}: {
+  entertainment: EntertainmentPlace;
+  showtime?: EntertainmentShowtimeEntry;
+  stale?: boolean;
+  now: Date;
+}) {
+  // Unmapped / not-yet-loaded entries render no showtime line at all. Passed
+  // performances are omitted (re-evaluated at render); complete normalized data
+  // is untouched.
+  const display = showtime && showtime.status !== "unmapped" ? entryDisplayAt(showtime, now) : null;
+  const showtimeText = !display
+    ? null
+    : display.status === "upcoming"
+      ? display.remaining.map((p) => p.localTime).join(" • ")
+      : display.message;
+  const isUpcoming = display?.status === "upcoming";
+
   return (
     <div className="entertainment-card">
       <div
@@ -450,6 +480,22 @@ function EntertainmentCard({ entertainment }: { entertainment: EntertainmentPlac
           }}
         >
           {entertainment.land}
+        </div>
+      )}
+      {showtimeText && (
+        <div
+          style={{
+            fontSize: "13px",
+            lineHeight: "1.3",
+            color: isUpcoming ? "#374151" : "#9ca3af",
+            marginTop: "4px",
+          }}
+        >
+          {showtimeText}
+          {display?.partial && (
+            <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>
+          )}
+          {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
     </div>
@@ -682,11 +728,75 @@ export default function WaitTimesPage() {
   /** Parks available for the currently selected resort */
   const resortParks = RESORT_PARKS[selectedResort];
 
+  // Phase 12.3 — normalized showtimes for the selected park (server-side
+  // ThemeParks.wiki boundary). A request failure/non-2xx never keeps the
+  // previous showtimes on screen: resolveShowtimesResponse degrades it to the
+  // normalized "unavailable" state, and showtimesForDisplay does the same for
+  // data from a previous resort-local day. The `cancelled` flag drops
+  // responses for a park that is no longer selected.
+  const [showtimesRaw, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
+  useEffect(() => {
+    // Wait for stored park hydration so the first request uses the real park.
+    if (!ready) return;
+    let cancelled = false;
+    // Latest-request-wins: overlapping polls (a slow earlier request finishing
+    // after a newer one) must not overwrite newer data or failure state.
+    let latestRequest = 0;
+    const load = () => {
+      const token = ++latestRequest;
+      fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((body) => { if (!cancelled && token === latestRequest) setShowtimes(resolveShowtimesResponse(selectedPark, body)); });
+    };
+    setShowtimes(null);
+    load();
+    // Same page-level triggers as the Queue-Times refresh above (Phase 6.3):
+    // refresh when the tab returns to visible, plus a guarded 120 s interval
+    // that skips hidden ticks. Not gated on LIVE_ENABLED — ThemeParks is an
+    // independent provider; the server-side client's 60 s live cache absorbs
+    // repeat requests. (The 15 s displayNow clock below never fetches.)
+    const onVisible = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [ready, selectedPark]);
+  // Display clock: re-evaluates passed performances and resort-local date
+  // rollover as time advances (same 15 s cadence as ResortClock) and
+  // immediately when the tab becomes visible. Display-only — it never triggers
+  // provider requests (those stay on the 120 s poll above).
+  const [displayNow, setDisplayNow] = useState(() => new Date());
+  useEffect(() => {
+    const tick = () => setDisplayNow(new Date());
+    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+    tick();
+    const id = setInterval(() => { if (document.visibilityState === "visible") tick(); }, 15_000);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+
+  // Never use retained state from a previously selected park.
+  const showtimesCurrent = showtimesForDisplay(showtimesRaw, displayNow);
+  const showtimes = showtimesCurrent && showtimesCurrent.parkId === selectedPark ? showtimesCurrent : null;
+
   /** Entertainment for the currently selected park, from the canonical catalog. */
   const parkEntertainment = useMemo(
     () => getEntertainmentForPark(selectedPark),
     [selectedPark],
   );
+
+  // ThemeParks.wiki attribution is owed whenever its data is presented: a
+  // successful response and at least one visible entry the provider was asked about.
+  const showtimesPresented =
+    !!showtimes &&
+    !showtimes.error &&
+    showtimes.entries.some(
+      (e) => e.status !== "unmapped" && (!selectedLand || parkEntertainment.some((p) => p.name === e.dwpName && p.land === selectedLand)),
+    );
 
   /**
    * Unique sorted land names for the selected park — union of attraction
@@ -1016,11 +1126,17 @@ export default function WaitTimesPage() {
                   marginBottom: "10px",
                 }}
               >
-                Plan-worthy entertainment for this park. Check the official Disney app or website for current schedules and showtimes.
+                Plan-worthy entertainment for this park. Check the official Disney app or website to confirm showtimes.
               </p>
               <div className="entertainment-grid">
                 {entertainment.map((show) => (
-                  <EntertainmentCard key={show.name} entertainment={show} />
+                  <EntertainmentCard
+                    key={show.name}
+                    entertainment={show}
+                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    stale={showtimes?.stale}
+                    now={displayNow}
+                  />
                 ))}
               </div>
             </div>
@@ -1149,25 +1265,41 @@ export default function WaitTimesPage() {
         })()}
       </div>
 
-      {/* Attribution — shown only when live data is enabled */}
-      {LIVE_ENABLED && (
+      {/* Attribution — Queue-Times (live data enabled) and ThemeParks.wiki (showtimes presented) */}
+      {(LIVE_ENABLED || showtimesPresented) && (
         <div
           style={{
             marginTop: "16px",
+            padding: "0 16px",
             textAlign: "center",
             fontSize: "12px",
+            lineHeight: 1.5,
             color: "#9ca3af",
           }}
         >
-          Wait times powered by{" "}
-          <a
-            href="https://queue-times.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: "#6b7280", textDecoration: "underline" }}
-          >
-            Queue-Times.com
-          </a>
+          {LIVE_ENABLED && (
+            <>
+              Wait times powered by{" "}
+              <a
+                href="https://queue-times.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "#6b7280", textDecoration: "underline" }}
+              >
+                Queue-Times.com
+              </a>
+            </>
+          )}
+          {LIVE_ENABLED && showtimesPresented && " • "}
+          {showtimesPresented && (
+            <>
+              Showtimes powered by{" "}
+              <ThemeParksAttribution
+                linkOnly
+                style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
+              />
+            </>
+          )}
         </div>
       )}
     </>

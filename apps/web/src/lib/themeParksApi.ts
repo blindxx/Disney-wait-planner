@@ -151,6 +151,12 @@ export interface ThemeParksLiveEntry {
   /** Provider's own last-updated timestamp, when supplied. */
   lastUpdated: string | null;
   showtimes: ThemeParksShowtime[];
+  /**
+   * Malformed showtime records discarded for THIS entity during validation
+   * (0 = `showtimes` is the complete provider list). Their dates are unknown,
+   * so consumers must treat any non-zero value as an incomplete schedule.
+   */
+  droppedShowtimes: number;
 }
 
 export interface ThemeParksLive {
@@ -382,6 +388,7 @@ export function normalizeLive(body: unknown): ThemeParksLive | null {
       status: str(e.status),
       lastUpdated,
       showtimes,
+      droppedShowtimes: entryDroppedShowtimes,
     });
   }
   // Genuinely empty liveData is valid-empty; non-empty with zero valid entries is not.
@@ -931,6 +938,7 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
   check("live: keeps valid entry, drops idless", live?.entries.length === 2 && live.droppedEntries === 1);
   check("live: preserves offset timestamp verbatim", live?.entries[0].showtimes[0].startTime === "2026-09-30T10:50:00-04:00");
   check("live: drops offset-less showtime", live?.entries[0].showtimes.length === 1 && live.droppedShowtimes === 1);
+  check("live: per-entity droppedShowtimes retained (0 for clean entities)", live?.entries[0].droppedShowtimes === 1 && live.entries[1].droppedShowtimes === 0);
   check("live: preserves lastUpdated/type/uuid", live?.entries[0].lastUpdated === "2026-09-30T04:01:56.507Z" && live.entries[0].showtimes[0].type === "Performance Time" && live.entries[0].parkId === DEV_PARK);
   check("live: raw queue not leaked", !("queue" in (live?.entries[0] ?? {})));
   check("live: valid-empty stays ok", normalizeLive({ ...DEV_LIVE, liveData: [] })?.entries.length === 0);
