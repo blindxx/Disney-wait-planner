@@ -14,7 +14,7 @@ The system enforces a strict boundary between live data and local planner state,
 
 ## ✨ Features
 
-### Today and Waits & Shows
+### Today & Wait Times
 
 - Live attraction wait times for DLR and WDW, with a resort/park selector
 - Deterministic status handling: planned closures take priority, then live "not operating" status, then a live wait time

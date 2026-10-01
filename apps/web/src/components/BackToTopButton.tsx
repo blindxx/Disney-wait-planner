@@ -28,7 +28,10 @@ export default function BackToTopButton() {
     <button
       type="button"
       className="tomhg-back-to-top"
-      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      onClick={() => {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+      }}
       aria-label="Back to top"
     >
       ↑ Top
