@@ -29,6 +29,19 @@
  * "Operating", which carries operating hours on meet-and-greet style SHOW
  * entities) are excluded and only counted in `provider` metadata.
  *
+ * Completeness: a mapped entry is only claimed empty ("No showtimes posted")
+ * when every mapped provider ref is present in the live payload and no
+ * showtime that could matter today is of an unrecognized type. A missing ref
+ * (live omits dormant entities) or an unrecognized type is uncertainty, so a
+ * result with no performances then becomes `unavailable`; usable performances
+ * from present refs are still returned, with `incomplete: true`.
+ *
+ * Client-safe: this module has only type imports from the (server-only)
+ * ThemeParks client, so the browser may reuse the pure helpers below
+ * (`resolveShowtimesResponse`, `showtimesForDisplay`) to degrade consistently
+ * on request failure or resort-local date rollover. The server fetch lives in
+ * entertainmentShowtimesService.ts.
+ *
  * DEV checks (run manually, returns failing labels): runDevEntertainmentShowtimeCases().
  */
 
@@ -36,18 +49,16 @@ import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { formatResortLocalTime, getResortLocalDate } from "./resortTime";
-import {
-  themeParks,
-  type ThemeParksError,
-  type ThemeParksLive,
-  type ThemeParksResult,
-  type ThemeParksShowtime,
+import type {
+  ThemeParksError,
+  ThemeParksLive,
+  ThemeParksResult,
+  ThemeParksShowtime,
 } from "./themeParksApi";
 import {
   getEntertainmentProviderMapping,
   type EntertainmentProviderMapping,
 } from "./themeParksEntertainmentMapping";
-import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 // ============================================
 // TYPES
@@ -71,6 +82,10 @@ export const SHOWTIME_STATUS_MESSAGES: Record<EntertainmentShowtimeStatus, strin
 
 /** Provider showtime `type` values that are real performances. */
 export const PERFORMANCE_SHOWTIME_TYPES: readonly string[] = ["Performance Time", "Special Ticketed Event"];
+/** Known non-performance types (e.g. operating hours on meet-and-greet SHOW entities): excluded, not uncertain. */
+export const NON_PERFORMANCE_SHOWTIME_TYPES: readonly string[] = ["Operating"];
+/** Label used in `unrecognizedTypes` for a showtime with no type. */
+export const UNTYPED_SHOWTIME_LABEL = "(untyped)";
 
 export interface EntertainmentPerformance {
   /** Offset-aware ISO start, verbatim from the provider. */
@@ -94,8 +109,10 @@ export interface EntertainmentShowtimeProviderRef {
   lastUpdated: string | null;
   /** Raw provider showtimes seen (all types, any day). */
   rawShowtimeCount: number;
-  /** Showtimes excluded for a non-performance type (e.g. "Operating"). */
+  /** Showtimes excluded for a known non-performance type (e.g. "Operating"). */
   excludedShowtimeCount: number;
+  /** Showtimes (any day) whose type is neither a performance nor a known non-performance type. */
+  unrecognizedShowtimeCount: number;
 }
 
 export interface EntertainmentShowtimeEntry {
@@ -106,6 +123,14 @@ export interface EntertainmentShowtimeEntry {
   performances: EntertainmentPerformance[];
   /** Copy for none_posted/all_passed/unavailable; null otherwise. */
   message: string | null;
+  /**
+   * True when completeness is uncertain: a mapped ref was absent from the live
+   * payload, or an unrecognized-type showtime falls on today. `performances`
+   * may then be partial; with none, the status is `unavailable`.
+   */
+  incomplete: boolean;
+  /** Distinct unrecognized provider showtime types dated today (maintenance metadata). */
+  unrecognizedTypes: string[];
   /** Per-ref provider metadata; empty for unmapped/unavailable-by-failure. */
   provider: EntertainmentShowtimeProviderRef[];
   /** Reason, for unmapped entries (from the mapping). */
@@ -150,30 +175,44 @@ function collectPerformances(
   localDate: string,
   nowMs: number,
   raw: ThemeParksShowtime[],
-): EntertainmentPerformance[] {
-  const byStart = new Map<number, EntertainmentPerformance>();
+): { performances: EntertainmentPerformance[]; unrecognizedTypes: string[] } {
+  // start instant → { first-seen record, latest valid end instant seen }
+  const byStart = new Map<number, { startTime: string; endTime: string | null; endMs: number; type: string }>();
+  const unrecognized = new Set<string>();
   for (const s of raw) {
-    if (s.type === null || !PERFORMANCE_SHOWTIME_TYPES.includes(s.type)) continue;
     const startMs = toMs(s.startTime);
     if (!Number.isFinite(startMs)) continue;
     // Resort-local "today": convert the instant, never trust the string's offset/date part.
     if (getResortLocalDate(resort, new Date(startMs)) !== localDate) continue;
+    if (s.type !== null && NON_PERFORMANCE_SHOWTIME_TYPES.includes(s.type)) continue;
+    if (s.type === null || !PERFORMANCE_SHOWTIME_TYPES.includes(s.type)) {
+      unrecognized.add(s.type ?? UNTYPED_SHOWTIME_LABEL);
+      continue;
+    }
     const endMs = s.endTime ? toMs(s.endTime) : NaN;
     const existing = byStart.get(startMs);
     if (existing) {
-      // Same start from another ref/type: one performance; keep an end time if any ref has one.
-      if (!existing.endTime && s.endTime) existing.endTime = s.endTime;
+      // Same start from another ref/record: one performance. Keep the LATEST
+      // valid end so a longer/in-progress duration is never cut short.
+      if (Number.isFinite(endMs) && (!Number.isFinite(existing.endMs) || endMs > existing.endMs)) {
+        existing.endTime = s.endTime;
+        existing.endMs = endMs;
+      }
       continue;
     }
-    byStart.set(startMs, {
-      startTime: s.startTime,
-      endTime: s.endTime,
-      localTime: formatResortLocalTime(resort, new Date(startMs)),
-      type: s.type,
-      passed: Math.max(startMs, Number.isFinite(endMs) ? endMs : startMs) < nowMs,
-    });
+    byStart.set(startMs, { startTime: s.startTime, endTime: s.endTime, endMs, type: s.type });
   }
-  return [...byStart.entries()].sort((a, b) => a[0] - b[0]).map(([, p]) => p);
+  // `passed` is computed only after merging, from the final end time.
+  const performances = [...byStart.entries()]
+    .sort((x, y) => x[0] - y[0])
+    .map(([startMs, p]): EntertainmentPerformance => ({
+      startTime: p.startTime,
+      endTime: p.endTime,
+      localTime: formatResortLocalTime(resort, new Date(startMs)),
+      type: p.type,
+      passed: Math.max(startMs, Number.isFinite(p.endMs) ? p.endMs : startMs) < nowMs,
+    }));
+  return { performances, unrecognizedTypes: [...unrecognized].sort() };
 }
 
 function entryFromMapping(
@@ -185,16 +224,18 @@ function entryFromMapping(
 ): EntertainmentShowtimeEntry {
   const base = { dwpName: m.dwpName, parkId: m.parkId };
   if (m.disposition === "unmapped") {
-    return { ...base, status: "unmapped", performances: [], message: null, provider: [], unmappedReason: m.reason };
+    return { ...base, status: "unmapped", performances: [], message: null, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: m.reason };
   }
   if (!live) {
-    return { ...base, status: "unavailable", performances: [], message: SHOWTIME_STATUS_MESSAGES.unavailable, provider: [] };
+    return { ...base, status: "unavailable", performances: [], message: SHOWTIME_STATUS_MESSAGES.unavailable, incomplete: true, unrecognizedTypes: [], provider: [] };
   }
   const byId = new Map(live.entries.map((e) => [e.entityId.toLowerCase(), e]));
   const provider: EntertainmentShowtimeProviderRef[] = [];
   const raw: ThemeParksShowtime[] = [];
+  let anyAbsent = false;
   for (const ref of m.provider) {
     const e = byId.get(ref.entityId.toLowerCase());
+    if (!e) anyAbsent = true;
     const showtimes = e?.showtimes ?? [];
     provider.push({
       entityId: ref.entityId,
@@ -202,15 +243,18 @@ function entryFromMapping(
       status: e?.status ?? null,
       lastUpdated: e?.lastUpdated ?? null,
       rawShowtimeCount: showtimes.length,
-      excludedShowtimeCount: showtimes.filter((s) => s.type === null || !PERFORMANCE_SHOWTIME_TYPES.includes(s.type)).length,
+      excludedShowtimeCount: showtimes.filter((s) => s.type !== null && NON_PERFORMANCE_SHOWTIME_TYPES.includes(s.type)).length,
+      unrecognizedShowtimeCount: showtimes.filter((s) => s.type === null || !(PERFORMANCE_SHOWTIME_TYPES.includes(s.type) || NON_PERFORMANCE_SHOWTIME_TYPES.includes(s.type))).length,
     });
     raw.push(...showtimes);
   }
-  const performances = collectPerformances(resort, localDate, nowMs, raw);
+  const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
+  const incomplete = anyAbsent || unrecognizedTypes.length > 0;
   let status: EntertainmentShowtimeStatus;
-  if (performances.length === 0) status = "none_posted";
-  else status = performances.some((p) => !p.passed) ? "upcoming" : "all_passed";
-  return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], provider };
+  if (performances.length > 0) status = performances.some((p) => !p.passed) ? "upcoming" : "all_passed";
+  // No performances: only a fully-present, fully-recognized payload may claim "none posted".
+  else status = incomplete ? "unavailable" : "none_posted";
+  return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider };
 }
 
 /**
@@ -232,7 +276,7 @@ export function normalizeParkEntertainmentShowtimes(
     const m = getEntertainmentProviderMapping(place.name, parkId);
     if (!m) {
       // Mapping completeness is enforced elsewhere; absent disposition is not provider-checked either.
-      entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: null, provider: [], unmappedReason: "No provider disposition" });
+      entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: null, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: "No provider disposition" });
       continue;
     }
     entries.push(entryFromMapping(m, live, resort, localDate, nowMs));
@@ -252,18 +296,44 @@ export function normalizeParkEntertainmentShowtimes(
 }
 
 // ============================================
-// SERVICE (server-side)
+// DEGRADATION HELPERS (pure, client-safe)
 // ============================================
 
-/** Fetch the park's live payload via the shared ThemeParks client and normalize it. Server-side only. */
-export async function getParkEntertainmentShowtimes(
+function unavailablePark(parkId: ParkId, instant: Date, message: string): ParkEntertainmentShowtimes {
+  return normalizeParkEntertainmentShowtimes(parkId, { ok: false, error: { kind: "network", message } }, instant);
+}
+
+/**
+ * Browser-side: turn a fetched /api/entertainment/showtimes body into display
+ * state. `body` is the parsed JSON, or null when the request failed / was
+ * non-2xx / was unparseable. Failure (or a body for a different park, or one
+ * that isn't the contract shape) degrades to the normalized "unavailable"
+ * state — previously shown showtimes are never retained.
+ */
+export function resolveShowtimesResponse(
   parkId: ParkId,
-  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>> } = {},
-): Promise<ParkEntertainmentShowtimes> {
-  const getLive = opts.getLive ?? ((id: string) => themeParks.getLive(id));
-  const result = await getLive(THEMEPARKS_PARKS[parkId].entityId);
-  // `now` is taken after the fetch so passed/upcoming reflects delivery time.
-  return normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date());
+  body: unknown,
+  instant: Date = new Date(),
+): ParkEntertainmentShowtimes {
+  const d = body as Partial<ParkEntertainmentShowtimes> | null;
+  if (!d || typeof d !== "object" || d.parkId !== parkId || !Array.isArray(d.entries) || typeof d.localDate !== "string") {
+    return unavailablePark(parkId, instant, "Showtimes request failed");
+  }
+  return d as ParkEntertainmentShowtimes;
+}
+
+/**
+ * Display-time guard: data computed for a previous resort-local day (the page
+ * stayed open across midnight and refreshes have not succeeded) is never shown
+ * as today's showtimes — it degrades to "unavailable".
+ */
+export function showtimesForDisplay(
+  data: ParkEntertainmentShowtimes | null,
+  instant: Date = new Date(),
+): ParkEntertainmentShowtimes | null {
+  if (!data) return null;
+  if (data.localDate === getResortLocalDate(data.resort, instant)) return data;
+  return unavailablePark(data.parkId, instant, "Showtimes are for a previous day");
 }
 
 // ============================================
@@ -357,14 +427,45 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
   {
     const r = normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])]), NOW);
     check("valid-empty showtimes → none_posted", find(r, "Happily Ever After").status === "none_posted" && find(r, "Happily Ever After").provider[0].present);
-    check("entity absent from ok payload → none_posted (not unavailable)", find(r, "Disney Starlight: Dream the Night Away").status === "none_posted" && !find(r, "Disney Starlight: Dream the Night Away").provider[0].present);
+    const missing = find(r, "Disney Starlight: Dream the Night Away");
+    check("mapped entity absent from ok payload → unavailable, never none_posted",
+      missing.status === "unavailable" && missing.message === "Showtimes unavailable" && missing.incomplete && !missing.provider[0].present);
+    check("complete valid-empty entry is not incomplete", !find(r, "Happily Ever After").incomplete);
   }
-  // Non-performance types excluded, never fabricated
+  // Known non-performance type ("Operating") is excluded without being uncertain
   {
-    const e = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T09:00:00-04:00", "Operating", "2026-10-01T17:00:00-04:00"), st("2026-10-01T21:00:00-04:00", null)])]), NOW), "Happily Ever After");
-    check("operating-hours/untyped showtimes are not performances", e.status === "none_posted" && e.provider[0].excludedShowtimeCount === 2 && e.provider[0].rawShowtimeCount === 2);
+    const e = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T09:00:00-04:00", "Operating", "2026-10-01T17:00:00-04:00")])]), NOW), "Happily Ever After");
+    check("Operating only → none_posted (known type, complete), not a performance",
+      e.status === "none_posted" && !e.incomplete && e.provider[0].excludedShowtimeCount === 1 && e.provider[0].unrecognizedShowtimeCount === 0 && e.performances.length === 0);
     const t = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00", "Special Ticketed Event")])]), NOW), "Happily Ever After");
     check("ticketed-event performances count", t.status === "upcoming" && t.performances[0].type === "Special Ticketed Event");
+  }
+  // Unrecognized / untyped showtime types are uncertainty, never a confident none_posted or a fabricated performance
+  {
+    const e = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00", "Mystery Type")])]), NOW), "Happily Ever After");
+    check("unknown type today only → unavailable, no fabricated performance",
+      e.status === "unavailable" && e.incomplete && e.performances.length === 0 && e.unrecognizedTypes.join() === "Mystery Type" && e.provider[0].unrecognizedShowtimeCount === 1);
+    const n = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00", null)])]), NOW), "Happily Ever After");
+    check("untyped showtime today → unavailable", n.status === "unavailable" && n.unrecognizedTypes.join() === UNTYPED_SHOWTIME_LABEL);
+    const o = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-02T21:00:00-04:00", "Mystery Type")])]), NOW), "Happily Ever After");
+    check("unknown type on another day does not affect today", o.status === "none_posted" && !o.incomplete && o.provider[0].unrecognizedShowtimeCount === 1);
+    const m = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00"), st("2026-10-01T22:00:00-04:00", "Mystery Type")])]), NOW), "Happily Ever After");
+    check("known performance + unknown type → performances kept, flagged incomplete",
+      m.status === "upcoming" && m.performances.length === 1 && m.incomplete && m.unrecognizedTypes.length === 1);
+  }
+  // Duplicate start merges the latest end, and `passed` follows the merged performance
+  {
+    // 3:00 PM EDT now; same 2:45 PM start, first record has no/early end (would be passed), second runs to 3:15 PM
+    for (const order of [0, 1]) {
+      const a = st("2026-10-01T14:45:00-04:00", "Performance Time", null);
+      const b = st("2026-10-01T14:45:00-04:00", "Performance Time", "2026-10-01T15:15:00-04:00");
+      const c = st("2026-10-01T14:45:00-04:00", "Performance Time", "2026-10-01T14:50:00-04:00");
+      const e = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, order ? [b, a, c] : [a, c, b])]), NOW), "Happily Ever After");
+      check(`dup start (order ${order}): latest end wins, in-progress not passed`,
+        e.performances.length === 1 && e.performances[0].endTime === "2026-10-01T15:15:00-04:00" && !e.performances[0].passed && e.status === "upcoming");
+    }
+    const f = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T14:00:00-04:00", "Performance Time", "2026-10-01T14:10:00-04:00"), st("2026-10-01T14:00:00-04:00", "Performance Time", "2026-10-01T14:20:00-04:00")])]), NOW), "Happily Ever After");
+    check("dup start: merged end still before now → passed", f.status === "all_passed" && f.performances[0].endTime === "2026-10-01T14:20:00-04:00");
   }
   // Multiple provider refs merge + dedupe; one ref absent is fine
   {
@@ -374,7 +475,13 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     ]), new Date("2026-10-01T16:00:00Z")), "Bluey's Best Day Ever!");
     check("multi-ref: merged, deduped, sorted", e.performances.map((p) => p.localTime).join() === "11:00 AM,3:25 PM,4:45 PM" && e.provider.length === 2);
     const h = find(normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_PR, [st("2026-10-01T21:30:00-07:00")])]), new Date("2026-10-01T16:00:00Z")), "Halloween Screams");
-    check("multi-ref: one ref absent still resolves from the other", h.status === "upcoming" && h.provider.length === 2 && !h.provider.find((p) => p.entityId === HALLOWEEN_FW)!.present);
+    check("multi-ref: one ref absent still resolves from the other (flagged incomplete)", h.status === "upcoming" && h.provider.length === 2 && h.incomplete && !h.provider.find((p) => p.entityId === HALLOWEEN_FW)!.present);
+    const none = find(normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_PR, [])]), new Date("2026-10-01T16:00:00Z")), "Halloween Screams");
+    check("multi-ref: present ref empty but other ref absent → unavailable, not none_posted", none.status === "unavailable" && none.incomplete);
+    const both = find(normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_FW, []), entry(HALLOWEEN_PR, [])]), new Date("2026-10-01T16:00:00Z")), "Halloween Screams");
+    check("multi-ref: all refs present and empty → none_posted", both.status === "none_posted" && !both.incomplete);
+    const allGone = find(normalizeParkEntertainmentShowtimes("disneyland", live([]), new Date("2026-10-01T16:00:00Z")), "Halloween Screams");
+    check("multi-ref: no refs present → unavailable", allGone.status === "unavailable" && allGone.provider.every((p) => !p.present));
   }
   // Failure → unavailable for mapped; unmapped stays unmapped
   {
@@ -413,11 +520,22 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const e = find(normalizeParkEntertainmentShowtimes("mk", live([entry(STARLIGHT, [], "CLOSED")]), NOW), "Disney Starlight: Dream the Night Away");
     check("closed with no showtimes → none_posted, status retained as metadata", e.status === "none_posted" && e.provider[0].status === "CLOSED");
   }
-  // Service wiring: uses the park's provider UUID and injected clock
+  // Browser request failure / rollover degrade through the shared contract (page behavior)
   {
-    let asked = "";
-    const r = await getParkEntertainmentShowtimes("mk", { instant: NOW, getLive: async (id) => { asked = id; return live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")])]); } });
-    check("service: queries the park's ThemeParks UUID", asked === THEMEPARKS_PARKS.mk.entityId && find(r, "Happily Ever After").status === "upcoming");
+    const good = normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")])]), NOW);
+    check("page: baseline success shows upcoming", find(good, "Happily Ever After").status === "upcoming");
+    const failed = resolveShowtimesResponse("mk", null, NOW);
+    check("page: failed/non-2xx request → unavailable for mapped (no retained showtimes)",
+      find(failed, "Happily Ever After").status === "unavailable" && find(failed, "Happily Ever After").performances.length === 0 &&
+      find(failed, "Mickey's Once Upon a Christmastime Parade").status === "unmapped" && failed.error !== null && !failed.stale);
+    check("page: success response passes through", resolveShowtimesResponse("mk", good, NOW) === good);
+    check("page: body for another park → unavailable", find(resolveShowtimesResponse("epcot", good, NOW), "Luminous The Symphony of Us").status === "unavailable");
+    check("page: malformed body → unavailable", resolveShowtimesResponse("mk", { parkId: "mk" }, NOW).error !== null && resolveShowtimesResponse("mk", "x", NOW).error !== null);
+    check("page: same-day display keeps data", showtimesForDisplay(good, new Date("2026-10-01T23:00:00Z")) === good);
+    const rolled = showtimesForDisplay(good, new Date("2026-10-02T04:30:00Z")); // 12:30 AM EDT Oct 2
+    check("page: resort-local date rollover → unavailable, not yesterday's showtimes",
+      !!rolled && rolled !== good && find(rolled, "Happily Ever After").status === "unavailable" && rolled.localDate === "2026-10-02");
+    check("page: no data → null (loading)", showtimesForDisplay(null, NOW) === null);
   }
   return failures;
 }

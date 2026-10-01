@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { getParkEntertainmentShowtimes } from "../../../../lib/entertainmentShowtimes";
+import { getParkEntertainmentShowtimes } from "../../../../lib/entertainmentShowtimesService";
 import { isValidParkId } from "../../../../lib/parkMetadata";
 
 // The ThemeParks client owns caching (60 s live TTL); never cache at the edge.

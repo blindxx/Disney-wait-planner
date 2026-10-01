@@ -50,9 +50,11 @@ import {
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 import ResortClock from "../../components/ResortClock";
 import ThemeParksAttribution from "../../components/ThemeParksAttribution";
-import type {
-  EntertainmentShowtimeEntry,
-  ParkEntertainmentShowtimes,
+import {
+  resolveShowtimesResponse,
+  showtimesForDisplay,
+  type EntertainmentShowtimeEntry,
+  type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
@@ -718,22 +720,26 @@ export default function WaitTimesPage() {
   const resortParks = RESORT_PARKS[selectedResort];
 
   // Phase 12.3 — normalized showtimes for the selected park (server-side
-  // ThemeParks.wiki boundary). Keyed by park so a response for a previous park
-  // can never render against the current one; failures leave it null.
-  const [showtimes, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
+  // ThemeParks.wiki boundary). A request failure/non-2xx never keeps the
+  // previous showtimes on screen: resolveShowtimesResponse degrades it to the
+  // normalized "unavailable" state, and showtimesForDisplay does the same for
+  // data from a previous resort-local day. The `cancelled` flag drops
+  // responses for a park that is no longer selected.
+  const [showtimesRaw, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
-        .then((r) => (r.ok ? (r.json() as Promise<ParkEntertainmentShowtimes>) : null))
-        .then((d) => { if (!cancelled && d && d.parkId === selectedPark) setShowtimes(d); })
-        .catch(() => {});
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((body) => { if (!cancelled) setShowtimes(resolveShowtimesResponse(selectedPark, body)); });
     };
     setShowtimes(null);
     load();
     const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
     return () => { cancelled = true; clearInterval(id); };
   }, [selectedPark]);
+  const showtimes = showtimesForDisplay(showtimesRaw);
 
   /** Entertainment for the currently selected park, from the canonical catalog. */
   const parkEntertainment = useMemo(
