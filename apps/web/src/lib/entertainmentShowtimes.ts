@@ -111,6 +111,8 @@ export interface EntertainmentShowtimeProviderRef {
   rawShowtimeCount: number;
   /** Showtimes excluded for a known non-performance type (e.g. "Operating"). */
   excludedShowtimeCount: number;
+  /** Malformed showtime records the ThemeParks validation discarded for this entity (dates unknown). */
+  droppedShowtimeCount: number;
   /** Showtimes (any day) whose type is neither a performance nor a known non-performance type. */
   unrecognizedShowtimeCount: number;
 }
@@ -125,7 +127,8 @@ export interface EntertainmentShowtimeEntry {
   message: string | null;
   /**
    * True when completeness is uncertain: a mapped ref was absent from the live
-   * payload, or an unrecognized-type showtime falls on today. `performances`
+   * payload, a ref had malformed showtime records dropped by validation, or an
+   * unrecognized-type showtime falls on today. `performances`
    * may then be partial; with none, the status is `unavailable`.
    */
   incomplete: boolean;
@@ -233,9 +236,11 @@ function entryFromMapping(
   const provider: EntertainmentShowtimeProviderRef[] = [];
   const raw: ThemeParksShowtime[] = [];
   let anyAbsent = false;
+  let anyDropped = false;
   for (const ref of m.provider) {
     const e = byId.get(ref.entityId.toLowerCase());
     if (!e) anyAbsent = true;
+    if (e && e.droppedShowtimes > 0) anyDropped = true;
     const showtimes = e?.showtimes ?? [];
     provider.push({
       entityId: ref.entityId,
@@ -243,13 +248,14 @@ function entryFromMapping(
       status: e?.status ?? null,
       lastUpdated: e?.lastUpdated ?? null,
       rawShowtimeCount: showtimes.length,
+      droppedShowtimeCount: e?.droppedShowtimes ?? 0,
       excludedShowtimeCount: showtimes.filter((s) => s.type !== null && NON_PERFORMANCE_SHOWTIME_TYPES.includes(s.type)).length,
       unrecognizedShowtimeCount: showtimes.filter((s) => s.type === null || !(PERFORMANCE_SHOWTIME_TYPES.includes(s.type) || NON_PERFORMANCE_SHOWTIME_TYPES.includes(s.type))).length,
     });
     raw.push(...showtimes);
   }
   const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
-  const incomplete = anyAbsent || unrecognizedTypes.length > 0;
+  const incomplete = anyAbsent || anyDropped || unrecognizedTypes.length > 0;
   let status: EntertainmentShowtimeStatus;
   if (performances.length > 0) status = performances.some((p) => !p.passed) ? "upcoming" : "all_passed";
   // No performances: only a fully-present, fully-recognized payload may claim "none posted".
@@ -358,8 +364,8 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
   const HALLOWEEN_PR = "7bedcc70-2443-4b54-9815-b41d3a3a59f2";
 
   const st = (startTime: string, type: string | null = "Performance Time", endTime: string | null = null): ThemeParksShowtime => ({ type, startTime, endTime });
-  const entry = (entityId: string, showtimes: ThemeParksShowtime[], status = "OPERATING") =>
-    ({ entityId, name: "x", entityType: "SHOW", parkId: null, externalId: null, status, lastUpdated: "2020-01-01T00:00:00Z", showtimes });
+  const entry = (entityId: string, showtimes: ThemeParksShowtime[], status = "OPERATING", droppedShowtimes = 0) =>
+    ({ entityId, name: "x", entityType: "SHOW", parkId: null, externalId: null, status, lastUpdated: "2020-01-01T00:00:00Z", showtimes, droppedShowtimes });
   const live = (entries: ReturnType<typeof entry>[]): ThemeParksResult<ThemeParksLive> => ({
     ok: true,
     data: { entityId: "p", name: "p", timeZone: null, entries, droppedEntries: 0, droppedShowtimes: 0 },
@@ -452,6 +458,22 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const m = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00"), st("2026-10-01T22:00:00-04:00", "Mystery Type")])]), NOW), "Happily Ever After");
     check("known performance + unknown type → performances kept, flagged incomplete",
       m.status === "upcoming" && m.performances.length === 1 && m.incomplete && m.unrecognizedTypes.length === 1);
+  }
+  // Dropped (malformed) showtime records from provider validation are uncertainty, never "none posted"
+  {
+    const d0 = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [], "OPERATING", 0)]), NOW), "Happily Ever After");
+    check("dropped: valid-empty entity (0 drops) → still none_posted", d0.status === "none_posted" && !d0.incomplete && d0.provider[0].droppedShowtimeCount === 0);
+    const d1 = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [], "OPERATING", 2)]), NOW), "Happily Ever After");
+    check("dropped: malformed records, no valid performance → unavailable, not none_posted",
+      d1.status === "unavailable" && d1.incomplete && d1.performances.length === 0 && d1.provider[0].droppedShowtimeCount === 2);
+    const d2 = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")], "OPERATING", 1)]), NOW), "Happily Ever After");
+    check("dropped: valid performance retained + incomplete", d2.status === "upcoming" && d2.performances.length === 1 && d2.incomplete);
+    const d3 = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [], "OPERATING", 0), entry(STARLIGHT, [], "OPERATING", 3)]), NOW), "Happily Ever After");
+    check("dropped: another entity's drops do not contaminate this entry", d3.status === "none_posted" && !d3.incomplete);
+    const d4 = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [], "OPERATING", 0), entry(STARLIGHT, [], "OPERATING", 3)]), NOW), "Disney Starlight: Dream the Night Away");
+    check("dropped: the affected entity itself is unavailable", d4.status === "unavailable" && d4.incomplete);
+    const d5 = find(normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_FW, [], "OPERATING", 0), entry(HALLOWEEN_PR, [], "OPERATING", 1)]), new Date("2026-10-01T16:00:00Z")), "Halloween Screams");
+    check("dropped: any dropped ref on a multi-ref entry blocks none_posted", d5.status === "unavailable" && d5.incomplete);
   }
   // Duplicate start merges the latest end, and `passed` follows the merged performance
   {
