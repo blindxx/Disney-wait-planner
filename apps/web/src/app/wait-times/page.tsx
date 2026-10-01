@@ -747,8 +747,19 @@ export default function WaitTimesPage() {
     };
     setShowtimes(null);
     load();
+    // Same page-level triggers as the Queue-Times refresh above (Phase 6.3):
+    // refresh when the tab returns to visible, plus a guarded 120 s interval
+    // that skips hidden ticks. Not gated on LIVE_ENABLED — ThemeParks is an
+    // independent provider; the server-side client's 60 s live cache absorbs
+    // repeat requests. (The 15 s displayNow clock below never fetches.)
+    const onVisible = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVisible);
     const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
-    return () => { cancelled = true; clearInterval(id); };
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [ready, selectedPark]);
   // Display clock: re-evaluates passed performances and resort-local date
   // rollover as time advances (same 15 s cadence as ResortClock) and
