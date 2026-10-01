@@ -121,7 +121,7 @@ export interface EntertainmentShowtimeEntry {
   dwpName: string;
   parkId: ParkId;
   status: EntertainmentShowtimeStatus;
-  /** All of today's known performances (resort-local), deduped, ascending. Empty unless upcoming/all_passed. */
+  /** All of today's known performances (resort-local), deduped, ascending. May be non-empty for `unavailable` (incomplete data whose known performances have all passed). */
   performances: EntertainmentPerformance[];
   /** Copy for none_posted/all_passed/unavailable; null otherwise. */
   message: string | null;
@@ -257,9 +257,10 @@ function entryFromMapping(
   const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
   const incomplete = anyAbsent || anyDropped || unrecognizedTypes.length > 0;
   let status: EntertainmentShowtimeStatus;
-  if (performances.length > 0) status = performances.some((p) => !p.passed) ? "upcoming" : "all_passed";
-  // No performances: only a fully-present, fully-recognized payload may claim "none posted".
-  else status = incomplete ? "unavailable" : "none_posted";
+  if (performances.some((p) => !p.passed)) status = "upcoming"; // a known upcoming show is real even if the schedule is partial
+  // "No more showtimes" / "none posted" are completeness claims: only complete data may make them.
+  else if (incomplete) status = "unavailable";
+  else status = performances.length > 0 ? "all_passed" : "none_posted";
   return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider };
 }
 
@@ -458,6 +459,22 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const m = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00"), st("2026-10-01T22:00:00-04:00", "Mystery Type")])]), NOW), "Happily Ever After");
     check("known performance + unknown type → performances kept, flagged incomplete",
       m.status === "upcoming" && m.performances.length === 1 && m.incomplete && m.unrecognizedTypes.length === 1);
+  }
+  // all_passed is a completeness claim: only complete schedules may make it
+  {
+    const past = [st("2026-10-01T09:00:00-04:00"), st("2026-10-01T10:00:00-04:00")];
+    const c = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, past)]), NOW), "Happily Ever After");
+    check("complete all-passed → all_passed", c.status === "all_passed" && !c.incomplete && c.message === "No more showtimes today");
+    const absent = find(normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_PR, [st("2026-10-01T09:00:00-07:00")])]), new Date("2026-10-01T22:00:00Z")), "Halloween Screams");
+    check("incomplete (absent ref) all-passed → unavailable, known performances retained",
+      absent.status === "unavailable" && absent.incomplete && absent.message === "Showtimes unavailable" && absent.performances.length === 1 && absent.performances[0].passed);
+    const dropped = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, past, "OPERATING", 1)]), NOW), "Happily Ever After");
+    check("incomplete (dropped record) all-passed → unavailable", dropped.status === "unavailable" && dropped.incomplete);
+    const unk = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [...past, st("2026-10-01T22:00:00-04:00", "Mystery Type")])]), NOW), "Happily Ever After");
+    check("incomplete (unrecognized type) all-passed → unavailable", unk.status === "unavailable" && unk.incomplete);
+    const up = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [...past, st("2026-10-01T21:00:00-04:00")], "OPERATING", 1)]), NOW), "Happily Ever After");
+    check("incomplete with a known upcoming performance → upcoming + incomplete",
+      up.status === "upcoming" && up.incomplete && up.performances.length === 3 && up.performances.filter((p) => !p.passed).length === 1);
   }
   // Dropped (malformed) showtime records from provider validation are uncertainty, never "none posted"
   {
