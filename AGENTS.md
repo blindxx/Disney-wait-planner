@@ -345,6 +345,14 @@ closure — it exists for closures that matter for trip planning:
   unmapped with a reason, no runtime name-based remapping. Drift surfaces via
   `verifyEntertainmentMapping()` findings; provider-only SHOW entities are
   preserved in its `providerOnly` report, never auto-added to DWP catalogs.
+- Park hours (Phase 12.4): ThemeParks `getSchedule()` → `parkHours.ts`
+  (pure normalizer/display) → `parkHoursService.ts` → `/api/park-hours`.
+  `OPERATING` is the park window; other schedule types are preserved and only
+  labelled with the provider's own `description` (never inferred from `type`).
+  `Closed` is derived only when provider data safely brackets the date (see
+  `parkHours.ts` header); absence of `OPERATING` alone is `unknown`, shown as
+  "Unavailable". Monthly follow-up requests happen only for potential closures.
+  DEV checks: `runDevParkHoursCases()` / `runDevParkHoursServiceCases()`.
 - DEV checks: `runDevThemeParksProviderCases()` /
   `runDevThemeParksApiCases()` /
   `runDevThemeParksEntertainmentMappingCases()` (run manually; return failing
