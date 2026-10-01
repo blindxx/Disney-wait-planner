@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * Floating "Back to Top" button — appears once the page has scrolled past
+ * Floating "Back to Top" button (Tom help + Waits & Shows) — appears once the page has scrolled past
  * SHOW_AFTER_PX, smooth-scrolls to the top on click. Styling (.tomhg-back-to-top)
- * lives alongside the rest of /tom/help's CSS in that page's server component.
+ * is defined by each host page (/tom/help, /wait-times).
  */
 
 import { useEffect, useState } from "react";
@@ -28,7 +28,10 @@ export default function BackToTopButton() {
     <button
       type="button"
       className="tomhg-back-to-top"
-      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      onClick={() => {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+      }}
       aria-label="Back to top"
     >
       ↑ Top

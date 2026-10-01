@@ -11,7 +11,7 @@
  *   - Park selector (2 big buttons)
  *   - Current time indicator
  *   - 5 best options with visual priority cues (short list, minimal scrolling)
- *   - Primary action: "View all wait times"
+ *   - Primary action: "View Waits & Shows"
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -565,7 +565,7 @@ export default function TodayPage() {
 
         {/* Primary Action Button */}
         <Link href="/wait-times" className="primary-btn">
-          View all wait times
+          View Waits & Shows
         </Link>
 
         {/* Last-updated trust affordance */}
