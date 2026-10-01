@@ -80,6 +80,9 @@ export const SHOWTIME_STATUS_MESSAGES: Record<EntertainmentShowtimeStatus, strin
   unmapped: null,
 };
 
+/** Compact note shown beside known upcoming times when the schedule is incomplete (not exhaustive). */
+export const PARTIAL_SHOWTIMES_NOTE = "More showtimes may be unavailable";
+
 /** Provider showtime `type` values that are real performances. */
 export const PERFORMANCE_SHOWTIME_TYPES: readonly string[] = ["Performance Time", "Special Ticketed Event"];
 /** Known non-performance types (e.g. operating hours on meet-and-greet SHOW entities): excluded, not uncertain. */
@@ -379,8 +382,14 @@ export function showtimesForDisplay(
 export function entryDisplayAt(
   entry: EntertainmentShowtimeEntry,
   instant: Date = new Date(),
-): { status: EntertainmentShowtimeStatus; message: string | null; remaining: EntertainmentPerformance[] } {
-  if (entry.performances.length === 0) return { status: entry.status, message: entry.message, remaining: [] };
+): {
+  status: EntertainmentShowtimeStatus;
+  message: string | null;
+  remaining: EntertainmentPerformance[];
+  /** Upcoming times shown from an incomplete schedule: the list may not be exhaustive. */
+  partial: boolean;
+} {
+  if (entry.performances.length === 0) return { status: entry.status, message: entry.message, remaining: [], partial: false };
   const nowMs = instant.getTime();
   const evaluated = entry.performances.map((p) => ({
     p,
@@ -391,6 +400,7 @@ export function entryDisplayAt(
     status,
     message: SHOWTIME_STATUS_MESSAGES[status],
     remaining: evaluated.filter((e) => !e.passed).map((e) => e.p),
+    partial: status === "upcoming" && entry.incomplete,
   };
 }
 
@@ -585,6 +595,25 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     check("display: all passed on incomplete data → unavailable, never all_passed", entryDisplayAt(inc).status === "unavailable");
     const none = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])]), NOW), "Happily Ever After");
     check("display: entries without performances unchanged", entryDisplayAt(none).status === "none_posted" && entryDisplayAt(none).remaining.length === 0);
+  }
+  // Partial indication: known upcoming times from incomplete schedules are flagged, complete ones are not
+  {
+    const complete = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")])]), NOW), "Happily Ever After");
+    check("partial: complete upcoming schedule is not partial", entryDisplayAt(complete, NOW).status === "upcoming" && !entryDisplayAt(complete, NOW).partial);
+    for (const [label, ent] of [
+      ["dropped record", entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")], "OPERATING", 1)],
+      ["unrecognized type", entry(HAPPILY, [st("2026-10-01T21:00:00-04:00"), st("2026-10-01T22:00:00-04:00", "Mystery Type")])],
+    ] as const) {
+      const e = find(normalizeParkEntertainmentShowtimes("mk", live([ent]), NOW), "Happily Ever After");
+      const d = entryDisplayAt(e, NOW);
+      check(`partial: incomplete upcoming (${label}) keeps known times and is flagged`, d.status === "upcoming" && d.partial && d.remaining.length === 1);
+    }
+    const absent = find(normalizeParkEntertainmentShowtimes("disneyland", live([entry(HALLOWEEN_PR, [st("2026-10-01T21:30:00-07:00")])]), new Date("2026-10-01T16:00:00Z")), "Halloween Screams");
+    check("partial: absent ref + known upcoming → partial", entryDisplayAt(absent, new Date("2026-10-01T16:00:00Z")).partial);
+    const allPast = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T10:00:00-04:00")], "OPERATING", 1)]), NOW), "Happily Ever After");
+    const dp = entryDisplayAt(allPast, NOW);
+    check("partial: incomplete + all passed stays unavailable (not partial)", dp.status === "unavailable" && !dp.partial && dp.message === "Showtimes unavailable");
+    check("partial: becomes unavailable once the last known time passes", entryDisplayAt(find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T21:00:00-04:00")], "OPERATING", 1)]), NOW), "Happily Ever After"), new Date("2026-10-02T02:00:00Z")).status === "unavailable");
   }
   // Dropped (malformed) showtime records from provider validation are uncertainty, never "none posted"
   {

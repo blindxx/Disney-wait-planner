@@ -51,6 +51,7 @@ import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/ente
 import ResortClock from "../../components/ResortClock";
 import ThemeParksAttribution from "../../components/ThemeParksAttribution";
 import {
+  PARTIAL_SHOWTIMES_NOTE,
   entryDisplayAt,
   resolveShowtimesResponse,
   showtimesForDisplay,
@@ -491,6 +492,9 @@ function EntertainmentCard({
           }}
         >
           {showtimeText}
+          {display?.partial && (
+            <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>
+          )}
           {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
