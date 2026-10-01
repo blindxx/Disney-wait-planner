@@ -175,6 +175,26 @@ function toMs(iso: string): number {
   return new Date(iso).getTime();
 }
 
+/**
+ * Single "passed" rule: a performance is passed once its end — or its start,
+ * when there is no meaningful end (absent, or not after the start) — is before
+ * `nowMs`. No grace period.
+ */
+export function isPerformancePassed(startMs: number, endMs: number, nowMs: number): boolean {
+  return Math.max(startMs, Number.isFinite(endMs) ? endMs : startMs) < nowMs;
+}
+
+/** Single status rule over today's known performances (shared by the normalizer and display re-evaluation). */
+function statusForPerformances(
+  performances: Array<{ passed: boolean }>,
+  incomplete: boolean,
+): EntertainmentShowtimeStatus {
+  if (performances.some((p) => !p.passed)) return "upcoming"; // a known upcoming show is real even if the schedule is partial
+  // "No more showtimes" / "none posted" are completeness claims: only complete data may make them.
+  if (incomplete) return "unavailable";
+  return performances.length > 0 ? "all_passed" : "none_posted";
+}
+
 function collectPerformances(
   resort: ResortId,
   localDate: string,
@@ -215,7 +235,7 @@ function collectPerformances(
       endTime: p.endTime,
       localTime: formatResortLocalTime(resort, new Date(startMs)),
       type: p.type,
-      passed: Math.max(startMs, Number.isFinite(p.endMs) ? p.endMs : startMs) < nowMs,
+      passed: isPerformancePassed(startMs, p.endMs, nowMs),
     }));
   return { performances, unrecognizedTypes: [...unrecognized].sort() };
 }
@@ -259,11 +279,7 @@ function entryFromMapping(
   }
   const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
   const incomplete = anyAbsent || anyDropped || !payloadCurrent || unrecognizedTypes.length > 0;
-  let status: EntertainmentShowtimeStatus;
-  if (performances.some((p) => !p.passed)) status = "upcoming"; // a known upcoming show is real even if the schedule is partial
-  // "No more showtimes" / "none posted" are completeness claims: only complete data may make them.
-  else if (incomplete) status = "unavailable";
-  else status = performances.length > 0 ? "all_passed" : "none_posted";
+  const status = statusForPerformances(performances, incomplete);
   return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider };
 }
 
@@ -350,6 +366,32 @@ export function showtimesForDisplay(
   if (!data) return null;
   if (data.localDate === getResortLocalDate(data.resort, instant)) return data;
   return unavailablePark(data.parkId, instant, "Showtimes are for a previous day");
+}
+
+/**
+ * Display-time view of one entry at `instant`: re-evaluates `passed` from the
+ * performance start/end so a card does not keep showing a time that passed
+ * since the response was computed, and returns only the performances still to
+ * show. Status uses the same completeness rule as the normalizer (incomplete
+ * data never becomes all_passed). Entries without performances (none_posted,
+ * unavailable-by-failure, unmapped) are returned unchanged.
+ */
+export function entryDisplayAt(
+  entry: EntertainmentShowtimeEntry,
+  instant: Date = new Date(),
+): { status: EntertainmentShowtimeStatus; message: string | null; remaining: EntertainmentPerformance[] } {
+  if (entry.performances.length === 0) return { status: entry.status, message: entry.message, remaining: [] };
+  const nowMs = instant.getTime();
+  const evaluated = entry.performances.map((p) => ({
+    p,
+    passed: isPerformancePassed(toMs(p.startTime), p.endTime ? toMs(p.endTime) : NaN, nowMs),
+  }));
+  const status = statusForPerformances(evaluated, entry.incomplete);
+  return {
+    status,
+    message: SHOWTIME_STATUS_MESSAGES[status],
+    remaining: evaluated.filter((e) => !e.passed).map((e) => e.p),
+  };
 }
 
 // ============================================
@@ -521,6 +563,28 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const up = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [...past, st("2026-10-01T21:00:00-04:00")], "OPERATING", 1)]), NOW), "Happily Ever After");
     check("incomplete with a known upcoming performance → upcoming + incomplete",
       up.status === "upcoming" && up.incomplete && up.performances.length === 3 && up.performances.filter((p) => !p.passed).length === 1);
+  }
+  // Passed/end-time semantics and display-time re-evaluation (no grace period)
+  {
+    // now = 3:00 PM EDT
+    const pf = (start: string, end: string | null) => find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st(start, "Performance Time", end)])]), NOW), "Happily Ever After").performances[0];
+    check("passed: no end → start cutoff (past)", pf("2026-10-01T14:59:00-04:00", null).passed);
+    check("passed: no end → start at now is not passed (no grace, no early drop)", !pf("2026-10-01T15:00:00-04:00", null).passed);
+    check("passed: end == start (non-meaningful) → start cutoff", pf("2026-10-01T14:00:00-04:00", "2026-10-01T14:00:00-04:00").passed && !pf("2026-10-01T16:00:00-04:00", "2026-10-01T16:00:00-04:00").passed);
+    check("passed: meaningful end keeps it current until it ends", !pf("2026-10-01T14:30:00-04:00", "2026-10-01T15:30:00-04:00").passed && pf("2026-10-01T14:00:00-04:00", "2026-10-01T14:59:00-04:00").passed);
+    const e0 = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [
+      st("2026-10-01T10:00:00-04:00"), st("2026-10-01T14:30:00-04:00", "Performance Time", "2026-10-01T15:30:00-04:00"), st("2026-10-01T20:00:00-04:00"),
+    ])]), NOW), "Happily Ever After");
+    check("passed: normalized data keeps ALL of today's performances", e0.performances.length === 3 && e0.performances.map((p) => p.passed).join() === "true,false,false");
+    const at = (iso: string) => entryDisplayAt(e0, new Date(iso));
+    check("display: only not-passed performances remain", at("2026-10-01T19:00:00Z").remaining.map((p) => p.localTime).join() === "2:30 PM,8:00 PM");
+    check("display: re-evaluated later → in-progress dropped once its end passes", at("2026-10-01T19:31:00Z").remaining.map((p) => p.localTime).join() === "8:00 PM");
+    const done = at("2026-10-02T00:30:00Z");
+    check("display: all passed on complete data → all_passed message", done.status === "all_passed" && done.message === "No more showtimes today" && done.remaining.length === 0);
+    const inc = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [st("2026-10-01T10:00:00-04:00")], "OPERATING", 1)]), NOW), "Happily Ever After");
+    check("display: all passed on incomplete data → unavailable, never all_passed", entryDisplayAt(inc).status === "unavailable");
+    const none = find(normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])]), NOW), "Happily Ever After");
+    check("display: entries without performances unchanged", entryDisplayAt(none).status === "none_posted" && entryDisplayAt(none).remaining.length === 0);
   }
   // Dropped (malformed) showtime records from provider validation are uncertainty, never "none posted"
   {

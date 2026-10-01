@@ -51,6 +51,7 @@ import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/ente
 import ResortClock from "../../components/ResortClock";
 import ThemeParksAttribution from "../../components/ThemeParksAttribution";
 import {
+  entryDisplayAt,
   resolveShowtimesResponse,
   showtimesForDisplay,
   type EntertainmentShowtimeEntry,
@@ -439,15 +440,17 @@ function EntertainmentCard({
   showtime?: EntertainmentShowtimeEntry;
   stale?: boolean;
 }) {
-  // Unmapped / not-yet-loaded entries render no showtime line at all.
-  const upcoming =
-    showtime?.status === "upcoming" ? showtime.performances.filter((p) => !p.passed) : [];
-  const showtimeText =
-    !showtime || showtime.status === "unmapped"
-      ? null
-      : showtime.status === "upcoming"
-        ? upcoming.map((p) => p.localTime).join(" • ")
-        : showtime.message;
+  // Unmapped / not-yet-loaded entries render no showtime line at all. Passed
+  // performances are omitted (re-evaluated at render); complete normalized data
+  // is untouched.
+  const display = showtime && showtime.status !== "unmapped" ? entryDisplayAt(showtime) : null;
+  const showtimeText = !display
+    ? null
+    : display.status === "upcoming"
+      ? display.remaining.map((p) => p.localTime).join(" • ")
+      : display.message;
+  const isUpcoming = display?.status === "upcoming";
+
   return (
     <div className="entertainment-card">
       <div
@@ -481,7 +484,7 @@ function EntertainmentCard({
           style={{
             fontSize: "13px",
             lineHeight: "1.3",
-            color: showtime?.status === "upcoming" ? "#374151" : "#9ca3af",
+            color: isUpcoming ? "#374151" : "#9ca3af",
             marginTop: "4px",
           }}
         >
@@ -745,7 +748,9 @@ export default function WaitTimesPage() {
     const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
     return () => { cancelled = true; clearInterval(id); };
   }, [ready, selectedPark]);
-  const showtimes = showtimesForDisplay(showtimesRaw);
+  // Never use retained state from a previously selected park.
+  const showtimesCurrent = showtimesForDisplay(showtimesRaw);
+  const showtimes = showtimesCurrent && showtimesCurrent.parkId === selectedPark ? showtimesCurrent : null;
 
   /** Entertainment for the currently selected park, from the canonical catalog. */
   const parkEntertainment = useMemo(
