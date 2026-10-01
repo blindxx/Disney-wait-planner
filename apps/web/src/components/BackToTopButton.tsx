@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * Floating "Back to Top" button — appears once the page has scrolled past
+ * Floating "Back to Top" button (Tom help + Waits & Shows) — appears once the page has scrolled past
  * SHOW_AFTER_PX, smooth-scrolls to the top on click. Styling (.tomhg-back-to-top)
- * lives alongside the rest of /tom/help's CSS in that page's server component.
+ * is defined by each host page (/tom/help, /wait-times).
  */
 
 import { useEffect, useState } from "react";

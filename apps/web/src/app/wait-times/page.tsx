@@ -15,7 +15,7 @@ Reviewers should verify that:
 */
 
 /**
- * Wait Times Page
+ * Waits & Shows Page (route: /wait-times)
  * Displays current attraction wait times for Disneyland Resort (DLR) and
  * Walt Disney World (WDW) parks.
  * Allows filtering by resort, park, operating status, land, and sorting.
@@ -32,6 +32,7 @@ import {
   type ParkId,
   type ResortId,
 } from "@disney-wait-planner/shared";
+import BackToTopButton from "../../components/BackToTopButton";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
@@ -331,6 +332,61 @@ const RESPONSIVE_CSS = `
     .entertainment-card {
       padding: 10px 14px;
       min-height: 52px;
+    }
+  }
+
+  /* ---- Section jump navigation (Attractions / Entertainment) ---- */
+  .section-jump {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .section-jump a {
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1px solid #d1d5db;
+    background-color: #fff;
+    color: #374151;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+  }
+  .section-jump a:hover { background-color: #f3f4f6; }
+  .section-jump a:focus-visible { outline: 2px solid #1e3a5f; outline-offset: 2px; }
+  .wait-section { scroll-margin-top: 12px; }
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+
+  /* ---- Floating Back to Top — same look as /tom/help's .tomhg-back-to-top ---- */
+  .tomhg-back-to-top {
+    position: fixed;
+    right: 20px;
+    bottom: 24px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px;
+    border-radius: 999px;
+    border: none;
+    background-color: #1e3a5f;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  }
+  .tomhg-back-to-top:hover { background-color: #16324f; }
+  @media (max-width: 480px) {
+    .tomhg-back-to-top {
+      right: 16px;
+      bottom: 16px;
+      padding: 8px 14px;
+      font-size: 12px;
     }
   }
 `;
@@ -831,6 +887,12 @@ export default function WaitTimesPage() {
     [selectedPark],
   );
 
+  /** Entertainment visible under the shared land filter (drives the section + its jump link). */
+  const visibleEntertainment = useMemo(
+    () => parkEntertainment.filter((p) => !selectedLand || p.land === selectedLand),
+    [parkEntertainment, selectedLand],
+  );
+
   // ThemeParks.wiki attribution is owed whenever its data is presented: a
   // successful response and at least one visible entry the provider was asked about.
   const showtimesPresented =
@@ -890,7 +952,7 @@ export default function WaitTimesPage() {
         {/* Page Header */}
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "16px" }}>
           <h1 style={{ fontSize: "22px", fontWeight: 700, color: "#111827", margin: 0 }}>
-            Wait Times
+            Waits &amp; Shows
           </h1>
           {activeProfileName && (
             <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
@@ -1088,7 +1150,23 @@ export default function WaitTimesPage() {
           </div>
         </div>
 
+        {/* Section jump links — both sections stay rendered (not tabs).
+            Entertainment link only when that section has visible entries. */}
+        {visibleEntertainment.length > 0 && (
+          <nav className="section-jump" aria-label="Page sections">
+            <a href="#attractions">Attractions</a>
+            <a href="#entertainment">Entertainment</a>
+          </nav>
+        )}
+
         {/* Attractions Grid / List */}
+        <h2
+          id="attractions"
+          className="wait-section"
+          style={{ fontSize: "16px", fontWeight: 700, color: "#111827", margin: "0 0 10px" }}
+        >
+          Attractions
+        </h2>
         <div className="wait-grid">
           {isLoading ? (
             Array.from({ length: 9 }).map((_, i) => (
@@ -1145,13 +1223,13 @@ export default function WaitTimesPage() {
 
         {/* ---- Entertainment ---- */}
         {(() => {
-          const entertainment = parkEntertainment.filter(
-            (p) => !selectedLand || p.land === selectedLand
-          );
+          const entertainment = visibleEntertainment;
           if (entertainment.length === 0) return null;
           return (
             <div style={{ marginTop: "20px" }}>
               <h2
+                id="entertainment"
+                className="wait-section"
                 style={{
                   fontSize: "16px",
                   fontWeight: 700,
@@ -1169,7 +1247,7 @@ export default function WaitTimesPage() {
                   marginBottom: "10px",
                 }}
               >
-                Plan-worthy entertainment for this park. Check the official Disney app or website to confirm showtimes.
+                Entertainment and showtimes for this park.
               </p>
               <div className="entertainment-grid">
                 {entertainment.map((show) => (
@@ -1345,6 +1423,7 @@ export default function WaitTimesPage() {
           )}
         </div>
       )}
+      <BackToTopButton />
     </>
   );
 }
