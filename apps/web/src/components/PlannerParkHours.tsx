@@ -11,7 +11,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ParkId } from "@disney-wait-planner/shared";
+import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import {
   describeParkDateHours,
   parkDateHoursForDisplay,
@@ -19,6 +19,8 @@ import {
   resolveParkDateHoursResponse,
   type ParkDateHours,
 } from "../lib/parkHours";
+import { getResortLocalDate } from "../lib/resortTime";
+import { PARK_TO_RESORT } from "../lib/parkMetadata";
 import ThemeParksAttribution from "./ThemeParksAttribution";
 
 export default function PlannerParkHours({
@@ -32,6 +34,16 @@ export default function PlannerParkHours({
 }) {
   const [raw, setRaw] = useState<ParkDateHours | null>(null);
   const [now, setNow] = useState(() => new Date());
+
+  // Display clock, same 15 s cadence as ResortClock (visible tab only). Display-only:
+  // it never polls the provider; it only makes the resort-local day rollover observable.
+  useEffect(() => {
+    const tick = () => { if (document.visibilityState === "visible") setNow(new Date()); };
+    const id = setInterval(tick, 15_000);
+    return () => clearInterval(id);
+  }, []);
+  // Resort-local today: crossing midnight changes it, which refetches once (below).
+  const resortToday = parkId ? getResortLocalDate(PARK_TO_RESORT[parkId] as ResortId, now) : null;
 
   useEffect(() => {
     setRaw(null);
@@ -61,7 +73,8 @@ export default function PlannerParkHours({
       cancelled = true;
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [dayId, date, parkId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayId, date, parkId, resortToday]);
 
   const data = parkDateHoursForDisplay(raw, parkId, date, now);
   // Reserve the line while loading so layout doesn't jump.

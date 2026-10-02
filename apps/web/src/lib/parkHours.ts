@@ -539,7 +539,8 @@ export function normalizeParkHoursForDate(
   if (operating.length > 0) return { ...result, status: "hours" };
   if (onDate.length > 0) {
     // Provider lists only non-OPERATING windows (e.g. Early Entry): hours aren't published yet.
-    return date > localDate
+    // An incomplete payload (dropped entries) can't establish that hours are unpublished.
+    return date > localDate && dropped === 0
       ? { ...result, status: "not_yet_available" }
       : { ...result, unavailableReason: "only_non_operating" };
   }
@@ -558,8 +559,8 @@ export function normalizeParkHoursForDate(
 
   if (!hasAfter) {
     // The fetched provider data holds nothing on/after `date` → not covered (future only).
-    // Stale data may predate a publication, so it never claims "not yet".
-    return date > localDate && !nextFailed && !stale
+    // Stale or incomplete (dropped entries) data never claims "not yet".
+    return date > localDate && !nextFailed && !stale && dropped === 0
       ? { ...result, status: "not_yet_available" }
       : { ...result, unavailableReason: "closure_unverified" };
   }
@@ -879,6 +880,14 @@ export function runDevParkDateHoursCases(): string[] {
   check("future date with only Early Entry → Not yet available (no hours invented)", r.status === "not_yet_available");
   r = run("2026-10-15", { month: ok(sched([extra("2026-10-15", "TICKETED_EVENT", "Early Entry", "08:30", "09:00")]), at) });
   check("today with only Early Entry → Unavailable", r.status === "unavailable" && r.unavailableReason === "only_non_operating");
+  r = run("2026-12-20", { month: ok(sched([], "America/New_York", 1), at), nextMonth: ok(sched([]), at) });
+  check("dropped entries in the month block Not yet available (empty path)", r.status === "unavailable" && r.unavailableReason === "closure_unverified" && r.droppedEntries === 1);
+  r = run("2026-10-30", { month: ok(sched([op("2026-10-20")]), at), nextMonth: ok(sched([], "America/New_York", 2), at) });
+  check("dropped entries in a follow-up month block Not yet available", r.status === "unavailable" && r.droppedEntries === 2);
+  r = run("2026-10-20", { month: ok(sched([extra("2026-10-20", "TICKETED_EVENT", "Early Entry", "08:30", "09:00")], "America/New_York", 1), at) });
+  check("dropped entries block Not yet available (only-Early-Entry path)", r.status === "unavailable" && r.unavailableReason === "only_non_operating");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-20")], "America/New_York", 1), at) });
+  check("published hours still shown despite dropped entries elsewhere", r.status === "hours");
   check("today with no data at all is never Not yet available", run("2026-10-15", { month: ok(sched([]), at), nextMonth: ok(sched([]), at) }).status === "unavailable");
 
   // month/year boundaries via follow-ups
