@@ -26,11 +26,21 @@
  * never uses it to write/modify planner data and applies a size cap so an
  * oversized or malformed value is safely dropped rather than forwarded.
  *
+ * Phase 12.7: when planner_context has dated days with an effective park, this
+ * route adds context.schedule — normalized exact-date park hours and
+ * current-day (today-only) entertainment showtimes — built server-side through
+ * DWP's normalized services (lib/tomScheduleContext.ts). Tom never calls
+ * ThemeParks.wiki; failures degrade to "unavailable" and never block the ask.
+ * A ThemeParks.wiki attribution source is appended to the response only when
+ * provider-confirmed schedule data was actually sent.
+ *
  * Upstream: POST ${TOM_API_URL}/api/ask
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
+import { buildTomScheduleContext, scheduleHasProviderData } from "@/lib/tomScheduleContext";
+import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "@/lib/themeParksProviders";
 import { checkTomRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
 export const dynamic = "force-dynamic";
@@ -129,6 +139,9 @@ export async function POST(request: NextRequest) {
   const plannerContext = sanitizePlannerContext(body.planner_context);
   if (plannerContext) context.planner = plannerContext;
 
+  const schedule = await buildTomScheduleContext(plannerContext);
+  if (schedule) context.schedule = schedule;
+
   let upstream: Response;
   try {
     upstream = await fetch(`${tomApiUrl}/api/ask`, {
@@ -167,7 +180,10 @@ export async function POST(request: NextRequest) {
     return errorResponse("Tom returned no answer", 500);
   }
 
-  const sources = Array.isArray(data.sources) ? data.sources : [];
+  const sources: unknown[] = Array.isArray(data.sources) ? [...data.sources] : [];
+  if (scheduleHasProviderData(schedule)) {
+    sources.push({ title: `Schedule data: ${THEMEPARKS_ATTRIBUTION_NAME}`, url: THEMEPARKS_ATTRIBUTION_URL });
+  }
 
   return NextResponse.json({ answer, sources, meta: { ok: true } });
 }

@@ -437,6 +437,18 @@ behavior — preserve them unless a phase explicitly modifies chat state
 management. See `apps/web/src/app/tom/page.tsx` for current implementation
 details before changing chat state handling.
 
+### Schedule context (Phase 12.7)
+
+`/api/tom/ask` adds `context.schedule` server-side via
+`apps/web/src/lib/tomScheduleContext.ts`, built only from DWP's normalized
+services (`getParkHoursForDate()`, `getParkEntertainmentShowtimes()`); Tom and
+`plannerContextSnapshot` never consume ThemeParks.wiki directly. Park/date come
+from the snapshot's existing `days[].park` + `dayAutoFallbacks` (no second park
+authority). Showtimes are TODAY-ONLY and are never applied to a future planner
+date. Fetching is bounded (dated today-or-future days only, deduped, capped);
+failures degrade to `unavailable` and never block the ask. DEV check:
+`runDevTomScheduleContextCases()`.
+
 ### Link Preview service
 
 `/api/link-preview` performs server-side metadata fetching. Preserve:
