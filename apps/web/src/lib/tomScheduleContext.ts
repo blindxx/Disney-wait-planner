@@ -16,9 +16,11 @@
  *     effective park, are considered (past/invalid dates make no provider call);
  *   - (park, date) pairs are deduped, ordered soonest-first, and capped at
  *     MAX_HOURS_TARGETS; days beyond the cap are listed as `not_fetched`;
- *   - showtimes are fetched only for parks with a planner day dated resort-local
- *     TODAY that has planned Entertainment, capped at MAX_SHOWTIME_PARKS, and
- *     only the planned entries are sent (never the whole park catalog).
+ *   - showtimes are fetched (one park-wide call, no per-show calls) only for
+ *     parks with a planner day dated resort-local TODAY, capped at
+ *     MAX_SHOWTIME_PARKS. Entries are limited to that park's curated active DWP
+ *     Entertainment with an explicit "mapped" ThemeParks mapping, whether or
+ *     not planned; provider-only and unmapped entries are never sent.
  *
  * Showtimes are TODAY-ONLY: a future planner date never receives showtimes
  * (and today's /live performances are never relabelled as another date's).
@@ -170,26 +172,11 @@ const unavailableHours = (t: Target): TomScheduleHoursEntry => ({
 });
 
 /**
- * Planned Entertainment canonical identities for the given (today) day ids.
- * Uses the snapshot's own resolveCanonicalIdentity (trailing-time cleanup +
- * canonical Entertainment resolution), so legacy names like "Fantasmic 9pm"
- * match the same identity the planner context already recognized.
- */
-function plannedEntertainmentKeys(planner: Record<string, unknown>, dayIds: Set<string>, resort: ResortId): Set<string> {
-  const keys = new Set<string>();
-  for (const p of Array.isArray(planner.plans) ? planner.plans : []) {
-    const item = obj(p);
-    if (!item || item.type !== "entertainment" || typeof item.name !== "string" || typeof item.dayId !== "string") continue;
-    if (!dayIds.has(item.dayId)) continue;
-    keys.add(resolveCanonicalIdentity(item.name, "entertainment", resort, item.dayId));
-  }
-  return keys;
-}
-
-/**
- * Canonical identities of the park's Entertainment entries that the explicit,
- * park-qualified ThemeParks mapping marks "mapped" (unmapped entries have no
- * provider showtimes to fetch). No fuzzy/name-based provider matching.
+ * Canonical identities of the park's curated active DWP Entertainment entries
+ * (ENTERTAINMENT_PLACES) that the explicit, park-qualified ThemeParks mapping
+ * marks "mapped" (unmapped entries have no provider showtimes to fetch and are
+ * never fabricated). No fuzzy/name-based provider matching; provider-only
+ * entities are never in this set.
  */
 function mappedEntertainmentIdentities(park: ParkId, resort: ResortId): Set<string> {
   const ids = new Set<string>();
@@ -243,7 +230,8 @@ export async function buildTomScheduleContext(
       return h ? hoursEntry(t, h) : unavailableHours(t);
     }));
 
-    // Showtimes: today-only, only parks whose TODAY day has planned Entertainment.
+    // Showtimes: today-only, for parks with a resort-local TODAY planner day,
+    // covering the park's mapped curated Entertainment (planned or not).
     const todayByPark = new Map<ParkId, Target[]>();
     for (const t of targets) if (t.today) todayByPark.set(t.park, [...(todayByPark.get(t.park) ?? []), t]);
     const showParks: NonNullable<TomScheduleContext["entertainment_showtimes"]>["parks"] = [];
@@ -252,11 +240,10 @@ export async function buildTomScheduleContext(
     let showtimeAttempts = 0;
     for (const [park, ts] of todayByPark) {
       if (showtimeAttempts >= MAX_SHOWTIME_PARKS) break;
-      const wanted = plannedEntertainmentKeys(plannerContext, new Set(ts.map((t) => t.dayId)), ts[0].resort);
-      // Skip (without consuming the attempt cap) parks whose planned Entertainment
-      // is all unmapped: there is nothing the provider could answer for them.
-      const mapped = mappedEntertainmentIdentities(park, ts[0].resort);
-      if (![...wanted].some((w) => mapped.has(w))) continue;
+      // Skip (without consuming the attempt cap) parks with no mapped curated
+      // Entertainment: there is nothing the provider could answer for them.
+      const wanted = mappedEntertainmentIdentities(park, ts[0].resort);
+      if (wanted.size === 0) continue;
       let st: ParkEntertainmentShowtimes | null = null;
       showtimeAttempts++;
       try { st = await getShowtimes(park); } catch { st = null; }
@@ -450,7 +437,7 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!"),
   });
   const sp = ctx?.entertainment_showtimes?.parks[0];
-  check("showtimes: today's planned entertainment gets today's times only", ctx?.entertainment_showtimes?.scope === "today_only" && sp?.entries.length === 1 && sp.entries[0].times[0]?.time === "9:00 PM");
+  check("showtimes: today's planned entertainment gets today's times only (provider-only 'Other Show' excluded)", ctx?.entertainment_showtimes?.scope === "today_only" && sp?.entries.length === 1 && sp.entries[0].name === "Fantasmic!" && sp.entries[0].times[0]?.time === "9:00 PM");
 
   showAsked.length = 0;
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-16", "disneyland")], plans: [plan("d1", "Fantasmic!")], dayAutoFallbacks: {} }, {
@@ -461,13 +448,36 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland"), day("d2", "2026-10-16", "disneyland")], plans: [plan("d2", "Fantasmic!")], dayAutoFallbacks: {} }, {
     instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!"),
   });
-  check("showtimes: entertainment planned only on a future day does not trigger today's showtimes", ctx?.entertainment_showtimes === undefined);
+  check("showtimes: entertainment planned only on a future day adds nothing beyond today's park curated schedule", ctx?.entertainment_showtimes?.parks.length === 1 && ctx.entertainment_showtimes.parks[0].localDate === "2026-10-15");
+  showAsked.length = 0;
+  ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-14", "mk"), day("d2", "2026-10-16", "mk")], plans: [plan("d1", "Happily Ever After"), plan("d2", "Happily Ever After")], dayAutoFallbacks: {} }, {
+    instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After"),
+  });
+  check("showtimes: only past/future planner dates → no showtime fetch or field", showAsked.length === 0 && ctx?.entertainment_showtimes === undefined);
+
+  // Phase 12.7.1: today MK with NO planned Entertainment → mapped curated schedule (HEA unplanned)
+  showAsked.length = 0;
+  ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "mk")], plans: [{ dayId: "d1", name: "Space Mountain", type: "attraction", time: "" }], dayAutoFallbacks: {} }, {
+    instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After"),
+  });
+  const mkp = ctx?.entertainment_showtimes?.parks[0];
+  check("12.7.1: today MK, no planned Entertainment → mapped curated MK showtimes; Happily Ever After appears unplanned", showAsked.join() === "mk" && ctx?.entertainment_showtimes?.scope === "today_only" && mkp?.park === "mk" && mkp.entries.length === 1 && mkp.entries[0].name === "Happily Ever After" && mkp.entries[0].times[0]?.time === "9:00 PM");
+  check("12.7.1: provider-only 'Other Show' stays excluded", !mkp?.entries.some((e) => e.name === "Other Show"));
+  // Auto/fallback park works the same; planned Entertainment is not required
+  showAsked.length = 0;
+  ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15")], plans: [], dayAutoFallbacks: { d1: "mk" } }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After") });
+  check("12.7.1: dayAutoFallbacks park drives curated showtimes", showAsked.join() === "mk" && ctx?.entertainment_showtimes?.parks[0]?.entries[0]?.name === "Happily Ever After");
+  // Unmapped curated entry in the provider payload is never surfaced
+  ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland")], plans: [], dayAutoFallbacks: {} }, {
+    instant: NOW, getHours: hoursFor({}), getShowtimes: async (p) => mkShow(p, "2026-10-15", "Wondrous Journeys"),
+  });
+  check("12.7.1: unmapped curated Entertainment (Wondrous Journeys) is not surfaced even if present in a payload", !(ctx?.entertainment_showtimes?.parks[0]?.entries ?? []).some((e) => e.name === "Wondrous Journeys"));
 
   showAsked.length = 0;
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland")], plans: [{ dayId: "d1", name: "Fantasmic!", type: "attraction", time: "" }], dayAutoFallbacks: {} }, {
     instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!"),
   });
-  check("showtimes: no planned Entertainment → not fetched", showAsked.length === 0);
+  check("showtimes: no planned Entertainment still fetches the park's mapped curated Entertainment (today only)", showAsked.join() === "disneyland" && ctx?.entertainment_showtimes?.parks[0]?.entries.map((e) => e.name).join() === "Fantasmic!");
 
   // Showtime failure / partial degrade safely
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland")], plans: [plan("d1", "Fantasmic!")], dayAutoFallbacks: {} }, {
@@ -573,20 +583,14 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     check("answer-use: malformed signals ignored", !scheduleUsedByAnswer(withData, null) && !scheduleUsedByAnswer(withData, { context_used: "schedule" }) && !scheduleUsedByAnswer(withData, { meta: "schedule" }));
   }
 
-  // Unmapped-only parks neither fetch nor consume the attempt cap
+  // Unmapped curated Entertainment never fabricates schedule entries
   {
     showAsked.length = 0;
-    ctx = await buildTomScheduleContext({
-      days: [day("a", "2026-10-15", "disneyland"), day("b", "2026-10-15", "dca"), day("c", "2026-10-15", "mk"), day("d", "2026-10-15", "hs")],
-      plans: [plan("a", "Wondrous Journeys"), plan("b", "Frightfully Fun Parade"), plan("c", "Happily Ever After"), plan("d", "Fantasmic!")], dayAutoFallbacks: {},
-    }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After") });
-    check("unmapped: unmapped-only parks make no showtime call and don't consume the cap; later mapped parks are fetched", showAsked.join() === "mk,hs");
-    showAsked.length = 0;
     ctx = await buildTomScheduleContext({ days: [day("a", "2026-10-15", "disneyland")], plans: [plan("a", "Wondrous Journeys")], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Wondrous Journeys") });
-    check("unmapped: unmapped-only planner → no showtimes fetch or field", showAsked.length === 0 && ctx?.entertainment_showtimes === undefined);
+    check("unmapped: planning an unmapped item surfaces no entry for it (only mapped curated park entries)", showAsked.join() === "disneyland" && !(ctx?.entertainment_showtimes?.parks[0]?.entries ?? []).some((e) => e.name === "Wondrous Journeys" || e.name === "Other Show"));
     showAsked.length = 0;
     ctx = await buildTomScheduleContext({ days: [day("a", "2026-10-15", "mk")], plans: [plan("a", "Mickey's Most Merriest Celebration"), plan("a", "Happily Ever After 9pm")], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After") });
-    check("unmapped: one mapped item (legacy time-suffixed) among unmapped still fetches", showAsked.join() === "mk");
+    check("unmapped: legacy time-suffixed planned item still resolves to its mapped identity", showAsked.join() === "mk" && ctx?.entertainment_showtimes?.parks[0]?.entries.map((e) => e.name).join() === "Happily Ever After");
   }
 
   // Attribution: not_yet_available is provider-backed; unavailable is not
