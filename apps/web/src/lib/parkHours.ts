@@ -554,7 +554,9 @@ export function normalizeParkHoursForDate(
   const hasBefore = operatingAll.some((w) => w.date < date);
   // Past-midnight window from an earlier day still running into `date`.
   const runsIntoDate = operatingAll.some(
-    (w) => w.date < date && getResortLocalDate(resort, new Date(w.closingTime)) >= date,
+    // Closing is exclusive: the window's last instant is closingTime − 1 ms, so a close exactly
+    // at the date's resort-local midnight does not run into it (Intl handles DST, no browser zone).
+    (w) => w.date < date && getResortLocalDate(resort, new Date(Date.parse(w.closingTime) - 1)) >= date,
   );
 
   if (!hasAfter) {
@@ -866,6 +868,12 @@ export function runDevParkDateHoursCases(): string[] {
   check("payload fetched on a previous local day cannot establish Closed", r.status === "unavailable");
   r = run("2026-10-20", { month: ok(sched([op("2026-10-19", "09:00", "02:00", "-04:00", "2026-10-20"), op("2026-10-21")]), at) });
   check("earlier window running past midnight into the date blocks Closed", r.status === "unavailable");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-19"), op("2026-10-19", "09:00", "00:00", "-04:00", "2026-10-20"), op("2026-10-21")]), at) });
+  check("previous-day window closing exactly at date midnight does not block Closed", r.status === "closed");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-19"), op("2026-10-19", "09:00", "00:01", "-04:00", "2026-10-20"), op("2026-10-21")]), at) });
+  check("close one minute after midnight still blocks Closed", r.status === "unavailable");
+  r = run("2026-11-02", { month: ok(sched([op("2026-11-01", "09:00", "22:00", "-05:00"), op("2026-11-01", "09:00", "00:00", "-05:00", "2026-11-02"), op("2026-11-03", "09:00", "22:00", "-05:00")]), new Date("2026-10-15T15:00:00Z").getTime()) });
+  check("midnight close across the DST end (EST offset) is still exclusive", r.status === "closed");
 
   // Not yet available: nothing on/after date in covered data; no extrapolation
   r = run("2026-12-20", { month: ok(sched([]), at), nextMonth: ok(sched([]), at) });
