@@ -449,7 +449,13 @@ date. Fetching is bounded (dated today-or-future days only, deduped, capped);
 failures degrade to `unavailable` and never block the ask. The whole
 enrichment is optional and bounded by a 3 s deadline
 (`SCHEDULE_ENRICHMENT_DEADLINE_MS`): past it, or on rejection, Tom is asked
-without schedule context or ThemeParks attribution; late results are discarded. DEV check:
+without schedule context or ThemeParks attribution; late results are discarded.
+Attribution: attaching schedule context does NOT attribute. `/api/tom/ask`
+returns `meta.attribution` (provider attribution, distinct from research
+`sources`; the Tom page renders linked `Powered by ThemeParks.wiki`) only when
+provider-backed schedule data was sent AND Tom's response reports it used it
+(`context_used` includes `"schedule"`); planner-only answers get none. My Plans
+renders ThemeParks attribution once in the page footer, not inline. DEV check:
 `runDevTomScheduleContextCases()`.
 
 ### Link Preview service

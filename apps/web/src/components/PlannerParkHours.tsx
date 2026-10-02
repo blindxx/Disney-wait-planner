@@ -10,7 +10,7 @@
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import {
   describeParkDateHours,
@@ -21,16 +21,22 @@ import {
 } from "../lib/parkHours";
 import { getResortLocalDate } from "../lib/resortTime";
 import { PARK_TO_RESORT } from "../lib/parkMetadata";
-import ThemeParksAttribution from "./ThemeParksAttribution";
 
 export default function PlannerParkHours({
   dayId,
   date,
   parkId,
+  onProviderDataPresented,
 }: {
   dayId: string;
   date: string | null;
   parkId: ParkId | null;
+  /**
+   * Reports whether this block is currently presenting ThemeParks-derived data,
+   * so the page can render the required attribution ONCE in its footer (the
+   * Waits & Shows pattern) instead of inline here.
+   */
+  onProviderDataPresented?: (presented: boolean) => void;
 }) {
   const [raw, setRaw] = useState<ParkDateHours | null>(null);
   const [now, setNow] = useState(() => new Date());
@@ -77,6 +83,13 @@ export default function PlannerParkHours({
   }, [dayId, date, parkId, resortToday]);
 
   const data = parkDateHoursForDisplay(raw, parkId, date, now);
+  const presented = data ? describeParkDateHours(data).presentsProviderData : false;
+  const reportRef = useRef(onProviderDataPresented);
+  reportRef.current = onProviderDataPresented;
+  useEffect(() => {
+    reportRef.current?.(presented);
+    return () => reportRef.current?.(false);
+  }, [presented]);
   // Reserve the line while loading so layout doesn't jump.
   if (!date || !parkId || parkDateRequestIssue(parkId, date, now)) return null;
   if (!data) return <div style={{ minHeight: 20 }} aria-hidden />;
@@ -88,12 +101,6 @@ export default function PlannerParkHours({
         {d.stale && <span title="Park hours may be out of date" style={{ fontWeight: 400, color: "#9ca3af" }}> (may be outdated)</span>}
       </div>
       {d.extras.length > 0 && <div style={{ fontSize: "12px", color: "#6b7280" }}>{d.extras.join(" • ")}</div>}
-      {d.presentsProviderData && (
-        <div style={{ fontSize: "12px", color: "#6b7280" }}>
-          Park hours powered by{" "}
-          <ThemeParksAttribution linkOnly style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }} />
-        </div>
-      )}
     </div>
   );
 }

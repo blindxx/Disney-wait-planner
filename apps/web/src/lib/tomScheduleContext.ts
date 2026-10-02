@@ -304,6 +304,27 @@ export async function buildTomScheduleContextWithDeadline(
 }
 
 /**
+ * Tom reports which supplied context its answer actually consumed via an
+ * optional `context_used` string array (top-level or under `meta`) on its
+ * response; "schedule" means the answer used the supplied `context.schedule`.
+ * DWP never parses the question or answer text to guess this.
+ */
+export const TOM_SCHEDULE_USED_SIGNAL = "schedule";
+
+/**
+ * ThemeParks attribution applies only when schedule data carrying provider
+ * facts was supplied AND Tom reports the answer used it. Merely attaching
+ * schedule context (e.g. a planner-only answer) never attributes.
+ */
+export function scheduleUsedByAnswer(schedule: TomScheduleContext | null, upstream: unknown): boolean {
+  if (!scheduleHasProviderData(schedule)) return false;
+  const body = obj(upstream);
+  if (!body) return false;
+  const lists = [body.context_used, obj(body.meta)?.context_used];
+  return lists.some((l) => Array.isArray(l) && l.includes(TOM_SCHEDULE_USED_SIGNAL));
+}
+
+/**
  * True when the schedule carries at least one provider-confirmed fact (so
  * ThemeParks attribution applies): confirmed/closed/not-yet-available hours
  * (the normalizer emits not_yet_available only from successful provider
@@ -520,6 +541,16 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     lateReject(new Error("late")); // would be an unhandled rejection if not caught
     await new Promise((r) => setTimeout(r, 10));
     check("deadline: late rejection after timeout is handled", t1 === null);
+  }
+
+  // Answer-use attribution gating
+  {
+    const withData = await buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({ "mk:2026-10-20": mkHours("mk", "2026-10-20", "hours") }) });
+    const noData = await buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({}) });
+    check("answer-use: schedule attached but answer did not use it (planner-only) → no attribution", scheduleHasProviderData(withData) && !scheduleUsedByAnswer(withData, { answer: "You have 3 plans." }) && !scheduleUsedByAnswer(withData, { answer: "x", context_used: ["planner"] }));
+    check("answer-use: Tom reports schedule used → attribution (top-level or meta)", scheduleUsedByAnswer(withData, { context_used: ["planner", "schedule"] }) && scheduleUsedByAnswer(withData, { meta: { context_used: ["schedule"] } }));
+    check("answer-use: used signal without provider-backed schedule data → no attribution", !scheduleUsedByAnswer(noData, { context_used: ["schedule"] }) && !scheduleUsedByAnswer(null, { context_used: ["schedule"] }));
+    check("answer-use: malformed signals ignored", !scheduleUsedByAnswer(withData, null) && !scheduleUsedByAnswer(withData, { context_used: "schedule" }) && !scheduleUsedByAnswer(withData, { meta: "schedule" }));
   }
 
   // Attribution: not_yet_available is provider-backed; unavailable is not

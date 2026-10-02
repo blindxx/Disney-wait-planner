@@ -45,6 +45,7 @@ import {
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import PlannerParkHours from "@/components/PlannerParkHours";
+import ThemeParksAttribution from "@/components/ThemeParksAttribution";
 import {
   computeCrossDayChecks,
   inferDayPark,
@@ -1125,6 +1126,8 @@ export default function PlansPage() {
   const [selectedResort, setSelectedResort] = useState<ResortId>("DLR");
   // Prevents resort selector from briefly showing DLR when WDW is stored.
   const [ready, setReady] = useState(false);
+  // Whether the active day's park-hours block is presenting ThemeParks data (drives the single footer attribution).
+  const [parkHoursPresented, setParkHoursPresented] = useState(false);
   const [items, setItems] = useState<PlanItem[]>([]);
   // Ref that always holds the latest items — used inside async callbacks to avoid
   // stale closure snapshots (e.g. deciding empty/non-empty in handleDayImportFile).
@@ -7002,6 +7005,7 @@ export default function PlansPage() {
             dayId={activeDayId}
             date={dayMeta[activeDayId]?.date && isValidIsoCalendarDate(dayMeta[activeDayId].date!) ? dayMeta[activeDayId].date! : null}
             parkId={activeDayPark}
+            onProviderDataPresented={setParkHoursPresented}
           />
         )}
 
@@ -7338,6 +7342,14 @@ export default function PlansPage() {
           );
         })()}
       </div>
+
+      {/* Attribution — ThemeParks.wiki, once at the page bottom when park hours are presented (Waits & Shows footer pattern) */}
+      {parkHoursPresented && (
+        <div style={{ marginTop: "16px", padding: "0 16px", textAlign: "center", fontSize: "12px", lineHeight: 1.5, color: "#9ca3af" }}>
+          Park hours powered by{" "}
+          <ThemeParksAttribution linkOnly style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }} />
+        </div>
+      )}
 
       {/* Phase 8.2 — Backup / Restore modal */}
       {showBackupRestore && (

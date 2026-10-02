@@ -33,15 +33,16 @@
  * ThemeParks.wiki; failures degrade to "unavailable" and never block the ask.
  * Enrichment is optional and bounded by SCHEDULE_ENRICHMENT_DEADLINE_MS: past it
  * (or on rejection) Tom is asked without schedule context/attribution.
- * A ThemeParks.wiki attribution source is appended to the response only when
- * provider-confirmed schedule data was actually sent.
+ * `meta.attribution` (ThemeParks.wiki; not a research source) is returned only
+ * when schedule data was sent AND Tom reports (`context_used`) that the answer
+ * used it.
  *
  * Upstream: POST ${TOM_API_URL}/api/ask
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { buildTomScheduleContextWithDeadline, scheduleHasProviderData } from "@/lib/tomScheduleContext";
+import { buildTomScheduleContextWithDeadline, scheduleUsedByAnswer } from "@/lib/tomScheduleContext";
 import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "@/lib/themeParksProviders";
 import { checkTomRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
@@ -182,10 +183,14 @@ export async function POST(request: NextRequest) {
     return errorResponse("Tom returned no answer", 500);
   }
 
-  const sources: unknown[] = Array.isArray(data.sources) ? [...data.sources] : [];
-  if (scheduleHasProviderData(schedule)) {
-    sources.push({ title: `Schedule data: ${THEMEPARKS_ATTRIBUTION_NAME}`, url: THEMEPARKS_ATTRIBUTION_URL });
-  }
+  const sources = Array.isArray(data.sources) ? data.sources : [];
 
-  return NextResponse.json({ answer, sources, meta: { ok: true } });
+  // Provider attribution is distinct from research `sources`, and only when the
+  // answer actually used ThemeParks-backed schedule data (Tom reports this via
+  // `context_used`); planner-only answers never carry it.
+  const attribution = scheduleUsedByAnswer(schedule, data)
+    ? { provider: "themeparks", name: THEMEPARKS_ATTRIBUTION_NAME, url: THEMEPARKS_ATTRIBUTION_URL }
+    : undefined;
+
+  return NextResponse.json({ answer, sources, meta: { ok: true, ...(attribution ? { attribution } : {}) } });
 }
