@@ -32,7 +32,7 @@
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { PARK_LABELS, PARK_TO_RESORT, isValidParkId } from "./parkMetadata";
 import { comparePlannerDateToResortToday } from "./resortTime";
-import { resolveEntertainmentKey } from "./entertainmentSuggestions";
+import { resolveCanonicalIdentity } from "./plannerContextSnapshot";
 import { getParkHoursForDate } from "./parkHoursService";
 import { getParkEntertainmentShowtimes } from "./entertainmentShowtimesService";
 import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "./themeParksProviders";
@@ -163,15 +163,19 @@ const unavailableHours = (t: Target): TomScheduleHoursEntry => ({
   status: "unavailable", unavailableReason: "request_failed", operating: [], additional: [], stale: false,
 });
 
-/** Planned Entertainment canonical keys for the given (today) day ids. */
+/**
+ * Planned Entertainment canonical identities for the given (today) day ids.
+ * Uses the snapshot's own resolveCanonicalIdentity (trailing-time cleanup +
+ * canonical Entertainment resolution), so legacy names like "Fantasmic 9pm"
+ * match the same identity the planner context already recognized.
+ */
 function plannedEntertainmentKeys(planner: Record<string, unknown>, dayIds: Set<string>, resort: ResortId): Set<string> {
   const keys = new Set<string>();
   for (const p of Array.isArray(planner.plans) ? planner.plans : []) {
     const item = obj(p);
     if (!item || item.type !== "entertainment" || typeof item.name !== "string" || typeof item.dayId !== "string") continue;
     if (!dayIds.has(item.dayId)) continue;
-    const key = resolveEntertainmentKey(item.name, resort);
-    if (key) keys.add(key);
+    keys.add(resolveCanonicalIdentity(item.name, "entertainment", resort, item.dayId));
   }
   return keys;
 }
@@ -230,7 +234,7 @@ export async function buildTomScheduleContext(
         stale: st?.stale ?? false,
         error: st ? (st.error ? st.error.kind : null) : "unavailable",
         entries: st ? st.entries
-          .filter((e) => { const k = resolveEntertainmentKey(e.dwpName, ts[0].resort); return k !== null && wanted.has(k); })
+          .filter((e) => wanted.has(resolveCanonicalIdentity(e.dwpName, "entertainment", ts[0].resort, "")))
           .map((e) => ({
             name: e.dwpName, status: e.status,
             times: e.performances.map((p) => ({ time: p.localTime, passed: p.passed })),
@@ -252,12 +256,17 @@ export async function buildTomScheduleContext(
   }
 }
 
-/** True when the schedule carries at least one provider-confirmed fact (so ThemeParks attribution applies). */
+/**
+ * True when the schedule carries at least one provider-confirmed fact (so
+ * ThemeParks attribution applies): confirmed/closed hours, known showtimes, or
+ * a complete valid-empty (`none_posted`) showtime answer. Unavailable,
+ * incomplete and error states are not confirmed provider data.
+ */
 export function scheduleHasProviderData(s: TomScheduleContext | null): boolean {
   if (!s) return false;
   return (
     s.hours.some((h) => h.status === "hours" || h.status === "closed") ||
-    (s.entertainment_showtimes?.parks.some((p) => !p.error && p.entries.some((e) => e.times.length > 0)) ?? false)
+    (s.entertainment_showtimes?.parks.some((p) => !p.error && p.entries.some((e) => e.times.length > 0 || (e.status === "none_posted" && !e.incomplete))) ?? false)
   );
 }
 
@@ -383,6 +392,24 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     instant: NOW, getHours: hoursFor({}), getShowtimes: async (p) => mkShow(p, "2026-10-14", "Fantasmic!"),
   });
   check("showtimes: provider payload for a different local date is dropped", ctx?.entertainment_showtimes === undefined);
+
+  // Legacy time-suffixed Entertainment name resolves through the canonical path
+  showAsked.length = 0;
+  ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland")], plans: [plan("d1", "Fantasmic 9pm")], dayAutoFallbacks: {} }, {
+    instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!"),
+  });
+  check("legacy: 'Fantasmic 9pm' matches canonical Fantasmic! and triggers today's showtimes", showAsked.join() === "disneyland" && ctx?.entertainment_showtimes?.parks[0]?.entries.map((e) => e.name).join() === "Fantasmic!");
+
+  // none_posted attribution
+  const noneEntry = (status: string, incomplete: boolean) => ({ dwpName: "Fantasmic!", parkId: "disneyland" as ParkId, status: status as never, performances: [], message: null, incomplete, unrecognizedTypes: [], provider: [] });
+  const noneCtx = async (entry: ReturnType<typeof noneEntry>, over: Partial<ParkEntertainmentShowtimes> = {}) =>
+    buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland")], plans: [plan("d1", "Fantasmic!")], dayAutoFallbacks: {} }, {
+      instant: NOW, getHours: hoursFor({}), getShowtimes: async (p) => mkShow(p, "2026-10-15", "Fantasmic!", { entries: [entry], ...over }),
+    });
+  check("attribution: complete none_posted counts as provider data", scheduleHasProviderData(await noneCtx(noneEntry("none_posted", false))));
+  check("attribution: incomplete none_posted does not", !scheduleHasProviderData(await noneCtx(noneEntry("none_posted", true))));
+  check("attribution: unavailable entry does not", !scheduleHasProviderData(await noneCtx(noneEntry("unavailable", true))));
+  check("attribution: provider error does not", !scheduleHasProviderData(await noneCtx(noneEntry("none_posted", false), { error: { kind: "timeout", message: "t" } })));
 
   // Attribution gating + malformed input
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({ "mk:2026-10-20": mkHours("mk", "2026-10-20", "hours") }) });
