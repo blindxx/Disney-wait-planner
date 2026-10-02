@@ -31,6 +31,8 @@
  * current-day (today-only) entertainment showtimes — built server-side through
  * DWP's normalized services (lib/tomScheduleContext.ts). Tom never calls
  * ThemeParks.wiki; failures degrade to "unavailable" and never block the ask.
+ * Enrichment is optional and bounded by SCHEDULE_ENRICHMENT_DEADLINE_MS: past it
+ * (or on rejection) Tom is asked without schedule context/attribution.
  * A ThemeParks.wiki attribution source is appended to the response only when
  * provider-confirmed schedule data was actually sent.
  *
@@ -39,7 +41,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { buildTomScheduleContext, scheduleHasProviderData } from "@/lib/tomScheduleContext";
+import { buildTomScheduleContextWithDeadline, scheduleHasProviderData } from "@/lib/tomScheduleContext";
 import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "@/lib/themeParksProviders";
 import { checkTomRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
@@ -139,7 +141,7 @@ export async function POST(request: NextRequest) {
   const plannerContext = sanitizePlannerContext(body.planner_context);
   if (plannerContext) context.planner = plannerContext;
 
-  const schedule = await buildTomScheduleContext(plannerContext);
+  const schedule = await buildTomScheduleContextWithDeadline(plannerContext);
   if (schedule) context.schedule = schedule;
 
   let upstream: Response;

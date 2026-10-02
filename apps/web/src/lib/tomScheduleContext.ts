@@ -273,6 +273,37 @@ export async function buildTomScheduleContext(
 }
 
 /**
+ * Overall deadline for OPTIONAL schedule enrichment at the Tom proxy boundary.
+ * 3 s: long enough for warm-cache and typical single-call provider responses
+ * (hours cache 15 min, live 60 s), short enough that a slow/stalled provider
+ * (per-call timeout is 8 s, and calls can chain) never dominates Tom latency.
+ */
+export const SCHEDULE_ENRICHMENT_DEADLINE_MS = 3_000;
+
+/**
+ * Race buildTomScheduleContext against a deadline. Resolves null (Tom proceeds
+ * with no schedule context and no ThemeParks attribution) on timeout or
+ * rejection. A late completion is discarded: the build promise has its own
+ * catch handler (no unhandled rejection) and its result is never read again.
+ */
+export async function buildTomScheduleContextWithDeadline(
+  plannerContext: Record<string, unknown> | undefined,
+  opts: { deadlineMs?: number; build?: typeof buildTomScheduleContext; deps?: TomScheduleDeps } = {},
+): Promise<TomScheduleContext | null> {
+  const build = opts.build ?? buildTomScheduleContext;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const work = (async () => build(plannerContext, opts.deps))().catch(() => null);
+  const deadline = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), opts.deadlineMs ?? SCHEDULE_ENRICHMENT_DEADLINE_MS);
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * True when the schedule carries at least one provider-confirmed fact (so
  * ThemeParks attribution applies): confirmed/closed/not-yet-available hours
  * (the normalizer emits not_yet_available only from successful provider
@@ -464,6 +495,31 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
       plans: [plan("a", "Show A"), plan("b", "Show B"), plan("c", "Show C"), plan("d", "Show D")], dayAutoFallbacks: {},
     }, { now, getHours: hoursFor({}), getShowtimes: getShowtimes("Show A") });
     check("showtime cap: discarded rollover responses still consume MAX_SHOWTIME_PARKS attempts", showAsked.length === MAX_SHOWTIME_PARKS && ctx?.entertainment_showtimes === undefined);
+  }
+
+  // Deadline boundary
+  {
+    const sample = await buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({ "mk:2026-10-20": mkHours("mk", "2026-10-20", "hours") }) });
+    const fast = await buildTomScheduleContextWithDeadline({}, { deadlineMs: 50, build: async () => sample });
+    check("deadline: enrichment finishing in time is returned", fast === sample && sample !== null);
+    let lateResolve: (v: TomScheduleContext | null) => void = () => {};
+    const slow = new Promise<TomScheduleContext | null>((r) => { lateResolve = r; });
+    const t0 = Date.now();
+    const timedOut = await buildTomScheduleContextWithDeadline({}, { deadlineMs: 30, build: () => slow });
+    check("deadline: exceeding it → null (no schedule/attribution) promptly", timedOut === null && Date.now() - t0 < 1000 && !scheduleHasProviderData(timedOut));
+    lateResolve(sample); // late completion must be inert
+    await new Promise((r) => setTimeout(r, 10));
+    check("deadline: late completion is discarded", timedOut === null);
+    const rejected = await buildTomScheduleContextWithDeadline({}, { deadlineMs: 50, build: async () => { throw new Error("boom"); } });
+    check("deadline: rejection → null, no throw", rejected === null);
+    const syncThrow = await buildTomScheduleContextWithDeadline({}, { deadlineMs: 50, build: () => { throw new Error("sync"); } });
+    check("deadline: synchronous throw → null", syncThrow === null);
+    let lateReject: (e: Error) => void = () => {};
+    const slowReject = new Promise<TomScheduleContext | null>((_, rej) => { lateReject = rej; });
+    const t1 = await buildTomScheduleContextWithDeadline({}, { deadlineMs: 20, build: () => slowReject });
+    lateReject(new Error("late")); // would be an unhandled rejection if not caught
+    await new Promise((r) => setTimeout(r, 10));
+    check("deadline: late rejection after timeout is handled", t1 === null);
   }
 
   // Attribution: not_yet_available is provider-backed; unavailable is not

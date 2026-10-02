@@ -446,7 +446,10 @@ services (`getParkHoursForDate()`, `getParkEntertainmentShowtimes()`); Tom and
 from the snapshot's existing `days[].park` + `dayAutoFallbacks` (no second park
 authority). Showtimes are TODAY-ONLY and are never applied to a future planner
 date. Fetching is bounded (dated today-or-future days only, deduped, capped);
-failures degrade to `unavailable` and never block the ask. DEV check:
+failures degrade to `unavailable` and never block the ask. The whole
+enrichment is optional and bounded by a 3 s deadline
+(`SCHEDULE_ENRICHMENT_DEADLINE_MS`): past it, or on rejection, Tom is asked
+without schedule context or ThemeParks attribution; late results are discarded. DEV check:
 `runDevTomScheduleContextCases()`.
 
 ### Link Preview service
