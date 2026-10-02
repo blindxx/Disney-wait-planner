@@ -230,11 +230,15 @@ export async function buildTomScheduleContext(
     const todayByPark = new Map<ParkId, Target[]>();
     for (const t of targets) if (t.today) todayByPark.set(t.park, [...(todayByPark.get(t.park) ?? []), t]);
     const showParks: NonNullable<TomScheduleContext["entertainment_showtimes"]>["parks"] = [];
+    // The cap bounds provider fetch ATTEMPTS, so a response discarded below
+    // (rollover/date validation) still consumes it.
+    let showtimeAttempts = 0;
     for (const [park, ts] of todayByPark) {
-      if (showParks.length >= MAX_SHOWTIME_PARKS) break;
+      if (showtimeAttempts >= MAX_SHOWTIME_PARKS) break;
       const wanted = plannedEntertainmentKeys(plannerContext, new Set(ts.map((t) => t.dayId)), ts[0].resort);
       if (wanted.size === 0) continue;
       let st: ParkEntertainmentShowtimes | null = null;
+      showtimeAttempts++;
       try { st = await getShowtimes(park); } catch { st = null; }
       // The provider's resort-local "today" must still be the planner's date (midnight rollover).
       // Also re-check the actual current resort-local date after the provider
@@ -447,6 +451,19 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
       now, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!"),
     });
     check("rollover: resort-local — DLR unaffected by WDW midnight", ctx?.entertainment_showtimes?.parks.length === 1);
+  }
+
+  // Fetch cap counts attempts: discarded (rollover) responses still consume it
+  {
+    const times = [new Date("2026-10-16T03:59:00Z")];
+    let reads = 0;
+    const now = () => (reads++ === 0 ? times[0] : new Date("2026-10-16T04:01:00Z"));
+    showAsked.length = 0;
+    ctx = await buildTomScheduleContext({
+      days: [day("a", "2026-10-15", "mk"), day("b", "2026-10-15", "epcot"), day("c", "2026-10-15", "hs"), day("d", "2026-10-15", "ak")],
+      plans: [plan("a", "Show A"), plan("b", "Show B"), plan("c", "Show C"), plan("d", "Show D")], dayAutoFallbacks: {},
+    }, { now, getHours: hoursFor({}), getShowtimes: getShowtimes("Show A") });
+    check("showtime cap: discarded rollover responses still consume MAX_SHOWTIME_PARKS attempts", showAsked.length === MAX_SHOWTIME_PARKS && ctx?.entertainment_showtimes === undefined);
   }
 
   // Attribution: not_yet_available is provider-backed; unavailable is not
