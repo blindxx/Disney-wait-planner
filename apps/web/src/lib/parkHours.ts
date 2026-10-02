@@ -379,6 +379,267 @@ export function parkHoursForDisplay(data: ParkHours | null, instant: Date = new 
 }
 
 // ============================================
+// EXACT-DATE HOURS (Phase 12.6)
+// ============================================
+
+/**
+ * Exact-date park hours for an explicit resort-local "YYYY-MM-DD" (My Plans).
+ * A separate normalized contract from `ParkHours` ("now"-relative, Waits &
+ * Shows) — a future date is never simulated by treating it as "now". Built
+ * from the provider's monthly schedule for the date's month (plus the
+ * adjacent month only when needed to decide Closed vs. Not yet available).
+ *
+ *   hours              ≥1 OPERATING window dated `date` (+ provider-described
+ *                      additional windows, verbatim)
+ *   closed             nothing dated `date`, and fresh/valid provider data
+ *                      holds OPERATING entries both before AND after it (same
+ *                      bracketing rule as `ParkHours`; absence alone is never
+ *                      Closed), and no earlier window runs into the date
+ *   not_yet_available  `date` is after today and the fetched provider data
+ *                      holds no OPERATING window on or after it — the
+ *                      schedule simply doesn't cover it (no horizon assumed,
+ *                      no hours extrapolated)
+ *   unavailable        request/provider failure, past date, timezone mismatch,
+ *                      or data that cannot safely classify the date
+ *                      (`unavailableReason` says why)
+ */
+export type ParkDateHoursStatus = "hours" | "closed" | "not_yet_available" | "unavailable";
+
+export type ParkDateUnavailableReason =
+  | "request_failed"
+  | "invalid_date"
+  | "past_date"
+  | "timezone_mismatch"
+  /** Only non-OPERATING windows for a date that is today (or earlier). */
+  | "only_non_operating"
+  /** Nothing dated that day, but closure cannot be safely established. */
+  | "closure_unverified";
+
+export interface ParkDateHours {
+  parkId: ParkId;
+  resort: ResortId;
+  /** The exact resort-local calendar date requested. */
+  date: string;
+  /** Resort-local "today" the result was computed against. */
+  localDate: string;
+  asOf: string;
+  status: ParkDateHoursStatus;
+  unavailableReason: ParkDateUnavailableReason | null;
+  operating: ParkHoursWindow[];
+  additional: ParkHoursWindow[];
+  stale: boolean;
+  meta: ParkHoursMeta | null;
+  error: ThemeParksError | null;
+  droppedEntries: number;
+}
+
+/** Provider results feeding one exact-date normalization (undefined = not requested). */
+export interface ParkDateSources {
+  /** Monthly schedule for the date's own resort-local month. */
+  month: ThemeParksResult<ThemeParksSchedule>;
+  prevMonth?: ThemeParksResult<ThemeParksSchedule>;
+  nextMonth?: ThemeParksResult<ThemeParksSchedule>;
+}
+
+export function previousResortMonth(date: string): { year: number; month: number } {
+  const [y, m] = date.split("-").map(Number);
+  return m === 1 ? { year: y - 1, month: 12 } : { year: y, month: m - 1 };
+}
+
+/** Year the provider client accepts for monthly schedules (see themeParksApi getSchedule). */
+function isRequestableDate(date: string): boolean {
+  if (addDaysToLocalDate(date, 0) !== date) return false;
+  const y = Number(date.slice(0, 4));
+  return y >= 2000 && y <= 2099; // +1 month never leaves the provider's 2100 bound
+}
+
+function emptyParkDateHours(parkId: ParkId, date: string, instant: Date): ParkDateHours {
+  const resort = resortOf(parkId);
+  return {
+    parkId, resort, date,
+    localDate: getResortLocalDate(resort, instant),
+    asOf: instant.toISOString(),
+    status: "unavailable",
+    unavailableReason: null,
+    operating: [], additional: [],
+    stale: false, meta: null, error: null, droppedEntries: 0,
+  };
+}
+
+/** Exact-date requests need no provider call when the answer is already known. */
+export function parkDateRequestIssue(
+  parkId: ParkId,
+  date: string,
+  instant: Date = new Date(),
+): ParkDateUnavailableReason | null {
+  if (!isRequestableDate(date)) return "invalid_date";
+  return date < getResortLocalDate(resortOf(parkId), instant) ? "past_date" : null;
+}
+
+/**
+ * What the service still needs after the date's own month: when nothing is
+ * dated `date`, the next month if the month lacks a later OPERATING entry;
+ * the previous month (only worth asking once something later is known) if it
+ * lacks an earlier one. `prev` here is a candidate — the service re-checks
+ * "something later exists" after the next-month result.
+ */
+export function parkDateFollowUps(
+  date: string,
+  month: ThemeParksResult<ThemeParksSchedule>,
+): { prev: boolean; next: boolean } {
+  if (!month.ok || month.data.entries.some((e) => e.date === date)) return { prev: false, next: false };
+  const ops = month.data.entries.filter((e) => e.type === "OPERATING");
+  return { prev: !ops.some((e) => e.date < date), next: !ops.some((e) => e.date > date) };
+}
+
+/** Pure: normalize provider monthly schedule result(s) into exact-date hours. */
+export function normalizeParkHoursForDate(
+  parkId: ParkId,
+  date: string,
+  src: ParkDateSources,
+  instant: Date = new Date(),
+): ParkDateHours {
+  const base = emptyParkDateHours(parkId, date, instant);
+  const { resort, localDate } = base;
+  const issue = parkDateRequestIssue(parkId, date, instant);
+  if (issue) return { ...base, unavailableReason: issue };
+  if (!src.month.ok) return { ...base, unavailableReason: "request_failed", error: src.month.error };
+
+  const okOf = (r?: ThemeParksResult<ThemeParksSchedule>) => (r && r.ok ? r : null);
+  const used = [src.month, okOf(src.prevMonth), okOf(src.nextMonth)].filter(
+    (r): r is Extract<ThemeParksResult<ThemeParksSchedule>, { ok: true }> => !!r && r.ok,
+  );
+  const stale = used.find((r) => r.meta.origin === "stale");
+  const meta: ParkHoursMeta = {
+    origin: stale ? "stale" : src.month.meta.origin,
+    fetchedAt: Math.min(...used.map((r) => r.meta.fetchedAt)),
+    ...(stale?.meta.staleReason ? { staleReason: stale.meta.staleReason } : {}),
+  };
+  const common = { ...base, stale: !!stale, meta };
+  if (used.some((r) => r.data.timeZone !== null && r.data.timeZone !== RESORT_TIME_ZONES[resort])) {
+    return { ...common, unavailableReason: "timezone_mismatch" };
+  }
+
+  const dropped = used.reduce((n, r) => n + r.data.droppedEntries, 0);
+  const seen = new Set<string>();
+  const windows: ParkHoursWindow[] = [];
+  for (const r of used) {
+    for (const e of r.data.entries) {
+      const w = toWindow(resort, e);
+      const k = windowKey(w);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      windows.push(w);
+    }
+  }
+  const onDate = windows.filter((w) => w.date === date).sort(byOpening);
+  const operating = onDate.filter((w) => w.type === "OPERATING");
+  const additional = onDate.filter((w) => w.type !== "OPERATING");
+  const result = { ...common, droppedEntries: dropped, operating, additional };
+  if (operating.length > 0) return { ...result, status: "hours" };
+  if (onDate.length > 0) {
+    // Provider lists only non-OPERATING windows (e.g. Early Entry): hours aren't published yet.
+    // An incomplete payload (dropped entries) can't establish that hours are unpublished.
+    return date > localDate && dropped === 0
+      ? { ...result, status: "not_yet_available" }
+      : { ...result, unavailableReason: "only_non_operating" };
+  }
+
+  // Nothing dated `date`. A follow-up month that was requested but failed
+  // means coverage is unknown: never claim Closed or Not yet available then.
+  const nextFailed = !!src.nextMonth && !src.nextMonth.ok;
+  const prevFailed = !!src.prevMonth && !src.prevMonth.ok;
+  const operatingAll = windows.filter((w) => w.type === "OPERATING");
+  const hasAfter = operatingAll.some((w) => w.date > date);
+  const hasBefore = operatingAll.some((w) => w.date < date);
+  // Past-midnight window from an earlier day still running into `date`.
+  const runsIntoDate = operatingAll.some(
+    // Closing is exclusive: the window's last instant is closingTime − 1 ms, so a close exactly
+    // at the date's resort-local midnight does not run into it (Intl handles DST, no browser zone).
+    (w) => w.date < date && getResortLocalDate(resort, new Date(Date.parse(w.closingTime) - 1)) >= date,
+  );
+
+  if (!hasAfter) {
+    // The fetched provider data holds nothing on/after `date` → not covered (future only).
+    // Stale or incomplete (dropped entries) data never claims "not yet".
+    return date > localDate && !nextFailed && !stale && dropped === 0
+      ? { ...result, status: "not_yet_available" }
+      : { ...result, unavailableReason: "closure_unverified" };
+  }
+  const fetchedToday = used.every((r) => getResortLocalDate(resort, new Date(r.meta.fetchedAt)) === localDate);
+  if (!stale && fetchedToday && dropped === 0 && hasBefore && !runsIntoDate && !nextFailed && !prevFailed) {
+    return { ...result, status: "closed" };
+  }
+  return { ...result, unavailableReason: "closure_unverified" };
+}
+
+export interface ParkDateHoursDisplay {
+  /** "Park hours: 9:00 AM–10:00 PM" | "…: Closed" | "…: Not yet available" | "…: Unavailable". */
+  headline: string;
+  extras: string[];
+  /** True when ThemeParks.wiki schedule state/data is presented (attribution owed). */
+  presentsProviderData: boolean;
+  stale: boolean;
+}
+
+export function describeParkDateHours(data: ParkDateHours): ParkDateHoursDisplay {
+  if (data.status === "hours") {
+    const seen = new Set<string>();
+    const extras: string[] = [];
+    for (const w of data.additional) {
+      if (!w.description || !LABELLED_ADDITIONAL_TYPES.includes(w.type)) continue;
+      const text = `${w.description}: ${formatParkHoursRange(w)}`;
+      if (!seen.has(text)) { seen.add(text); extras.push(text); }
+    }
+    return {
+      headline: `Park hours: ${data.operating.map(formatParkHoursRange).join(", ")}`,
+      extras, presentsProviderData: true, stale: data.stale,
+    };
+  }
+  if (data.status === "closed") return { headline: "Park hours: Closed", extras: [], presentsProviderData: true, stale: data.stale };
+  if (data.status === "not_yet_available") return { headline: "Park hours: Not yet available", extras: [], presentsProviderData: true, stale: data.stale };
+  return { headline: "Park hours: Unavailable", extras: [], presentsProviderData: false, stale: false };
+}
+
+function unavailableParkDate(parkId: ParkId, date: string, instant: Date, message: string): ParkDateHours {
+  return normalizeParkHoursForDate(parkId, date, { month: { ok: false, error: { kind: "network", message } } }, instant);
+}
+
+const DATE_STATUSES: readonly string[] = ["hours", "closed", "not_yet_available", "unavailable"];
+
+/**
+ * Browser-side: a fetched /api/park-hours?date= body → display state. Failure,
+ * or a body for another park/date or not the contract shape, degrades to
+ * "unavailable" — another day/park's schedule is never adopted.
+ */
+export function resolveParkDateHoursResponse(parkId: ParkId, date: string, body: unknown, instant: Date = new Date()): ParkDateHours {
+  const d = body as Partial<ParkDateHours> | null;
+  if (
+    !d || typeof d !== "object" || d.parkId !== parkId || d.date !== date || typeof d.localDate !== "string" ||
+    typeof d.status !== "string" || !DATE_STATUSES.includes(d.status) ||
+    !Array.isArray(d.operating) || !Array.isArray(d.additional)
+  ) {
+    return unavailableParkDate(parkId, date, instant, "Park hours request failed");
+  }
+  return d as ParkDateHours;
+}
+
+/**
+ * Display-time guard: a result computed on a previous resort-local day (Closed /
+ * Not yet available / hours may all have moved on) is not shown as current.
+ */
+export function parkDateHoursForDisplay(
+  data: ParkDateHours | null,
+  parkId: ParkId | null,
+  date: string | null,
+  instant: Date = new Date(),
+): ParkDateHours | null {
+  if (!data || !parkId || !date || data.parkId !== parkId || data.date !== date) return null;
+  if (data.localDate === getResortLocalDate(data.resort, instant)) return data;
+  return unavailableParkDate(data.parkId, data.date, instant, "Park hours are for a previous day");
+}
+
+// ============================================
 // DEV CASES
 // ============================================
 
@@ -542,5 +803,136 @@ export function runDevParkHoursCases(): string[] {
   check("resolve: valid round-trips", resolveParkHoursResponse("mk", JSON.parse(JSON.stringify(fresh))).status === "hours");
   check("display: invalid date label → no Next opening", formatLocalDateLabel("2026-02-30") === null);
 
+  return failures;
+}
+
+/**
+ * Exact-date DEV checks (Phase 12.6). Run manually from Node (e.g. tsx):
+ *   import { runDevParkDateHoursCases } from "./parkHours";
+ *   console.log(runDevParkDateHoursCases()); // [] = all pass
+ */
+export function runDevParkDateHoursCases(): string[] {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  type E = ThemeParksScheduleEntry;
+  const op = (date: string, open = "09:00", close = "22:00", off = "-04:00", closeDate = date): E => ({
+    date, type: "OPERATING", openingTime: `${date}T${open}:00${off}`, closingTime: `${closeDate}T${close}:00${off}`, description: null, lastUpdated: null,
+  });
+  const extra = (date: string, type: string, description: string | null, open: string, close: string, off = "-04:00"): E => ({
+    date, type, openingTime: `${date}T${open}:00${off}`, closingTime: `${date}T${close}:00${off}`, description, lastUpdated: "2026-09-30T04:01:56.507Z",
+  });
+  const sched = (entries: E[], tz: string | null = "America/New_York", droppedEntries = 0): ThemeParksSchedule =>
+    ({ entityId: "x", name: "Park", timeZone: tz, entries, parks: [], droppedEntries });
+  const ok = (s: ThemeParksSchedule, fetchedAt: number, origin: "network" | "stale" = "network"): ThemeParksResult<ThemeParksSchedule> =>
+    ({ ok: true, data: s, meta: { origin, fetchedAt, etag: null, ...(origin === "stale" ? { staleReason: { kind: "network" as const, message: "x" } } : {}) } });
+  const fail: ThemeParksResult<ThemeParksSchedule> = { ok: false, error: { kind: "timeout", message: "t" } };
+  const NOW = new Date("2026-10-15T15:00:00Z"); // 11:00 AM EDT Oct 15
+  const at = NOW.getTime();
+  const run = (date: string, src: ParkDateSources, park: ParkId = "mk", now = NOW) => normalizeParkHoursForDate(park, date, src, now);
+  const head = (r: ParkDateHours) => describeParkDateHours(r).headline;
+
+  // published hours: current + future dates, not simulated as "now"
+  let r = run("2026-10-20", { month: ok(sched([op("2026-10-19"), op("2026-10-20", "08:00", "23:00")]), at) });
+  check("hours: future exact date", r.status === "hours" && head(r) === "Park hours: 8:00 AM–11:00 PM" && r.localDate === "2026-10-15" && r.date === "2026-10-20");
+  r = run("2026-10-15", { month: ok(sched([op("2026-10-15")]), at) });
+  check("hours: today", r.status === "hours");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-20", "09:00", "13:00"), op("2026-10-20", "17:00", "22:00"), op("2026-10-20", "09:00", "13:00")]), at) });
+  check("hours: two OPERATING windows, duplicates collapsed", head(r) === "Park hours: 9:00 AM–1:00 PM, 5:00 PM–10:00 PM");
+
+  // additional windows: provider-described only, never the headline
+  r = run("2026-10-20", { month: ok(sched([
+    extra("2026-10-20", "TICKETED_EVENT", "Early Entry", "08:30", "09:00"), op("2026-10-20"),
+    extra("2026-10-20", "TICKETED_EVENT", null, "23:00", "23:30"), extra("2026-10-20", "INFORMATIONAL", "Fireworks", "21:00", "21:30"),
+  ]), at) });
+  const d = describeParkDateHours(r);
+  check("extras: Early Entry kept, unlabelled/INFORMATIONAL not guessed", d.extras.length === 1 && d.extras[0] === "Early Entry: 8:30 AM–9:00 AM" && d.headline === "Park hours: 9:00 AM–10:00 PM" && r.additional.length === 3);
+
+  // DLR timezone rendering + resort-local today
+  const DL_NOW = new Date("2026-10-16T03:00:00Z"); // DLR Oct 15 8 PM, WDW Oct 15 11 PM
+  r = run("2026-10-16", { month: ok(sched([op("2026-10-16", "08:00", "23:00", "-07:00")], "America/Los_Angeles"), DL_NOW.getTime()) }, "disneyland", DL_NOW);
+  check("DLR: PDT hours, future vs resort-local today", r.status === "hours" && r.localDate === "2026-10-15" && head(r) === "Park hours: 8:00 AM–11:00 PM");
+  check("DLR: Oct 15 is today (not past) at 03:00Z Oct 16", parkDateRequestIssue("disneyland", "2026-10-15", DL_NOW) === null);
+  check("WDW: Oct 15 at 05:00Z Oct 16 is past", parkDateRequestIssue("mk", "2026-10-15", new Date("2026-10-16T05:00:00Z")) === "past_date");
+
+  // Closed: needs bracketing
+  const oct = sched([op("2026-10-18"), op("2026-10-19"), op("2026-10-21"), op("2026-10-22")]);
+  r = run("2026-10-20", { month: ok(oct, at) });
+  check("closed: bracketed gap", r.status === "closed" && head(r) === "Park hours: Closed");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-21")]), at) });
+  check("absence alone (nothing before) is not Closed", r.status === "unavailable" && r.unavailableReason === "closure_unverified");
+  r = run("2026-10-20", { month: ok(oct, at, "stale") });
+  check("stale never establishes Closed", r.status === "unavailable" && r.stale);
+  r = run("2026-10-20", { month: ok(sched(oct.entries, "America/New_York", 1), at) });
+  check("dropped entries block Closed", r.status === "unavailable");
+  r = run("2026-10-20", { month: ok(oct, at - 24 * 3600_000) });
+  check("payload fetched on a previous local day cannot establish Closed", r.status === "unavailable");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-19", "09:00", "02:00", "-04:00", "2026-10-20"), op("2026-10-21")]), at) });
+  check("earlier window running past midnight into the date blocks Closed", r.status === "unavailable");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-19"), op("2026-10-19", "09:00", "00:00", "-04:00", "2026-10-20"), op("2026-10-21")]), at) });
+  check("previous-day window closing exactly at date midnight does not block Closed", r.status === "closed");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-19"), op("2026-10-19", "09:00", "00:01", "-04:00", "2026-10-20"), op("2026-10-21")]), at) });
+  check("close one minute after midnight still blocks Closed", r.status === "unavailable");
+  r = run("2026-11-02", { month: ok(sched([op("2026-11-01", "09:00", "22:00", "-05:00"), op("2026-11-01", "09:00", "00:00", "-05:00", "2026-11-02"), op("2026-11-03", "09:00", "22:00", "-05:00")]), new Date("2026-10-15T15:00:00Z").getTime()) });
+  check("midnight close across the DST end (EST offset) is still exclusive", r.status === "closed");
+
+  // Not yet available: nothing on/after date in covered data; no extrapolation
+  r = run("2026-12-20", { month: ok(sched([]), at), nextMonth: ok(sched([]), at) });
+  check("future, nothing published → Not yet available", r.status === "not_yet_available" && head(r) === "Park hours: Not yet available" && r.operating.length === 0);
+  r = run("2026-10-30", { month: ok(sched([op("2026-10-20")]), at), nextMonth: ok(sched([]), at) });
+  check("future past the last published window → Not yet available", r.status === "not_yet_available");
+  r = run("2026-10-30", { month: ok(sched([op("2026-10-20")]), at), nextMonth: fail });
+  check("next-month failure → Unavailable, never Not yet / Closed", r.status === "unavailable");
+  r = run("2026-10-30", { month: ok(sched([op("2026-10-20")]), at, "stale"), nextMonth: ok(sched([]), at) });
+  check("stale never claims Not yet available", r.status === "unavailable");
+  r = run("2026-10-20", { month: ok(sched([extra("2026-10-20", "TICKETED_EVENT", "Early Entry", "08:30", "09:00")]), at) });
+  check("future date with only Early Entry → Not yet available (no hours invented)", r.status === "not_yet_available");
+  r = run("2026-10-15", { month: ok(sched([extra("2026-10-15", "TICKETED_EVENT", "Early Entry", "08:30", "09:00")]), at) });
+  check("today with only Early Entry → Unavailable", r.status === "unavailable" && r.unavailableReason === "only_non_operating");
+  r = run("2026-12-20", { month: ok(sched([], "America/New_York", 1), at), nextMonth: ok(sched([]), at) });
+  check("dropped entries in the month block Not yet available (empty path)", r.status === "unavailable" && r.unavailableReason === "closure_unverified" && r.droppedEntries === 1);
+  r = run("2026-10-30", { month: ok(sched([op("2026-10-20")]), at), nextMonth: ok(sched([], "America/New_York", 2), at) });
+  check("dropped entries in a follow-up month block Not yet available", r.status === "unavailable" && r.droppedEntries === 2);
+  r = run("2026-10-20", { month: ok(sched([extra("2026-10-20", "TICKETED_EVENT", "Early Entry", "08:30", "09:00")], "America/New_York", 1), at) });
+  check("dropped entries block Not yet available (only-Early-Entry path)", r.status === "unavailable" && r.unavailableReason === "only_non_operating");
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-20")], "America/New_York", 1), at) });
+  check("published hours still shown despite dropped entries elsewhere", r.status === "hours");
+  check("today with no data at all is never Not yet available", run("2026-10-15", { month: ok(sched([]), at), nextMonth: ok(sched([]), at) }).status === "unavailable");
+
+  // month/year boundaries via follow-ups
+  check("followUps: date has entries → none", JSON.stringify(parkDateFollowUps("2026-10-20", ok(sched([op("2026-10-20")]), at))) === '{"prev":false,"next":false}');
+  check("followUps: nothing after/before → both", JSON.stringify(parkDateFollowUps("2026-10-20", ok(sched([]), at))) === '{"prev":true,"next":true}');
+  check("followUps: failed month → none", JSON.stringify(parkDateFollowUps("2026-10-20", fail)) === '{"prev":false,"next":false}');
+  check("previousResortMonth: Jan → Dec prior year", previousResortMonth("2027-01-05").year === 2026 && previousResortMonth("2027-01-05").month === 12);
+  const DEC = new Date("2026-12-20T15:00:00Z");
+  r = run("2026-12-31", { month: ok(sched([op("2026-12-30", "09:00", "22:00", "-05:00")]), DEC.getTime()), nextMonth: ok(sched([op("2027-01-02", "09:00", "22:00", "-05:00")]), DEC.getTime()) }, "mk", DEC);
+  check("year boundary: Dec 31 closed bracketed by Jan 2", r.status === "closed");
+  r = run("2027-01-01", { month: ok(sched([op("2027-01-02", "09:00", "22:00", "-05:00")]), DEC.getTime()), prevMonth: ok(sched([op("2026-12-31", "09:00", "22:00", "-05:00")]), DEC.getTime()) }, "mk", DEC);
+  check("year boundary: Jan 1 closed bracketed by prior-year Dec 31", r.status === "closed");
+
+  // failure / validation / timezone
+  r = run("2026-10-20", { month: fail });
+  check("provider failure → Unavailable + typed error", r.status === "unavailable" && r.unavailableReason === "request_failed" && r.error?.kind === "timeout" && !describeParkDateHours(r).presentsProviderData);
+  r = run("2026-10-20", { month: ok(sched(oct.entries, "Europe/London"), at) });
+  check("zone mismatch → Unavailable", r.status === "unavailable" && r.unavailableReason === "timezone_mismatch");
+  check("invalid date → invalid_date", parkDateRequestIssue("mk", "2026-02-30", NOW) === "invalid_date" && parkDateRequestIssue("mk", "2101-01-01", NOW) === "invalid_date");
+  check("past date → past_date, no hours", run("2026-10-14", { month: ok(sched([op("2026-10-14")]), at) }).unavailableReason === "past_date");
+  r = run("2026-10-20", { month: ok(sched([{ ...op("2026-10-20"), lastUpdated: "2020-01-01T00:00:00Z" }]), at) });
+  check("old lastUpdated alone is metadata, not staleness", r.status === "hours" && !r.stale);
+  r = run("2026-10-20", { month: ok(sched([op("2026-10-20")]), at, "stale") });
+  check("stale hours flagged, not hidden", r.status === "hours" && r.stale && describeParkDateHours(r).stale);
+  check("attribution owed for hours/closed/not-yet, not unavailable",
+    describeParkDateHours({ ...r }).presentsProviderData && describeParkDateHours({ ...r, status: "closed" }).presentsProviderData &&
+    describeParkDateHours({ ...r, status: "not_yet_available" }).presentsProviderData && !describeParkDateHours({ ...r, status: "unavailable" }).presentsProviderData);
+
+  // client resolution + display guards
+  const good = run("2026-10-20", { month: ok(sched([op("2026-10-20")]), at) });
+  check("resolve: null → Unavailable", resolveParkDateHoursResponse("mk", "2026-10-20", null).status === "unavailable");
+  check("resolve: other park → Unavailable", resolveParkDateHoursResponse("epcot", "2026-10-20", JSON.parse(JSON.stringify(good))).status === "unavailable");
+  check("resolve: other date → Unavailable", resolveParkDateHoursResponse("mk", "2026-10-21", JSON.parse(JSON.stringify(good))).status === "unavailable");
+  check("resolve: bad shape → Unavailable", resolveParkDateHoursResponse("mk", "2026-10-20", { ...JSON.parse(JSON.stringify(good)), status: "closure" }).status === "unavailable");
+  check("resolve: valid round-trips", resolveParkDateHoursResponse("mk", "2026-10-20", JSON.parse(JSON.stringify(good))).status === "hours");
+  check("display: matching park/date/day passes", parkDateHoursForDisplay(good, "mk", "2026-10-20", NOW) === good);
+  check("display: other park/date hidden", parkDateHoursForDisplay(good, "epcot", "2026-10-20", NOW) === null && parkDateHoursForDisplay(good, "mk", "2026-10-21", NOW) === null && parkDateHoursForDisplay(good, null, "2026-10-20", NOW) === null && parkDateHoursForDisplay(good, "mk", null, NOW) === null);
+  check("display: next resort-local day degrades", parkDateHoursForDisplay(good, "mk", "2026-10-20", new Date("2026-10-16T05:00:00Z"))?.status === "unavailable");
   return failures;
 }

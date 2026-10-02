@@ -353,6 +353,17 @@ closure — it exists for closures that matter for trip planning:
   `parkHours.ts` header); absence of `OPERATING` alone is `unknown`, shown as
   "Unavailable". Monthly follow-up requests happen only for potential closures.
   DEV checks: `runDevParkHoursCases()` / `runDevParkHoursServiceCases()`.
+- Exact-date park hours (Phase 12.6, My Plans): same `parkHours.ts` /
+  `parkHoursService.ts` boundary, `/api/park-hours?parkId=&date=YYYY-MM-DD`
+  (`ParkDateHours`; `getParkHoursForDate()` uses monthly `getSchedule()` for
+  the date's resort-local month, adjacent months only when needed). States:
+  `hours` / `closed` (same bracketing + freshness rules) / `not_yet_available`
+  (future date with no published OPERATING on/after it in the fetched data —
+  no horizon assumed, no extrapolation) / `unavailable`. Never treat a future
+  date as "now". My Plans binds the active day's valid `dayMeta` date to its
+  existing effective day park (`activeDayPark`) via `PlannerParkHours`; it adds
+  no park selector. DEV checks: `runDevParkDateHoursCases()` /
+  `runDevParkHoursForDateServiceCases()`.
 - DEV checks: `runDevThemeParksProviderCases()` /
   `runDevThemeParksApiCases()` /
   `runDevThemeParksEntertainmentMappingCases()` (run manually; return failing
