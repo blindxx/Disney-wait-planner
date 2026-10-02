@@ -26,11 +26,24 @@
  * never uses it to write/modify planner data and applies a size cap so an
  * oversized or malformed value is safely dropped rather than forwarded.
  *
+ * Phase 12.7: when planner_context has dated days with an effective park, this
+ * route adds context.schedule — normalized exact-date park hours and
+ * current-day (today-only) entertainment showtimes — built server-side through
+ * DWP's normalized services (lib/tomScheduleContext.ts). Tom never calls
+ * ThemeParks.wiki; failures degrade to "unavailable" and never block the ask.
+ * Enrichment is optional and bounded by SCHEDULE_ENRICHMENT_DEADLINE_MS: past it
+ * (or on rejection) Tom is asked without schedule context/attribution.
+ * `meta.attribution` (ThemeParks.wiki; not a research source) is returned only
+ * when schedule data was sent AND Tom reports (`context_used`) that the answer
+ * used it.
+ *
  * Upstream: POST ${TOM_API_URL}/api/ask
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
+import { buildTomScheduleContextWithDeadline, scheduleUsedByAnswer } from "@/lib/tomScheduleContext";
+import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "@/lib/themeParksProviders";
 import { checkTomRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
 export const dynamic = "force-dynamic";
@@ -129,6 +142,9 @@ export async function POST(request: NextRequest) {
   const plannerContext = sanitizePlannerContext(body.planner_context);
   if (plannerContext) context.planner = plannerContext;
 
+  const schedule = await buildTomScheduleContextWithDeadline(plannerContext);
+  if (schedule) context.schedule = schedule;
+
   let upstream: Response;
   try {
     upstream = await fetch(`${tomApiUrl}/api/ask`, {
@@ -169,5 +185,12 @@ export async function POST(request: NextRequest) {
 
   const sources = Array.isArray(data.sources) ? data.sources : [];
 
-  return NextResponse.json({ answer, sources, meta: { ok: true } });
+  // Provider attribution is distinct from research `sources`, and only when the
+  // answer actually used ThemeParks-backed schedule data (Tom reports this via
+  // `context_used`); planner-only answers never carry it.
+  const attribution = scheduleUsedByAnswer(schedule, data)
+    ? { provider: "themeparks", name: THEMEPARKS_ATTRIBUTION_NAME, url: THEMEPARKS_ATTRIBUTION_URL }
+    : undefined;
+
+  return NextResponse.json({ answer, sources, meta: { ok: true, ...(attribution ? { attribution } : {}) } });
 }

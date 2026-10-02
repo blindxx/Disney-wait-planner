@@ -437,6 +437,27 @@ behavior — preserve them unless a phase explicitly modifies chat state
 management. See `apps/web/src/app/tom/page.tsx` for current implementation
 details before changing chat state handling.
 
+### Schedule context (Phase 12.7)
+
+`/api/tom/ask` adds `context.schedule` server-side via
+`apps/web/src/lib/tomScheduleContext.ts`, built only from DWP's normalized
+services (`getParkHoursForDate()`, `getParkEntertainmentShowtimes()`); Tom and
+`plannerContextSnapshot` never consume ThemeParks.wiki directly. Park/date come
+from the snapshot's existing `days[].park` + `dayAutoFallbacks` (no second park
+authority). Showtimes are TODAY-ONLY and are never applied to a future planner
+date. Fetching is bounded (dated today-or-future days only, deduped, capped);
+failures degrade to `unavailable` and never block the ask. The whole
+enrichment is optional and bounded by a 3 s deadline
+(`SCHEDULE_ENRICHMENT_DEADLINE_MS`): past it, or on rejection, Tom is asked
+without schedule context or ThemeParks attribution; late results are discarded.
+Attribution: attaching schedule context does NOT attribute. `/api/tom/ask`
+returns `meta.attribution` (provider attribution, distinct from research
+`sources`; the Tom page renders linked `Powered by ThemeParks.wiki`) only when
+provider-backed schedule data was sent AND Tom's response reports it used it
+(`context_used` includes `"schedule"`); planner-only answers get none. My Plans
+renders ThemeParks attribution once in the page footer, not inline. DEV check:
+`runDevTomScheduleContextCases()`.
+
 ### Link Preview service
 
 `/api/link-preview` performs server-side metadata fetching. Preserve:

@@ -44,6 +44,7 @@ import {
   shouldReleaseTomLoadingOnCompletion,
 } from "@/lib/syncHelper";
 import { getUserId } from "@/lib/syncIdentity";
+import ThemeParksAttribution from "@/components/ThemeParksAttribution";
 
 /** Pre-10.4 global (non-profile-scoped) chat cache — read-only migration fallback for the "default" profile. */
 const LEGACY_CHAT_STORAGE_KEY = "dwp.tomChat.v1";
@@ -116,6 +117,8 @@ interface ChatMessage {
   role: ChatRole;
   text: string;
   sources?: TomSource[];
+  /** Answer used ThemeParks-backed schedule data (server `meta.attribution`); rendered as provider attribution, not a source. */
+  themeParksAttribution?: boolean;
 }
 
 interface StoredChatState {
@@ -138,7 +141,11 @@ function normalizeStoredMessage(raw: unknown): ChatMessage | undefined {
   if ((role !== "user" && role !== "tom") || typeof text !== "string") return undefined;
   const id = typeof candidate.id === "string" && candidate.id ? candidate.id : generateId();
   const sources = normalizeSources(candidate.sources);
-  return { id, role, text, sources: sources.length > 0 ? sources : undefined };
+  return {
+    id, role, text,
+    sources: sources.length > 0 ? sources : undefined,
+    ...(role === "tom" && candidate.themeParksAttribution === true ? { themeParksAttribution: true } : {}),
+  };
 }
 
 function normalizeStoredMessages(raw: unknown): ChatMessage[] {
@@ -1456,6 +1463,7 @@ export default function TomChatPage() {
           role: "tom",
           text: answer,
           sources: sources.length > 0 ? sources : undefined,
+          ...(data?.meta?.attribution?.provider === "themeparks" ? { themeParksAttribution: true } : {}),
         },
       ]);
       return true;
@@ -1713,6 +1721,11 @@ export default function TomChatPage() {
               </div>
               {message.role === "tom" && (
                 <LinkPreviewCards urls={extractSafeUrls(message.text)} onCardsChange={handlePreviewCardsChange} />
+              )}
+              {message.role === "tom" && message.themeParksAttribution && (
+                <div style={{ marginLeft: "38px", fontSize: "12px", color: "#6b7280" }}>
+                  <ThemeParksAttribution style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }} />
+                </div>
               )}
               {message.sources && message.sources.length > 0 && (
                 <div className="tom-sources" style={{ marginLeft: message.role === "tom" ? "38px" : "auto", textAlign: message.role === "tom" ? "left" : "right" }}>
