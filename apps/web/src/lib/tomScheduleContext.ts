@@ -30,6 +30,7 @@
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
+import { getResortLocalDate } from "./resortTime";
 import { PARK_LABELS, PARK_TO_RESORT, isValidParkId } from "./parkMetadata";
 import { comparePlannerDateToResortToday } from "./resortTime";
 import { resolveCanonicalIdentity } from "./plannerContextSnapshot";
@@ -97,7 +98,10 @@ export interface TomScheduleContext {
 }
 
 export interface TomScheduleDeps {
+  /** Fixed clock (deterministic DEV tests). */
   instant?: Date;
+  /** Injectable clock, read again after provider work (rollover DEV tests). Wins over `instant`. */
+  now?: () => Date;
   getHours?: (parkId: ParkId, date: string) => Promise<ParkDateHours>;
   getShowtimes?: (parkId: ParkId) => Promise<ParkEntertainmentShowtimes>;
 }
@@ -191,9 +195,14 @@ export async function buildTomScheduleContext(
 ): Promise<TomScheduleContext | null> {
   try {
     if (!plannerContext) return null;
-    const instant = deps.instant ?? new Date();
-    const getHours = deps.getHours ?? ((p: ParkId, d: string) => getParkHoursForDate(p, d, { instant }));
-    const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p, { instant }));
+    const fixed = deps.instant;
+    const clock = deps.now ?? (fixed ? () => fixed : () => new Date());
+    const instant = clock();
+    // Production services get NO frozen instant: each reads its own clock after
+    // its provider fetch, so a request crossing resort-local midnight never
+    // normalizes a late response against the request-start day.
+    const getHours = deps.getHours ?? ((p: ParkId, d: string) => getParkHoursForDate(p, d));
+    const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p));
 
     const targets = targetsFromPlanner(plannerContext, instant);
     if (targets.length === 0) return null;
@@ -228,6 +237,9 @@ export async function buildTomScheduleContext(
       let st: ParkEntertainmentShowtimes | null = null;
       try { st = await getShowtimes(park); } catch { st = null; }
       // The provider's resort-local "today" must still be the planner's date (midnight rollover).
+      // Also re-check the actual current resort-local date after the provider
+      // work (never trust a date derived from a frozen request-start instant).
+      if (getResortLocalDate(ts[0].resort, clock()) !== ts[0].date) continue;
       if (st && st.localDate !== ts[0].date) continue;
       showParks.push({
         park, parkName: PARK_LABELS[park], localDate: ts[0].date,
@@ -258,14 +270,16 @@ export async function buildTomScheduleContext(
 
 /**
  * True when the schedule carries at least one provider-confirmed fact (so
- * ThemeParks attribution applies): confirmed/closed hours, known showtimes, or
+ * ThemeParks attribution applies): confirmed/closed/not-yet-available hours
+ * (the normalizer emits not_yet_available only from successful provider
+ * coverage), known showtimes, or
  * a complete valid-empty (`none_posted`) showtime answer. Unavailable,
  * incomplete and error states are not confirmed provider data.
  */
 export function scheduleHasProviderData(s: TomScheduleContext | null): boolean {
   if (!s) return false;
   return (
-    s.hours.some((h) => h.status === "hours" || h.status === "closed") ||
+    s.hours.some((h) => h.status === "hours" || h.status === "closed" || h.status === "not_yet_available") ||
     (s.entertainment_showtimes?.parks.some((p) => !p.error && p.entries.some((e) => e.times.length > 0 || (e.status === "none_posted" && !e.incomplete))) ?? false)
   );
 }
@@ -410,6 +424,36 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
   check("attribution: incomplete none_posted does not", !scheduleHasProviderData(await noneCtx(noneEntry("none_posted", true))));
   check("attribution: unavailable entry does not", !scheduleHasProviderData(await noneCtx(noneEntry("unavailable", true))));
   check("attribution: provider error does not", !scheduleHasProviderData(await noneCtx(noneEntry("none_posted", false), { error: { kind: "timeout", message: "t" } })));
+
+  // Midnight rollover: request starts 11:59pm WDW Oct 15; clock is past midnight after provider work
+  {
+    const times = [new Date("2026-10-16T03:59:00Z"), new Date("2026-10-16T04:01:00Z")];
+    let i = 0;
+    const now = () => times[Math.min(i++, times.length - 1)];
+    // clock() reads: [0] start, [1] post-fetch recheck
+    showAsked.length = 0;
+    ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "mk")], plans: [plan("d1", "Happily Ever After")], dayAutoFallbacks: {} }, {
+      now, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After"),
+    });
+    check("rollover: fetch started before midnight, finished after → yesterday's showtimes NOT attached", showAsked.join() === "mk" && ctx?.entertainment_showtimes === undefined);
+    // Same request fully before midnight still attaches
+    ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "mk")], plans: [plan("d1", "Happily Ever After")], dayAutoFallbacks: {} }, {
+      now: () => new Date("2026-10-16T03:59:00Z"), getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After"),
+    });
+    check("rollover: no crossing → showtimes attached", ctx?.entertainment_showtimes?.parks.length === 1);
+    // DLR is still Oct 15 at the same instant (8:01pm), so no rollover there
+    i = 0;
+    ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-15", "disneyland")], plans: [plan("d1", "Fantasmic!")], dayAutoFallbacks: {} }, {
+      now, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!"),
+    });
+    check("rollover: resort-local — DLR unaffected by WDW midnight", ctx?.entertainment_showtimes?.parks.length === 1);
+  }
+
+  // Attribution: not_yet_available is provider-backed; unavailable is not
+  const hoursOnly = async (st: ParkDateHours["status"]) => buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({ "mk:2026-10-20": mkHours("mk", "2026-10-20", st) }) });
+  check("attribution: not_yet_available counts as provider data", scheduleHasProviderData(await hoursOnly("not_yet_available")));
+  check("attribution: unavailable does not", !scheduleHasProviderData(await hoursOnly("unavailable")));
+  check("attribution: closed still counts", scheduleHasProviderData(await hoursOnly("closed")));
 
   // Attribution gating + malformed input
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({ "mk:2026-10-20": mkHours("mk", "2026-10-20", "hours") }) });
