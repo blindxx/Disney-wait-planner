@@ -34,6 +34,8 @@ import { getResortLocalDate } from "./resortTime";
 import { PARK_LABELS, PARK_TO_RESORT, isValidParkId } from "./parkMetadata";
 import { comparePlannerDateToResortToday } from "./resortTime";
 import { resolveCanonicalIdentity } from "./plannerContextSnapshot";
+import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { getEntertainmentProviderMapping } from "./themeParksEntertainmentMapping";
 import { getParkHoursForDate } from "./parkHoursService";
 import { getParkEntertainmentShowtimes } from "./entertainmentShowtimesService";
 import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "./themeParksProviders";
@@ -185,6 +187,21 @@ function plannedEntertainmentKeys(planner: Record<string, unknown>, dayIds: Set<
 }
 
 /**
+ * Canonical identities of the park's Entertainment entries that the explicit,
+ * park-qualified ThemeParks mapping marks "mapped" (unmapped entries have no
+ * provider showtimes to fetch). No fuzzy/name-based provider matching.
+ */
+function mappedEntertainmentIdentities(park: ParkId, resort: ResortId): Set<string> {
+  const ids = new Set<string>();
+  for (const place of ENTERTAINMENT_PLACES) {
+    if (place.parkId !== park) continue;
+    if (getEntertainmentProviderMapping(place.name, park)?.disposition !== "mapped") continue;
+    ids.add(resolveCanonicalIdentity(place.name, "entertainment", resort, ""));
+  }
+  return ids;
+}
+
+/**
  * Build the `context.schedule` object for a Tom request from the (already
  * sanitized) planner context, or null when nothing schedule-relevant exists.
  * Never throws.
@@ -236,7 +253,10 @@ export async function buildTomScheduleContext(
     for (const [park, ts] of todayByPark) {
       if (showtimeAttempts >= MAX_SHOWTIME_PARKS) break;
       const wanted = plannedEntertainmentKeys(plannerContext, new Set(ts.map((t) => t.dayId)), ts[0].resort);
-      if (wanted.size === 0) continue;
+      // Skip (without consuming the attempt cap) parks whose planned Entertainment
+      // is all unmapped: there is nothing the provider could answer for them.
+      const mapped = mappedEntertainmentIdentities(park, ts[0].resort);
+      if (![...wanted].some((w) => mapped.has(w))) continue;
       let st: ParkEntertainmentShowtimes | null = null;
       showtimeAttempts++;
       try { st = await getShowtimes(park); } catch { st = null; }
@@ -513,8 +533,8 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     showAsked.length = 0;
     ctx = await buildTomScheduleContext({
       days: [day("a", "2026-10-15", "mk"), day("b", "2026-10-15", "epcot"), day("c", "2026-10-15", "hs"), day("d", "2026-10-15", "ak")],
-      plans: [plan("a", "Show A"), plan("b", "Show B"), plan("c", "Show C"), plan("d", "Show D")], dayAutoFallbacks: {},
-    }, { now, getHours: hoursFor({}), getShowtimes: getShowtimes("Show A") });
+      plans: [plan("a", "Happily Ever After"), plan("b", "Luminous The Symphony of Us"), plan("c", "Fantasmic!"), plan("d", "Festival of the Lion King")], dayAutoFallbacks: {},
+    }, { now, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After") });
     check("showtime cap: discarded rollover responses still consume MAX_SHOWTIME_PARKS attempts", showAsked.length === MAX_SHOWTIME_PARKS && ctx?.entertainment_showtimes === undefined);
   }
 
@@ -551,6 +571,22 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     check("answer-use: Tom reports schedule used → attribution (top-level or meta)", scheduleUsedByAnswer(withData, { context_used: ["planner", "schedule"] }) && scheduleUsedByAnswer(withData, { meta: { context_used: ["schedule"] } }));
     check("answer-use: used signal without provider-backed schedule data → no attribution", !scheduleUsedByAnswer(noData, { context_used: ["schedule"] }) && !scheduleUsedByAnswer(null, { context_used: ["schedule"] }));
     check("answer-use: malformed signals ignored", !scheduleUsedByAnswer(withData, null) && !scheduleUsedByAnswer(withData, { context_used: "schedule" }) && !scheduleUsedByAnswer(withData, { meta: "schedule" }));
+  }
+
+  // Unmapped-only parks neither fetch nor consume the attempt cap
+  {
+    showAsked.length = 0;
+    ctx = await buildTomScheduleContext({
+      days: [day("a", "2026-10-15", "disneyland"), day("b", "2026-10-15", "dca"), day("c", "2026-10-15", "mk"), day("d", "2026-10-15", "hs")],
+      plans: [plan("a", "Wondrous Journeys"), plan("b", "Frightfully Fun Parade"), plan("c", "Happily Ever After"), plan("d", "Fantasmic!")], dayAutoFallbacks: {},
+    }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After") });
+    check("unmapped: unmapped-only parks make no showtime call and don't consume the cap; later mapped parks are fetched", showAsked.join() === "mk,hs");
+    showAsked.length = 0;
+    ctx = await buildTomScheduleContext({ days: [day("a", "2026-10-15", "disneyland")], plans: [plan("a", "Wondrous Journeys")], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Wondrous Journeys") });
+    check("unmapped: unmapped-only planner → no showtimes fetch or field", showAsked.length === 0 && ctx?.entertainment_showtimes === undefined);
+    showAsked.length = 0;
+    ctx = await buildTomScheduleContext({ days: [day("a", "2026-10-15", "mk")], plans: [plan("a", "Mickey's Most Merriest Celebration"), plan("a", "Happily Ever After 9pm")], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Happily Ever After") });
+    check("unmapped: one mapped item (legacy time-suffixed) among unmapped still fetches", showAsked.join() === "mk");
   }
 
   // Attribution: not_yet_available is provider-backed; unavailable is not
