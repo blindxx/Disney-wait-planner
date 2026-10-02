@@ -44,6 +44,7 @@ import {
   stripTrailingTimeTokens,
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
+import PlannerParkHours from "@/components/PlannerParkHours";
 import {
   computeCrossDayChecks,
   inferDayPark,
@@ -6991,6 +6992,17 @@ export default function PlansPage() {
         </div>
         {ready && (
           <p className="day-park-hint">Auto: uses your plans to pick a park. Selecting a park locks this day.</p>
+        )}
+
+        {/* Phase 12.6 — exact-date park hours: the active day's own valid date +
+            its effective park (activeDayPark, i.e. manual/Auto resolution). No
+            date or no resolved park renders nothing. */}
+        {ready && (
+          <PlannerParkHours
+            dayId={activeDayId}
+            date={dayMeta[activeDayId]?.date && isValidIsoCalendarDate(dayMeta[activeDayId].date!) ? dayMeta[activeDayId].date! : null}
+            parkId={activeDayPark}
+          />
         )}
 
         <p className="wait-scope-label">
