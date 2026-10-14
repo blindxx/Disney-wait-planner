@@ -42,7 +42,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { timingSafeEqual } from "crypto";
-import { buildTomScheduleContextWithDeadline, scheduleUsedByAnswer } from "@/lib/tomScheduleContext";
+import { buildTomScheduleContextWithDeadline, scheduleUsedByAnswer, showtimesLookupUsedByAnswer } from "@/lib/tomScheduleContext";
 import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "@/lib/themeParksProviders";
 import { checkTomRateLimit, getTrustedClientIp } from "@/lib/tomRateLimit";
 
@@ -188,7 +188,10 @@ export async function POST(request: NextRequest) {
   // Provider attribution is distinct from research `sources`, and only when the
   // answer actually used ThemeParks-backed schedule data (Tom reports this via
   // `context_used`); planner-only answers never carry it.
-  const attribution = scheduleUsedByAnswer(schedule, data)
+  // Phase 12.8.1: Tom's own targeted /api/tom/showtimes lookups are reported
+  // via context_used "dwp_showtimes_lookup" (Tom sets it only for responses
+  // with meta.provider_backed === true).
+  const attribution = scheduleUsedByAnswer(schedule, data) || showtimesLookupUsedByAnswer(data)
     ? { provider: "themeparks", name: THEMEPARKS_ATTRIBUTION_NAME, url: THEMEPARKS_ATTRIBUTION_URL }
     : undefined;
 
