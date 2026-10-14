@@ -188,6 +188,43 @@ function mappedEntertainmentIdentities(park: ParkId, resort: ResortId): Set<stri
   return ids;
 }
 
+type ShowtimeParkEntry = NonNullable<TomScheduleContext["entertainment_showtimes"]>["parks"][number];
+
+/**
+ * One park-wide showtimes fetch (no per-show calls) for `expectedDate`, limited
+ * to the `wanted` mapped curated identities. Shared by the planner-derived
+ * enrichment and the planner-independent lookup so both apply identical
+ * today-only, rollover and filtering rules. Returns null when the result must
+ * be discarded: the actual resort-local date (read AFTER the provider work) or
+ * the provider payload's own localDate is no longer `expectedDate`.
+ */
+async function fetchParkShowtimesEntry(
+  park: ParkId,
+  resort: ResortId,
+  expectedDate: string,
+  wanted: Set<string>,
+  getShowtimes: (parkId: ParkId) => Promise<ParkEntertainmentShowtimes>,
+  clock: () => Date,
+): Promise<ShowtimeParkEntry | null> {
+  let st: ParkEntertainmentShowtimes | null = null;
+  try { st = await getShowtimes(park); } catch { st = null; }
+  // Never trust a date derived from a frozen request-start instant.
+  if (getResortLocalDate(resort, clock()) !== expectedDate) return null;
+  if (st && st.localDate !== expectedDate) return null;
+  return {
+    park, parkName: PARK_LABELS[park], localDate: expectedDate,
+    stale: st?.stale ?? false,
+    error: st ? (st.error ? st.error.kind : null) : "unavailable",
+    entries: st ? st.entries
+      .filter((e) => wanted.has(resolveCanonicalIdentity(e.dwpName, "entertainment", resort, "")))
+      .map((e) => ({
+        name: e.dwpName, status: e.status,
+        times: e.performances.map((p) => ({ time: p.localTime, passed: p.passed })),
+        incomplete: e.incomplete,
+      })) : [],
+  };
+}
+
 /**
  * Build the `context.schedule` object for a Tom request from the (already
  * sanitized) planner context, or null when nothing schedule-relevant exists.
@@ -244,26 +281,9 @@ export async function buildTomScheduleContext(
       // Entertainment: there is nothing the provider could answer for them.
       const wanted = mappedEntertainmentIdentities(park, ts[0].resort);
       if (wanted.size === 0) continue;
-      let st: ParkEntertainmentShowtimes | null = null;
       showtimeAttempts++;
-      try { st = await getShowtimes(park); } catch { st = null; }
-      // The provider's resort-local "today" must still be the planner's date (midnight rollover).
-      // Also re-check the actual current resort-local date after the provider
-      // work (never trust a date derived from a frozen request-start instant).
-      if (getResortLocalDate(ts[0].resort, clock()) !== ts[0].date) continue;
-      if (st && st.localDate !== ts[0].date) continue;
-      showParks.push({
-        park, parkName: PARK_LABELS[park], localDate: ts[0].date,
-        stale: st?.stale ?? false,
-        error: st ? (st.error ? st.error.kind : null) : "unavailable",
-        entries: st ? st.entries
-          .filter((e) => wanted.has(resolveCanonicalIdentity(e.dwpName, "entertainment", ts[0].resort, "")))
-          .map((e) => ({
-            name: e.dwpName, status: e.status,
-            times: e.performances.map((p) => ({ time: p.localTime, passed: p.passed })),
-            incomplete: e.incomplete,
-          })) : [],
-      });
+      const entry = await fetchParkShowtimesEntry(park, ts[0].resort, ts[0].date, wanted, getShowtimes, clock);
+      if (entry) showParks.push(entry);
     }
 
     return {
@@ -345,6 +365,132 @@ export function scheduleHasProviderData(s: TomScheduleContext | null): boolean {
     s.hours.some((h) => h.status === "hours" || h.status === "closed" || h.status === "not_yet_available") ||
     (s.entertainment_showtimes?.parks.some((p) => !p.error && p.entries.some((e) => e.times.length > 0 || (e.status === "none_posted" && !e.incomplete))) ?? false)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12.8.1 — planner-independent, targeted showtimes lookup for Tom.
+// ---------------------------------------------------------------------------
+
+/** Tom's own deadline for a targeted lookup (a primary request, unlike optional enrichment; provider calls time out at 8 s). */
+export const TOM_SHOWTIMES_LOOKUP_DEADLINE_MS = 6_000;
+
+/**
+ * Signal Tom puts in its response `context_used` when its answer used a
+ * targeted showtimes lookup result with `meta.provider_backed === true`.
+ * `/api/tom/ask` then returns ThemeParks attribution (see route).
+ */
+export const TOM_SHOWTIMES_LOOKUP_USED_SIGNAL = "dwp_showtimes_lookup";
+
+export interface TomShowtimesLookupShow {
+  /** Echo of the structured `show` input. */
+  input: string;
+  /** True when it resolved to exactly one mapped curated entry of the park. */
+  matched: boolean;
+  /** Canonical DWP name when matched. */
+  name: string | null;
+}
+
+export interface TomShowtimesLookup {
+  source: "ThemeParks.wiki via Disney Wait Planner";
+  attribution: { name: string; url: string };
+  scope: "today_only";
+  park: ParkId;
+  parkName: string;
+  /** Resort-local date these showtimes are for (always today). */
+  localDate: string;
+  /** Provider failure kind when no showtimes are known; null otherwise. */
+  error: string | null;
+  stale: boolean;
+  entries: TomScheduleShowtimeEntry[];
+  requested_show?: TomShowtimesLookupShow;
+  meta: {
+    ok: true;
+    /** True iff confirmed provider facts are present (attribution applies when the answer uses them). */
+    provider_backed: boolean;
+    count: number;
+  };
+  note: string;
+}
+
+export type TomShowtimesLookupResult =
+  | { ok: true; data: TomShowtimesLookup }
+  | { ok: false; status: 400; error: string };
+
+const LOOKUP_NOTE =
+  "Today-only (resort-local) showtimes for DWP's curated, provider-mapped Entertainment in this park. Entries with status 'unavailable' or incomplete=true are NOT confirmed — do not state complete schedules for them; never infer times. 'passed' times are already over. Shows absent from entries have no provider-backed schedule here (unmapped or not curated): say the schedule is unavailable, do not guess. Cite ThemeParks.wiki when using provider-backed times.";
+
+/**
+ * Planner-independent targeted lookup: today's mapped curated Entertainment
+ * showtimes for ONE structured, canonical ParkId. Tom resolves natural-language
+ * park/show identification; DWP validates structured input only and never
+ * inspects a question. Optional `show` narrows to one mapped curated entry,
+ * matched through the same canonical resolver as planner items (names/aliases;
+ * ambiguity or no match → `matched:false`, empty entries; never a guess).
+ * Reuses getParkEntertainmentShowtimes() (cached park-wide provider call).
+ * Never throws; a provider failure/timeout is a 200 with `error` set.
+ */
+export async function lookupTomParkShowtimes(
+  parkInput: unknown,
+  showInput: unknown,
+  deps: { instant?: Date; now?: () => Date; getShowtimes?: TomScheduleDeps["getShowtimes"]; deadlineMs?: number } = {},
+): Promise<TomShowtimesLookupResult> {
+  if (typeof parkInput !== "string" || !isValidParkId(parkInput)) {
+    return { ok: false, status: 400, error: "Missing or invalid park (expected one of: mk, epcot, hs, ak, disneyland, dca)" };
+  }
+  if (showInput !== undefined && showInput !== null && (typeof showInput !== "string" || showInput.trim().length === 0 || showInput.length > 120)) {
+    return { ok: false, status: 400, error: "Invalid show" };
+  }
+  const park = parkInput;
+  const resort = PARK_TO_RESORT[park] as ResortId;
+  const fixed = deps.instant;
+  const clock = deps.now ?? (fixed ? () => fixed : () => new Date());
+  const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p));
+  const localDate = getResortLocalDate(resort, clock());
+
+  let wanted = mappedEntertainmentIdentities(park, resort);
+  let requested: TomShowtimesLookupShow | undefined;
+  if (typeof showInput === "string") {
+    const key = resolveCanonicalIdentity(showInput.trim(), "entertainment", resort, "");
+    const hit = wanted.has(key);
+    wanted = hit ? new Set([key]) : new Set();
+    const name = hit
+      ? ENTERTAINMENT_PLACES.find((pl) => pl.parkId === park && resolveCanonicalIdentity(pl.name, "entertainment", resort, "") === key)?.name ?? null
+      : null;
+    requested = { input: showInput.trim(), matched: hit && name !== null, name };
+  }
+
+  let entry: ShowtimeParkEntry | null = null;
+  // No mapped identity to ask the provider about → nothing to fetch or fabricate.
+  if (wanted.size > 0) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const work = fetchParkShowtimesEntry(park, resort, localDate, wanted, getShowtimes, clock).catch(() => null);
+    const deadline = new Promise<null>((r) => { timer = setTimeout(() => r(null), deps.deadlineMs ?? TOM_SHOWTIMES_LOOKUP_DEADLINE_MS); });
+    try { entry = await Promise.race([work, deadline]); } finally { if (timer) clearTimeout(timer); }
+  }
+  const fetched = wanted.size > 0;
+  const error = fetched ? (entry ? entry.error : "unavailable") : null;
+  const entries = entry?.entries ?? [];
+  const providerBacked = fetched && !!entry && !entry.error && entries.some((e) => e.times.length > 0 || (e.status === "none_posted" && !e.incomplete));
+  return {
+    ok: true,
+    data: {
+      source: "ThemeParks.wiki via Disney Wait Planner",
+      attribution: { name: THEMEPARKS_ATTRIBUTION_NAME, url: THEMEPARKS_ATTRIBUTION_URL },
+      scope: "today_only", park, parkName: PARK_LABELS[park],
+      localDate: entry?.localDate ?? localDate,
+      error, stale: entry?.stale ?? false, entries,
+      ...(requested ? { requested_show: requested } : {}),
+      meta: { ok: true, provider_backed: providerBacked, count: entries.length },
+      note: LOOKUP_NOTE,
+    },
+  };
+}
+
+/** True iff Tom reports (`context_used`, top-level or under `meta`) that its answer used a targeted showtimes lookup. */
+export function showtimesLookupUsedByAnswer(upstream: unknown): boolean {
+  const body = obj(upstream);
+  if (!body) return false;
+  return [body.context_used, obj(body.meta)?.context_used].some((l) => Array.isArray(l) && l.includes(TOM_SHOWTIMES_LOOKUP_USED_SIGNAL));
 }
 
 /** DEV check (run manually; returns failing labels). Highest shared boundary: planner context → schedule context. */
@@ -603,5 +749,60 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
   ctx = await buildTomScheduleContext({ days: [day("d1", "2026-10-20", "mk")], plans: [], dayAutoFallbacks: {} }, { instant: NOW, getHours: hoursFor({ "mk:2026-10-20": mkHours("mk", "2026-10-20", "hours") }) });
   check("attribution: present, and provider data detected", ctx?.attribution.name === THEMEPARKS_ATTRIBUTION_NAME && scheduleHasProviderData(ctx));
   check("input: undefined / malformed planner context → null", (await buildTomScheduleContext(undefined)) === null && (await buildTomScheduleContext({ days: "x", plans: 5 })) === null);
+  // Phase 12.8.1 — planner-independent targeted lookup
+  {
+    const lk = async (park: unknown, show?: unknown, gs?: TomScheduleDeps["getShowtimes"], extra: { now?: () => Date; deadlineMs?: number } = {}) =>
+      lookupTomParkShowtimes(park, show, { instant: NOW, getShowtimes: gs ?? getShowtimes("Fantasmic!"), ...extra });
+    showAsked.length = 0;
+    let r = await lk("hs", undefined, getShowtimes("Fantasmic!"));
+    check("12.8.1: explicit HS needs no planner; today-only mapped entries, Fantasmic! present", r.ok && showAsked.join() === "hs" && r.data.scope === "today_only" && r.data.localDate === "2026-10-15" && r.data.entries.some((e) => e.name === "Fantasmic!") && !r.data.entries.some((e) => e.name === "Other Show") && r.data.meta.provider_backed);
+    for (const p of ["mk", "epcot", "hs", "ak", "disneyland", "dca"]) {
+      showAsked.length = 0;
+      const pr = await lk(p, undefined, async (pid) => { showAsked.push(pid); return mkShow(pid, "2026-10-15", "Nothing"); });
+      check(`12.8.1: park ${p} accepted, single park-wide fetch`, pr.ok && pr.data.park === p && showAsked.length <= 1);
+    }
+    for (const bad of [undefined, null, "", "MK", "toString", "constructor", "__proto__", "magic kingdom", 5, ["mk"]]) {
+      showAsked.length = 0;
+      const br = await lk(bad as unknown);
+      check(`12.8.1: invalid park ${JSON.stringify(bad)} → 400, no fetch`, !br.ok && br.status === 400 && showAsked.length === 0);
+    }
+    check("12.8.1: invalid show types → 400", !(await lk("mk", 5)).ok && !(await lk("mk", "  ")).ok);
+    showAsked.length = 0;
+    r = await lk("mk", "Happily Ever After 9pm", getShowtimes("Happily Ever After"));
+    check("12.8.1: show narrows via canonical resolver (legacy time suffix)", r.ok && r.data.requested_show?.matched === true && r.data.requested_show.name === "Happily Ever After" && r.data.entries.length === 1);
+    showAsked.length = 0;
+    r = await lk("mk", "Totally Unknown Show");
+    check("12.8.1: unknown show → matched:false, empty entries, no provider fetch, no arbitrary selection", r.ok && r.data.requested_show?.matched === false && r.data.entries.length === 0 && showAsked.length === 0 && !r.data.meta.provider_backed);
+    showAsked.length = 0;
+    r = await lk("mk", "Fantasmic!");
+    check("12.8.1: show from a different park does not match", r.ok && r.data.requested_show?.matched === false && showAsked.length === 0);
+    r = await lk("disneyland", undefined, async (p) => mkShow(p, "2026-10-15", "Wondrous Journeys"));
+    check("12.8.1: unmapped/provider-only never surfaced", r.ok && !r.data.entries.some((e) => e.name === "Wondrous Journeys" || e.name === "Other Show"));
+    r = await lk("disneyland", undefined, async () => { throw new Error("x"); });
+    check("12.8.1: thrown service → error unavailable, no times, not provider-backed", r.ok && r.data.error === "unavailable" && r.data.entries.length === 0 && !r.data.meta.provider_backed);
+    r = await lk("disneyland", undefined, async (p) => mkShow(p, "2026-10-15", "Fantasmic!", { error: { kind: "timeout", message: "t" }, entries: [{ dwpName: "Fantasmic!", parkId: p, status: "unavailable", performances: [], message: null, incomplete: true, unrecognizedTypes: [], provider: [] }] }));
+    check("12.8.1: provider error passes through; not provider-backed", r.ok && r.data.error === "timeout" && r.data.entries[0]?.status === "unavailable" && !r.data.meta.provider_backed);
+    r = await lk("disneyland", undefined, async (p) => mkShow(p, "2026-10-15", "Fantasmic!", { stale: true }));
+    check("12.8.1: stale flag preserved", r.ok && r.data.stale === true);
+    r = await lk("disneyland", undefined, async (p) => mkShow(p, "2026-10-15", "Fantasmic!", { entries: [{ dwpName: "Fantasmic!", parkId: p, status: "none_posted", performances: [], message: null, incomplete: false, unrecognizedTypes: [], provider: [] }] }));
+    check("12.8.1: complete none_posted is provider-backed; incomplete is not", r.ok && r.data.meta.provider_backed && r.data.entries[0].times.length === 0);
+    r = await lk("disneyland", undefined, async (p) => mkShow(p, "2026-10-15", "Fantasmic!", { entries: [{ dwpName: "Fantasmic!", parkId: p, status: "none_posted", performances: [], message: null, incomplete: true, unrecognizedTypes: [], provider: [] }] }));
+    check("12.8.1: incomplete none_posted not provider-backed", r.ok && !r.data.meta.provider_backed);
+    r = await lk("disneyland", undefined, async (p) => mkShow(p, "2026-10-14", "Fantasmic!"));
+    check("12.8.1: provider payload for another local date discarded → unavailable", r.ok && r.data.error === "unavailable" && r.data.entries.length === 0);
+    {
+      let i = 0;
+      const now = () => (i++ === 0 ? new Date("2026-10-16T03:59:00Z") : new Date("2026-10-16T04:01:00Z"));
+      r = await lk("mk", undefined, getShowtimes("Happily Ever After"), { now });
+      check("12.8.1: resort-local midnight rollover during fetch → yesterday's times discarded", r.ok && r.data.error === "unavailable" && r.data.entries.length === 0 && r.data.localDate === "2026-10-15");
+      r = await lookupTomParkShowtimes("disneyland", undefined, { now: () => new Date("2026-10-16T04:01:00Z"), getShowtimes: async (p) => mkShow(p, "2026-10-15", "Fantasmic!") });
+      check("12.8.1: DLR date is its own resort-local day (Oct 15 at 04:01Z)", r.ok && r.data.localDate === "2026-10-15" && r.data.entries.length === 1);
+    }
+    r = await lk("mk", undefined, () => new Promise<ParkEntertainmentShowtimes>(() => {}), { deadlineMs: 30 });
+    check("12.8.1: stalled provider → bounded by deadline, unavailable", r.ok && r.data.error === "unavailable" && r.data.entries.length === 0);
+    check("12.8.1: attribution always present on responses", r.ok && r.data.attribution.name === THEMEPARKS_ATTRIBUTION_NAME);
+    check("12.8.1: lookup answer-use signal", showtimesLookupUsedByAnswer({ context_used: ["dwp_showtimes_lookup"] }) && showtimesLookupUsedByAnswer({ meta: { context_used: ["dwp_showtimes_lookup"] } }) && !showtimesLookupUsedByAnswer({ context_used: ["schedule"] }) && !showtimesLookupUsedByAnswer(null));
+  }
+
   return failures;
 }

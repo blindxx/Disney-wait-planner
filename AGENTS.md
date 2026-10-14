@@ -458,6 +458,18 @@ provider-backed schedule data was sent AND Tom's response reports it used it
 renders ThemeParks attribution once in the page footer, not inline. DEV check:
 `runDevTomScheduleContextCases()`.
 
+### Targeted showtimes lookup (Phase 12.8.1)
+
+`GET /api/tom/showtimes?park=<ParkId>[&show=<name>]` is the planner-independent,
+server-to-server lookup Tom uses for today's Entertainment showtimes (see
+`lookupTomParkShowtimes` in `tomScheduleContext.ts`). Auth: required
+`x-dwp-catalog-api-key` / `DWP_CATALOG_API_KEY`. DWP validates the structured
+canonical ParkId only; Tom owns park/show identification and clarification.
+Same today-only/rollover/mapped-only rules as the planner-derived enrichment
+(shared `fetchParkShowtimesEntry`). Attribution: response carries
+`meta.provider_backed`; Tom reports `context_used: ["dwp_showtimes_lookup"]`
+and `/api/tom/ask` then returns `meta.attribution`.
+
 ### Link Preview service
 
 `/api/link-preview` performs server-side metadata fetching. Preserve:
