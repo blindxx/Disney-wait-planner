@@ -14,13 +14,18 @@ The system enforces a strict boundary between live data and local planner state,
 
 ## ✨ Features
 
-### Today & Wait Times
+### Today
 
-- Live attraction wait times for DLR and WDW, with a resort/park selector
+- Resort-local home view with a resort/park selector and a shortcut to **Waits & Shows**
+
+### Waits & Shows
+
+- Live attraction wait times for DLR and WDW, with a resort/park selector (Queue-Times remains the authority for attraction waits and open/closed status)
 - Deterministic status handling: planned closures take priority, then live "not operating" status, then a live wait time
 - Planned closures are lifecycle-aware — temporary refurbishments (with a known end date or open-ended) and permanent closures are tracked and displayed distinctly, with permanent closures aging out of the active list over time
 - Mobile-first ride cards with sorting and land filtering
-- Entertainment showtimes, including multi-showtime events
+- Selected-park **park hours** for today (park operating window; shown as "Closed" only when provider data safely establishes it, otherwise "Unavailable")
+- **Entertainment showtimes for today** on curated Entertainment entries that are mapped to ThemeParks.wiki, including multi-showtime events. Entries with no posted, remaining, or available showtimes say so rather than guessing; unmapped entries show no showtime line. Showtimes are today-only — there is no future-date showtime lookup
 
 ### My Plans
 
@@ -28,6 +33,7 @@ The system enforces a strict boundary between live data and local planner state,
 - Smart Entry suggestions for known attractions, dining locations, and entertainment, with automatic type detection; unmatched names fall back to a manual type selector
 - Multi-day planning with per-day labels/dates, and day-scoped Lightning Lane reservations
 - Day-aware park context (auto-derived from your plans, or manually overridden)
+- **Exact-date park hours** for the active day: when a day has a valid date, My Plans shows that park's hours for that specific date using the day's existing park context (no separate park selector). Dates the provider hasn't published yet show as not yet available, and failures show as unavailable — hours are never extrapolated
 - TXT/CSV import, plus three export/restore scopes — **Full Backup** (all days, Plans and Lightning Lane), **Plans Backup** (all days, Plans only), and **Day Export** (just the active day's Plans and Lightning Lane) — with a metadata preview shown before restoring
 - Cross-day duplicate detection (attractions and Lightning Lane) and conflict detection (overlapping times, Lightning Lane vs. plan conflicts), shown as informational signals — the app never modifies your itinerary automatically
 
@@ -49,8 +55,12 @@ Tom is Disney Wait Planner's built-in assistant. Tom can:
 
 - Answer general Disney questions — parks, lands, attractions, dining, entertainment, experiences, and news, including where known attractions, dining locations, and experiences are located
 - Answer supported wait time questions
+- Use **schedule context** from My Plans: for planner days with a valid date that is today or later, Disney Wait Planner can send that day's park hours (and, for a day dated today, today's Entertainment showtimes) so Tom can reference them. This is optional and bounded — if it can't be gathered quickly, Tom is simply asked without it
+- Look up **today's Entertainment showtimes** for a park independent of your planner, via a server-to-server endpoint (`GET /api/tom/showtimes`, authenticated with `DWP_CATALOG_API_KEY`) that Tom calls with a structured park (and optionally a show name). Like all showtimes in the app, this is today-only and covers only curated, ThemeParks-mapped Entertainment
 - Answer **Planner Insights** questions: read-only, planner-aware questions and analytics about your local trip planner — what you have planned, conflicts, repeats, park assignments, and simple analytics like "which day has the most planned"
 - Hold a conversation, including natural follow-up questions
+
+When an answer uses ThemeParks.wiki schedule data, the Tom page shows a linked "Powered by ThemeParks.wiki" attribution; planner-only answers show none.
 
 Tom does **not** edit your plans, generate or optimize itineraries, reason about transportation or travel time, or make predictions/recommendations it isn't designed to support. Planner data shared with Tom is a compact, read-only summary — Tom cannot write back to your planner. See the in-app **Tom Help Guide** (`/tom/help`, linked from the Ask Tom Help modal) for the full, current list of what Tom can do.
 
@@ -60,7 +70,13 @@ Tom does **not** edit your plans, generate or optimize itineraries, reason about
 
 Live attraction wait times are powered by the Queue-Times API, accessed through a server-side proxy rather than called directly from the browser. All wait data flows through a single unified path (`liveWaitApi.ts`), which returns the same shape regardless of source and falls back to a mock dataset if live data is disabled or unavailable — so the UI never breaks on a live-data outage.
 
-A separate, server-side ThemeParks.wiki (Free API) provider foundation (`themeParksProviders.ts`, `themeParksApi.ts`) is groundwork for upcoming showtime/park-schedule features. It does not affect Queue-Times wait data, is not yet consumed by any page, and needs no environment variables. Surfaces that display ThemeParks.wiki data must show the linked attribution via `components/ThemeParksAttribution.tsx` ("Powered by ThemeParks.wiki").
+Park hours and Entertainment showtimes come from the ThemeParks.wiki (Free API), accessed only server-side (`themeParksApi.ts`; the browser never calls the provider) and normalized before use (`parkHours.ts`, `parkHoursService.ts`, `entertainmentShowtimes.ts`). It is used for:
+
+- Park hours — today's hours on Waits & Shows and exact-date hours in My Plans (`/api/park-hours`)
+- Today's Entertainment showtimes on Waits & Shows (`/api/entertainment/showtimes`)
+- Optional schedule context for Ask Tom (see above)
+
+ThemeParks.wiki does not replace Queue-Times for attraction waits, and it does not decide which attractions or Entertainment exist: the curated DWP catalog stays the canonical identity authority, and Entertainment is matched to the provider only through an explicit mapping. It needs no environment variables. Surfaces that display ThemeParks.wiki data show the linked attribution via `components/ThemeParksAttribution.tsx` ("Powered by ThemeParks.wiki").
 
 ---
 
