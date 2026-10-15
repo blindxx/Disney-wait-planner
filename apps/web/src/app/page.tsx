@@ -290,6 +290,37 @@ const RESPONSIVE_CSS = `
     .today-grid-full {
       grid-column: 1 / -1;
     }
+
+    /* Align corresponding wait cards across both columns: each column spans
+       title + up to 5 card rows of the shared grid (subgrid), so row N is the
+       same height on both sides (Top pick badge / wrapped names included).
+       Columns with fewer cards just leave trailing rows empty. */
+    .today-wait-col {
+      display: grid;
+      grid-template-rows: subgrid;
+      grid-row: span 6;
+      align-content: start;
+      row-gap: 8px;
+    }
+    .today-wait-col > .today-section-title {
+      margin-bottom: 0;
+    }
+    .today-wait-list {
+      display: contents;
+    }
+    .today-wait-list > .option-item {
+      min-width: 0;
+    }
+    .today-wait-list > .today-empty {
+      padding: 4px 0 0;
+    }
+    /* The list wrapper's bottom margin is gone with display: contents. */
+    .today-wait-col ~ .today-grid-full {
+      margin-top: 16px;
+    }
+    .today-wait-col + .today-wait-col {
+      grid-column: 2;
+    }
   }
 `;
 
@@ -701,11 +732,11 @@ export default function TodayPage() {
         )}
 
         <div className="today-grid">
-        <section>
+        <section className="today-wait-col">
         <h2 className="today-section-title">Shortest Waits Right Now</h2>
 
         {/* Best Options List */}
-        <div className="options-list">
+        <div className="options-list today-wait-list">
           {waitEmptyMessage(bestOptions.length) && (
             <div className="today-empty">{waitEmptyMessage(bestOptions.length)}</div>
           )}
@@ -767,9 +798,9 @@ export default function TodayPage() {
         </div>
         </section>
 
-        <section>
+        <section className="today-wait-col">
         <h2 className="today-section-title">Longest Waits Right Now</h2>
-        <div className="options-list">
+        <div className="options-list today-wait-list">
           {waitEmptyMessage(longestWaits.length) && (
             <div className="today-empty">{waitEmptyMessage(longestWaits.length)}</div>
           )}
