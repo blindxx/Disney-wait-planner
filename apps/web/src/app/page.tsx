@@ -45,6 +45,8 @@ import { getResortLocalDate } from "../lib/resortTime";
 import { getEntertainmentForPark } from "../lib/entertainmentSuggestions";
 import {
   FALLBACK_WAIT_LABEL,
+  describeParkOperatingStatus,
+  waitListEmptyMessage,
   NEXT_SHOWS_HEADING,
   NEXT_SHOWS_NONE_REMAINING,
   NEXT_SHOWS_SCOPE_NOTE,
@@ -530,6 +532,9 @@ export default function TodayPage() {
     () => new Map(getEntertainmentForPark(selectedPark).map((p) => [p.name, p.land])),
     [selectedPark],
   );
+  const parkStatus = describeParkOperatingStatus(parkHours, displayNow);
+  const waitEmptyMessage = (rowCount: number) =>
+    waitListEmptyMessage({ waitsLoaded, rowCount, parkConfirmedClosed: parkStatus.confirmedClosed });
   const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
   const themeParksPresented = parkHoursPresented || nextShows.presentsProviderData;
 
@@ -667,6 +672,15 @@ export default function TodayPage() {
 
         {/* Today's park hours (selected park, resort-local today) */}
         {ready && <ParkHoursLine data={parkHours} />}
+        {ready && parkStatus.text && (
+          <div
+            aria-label="Park status"
+            style={{ margin: "-6px 0 12px", fontSize: "13px", fontWeight: 600, color: parkStatus.kind === "open" ? "#15803d" : "#6b7280" }}
+          >
+            {parkStatus.text}
+            {parkStatus.stale && <span style={{ fontWeight: 400, color: "#9ca3af" }}> (may be outdated)</span>}
+          </div>
+        )}
 
         <div className="today-grid">
         <section>
@@ -674,8 +688,8 @@ export default function TodayPage() {
 
         {/* Best Options List */}
         <div className="options-list">
-          {waitsLoaded && bestOptions.length === 0 && (
-            <div className="today-empty">No operating wait times right now.</div>
+          {waitEmptyMessage(bestOptions.length) && (
+            <div className="today-empty">{waitEmptyMessage(bestOptions.length)}</div>
           )}
           {bestOptions.map((attraction, index) => {
             const isTopPick = index === 0;
@@ -738,8 +752,8 @@ export default function TodayPage() {
         <section>
         <h2 className="today-section-title">Longest Waits Right Now</h2>
         <div className="options-list">
-          {waitsLoaded && longestWaits.length === 0 && (
-            <div className="today-empty">No operating wait times right now.</div>
+          {waitEmptyMessage(longestWaits.length) && (
+            <div className="today-empty">{waitEmptyMessage(longestWaits.length)}</div>
           )}
           {longestWaits.map((attraction) => (
             <div key={attraction.id} className="option-item">
