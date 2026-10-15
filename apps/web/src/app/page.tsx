@@ -7,10 +7,17 @@
  * Shows lowest wait times for operating attractions only.
  * Down/Closed attractions are filtered out of the best options list.
  *
+ * Phase 12.10 — compact daily park overview for the selected park:
+ *   park hours (/api/park-hours), lowest + highest 5 operating waits (same
+ *   Queue-Times dataset), and the next 3 upcoming Entertainment performances
+ *   (/api/entertainment/showtimes). Rankings/show selection live in
+ *   lib/todayDashboard.ts; hours/showtimes interpretation stays in
+ *   parkHours.ts / entertainmentShowtimes.ts.
+ *
  * Mobile-first design:
  *   - Park selector (2 big buttons)
- *   - Current time indicator
- *   - 5 best options with visual priority cues (short list, minimal scrolling)
+ *   - Current time indicator + today's park hours
+ *   - Best options / Longest waits / Next up (short lists, minimal scrolling)
  *   - Primary action: "View Waits & Shows"
  */
 
@@ -20,6 +27,23 @@ import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-pl
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
 import { getWaitTextColor } from "../lib/waitBadge";
 import ResortClock from "../components/ResortClock";
+import ParkHoursLine from "../components/ParkHoursLine";
+import ThemeParksAttribution from "../components/ThemeParksAttribution";
+import {
+  describeParkHours,
+  parkHoursForDisplay,
+  resolveParkHoursResponse,
+  type ParkHours,
+} from "../lib/parkHours";
+import {
+  PARTIAL_SHOWTIMES_NOTE,
+  resolveShowtimesResponse,
+  showtimesForDisplay,
+  type ParkEntertainmentShowtimes,
+} from "../lib/entertainmentShowtimes";
+import { getResortLocalDate } from "../lib/resortTime";
+import { getEntertainmentForPark } from "../lib/entertainmentSuggestions";
+import { rankHighestWaits, rankLowestWaits, selectNextShows } from "../lib/todayDashboard";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
 import {
   bootstrapProfiles,
@@ -58,8 +82,6 @@ const RESORT_PARKS: Record<ResortId, { id: ParkId; label: string }[]> = {
 };
 
 
-const BEST_OPTIONS_COUNT = 5;
-
 // ============================================
 // RESPONSIVE CSS
 // ============================================
@@ -69,6 +91,8 @@ const RESPONSIVE_CSS = `
   .today-page {
     max-width: 600px;
     margin: 0 auto;
+    width: 100%;
+    box-sizing: border-box;
     padding: 16px;
     min-height: 100vh;
     display: flex;
@@ -100,8 +124,8 @@ const RESPONSIVE_CSS = `
   .options-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    margin-bottom: 20px;
+    gap: 8px;
+    margin-bottom: 16px;
   }
 
   .option-item {
@@ -109,11 +133,11 @@ const RESPONSIVE_CSS = `
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 14px 16px;
+    padding: 10px 14px;
     background-color: #fff;
     border: 1px solid #e5e7eb;
     border-radius: 10px;
-    min-height: 72px;
+    min-height: 56px;
     position: relative;
   }
 
@@ -147,7 +171,7 @@ const RESPONSIVE_CSS = `
   }
 
   .wait-number {
-    font-size: 32px;
+    font-size: 28px;
     font-weight: 800;
     line-height: 1;
     font-variant-numeric: tabular-nums;
@@ -184,9 +208,52 @@ const RESPONSIVE_CSS = `
     background-color: #1d4ed8;
   }
 
+  .today-section-title {
+    font-size: 17px;
+    font-weight: 600;
+    color: #111827;
+    margin: 0 0 8px;
+  }
+
+  .today-empty {
+    font-size: 14px;
+    color: #6b7280;
+    padding: 4px 0 12px;
+  }
+
+  .show-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    background-color: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+  }
+
+  /* Dashboard sections stack on mobile; two columns on desktop. */
+  .today-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    column-gap: 20px;
+  }
+
   @media (min-width: 768px) {
     .today-page {
       padding: 24px;
+    }
+  }
+
+  @media (min-width: 900px) {
+    .today-page {
+      max-width: 960px;
+    }
+    .today-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+    .today-grid-full {
+      grid-column: 1 / -1;
     }
   }
 `;
@@ -206,6 +273,8 @@ export default function TodayPage() {
   const [settingsResort, setSettingsResort] = useState<ResortId>("DLR");
   const [settingsPark, setSettingsPark] = useState<ParkId>("disneyland");
   const [attractions, setAttractions] = useState<AttractionWait[]>([]);
+  // Park the stored attractions belong to; data from another park is never rendered.
+  const [attractionsPark, setAttractionsPark] = useState<ParkId | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const [dataSource, setDataSource] = useState<"live" | "mock">("mock");
   const [activeProfileName, setActiveProfileName] = useState<string | null>(null);
@@ -301,31 +370,35 @@ export default function TodayPage() {
     } catch {}
   }
 
-  // Fetch wait data for the selected resort+park on mount and on change.
-  useEffect(() => {
-    let cancelled = false;
-    getWaitDataset({ resortId: selectedResort, parkId: selectedPark }).then(
+  // Latest-request-wins for Queue-Times data: every load (park change, tab
+  // focus, interval) takes a token and only the newest may commit, so a slow
+  // response for a previously selected park can never overwrite current data.
+  // Responses are additionally checked against the park they were requested for.
+  const waitsTokenRef = useRef(0);
+  const loadWaits = useCallback((resortId: ResortId, parkId: ParkId) => {
+    const token = ++waitsTokenRef.current;
+    getWaitDataset({ resortId, parkId }).then(
       ({ data, dataSource: ds, lastUpdated: lu }) => {
-        if (!cancelled) {
-          setAttractions(data);
-          setDataSource(ds);
-          setLastUpdated(lu);
-        }
-      },
-    );
-    return () => { cancelled = true; };
-  }, [selectedResort, selectedPark]);
-
-  // Silent refresh — reads current resort+park from refs.
-  const refreshData = useCallback(() => {
-    getWaitDataset({ resortId: selectedResortRef.current, parkId: selectedParkRef.current }).then(
-      ({ data, dataSource: ds, lastUpdated: lu }) => {
+        if (token !== waitsTokenRef.current) return;
+        if (selectedResortRef.current !== resortId || selectedParkRef.current !== parkId) return;
         setAttractions(data);
+        setAttractionsPark(parkId);
         setDataSource(ds);
         setLastUpdated(lu);
       },
     );
-  }, []); // stable — resort+park read from refs
+  }, []);
+
+  // Fetch wait data for the selected resort+park on mount and on change.
+  useEffect(() => {
+    loadWaits(selectedResort, selectedPark);
+    return () => { waitsTokenRef.current++; }; // invalidate in-flight on change/unmount
+  }, [selectedResort, selectedPark, loadWaits]);
+
+  // Silent refresh — reads current resort+park from refs.
+  const refreshData = useCallback(() => {
+    loadWaits(selectedResortRef.current, selectedParkRef.current);
+  }, [loadWaits]); // stable — resort+park read from refs
 
   // Phase 6.3 — Tab focus refresh (primary trigger).
   // Fires once when the user returns to this tab; TTL cache in getWaitDataset
@@ -352,16 +425,78 @@ export default function TodayPage() {
     return () => clearInterval(id);
   }, [refreshData]);
 
-  // Get best options: lowest wait times for selected park.
-  // Excludes Down/Closed attractions — only OPERATING with a valid wait time.
-  // If fewer than BEST_OPTIONS_COUNT qualify, show fewer (no backfill).
-  const bestOptions = useMemo(() => {
-    return attractions
-      .filter((a) => a.status === "OPERATING")
-      .filter((a) => a.waitMins != null)
-      .sort((a, b) => (a.waitMins ?? 999) - (b.waitMins ?? 999))
-      .slice(0, BEST_OPTIONS_COUNT);
-  }, [attractions]);
+  // Ranked lists (lib/todayDashboard.ts): OPERATING with a valid wait only.
+  // If fewer than 5 (or 10) qualify, lists are shorter and may overlap (no backfill).
+  const parkAttractions = attractionsPark === selectedPark ? attractions : [];
+  const waitsLoaded = attractionsPark === selectedPark;
+  const bestOptions = useMemo(() => rankLowestWaits(parkAttractions), [parkAttractions]);
+  const longestWaits = useMemo(() => rankHighestWaits(parkAttractions), [parkAttractions]);
+
+  // Display clock (15 s, same cadence as ResortClock): re-evaluates passed
+  // performances and the resort-local date. Display-only — never fetches.
+  const [displayNow, setDisplayNow] = useState(() => new Date());
+  useEffect(() => {
+    const tick = () => setDisplayNow(new Date());
+    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+    tick();
+    const id = setInterval(() => { if (document.visibilityState === "visible") tick(); }, 15_000);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+  // Resort-local date: crossing midnight changes it, which refetches schedule data once.
+  const resortToday = getResortLocalDate(selectedResort, displayNow);
+
+  // Schedule data (ThemeParks.wiki via DWP routes). Each request is
+  // latest-request-wins (token) and dropped on park/day change (cancelled);
+  // failure degrades to "unavailable" and never keeps previous data.
+  const [showtimesRaw, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
+  const [parkHoursRaw, setParkHours] = useState<ParkHours | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let latestShowtimes = 0;
+    let latestHours = 0;
+    const parkId = selectedPark;
+    const loadShowtimes = () => {
+      const token = ++latestShowtimes;
+      fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(parkId)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((body) => { if (!cancelled && token === latestShowtimes) setShowtimes(resolveShowtimesResponse(parkId, body)); });
+    };
+    const loadHours = () => {
+      const token = ++latestHours;
+      fetch(`/api/park-hours?parkId=${encodeURIComponent(parkId)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((body) => { if (!cancelled && token === latestHours) setParkHours(resolveParkHoursResponse(parkId, body)); });
+    };
+    const loadAll = () => { loadShowtimes(); loadHours(); };
+    setShowtimes(null);
+    setParkHours(null);
+    loadAll();
+    const onVisible = () => { if (document.visibilityState === "visible") loadAll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (document.visibilityState === "visible") loadAll(); }, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [ready, selectedPark, resortToday]);
+
+  // Never show data retained from another park or a previous resort-local day.
+  const showtimesCurrent = showtimesForDisplay(showtimesRaw, displayNow);
+  const showtimes = showtimesCurrent && showtimesCurrent.parkId === selectedPark ? showtimesCurrent : null;
+  const parkHoursCurrent = parkHoursForDisplay(parkHoursRaw, displayNow);
+  const parkHours = parkHoursCurrent && parkHoursCurrent.parkId === selectedPark ? parkHoursCurrent : null;
+  const nextShows = selectNextShows(showtimes, displayNow);
+  const landByShow = useMemo(
+    () => new Map(getEntertainmentForPark(selectedPark).map((p) => [p.name, p.land])),
+    [selectedPark],
+  );
+  const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
+  const themeParksPresented = parkHoursPresented || nextShows.presentsProviderData;
 
   return (
     <>
@@ -495,20 +630,18 @@ export default function TodayPage() {
           </>
         )}
 
-        {/* Section Header */}
-        <h2
-          style={{
-            fontSize: "18px",
-            fontWeight: 600,
-            color: "#111827",
-            marginBottom: "12px",
-          }}
-        >
-          Best options right now
-        </h2>
+        {/* Today's park hours (selected park, resort-local today) */}
+        {ready && <ParkHoursLine data={parkHours} />}
+
+        <div className="today-grid">
+        <section>
+        <h2 className="today-section-title">Best options right now</h2>
 
         {/* Best Options List */}
         <div className="options-list">
+          {waitsLoaded && bestOptions.length === 0 && (
+            <div className="today-empty">No operating wait times right now.</div>
+          )}
           {bestOptions.map((attraction, index) => {
             const isTopPick = index === 0;
             // Color code wait time — thresholds centralized in waitBadge.ts
@@ -562,6 +695,73 @@ export default function TodayPage() {
             );
           })}
         </div>
+        </section>
+
+        <section>
+        <h2 className="today-section-title">Longest waits right now</h2>
+        <div className="options-list">
+          {waitsLoaded && longestWaits.length === 0 && (
+            <div className="today-empty">No operating wait times right now.</div>
+          )}
+          {longestWaits.map((attraction) => (
+            <div key={attraction.id} className="option-item">
+              <div style={{ flex: "1 1 0%", minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "#111827", wordWrap: "break-word" }}>
+                  {attraction.name}
+                </div>
+                {attraction.land && (
+                  <div style={{ fontSize: "12px", color: "#9ca3af", marginTop: "2px", lineHeight: "1.3" }}>
+                    {attraction.land}
+                  </div>
+                )}
+              </div>
+              <div className="wait-block">
+                <div className="wait-number" style={{ color: getWaitTextColor(attraction.waitMins ?? 0) }}>
+                  {attraction.waitMins}
+                </div>
+                <div className="wait-label">min</div>
+              </div>
+            </div>
+          ))}
+        </div>
+        </section>
+
+        <section className="today-grid-full">
+        <h2 className="today-section-title">Next up: Entertainment</h2>
+        <div className="options-list">
+          {nextShows.state === "loading" && <div className="today-empty" aria-hidden style={{ minHeight: 20 }} />}
+          {nextShows.state === "upcoming" &&
+            nextShows.performances.map((p) => (
+              <div key={`${p.dwpName}|${p.startMs}`} className="show-item">
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "#111827", wordWrap: "break-word" }}>
+                    {p.dwpName}
+                  </div>
+                  {landByShow.get(p.dwpName) && (
+                    <div style={{ fontSize: "12px", color: "#9ca3af", marginTop: "2px", lineHeight: "1.3" }}>
+                      {landByShow.get(p.dwpName)}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontWeight: 700, fontSize: "16px", color: "#374151", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
+                  {p.localTime}
+                </div>
+              </div>
+            ))}
+          {nextShows.state === "upcoming" && nextShows.partial && (
+            <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+              {PARTIAL_SHOWTIMES_NOTE}
+              {showtimes?.stale && " (may be outdated)"}
+            </div>
+          )}
+          {nextShows.state === "upcoming" && !nextShows.partial && showtimes?.stale && (
+            <div style={{ fontSize: "12px", color: "#9ca3af" }}>Showtimes may be out of date</div>
+          )}
+          {nextShows.state === "none_remaining" && <div className="today-empty">No more showtimes today</div>}
+          {nextShows.state === "unavailable" && <div className="today-empty">Showtimes unavailable</div>}
+        </div>
+        </section>
+        </div>
 
         {/* Primary Action Button */}
         <Link href="/wait-times" className="primary-btn">
@@ -585,6 +785,17 @@ export default function TodayPage() {
               })
             : "\u2014"}
         </div>
+
+        {/* ThemeParks.wiki attribution — owed whenever its park hours or showtimes are presented */}
+        {themeParksPresented && (
+          <div style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af", textAlign: "right" }}>
+            {parkHoursPresented && nextShows.presentsProviderData ? "Park hours and showtimes" : parkHoursPresented ? "Park hours" : "Showtimes"} powered by{" "}
+            <ThemeParksAttribution
+              linkOnly
+              style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
+            />
+          </div>
+        )}
       </div>
     </>
   );
