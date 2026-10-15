@@ -120,6 +120,28 @@ const RESPONSIVE_CSS = `
     min-height: 48px;
   }
 
+  /* 4-park resorts (WDW): 2x2 grid on mobile, single row from tablet up.
+     Equal-width cells keep sizing consistent and labels fully readable. */
+  .park-selector-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: 1fr; /* both rows equal height even if a label wraps */
+  }
+  .park-selector-grid .park-btn {
+    padding: 10px 6px;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+  @media (min-width: 768px) {
+    .park-selector-grid {
+      display: flex;
+    }
+    .park-selector-grid .park-btn {
+      padding: 12px 16px;
+      font-size: 16px;
+    }
+  }
+
   /* Best options list */
   .options-list {
     display: flex;
@@ -554,7 +576,7 @@ export default function TodayPage() {
             </div>
 
             {/* Park Selector */}
-            <div className="park-selector">
+            <div className={`park-selector${RESORT_PARKS[selectedResort].length > 2 ? " park-selector-grid" : ""}`}>
               {RESORT_PARKS[selectedResort].map(({ id: parkId, label }) => (
                 <button
                   key={parkId}
@@ -635,7 +657,7 @@ export default function TodayPage() {
 
         <div className="today-grid">
         <section>
-        <h2 className="today-section-title">Best options right now</h2>
+        <h2 className="today-section-title">Shortest Waits Right Now</h2>
 
         {/* Best Options List */}
         <div className="options-list">
@@ -698,7 +720,7 @@ export default function TodayPage() {
         </section>
 
         <section>
-        <h2 className="today-section-title">Longest waits right now</h2>
+        <h2 className="today-section-title">Longest Waits Right Now</h2>
         <div className="options-list">
           {waitsLoaded && longestWaits.length === 0 && (
             <div className="today-empty">No operating wait times right now.</div>
