@@ -157,12 +157,6 @@ export interface ParkHoursSources {
   currentMonth?: ThemeParksResult<ThemeParksSchedule>;
   /** Following resort-local month (next opening past the current month); undefined = not requested. */
   nextMonth?: ThemeParksResult<ThemeParksSchedule>;
-  /**
-   * Month containing resort-local yesterday, requested only while the park
-   * isn't yet open today and the default window doesn't cover yesterday. Used
-   * solely to detect/rule out an overnight window — never for closure bracketing.
-   */
-  previousDay?: ThemeParksResult<ThemeParksSchedule>;
 }
 
 // ============================================
@@ -241,33 +235,6 @@ export function isClosureCandidate(
 }
 
 /**
- * True when yesterday's regular hours could still be running and the fetched
- * data can't say: the park isn't known to be open yet today (no OPERATING
- * window has started), and no fetched entry reaches back to yesterday. The
- * service then asks for the month containing yesterday (cached upstream).
- */
-export function needsPreviousDayCheck(
-  parkId: ParkId,
-  src: ParkHoursSources,
-  instant: Date,
-): boolean {
-  if (!src.primary.ok) return false;
-  const resort = resortOf(parkId);
-  const localDate = getResortLocalDate(resort, instant);
-  const yesterday = addDaysToLocalDate(localDate, -1);
-  if (!yesterday) return false;
-  const results = [src.primary, src.currentMonth, src.nextMonth].filter(
-    (r): r is Extract<ThemeParksResult<ThemeParksSchedule>, { ok: true }> => !!r && r.ok,
-  );
-  if (results.some((r) => r.data.entries.some((e) => e.date <= yesterday))) return false;
-  const nowMs = instant.getTime();
-  const startedToday = results.some((r) =>
-    r.data.entries.some((e) => e.type === "OPERATING" && e.date === localDate && Date.parse(e.openingTime) <= nowMs),
-  );
-  return !startedToday;
-}
-
-/**
  * Pure: turn provider schedule result(s) for a park into the normalized
  * contract. `instant` is "now".
  */
@@ -324,23 +291,25 @@ export function normalizeParkHours(
         windows: operatingAll.filter((w) => w.date === nextDate),
       }
     : null;
-  // Overnight carry-over: earlier-dated regular windows still open now. The
-  // optional previous-day month contributes windows but never alters the
-  // closed/bracketing logic below.
-  const prev = src.previousDay && src.previousDay.ok ? src.previousDay : null;
-  const prevWindows = prev ? prev.data.entries.map((e) => toWindow(resort, e)) : [];
+  // Overnight carry-over, from the schedule data this request already needed
+  // (no extra provider lookups). `in_progress`: an earlier-dated regular window
+  // is still open (its stale provenance is already in `common.stale`, since the
+  // window comes from `used`). `none` requires VERIFIED coverage of yesterday:
+  // fresh, complete data fetched today that either holds a regular window dated
+  // yesterday (so its end is known) or brackets yesterday with regular windows
+  // before and after it (the park did not operate yesterday). An empty or
+  // today-only schedule proves nothing → `unverified`.
   const yesterday = addDaysToLocalDate(localDate, -1);
-  const inProgress = [...windows, ...prevWindows]
-    .filter((w) => w.type === "OPERATING" && w.date < localDate && Date.parse(w.openingTime) <= nowMs && nowMs < Date.parse(w.closingTime))
-    .sort(byOpening);
-  const prevTrusted =
-    !!prev && prev.meta.origin !== "stale" && prev.data.droppedEntries === 0 &&
-    (prev.data.timeZone === null || prev.data.timeZone === RESORT_TIME_ZONES[resort]);
-  const primaryCoversYesterday = !stale && dropped === 0 && used.some((r) => r.data.entries.some((e) => yesterday !== null && e.date <= yesterday));
+  const inProgress = operatingAll.filter((w) => w.date < localDate && Date.parse(w.openingTime) <= nowMs && nowMs < Date.parse(w.closingTime));
+  const fetchedTodayAll = used.every((r) => getResortLocalDate(resort, new Date(r.meta.fetchedAt)) === localDate);
+  const coversYesterday =
+    yesterday !== null && !stale && dropped === 0 && fetchedTodayAll &&
+    (operatingAll.some((w) => w.date === yesterday) ||
+      (operatingAll.some((w) => w.date < yesterday) && operatingAll.some((w) => w.date > yesterday)));
   const overnight: ParkOvernightHours =
     inProgress.length > 0
       ? { state: "in_progress", windows: inProgress }
-      : primaryCoversYesterday || prevTrusted
+      : coversYesterday
         ? { state: "none", windows: [] }
         : { state: "unverified", windows: [] };
   const result = { ...common, droppedEntries: dropped, operating, additional, nextOpening, overnight };
@@ -788,31 +757,37 @@ export function runDevParkHoursCases(): string[] {
   {
     const AM = T("2026-10-01T04:30:00Z"); // 12:30 AM EDT Oct 1
     const lateOp = op("2026-09-30", "09:00", "01:00", "-04:00", "2026-10-01");
+    const endedOp = op("2026-09-30", "09:00", "23:00");
     const today = op("2026-10-01", "09:00", "22:00");
     let o = normalizeParkHours("mk", { primary: ok(sched([lateOp, today]), AM.getTime()) }, AM);
-    check("overnight: yesterday's window still running → in_progress", o.overnight?.state === "in_progress" && o.overnight.windows[0].closes === "1:00 AM" && o.operating.length === 1);
+    check("overnight: yesterday's window still running → in_progress", o.overnight?.state === "in_progress" && o.overnight.windows[0].closes === "1:00 AM" && o.operating.length === 1 && !o.stale);
     o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()) }, AM);
-    check("overnight: default window starts today, no extra data → unverified", o.overnight?.state === "unverified");
-    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), previousDay: ok(sched([op("2026-09-30", "09:00", "23:00")]), AM.getTime()) }, AM);
-    check("overnight: previous-day month shows it already closed → none", o.overnight?.state === "none");
-    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), previousDay: ok(sched([lateOp]), AM.getTime()) }, AM);
-    check("overnight: previous-day month window crossing midnight → in_progress", o.overnight?.state === "in_progress");
-    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), previousDay: ok(sched([lateOp]), AM.getTime(), "stale") }, AM);
-    check("overnight: stale previous-day data cannot rule out carry-over beyond an in-progress window", o.overnight?.state === "in_progress");
-    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), previousDay: ok(sched([op("2026-09-30", "09:00", "23:00")]), AM.getTime(), "stale") }, AM);
-    check("overnight: stale previous-day data cannot verify none → unverified", o.overnight?.state === "unverified");
-    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), previousDay: ok(sched([op("2026-09-30", "09:00", "23:00")], "America/Los_Angeles"), AM.getTime()) }, AM);
-    check("overnight: wrong-timezone previous-day data → unverified", o.overnight?.state === "unverified");
+    check("overnight: default window starts today → unverified (no extra lookup assumed)", o.overnight?.state === "unverified");
+    o = normalizeParkHours("mk", { primary: ok(sched([]), AM.getTime()) }, AM);
+    check("overnight: empty fresh schedule proves nothing → unverified", o.overnight?.state === "unverified");
+    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), currentMonth: ok(sched([]), AM.getTime()) }, AM);
+    check("overnight: empty month response proves nothing → unverified", o.overnight?.state === "unverified");
+    o = normalizeParkHours("mk", { primary: ok(sched([endedOp, today]), AM.getTime()) }, T("2026-10-01T05:30:00Z"));
+    check("overnight: yesterday's window known and ended → none", o.overnight?.state === "none");
+    o = normalizeParkHours("mk", { primary: ok(sched([op("2026-09-29", "09:00", "22:00"), today]), AM.getTime()) }, AM);
+    check("overnight: entries before and after yesterday bracket it (park closed) → none", o.overnight?.state === "none");
+    o = normalizeParkHours("mk", { primary: ok(sched([op("2026-09-29", "09:00", "22:00")]), AM.getTime()) }, AM);
+    check("overnight: only earlier entries, nothing after → unverified", o.overnight?.state === "unverified");
+    o = normalizeParkHours("mk", { primary: ok(sched([endedOp, today]), AM.getTime(), "stale") }, T("2026-10-01T05:30:00Z"));
+    check("overnight: stale data cannot verify none", o.overnight?.state === "unverified" && o.stale);
+    o = normalizeParkHours("mk", { primary: ok(sched([endedOp, today], "America/New_York", 1), AM.getTime()) }, T("2026-10-01T05:30:00Z"));
+    check("overnight: dropped entries cannot verify none", o.overnight?.state === "unverified");
+    o = normalizeParkHours("mk", { primary: ok(sched([endedOp, today]), T("2026-09-30T20:00:00Z").getTime()) }, T("2026-10-01T05:30:00Z"));
+    check("overnight: payload fetched on a previous resort-local day cannot verify none", o.overnight?.state === "unverified");
+    // Stale provenance propagates when stale data establishes an overnight window
+    o = normalizeParkHours("mk", { primary: ok(sched([lateOp, today]), AM.getTime(), "stale") }, AM);
+    check("overnight: stale data establishing an in-progress window is flagged stale", o.overnight?.state === "in_progress" && o.stale);
+    o = normalizeParkHours("mk", { primary: ok(sched([today]), AM.getTime()), currentMonth: ok(sched([lateOp]), AM.getTime(), "stale") }, AM);
+    check("overnight: stale month data contributing the window flags stale", o.overnight?.state === "in_progress" && o.stale);
     const lateTicket = { ...extra("2026-09-30", "TICKETED_EVENT", "After Hours", "20:00", "23:59"), closingTime: "2026-10-01T02:00:00-04:00" };
     o = normalizeParkHours("mk", { primary: ok(sched([lateTicket, today]), AM.getTime()) }, AM);
-    check("overnight: ticketed-only overnight event is not regular hours", o.overnight?.state === "none" && o.overnight.windows.length === 0);
-    o = normalizeParkHours("mk", { primary: ok(sched([lateOp, today]), AM.getTime()) }, T("2026-10-01T05:30:00Z"));
-    check("overnight: after the window closed, covered data → none", o.overnight?.state === "none");
+    check("overnight: ticketed-only overnight event is not regular hours and verifies nothing", o.overnight?.state === "unverified" && o.overnight.windows.length === 0);
     check("overnight: failure result defaults to unverified", normalizeParkHours("mk", { primary: fail }, AM).overnight?.state === "unverified");
-    check("needsPreviousDayCheck: pre-open, data starts today", needsPreviousDayCheck("mk", { primary: ok(sched([today]), AM.getTime()) }, AM));
-    check("needsPreviousDayCheck: not when data reaches yesterday", !needsPreviousDayCheck("mk", { primary: ok(sched([lateOp, today]), AM.getTime()) }, AM));
-    check("needsPreviousDayCheck: not once today's window has started", !needsPreviousDayCheck("mk", { primary: ok(sched([today]), NOW.getTime()) }, NOW));
-    check("needsPreviousDayCheck: not on primary failure", !needsPreviousDayCheck("mk", { primary: fail }, AM));
   }
 
   // ---- closed: needs bracket (month) data. Today Oct 15 has no entries, Oct 14 and 16 do.

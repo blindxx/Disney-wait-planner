@@ -356,6 +356,8 @@ export function runDevTodayDashboardCases(): string[] {
     check("exactly at overnight close: not carried (closed · opens)", r.kind === "before_open");
     r = st(hours([reg], [], { overnight: NONE }), "2026-10-01T01:30:00-04:00");
     check("after overnight window ended, verified: Closed · opens 9:00 AM", r.kind === "before_open" && r.text === "Closed \u00b7 opens 9:00 AM");
+    r = st(hours([reg], [], { overnight: inProg, stale: true }), "2026-10-01T00:30:00-04:00");
+    check("stale overnight window: Open still carries the stale warning flag", r.kind === "open" && r.stale);
     r = st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00");
     check("overnight unverified before opening: unavailable, NOT closed", r.kind === "unknown" && r.text === "Status unavailable" && !r.confirmedClosed);
     r = st(hours([reg], [], { overnight: undefined }), "2026-10-01T00:30:00-04:00");

@@ -15,11 +15,10 @@
 
 import type { ParkId } from "@disney-wait-planner/shared";
 import { PARK_TO_RESORT } from "./parkMetadata";
-import { addDaysToLocalDate, getResortLocalDate } from "./resortTime";
+import { getResortLocalDate } from "./resortTime";
 import {
   currentResortMonth,
   isClosureCandidate,
-  needsPreviousDayCheck,
   nextResortMonth,
   normalizeParkHours,
   normalizeParkHoursForDate,
@@ -56,21 +55,6 @@ export async function getParkHours(
     src.currentMonth = await getSchedule(id, currentResortMonth(localDate));
     if (src.currentMonth.ok && normalizeParkHours(parkId, src, now()).nextOpening === null) {
       src.nextMonth = await getSchedule(id, nextResortMonth(localDate));
-    }
-  }
-  // Overnight check: while the park isn't open yet today and the default window
-  // doesn't reach back to yesterday, ask the (cached) provider month containing
-  // yesterday so a window crossing midnight can be detected or ruled out.
-  if (needsPreviousDayCheck(parkId, src, now())) {
-    const today = getResortLocalDate(resort, now());
-    const yesterday = addDaysToLocalDate(today, -1);
-    if (yesterday) {
-      const m = currentResortMonth(yesterday);
-      const cur = currentResortMonth(today);
-      src.previousDay =
-        src.currentMonth && m.year === cur.year && m.month === cur.month
-          ? src.currentMonth
-          : await getSchedule(id, m);
     }
   }
   return normalizeParkHours(parkId, src, now());
@@ -142,13 +126,13 @@ export async function runDevParkHoursServiceCases(): Promise<string[]> {
   o = await run("2026-10-15T15:00:00Z", { default: [op("2026-10-16")] });
   check("service: month follow-up failure → unknown, not Closed", o.r.status === "unknown");
 
-  // Overnight check: before opening with a today-only default window, the month containing yesterday is asked once.
-  o = await run("2026-10-15T04:30:00Z", { default: [op("2026-10-15")], "2026-10": [op("2026-10-14")] });
-  check("service: pre-open adds the previous-day month (same month)", o.asked.join() === "mk:default,mk:2026-10" && o.r.overnight?.state === "none");
+  // Provider-request boundary: pre-open Today overnight checks add NO monthly lookups.
+  o = await run("2026-10-15T04:30:00Z", { default: [op("2026-10-15"), op("2026-10-16")], "2026-10": [op("2026-10-14")] });
+  check("service: pre-open normal day stays one default-window call", o.asked.join() === "mk:default" && o.r.overnight?.state === "unverified");
   o = await run("2026-10-01T04:30:00Z", { default: [op("2026-10-01")], "2026-09": [op("2026-09-30")] });
-  check("service: first of month asks the previous month", o.asked.join() === "mk:default,mk:2026-09" && o.r.overnight?.state === "none");
-  o = await run("2026-10-01T04:30:00Z", { default: [op("2026-10-01")] });
-  check("service: previous-day failure → overnight unverified, hours intact", o.r.overnight?.state === "unverified" && o.r.status === "hours");
+  check("service: first of month pre-open adds no previous-month call", o.asked.join() === "mk:default");
+  o = await run("2026-10-15T15:00:00Z", { default: [op("2026-10-16")], "2026-10": [op("2026-10-14"), op("2026-10-16")] });
+  check("service: closure follow-up month is reused as overnight evidence (no extra call)", o.asked.join() === "mk:default,mk:2026-10" && o.r.overnight?.state === "none");
 
   o = await run("2026-10-15T15:00:00Z", {});
   check("service: primary failure → unavailable, no follow-ups", o.r.status === "unavailable" && o.asked.length === 1);
