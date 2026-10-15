@@ -28,6 +28,33 @@ export function isRankableWait(a: AttractionWait): boolean {
   return a.status === "OPERATING" && typeof a.waitMins === "number" && Number.isFinite(a.waitMins) && a.waitMins >= 0;
 }
 
+/** True when the displayed wait is DWP mock/fallback, per the explicit `waitSource` provenance field (never inferred). */
+export function isFallbackWait(a: AttractionWait): boolean {
+  return a.waitSource === "fallback";
+}
+
+/**
+ * Attractions eligible for the Today rankings. When the dataset is live, a
+ * partial Queue-Times payload still carries unmatched catalog rides with
+ * fallback (mock) waits; those are NOT confirmed live and must not be ranked
+ * (or shown) as the park's current shortest/longest wait, so only
+ * non-fallback rows qualify. In mock mode (`dataSource: "mock"`) everything is
+ * fallback by definition, so all rows stay eligible — the rows are labelled
+ * "Fallback wait · not live" by the page and the footer already says Mock.
+ */
+export function selectRankableAttractions(
+  attractions: AttractionWait[],
+  dataSource: "live" | "mock",
+): AttractionWait[] {
+  return dataSource === "live" ? attractions.filter((a) => !isFallbackWait(a)) : attractions;
+}
+
+/** Copy for the Entertainment section: scoped to DWP's curated shows, never "all park entertainment". */
+export const NEXT_SHOWS_HEADING = "Next Up: Curated Shows";
+export const NEXT_SHOWS_SCOPE_NOTE = "DWP-curated shows with posted times \u2014 not all park entertainment.";
+export const NEXT_SHOWS_NONE_REMAINING = "No more curated showtimes today";
+export const FALLBACK_WAIT_LABEL = "Fallback wait \u00b7 not live";
+
 /** Lowest operating waits, ascending (stable: dataset order breaks ties). */
 export function rankLowestWaits(attractions: AttractionWait[], count = TODAY_LIST_COUNT): AttractionWait[] {
   return attractions.filter(isRankableWait).sort((a, b) => (a.waitMins as number) - (b.waitMins as number)).slice(0, count);
@@ -119,8 +146,8 @@ export function runDevTodayDashboardCases(): string[] {
   const failures: string[] = [];
   const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
 
-  const ride = (id: string, waitMins: number | null | undefined, status: string = "OPERATING"): AttractionWait =>
-    ({ id, name: id, waitMins, status } as unknown as AttractionWait);
+  const ride = (id: string, waitMins: number | null | undefined, status: string = "OPERATING", waitSource: string = "live"): AttractionWait =>
+    ({ id, name: id, waitMins, status, waitSource } as unknown as AttractionWait);
   const ids = (l: AttractionWait[]) => l.map((a) => a.id).join();
 
   // Rankings
@@ -142,6 +169,24 @@ export function runDevTodayDashboardCases(): string[] {
     check("7 rides: lists overlap, each 5", lo.length === 5 && hi.length === 5 && lo.some((a) => hi.includes(a)));
     check("empty / none operating", rankLowestWaits([]).length === 0 && rankHighestWaits([ride("c", 5, "CLOSED")]).length === 0);
     check("walk-on 0 min is valid", ids(rankLowestWaits([ride("w", 0), ride("v", 5)])) === "w,v");
+  }
+
+  // Regression (Codex P2): fallback waits are never ranked as confirmed live.
+  {
+    const mixed = [
+      ride("liveA", 40), ride("liveB", 25), ride("liveC", 70),
+      ride("fbLow", 1, "OPERATING", "fallback"), ride("fbHigh", 999, "OPERATING", "fallback"),
+    ];
+    const live = selectRankableAttractions(mixed, "live");
+    check("live dataset: fallback rows excluded", ids(live) === "liveA,liveB,liveC");
+    check("shortest list never contains fallback", ids(rankLowestWaits(live)) === "liveB,liveA,liveC");
+    check("longest list never contains fallback", ids(rankHighestWaits(live)) === "liveC,liveA,liveB");
+    check("live-sourced 0-minute wait is kept", ids(selectRankableAttractions([ride("z", 0), ride("fb", 5, "OPERATING", "fallback")], "live")) === "z");
+    check("missing waitSource (older cache) is not treated as fallback", ids(selectRankableAttractions([{ id: "old", name: "old", waitMins: 10, status: "OPERATING" } as unknown as AttractionWait], "live")) === "old");
+    const mock = selectRankableAttractions(mixed, "mock");
+    check("mock mode: all rows stay eligible and ranked", mock.length === 5 && ids(rankLowestWaits(mock)).startsWith("fbLow") && ids(rankHighestWaits(mock)).startsWith("fbHigh"));
+    check("isFallbackWait is explicit-provenance only", isFallbackWait(ride("f", 5, "OPERATING", "fallback")) && !isFallbackWait(ride("l", 5)));
+    check("all-fallback live payload → empty rankings", rankLowestWaits(selectRankableAttractions([ride("f", 5, "OPERATING", "fallback")], "live")).length === 0);
   }
 
   // Next shows
@@ -203,6 +248,21 @@ export function runDevTodayDashboardCases(): string[] {
     check("fresh + none_remaining → no stale flag", freshNone.state === "none_remaining" && !freshNone.stale);
     const staleUp = selectNextShows({ ...park([entry("A", "upcoming", [perf("9:00 PM", "2026-10-01T21:00:00-04:00")])]), stale: true } as ParkEntertainmentShowtimes, NOW);
     check("stale + upcoming → stale flag", staleUp.state === "upcoming" && staleUp.stale);
+  }
+
+  // Regression (Codex P2): Next up copy is scoped to curated shows, and unmapped
+  // entries are not treated as checked (claims are scoped, not implied exhaustive).
+  {
+    check("scope copy names curated shows", /curated/i.test(NEXT_SHOWS_HEADING) && /curated/i.test(NEXT_SHOWS_SCOPE_NOTE) && /not all park entertainment/i.test(NEXT_SHOWS_SCOPE_NOTE));
+    check("none-remaining copy is scoped, not park-wide", /curated/i.test(NEXT_SHOWS_NONE_REMAINING));
+    const withUnmapped = selectNextShows(park([
+      entry("Mapped", "all_passed", [perf("10:00 AM", "2026-10-01T10:00:00-04:00", "2026-10-01T10:30:00-04:00")]),
+      entry("Unmapped Show", "unmapped", []),
+    ]), NOW);
+    check("unmapped entries contribute nothing and do not change mapped handling", withUnmapped.state === "none_remaining" && withUnmapped.performances.length === 0);
+    check("incomplete mapped schedule still unavailable alongside unmapped", selectNextShows(park([
+      entry("Mapped", "unavailable", [], true), entry("Unmapped Show", "unmapped", []),
+    ]), NOW).state === "unavailable");
   }
 
   return failures;

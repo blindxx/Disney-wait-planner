@@ -43,7 +43,17 @@ import {
 } from "../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../lib/resortTime";
 import { getEntertainmentForPark } from "../lib/entertainmentSuggestions";
-import { rankHighestWaits, rankLowestWaits, selectNextShows } from "../lib/todayDashboard";
+import {
+  FALLBACK_WAIT_LABEL,
+  NEXT_SHOWS_HEADING,
+  NEXT_SHOWS_NONE_REMAINING,
+  NEXT_SHOWS_SCOPE_NOTE,
+  isFallbackWait,
+  rankHighestWaits,
+  rankLowestWaits,
+  selectNextShows,
+  selectRankableAttractions,
+} from "../lib/todayDashboard";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../lib/settingsDefaults";
 import {
   bootstrapProfiles,
@@ -451,8 +461,11 @@ export default function TodayPage() {
   // If fewer than 5 (or 10) qualify, lists are shorter and may overlap (no backfill).
   const parkAttractions = attractionsPark === selectedPark ? attractions : [];
   const waitsLoaded = attractionsPark === selectedPark;
-  const bestOptions = useMemo(() => rankLowestWaits(parkAttractions), [parkAttractions]);
-  const longestWaits = useMemo(() => rankHighestWaits(parkAttractions), [parkAttractions]);
+  // Fallback (mock) waits are never ranked as live: in a live dataset only
+  // non-fallback rows qualify; in mock mode all rows do and are labelled.
+  const rankable = useMemo(() => selectRankableAttractions(parkAttractions, dataSource), [parkAttractions, dataSource]);
+  const bestOptions = useMemo(() => rankLowestWaits(rankable), [rankable]);
+  const longestWaits = useMemo(() => rankHighestWaits(rankable), [rankable]);
 
   // Display clock (15 s, same cadence as ResortClock): re-evaluates passed
   // performances and the resort-local date. Display-only — never fetches.
@@ -704,6 +717,9 @@ export default function TodayPage() {
                       {attraction.land}
                     </div>
                   )}
+                  {isFallbackWait(attraction) && (
+                    <div style={{ fontSize: "11px", lineHeight: "1.3", color: "#9ca3af", marginTop: "2px" }}>{FALLBACK_WAIT_LABEL}</div>
+                  )}
                 </div>
 
                 {/* Right: Wait Time (most prominent) */}
@@ -736,6 +752,9 @@ export default function TodayPage() {
                     {attraction.land}
                   </div>
                 )}
+                {isFallbackWait(attraction) && (
+                  <div style={{ fontSize: "11px", lineHeight: "1.3", color: "#9ca3af", marginTop: "2px" }}>{FALLBACK_WAIT_LABEL}</div>
+                )}
               </div>
               <div className="wait-block">
                 <div className="wait-number" style={{ color: getWaitTextColor(attraction.waitMins ?? 0) }}>
@@ -749,7 +768,8 @@ export default function TodayPage() {
         </section>
 
         <section className="today-grid-full">
-        <h2 className="today-section-title">Next up: Entertainment</h2>
+        <h2 className="today-section-title">{NEXT_SHOWS_HEADING}</h2>
+        <div style={{ fontSize: "12px", color: "#9ca3af", margin: "-4px 0 8px" }}>{NEXT_SHOWS_SCOPE_NOTE}</div>
         <div className="options-list">
           {nextShows.state === "loading" && <div className="today-empty" aria-hidden style={{ minHeight: 20 }} />}
           {nextShows.state === "upcoming" &&
@@ -781,7 +801,7 @@ export default function TodayPage() {
           )}
           {nextShows.state === "none_remaining" && (
             <div className="today-empty">
-              No more showtimes today
+              {NEXT_SHOWS_NONE_REMAINING}
               {nextShows.stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
             </div>
           )}
