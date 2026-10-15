@@ -62,6 +62,8 @@ export interface TodayNextShows {
   partial: boolean;
   /** True when ThemeParks.wiki data is being presented (attribution owed). */
   presentsProviderData: boolean;
+  /** Stale-if-error data behind an upcoming/none_remaining result: never present it as definitively complete. */
+  stale: boolean;
 }
 
 /**
@@ -75,10 +77,11 @@ export function selectNextShows(
   instant: Date,
   count = TODAY_NEXT_SHOWS_COUNT,
 ): TodayNextShows {
-  if (!data) return { state: "loading", performances: [], partial: false, presentsProviderData: false };
-  if (data.error) return { state: "unavailable", performances: [], partial: false, presentsProviderData: false };
+  if (!data) return { state: "loading", performances: [], partial: false, presentsProviderData: false, stale: false };
+  if (data.error) return { state: "unavailable", performances: [], partial: false, presentsProviderData: false, stale: false };
 
   const mapped = data.entries.filter((e) => e.status !== "unmapped");
+  const nowMs = instant.getTime();
   const all: TodayUpcomingPerformance[] = [];
   let uncertain = false;
   for (const entry of mapped) {
@@ -86,20 +89,21 @@ export function selectNextShows(
     if (d.status === "unavailable" || d.partial) uncertain = true;
     for (const p of d.remaining) {
       const startMs = new Date(p.startTime).getTime();
-      if (Number.isFinite(startMs)) all.push({ dwpName: entry.dwpName, localTime: p.localTime, startMs });
+      // Future-facing list: a performance already underway (end still ahead) is not "next".
+      if (Number.isFinite(startMs) && startMs > nowMs) all.push({ dwpName: entry.dwpName, localTime: p.localTime, startMs });
     }
   }
   all.sort((a, b) => a.startMs - b.startMs || a.dwpName.localeCompare(b.dwpName));
   const performances = all.slice(0, count);
 
   if (performances.length > 0) {
-    return { state: "upcoming", performances, partial: uncertain, presentsProviderData: true };
+    return { state: "upcoming", performances, partial: uncertain, presentsProviderData: true, stale: data.stale };
   }
-  if (mapped.length === 0) return { state: "unavailable", performances: [], partial: false, presentsProviderData: false };
+  if (mapped.length === 0) return { state: "unavailable", performances: [], partial: false, presentsProviderData: false, stale: false };
   // No known upcoming: only a complete schedule may claim nothing remains.
   return uncertain
-    ? { state: "unavailable", performances: [], partial: false, presentsProviderData: true }
-    : { state: "none_remaining", performances: [], partial: false, presentsProviderData: true };
+    ? { state: "unavailable", performances: [], partial: false, presentsProviderData: true, stale: false }
+    : { state: "none_remaining", performances: [], partial: false, presentsProviderData: true, stale: data.stale };
 }
 
 // ============================================
@@ -175,6 +179,31 @@ export function runDevTodayDashboardCases(): string[] {
   ]), NOW).state === "unavailable");
   check("all unmapped → unavailable, no attribution", (() => { const r = selectNextShows(park([entry("A", "unmapped", [])]), NOW); return r.state === "unavailable" && !r.presentsProviderData; })());
   check("time re-evaluated: show passes as clock advances", selectNextShows(park([entry("A", "upcoming", [perf("4:00 PM", "2026-10-01T16:00:00-04:00", "2026-10-01T16:30:00-04:00")])]), new Date("2026-10-01T21:00:00Z")).state === "none_remaining");
+
+  // Regression (Codex P2): already-started performances are excluded from Next up.
+  {
+    // now = 3:15 PM EDT; 3:00–3:30 PM is underway, 4:00 PM is next.
+    const NOW315 = new Date("2026-10-01T19:15:00Z");
+    const underway = perf("3:00 PM", "2026-10-01T15:00:00-04:00", "2026-10-01T15:30:00-04:00");
+    const later = perf("4:00 PM", "2026-10-01T16:00:00-04:00");
+    const r = selectNextShows(park([entry("A", "upcoming", [underway, later])]), NOW315);
+    check("started-but-not-ended show excluded; next is future", r.performances.map((p) => p.localTime).join() === "4:00 PM");
+    const onlyUnderway = selectNextShows(park([entry("A", "upcoming", [underway])]), NOW315);
+    check("only an underway show → nothing upcoming", onlyUnderway.performances.length === 0 && onlyUnderway.state === "none_remaining");
+    const exact = selectNextShows(park([entry("A", "upcoming", [perf("3:15 PM", "2026-10-01T15:15:00-04:00", "2026-10-01T15:45:00-04:00")])]), NOW315);
+    check("start == now is not upcoming (requires start > now)", exact.performances.length === 0);
+  }
+
+  // Regression (Codex P2): stale data is flagged for none_remaining and upcoming, never for fresh data.
+  {
+    const done = entry("A", "all_passed", [perf("10:00 AM", "2026-10-01T10:00:00-04:00", "2026-10-01T10:30:00-04:00")]);
+    const staleNone = selectNextShows({ ...park([done]), stale: true } as ParkEntertainmentShowtimes, NOW);
+    check("stale + none_remaining → stale flag", staleNone.state === "none_remaining" && staleNone.stale);
+    const freshNone = selectNextShows(park([done]), NOW);
+    check("fresh + none_remaining → no stale flag", freshNone.state === "none_remaining" && !freshNone.stale);
+    const staleUp = selectNextShows({ ...park([entry("A", "upcoming", [perf("9:00 PM", "2026-10-01T21:00:00-04:00")])]), stale: true } as ParkEntertainmentShowtimes, NOW);
+    check("stale + upcoming → stale flag", staleUp.state === "upcoming" && staleUp.stale);
+  }
 
   return failures;
 }

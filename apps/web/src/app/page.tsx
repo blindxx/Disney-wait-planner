@@ -751,13 +751,18 @@ export default function TodayPage() {
           {nextShows.state === "upcoming" && nextShows.partial && (
             <div style={{ fontSize: "12px", color: "#9ca3af" }}>
               {PARTIAL_SHOWTIMES_NOTE}
-              {showtimes?.stale && " (may be outdated)"}
+              {nextShows.stale && " (may be outdated)"}
             </div>
           )}
-          {nextShows.state === "upcoming" && !nextShows.partial && showtimes?.stale && (
+          {nextShows.state === "upcoming" && !nextShows.partial && nextShows.stale && (
             <div style={{ fontSize: "12px", color: "#9ca3af" }}>Showtimes may be out of date</div>
           )}
-          {nextShows.state === "none_remaining" && <div className="today-empty">No more showtimes today</div>}
+          {nextShows.state === "none_remaining" && (
+            <div className="today-empty">
+              No more showtimes today
+              {nextShows.stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
+            </div>
+          )}
           {nextShows.state === "unavailable" && <div className="today-empty">Showtimes unavailable</div>}
         </div>
         </section>
