@@ -45,6 +45,7 @@ import { getResortLocalDate } from "../lib/resortTime";
 import { getEntertainmentForPark } from "../lib/entertainmentSuggestions";
 import {
   FALLBACK_WAIT_LABEL,
+  PARK_STATUS_TONE_COLORS,
   describeParkOperatingStatus,
   waitListEmptyMessage,
   NEXT_SHOWS_HEADING,
@@ -674,11 +675,26 @@ export default function TodayPage() {
         {ready && <ParkHoursLine data={parkHours} />}
         {ready && parkStatus.text && (
           <div
-            aria-label="Park status"
-            style={{ margin: "-6px 0 12px", fontSize: "13px", fontWeight: 600, color: parkStatus.kind === "open" ? "#15803d" : "#6b7280" }}
+            aria-label={`Park status: ${parkStatus.text}`}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              margin: "-6px 0 12px",
+              fontSize: "13px",
+              fontWeight: 600,
+              lineHeight: 1.3,
+              color: PARK_STATUS_TONE_COLORS[parkStatus.tone],
+            }}
           >
-            {parkStatus.text}
-            {parkStatus.stale && <span style={{ fontWeight: 400, color: "#9ca3af" }}> (may be outdated)</span>}
+            <span
+              aria-hidden
+              style={{ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, backgroundColor: PARK_STATUS_TONE_COLORS[parkStatus.tone] }}
+            />
+            <span>
+              {parkStatus.text}
+              {parkStatus.stale && <span style={{ fontWeight: 400, color: "#9ca3af" }}> (may be outdated)</span>}
+            </span>
           </div>
         )}
 

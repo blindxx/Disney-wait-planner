@@ -71,16 +71,29 @@ export function rankHighestWaits(attractions: AttractionWait[], count = TODAY_LI
 // ============================================
 
 export type ParkOperatingKind =
-  | "open" // now inside a regular OPERATING window
+  | "open" // now inside a regular OPERATING window (today's, or yesterday's running past midnight)
   | "before_open" // before today's first regular opening
   | "between" // between two regular windows
   | "closed_after_hours" // after today's last regular closing
   | "closed_today" // provider data safely establishes no operation today
-  | "unknown"; // loading / unavailable / unverifiable — never guessed
+  | "unknown"; // unavailable / unverifiable (incl. overnight) — never guessed
+
+export type ParkStatusTone = "green" | "amber" | "red" | "gray";
+
+/** Dot + text colour per tone (the text label always carries the meaning too). */
+export const PARK_STATUS_TONE_COLORS: Record<ParkStatusTone, string> = {
+  green: "#15803d",
+  amber: "#b45309",
+  red: "#b91c1c",
+  gray: "#6b7280",
+};
+
+export const PARK_STATUS_UNAVAILABLE_TEXT = "Status unavailable";
 
 export interface ParkOperatingStatus {
   kind: ParkOperatingKind;
-  /** Compact indicator copy; null when nothing may be claimed. */
+  tone: ParkStatusTone;
+  /** Compact indicator copy; null only while hours are still loading. */
   text: string | null;
   /** The park is confirmed closed right now by the schedule (never inferred from wait data). */
   confirmedClosed: boolean;
@@ -88,44 +101,63 @@ export interface ParkOperatingStatus {
   stale: boolean;
 }
 
-const UNKNOWN_STATUS: ParkOperatingStatus = { kind: "unknown", text: null, confirmedClosed: false, stale: false };
+const LOADING_STATUS: ParkOperatingStatus = { kind: "unknown", tone: "gray", text: null, confirmedClosed: false, stale: false };
+
+function unknownStatus(stale: boolean): ParkOperatingStatus {
+  return { kind: "unknown", tone: "gray", text: PARK_STATUS_UNAVAILABLE_TEXT, confirmedClosed: false, stale };
+}
 
 /**
  * Compact operating status for the selected park from the existing normalized
  * `ParkHours` (already display-guarded for park and resort-local day). Only
  * regular `OPERATING` windows count — ticketed/extra-hours windows live in
- * `additional` and never make the park "open". Times are the resort-local
- * strings the normalizer already produced. Anything other than `hours`/`closed`
- * yields `unknown` with no text.
+ * `additional` and never make the park "open". Overnight: a regular window
+ * dated yesterday that is still running (`overnight.in_progress`) means Open;
+ * "Closed"/"Opens" claims before today's first opening additionally require
+ * `overnight.state === "none"` (yesterday verified) — otherwise `unknown`.
+ * Times are the resort-local strings the normalizer already produced.
  */
 export function describeParkOperatingStatus(data: ParkHours | null, instant: Date): ParkOperatingStatus {
-  if (!data) return UNKNOWN_STATUS;
+  if (!data) return LOADING_STATUS;
   const stale = data.stale;
-  if (data.status === "closed") {
-    return { kind: "closed_today", text: "Closed today", confirmedClosed: true, stale };
-  }
-  if (data.status !== "hours") return UNKNOWN_STATUS;
-
+  if (data.status === "unavailable") return unknownStatus(stale);
   const nowMs = instant.getTime();
+  const rawOvernight = data.overnight ?? { state: "unverified" as const, windows: [] };
+
+  // Yesterday's regular window still running past midnight → open.
+  const carry = rawOvernight.state === "in_progress"
+    ? rawOvernight.windows.filter((w) => Date.parse(w.closingTime) > nowMs).sort((a, b) => Date.parse(b.closingTime) - Date.parse(a.closingTime))[0]
+    : undefined;
+  if (carry) return { kind: "open", tone: "green", text: `Open \u00b7 closes ${carry.closes}`, confirmedClosed: false, stale };
+  // The fetched in-progress window(s) have since ended on this clock: yesterday was covered, so nothing runs on.
+  const overnight = rawOvernight.state === "in_progress" ? { state: "none" as const, windows: [] } : rawOvernight;
+
+  if (data.status === "closed") {
+    return overnight.state === "none"
+      ? { kind: "closed_today", tone: "red", text: "Closed today", confirmedClosed: true, stale }
+      : unknownStatus(stale);
+  }
+  if (data.status !== "hours") return unknownStatus(stale);
+
   const wins = data.operating
     .map((w) => ({ w, open: Date.parse(w.openingTime), close: Date.parse(w.closingTime) }))
     .filter((x) => Number.isFinite(x.open) && Number.isFinite(x.close) && x.close > x.open)
     .sort((a, b) => a.open - b.open);
-  if (wins.length === 0) return UNKNOWN_STATUS;
+  if (wins.length === 0) return unknownStatus(stale);
 
   const current = wins.find((x) => x.open <= nowMs && nowMs < x.close);
-  if (current) return { kind: "open", text: `Open \u00b7 closes ${current.w.closes}`, confirmedClosed: false, stale };
+  if (current) return { kind: "open", tone: "green", text: `Open \u00b7 closes ${current.w.closes}`, confirmedClosed: false, stale };
   const next = wins.find((x) => x.open > nowMs);
   if (next) {
-    const first = next === wins[0];
-    return {
-      kind: first ? "before_open" : "between",
-      text: first ? `Opens ${next.w.opens}` : `Closed \u00b7 reopens ${next.w.opens}`,
-      confirmedClosed: true,
-      stale,
-    };
+    if (next === wins[0]) {
+      // Before today's first opening: only claim closed once yesterday's hours are verified not to run on.
+      return overnight.state === "none"
+        ? { kind: "before_open", tone: "amber", text: `Closed \u00b7 opens ${next.w.opens}`, confirmedClosed: true, stale }
+        : unknownStatus(stale);
+    }
+    return { kind: "between", tone: "amber", text: `Closed \u00b7 reopens ${next.w.opens}`, confirmedClosed: true, stale };
   }
-  return { kind: "closed_after_hours", text: "Closed for today", confirmedClosed: true, stale };
+  return { kind: "closed_after_hours", tone: "red", text: "Closed for today", confirmedClosed: true, stale };
 }
 
 /** Empty-state copy for the wait lists. Closure comes only from the schedule, never from missing Queue-Times data. */
@@ -273,58 +305,92 @@ export function runDevTodayDashboardCases(): string[] {
 
   // Park operating status + empty-wait messaging
   {
-    const win = (type: string, open: string, close: string, opens: string, closes: string) =>
-      ({ date: "2026-10-01", type, description: null, openingTime: open, closingTime: close, opens, closes, lastUpdated: null });
+    const win = (type: string, open: string, close: string, opens: string, closes: string, date = "2026-10-01") =>
+      ({ date, type, description: null, openingTime: open, closingTime: close, opens, closes, lastUpdated: null });
     const reg = win("OPERATING", "2026-10-01T09:00:00-04:00", "2026-10-01T22:00:00-04:00", "9:00 AM", "10:00 PM");
+    const NONE = { state: "none", windows: [] };
     const hours = (operating: unknown[], additional: unknown[] = [], extra: object = {}) =>
-      ({ parkId: "mk", resort: "WDW", localDate: "2026-10-01", status: "hours", operating, additional, stale: false, ...extra } as unknown as ParkHours);
+      ({ parkId: "mk", resort: "WDW", localDate: "2026-10-01", status: "hours", operating, additional, stale: false, overnight: NONE, ...extra } as unknown as ParkHours);
     const at = (iso: string) => new Date(iso);
     const st = (d: ParkHours | null, iso: string) => describeParkOperatingStatus(d, at(iso));
+    const C = PARK_STATUS_TONE_COLORS;
 
     let r = st(hours([reg]), "2026-10-01T08:00:00-04:00");
-    check("before opening: shows opening time, confirmed closed", r.kind === "before_open" && r.text === "Opens 9:00 AM" && r.confirmedClosed);
+    check("before opening: Closed · opens, amber, confirmed closed", r.kind === "before_open" && r.text === "Closed \u00b7 opens 9:00 AM" && r.tone === "amber" && r.confirmedClosed);
     r = st(hours([reg]), "2026-10-01T12:00:00-04:00");
-    check("open: shows closing time, not closed", r.kind === "open" && r.text === "Open \u00b7 closes 10:00 PM" && !r.confirmedClosed);
+    check("open: Open · closes, green, not closed", r.kind === "open" && r.text === "Open \u00b7 closes 10:00 PM" && r.tone === "green" && !r.confirmedClosed);
     r = st(hours([reg]), "2026-10-01T09:00:00-04:00");
     check("exactly at opening is open", r.kind === "open");
     r = st(hours([reg]), "2026-10-01T22:00:00-04:00");
-    check("exactly at closing is closed for today", r.kind === "closed_after_hours" && r.text === "Closed for today" && r.confirmedClosed);
-    r = st(hours([reg]), "2026-10-01T23:30:00-04:00");
-    check("after closing: closed for today", r.kind === "closed_after_hours");
-    check("confirmed closed today (status closed)", (() => { const x = st(hours([], [], { status: "closed" }), "2026-10-01T12:00:00-04:00"); return x.kind === "closed_today" && x.confirmedClosed; })());
+    check("exactly at closing: Closed for today, red", r.kind === "closed_after_hours" && r.text === "Closed for today" && r.tone === "red" && r.confirmedClosed);
+    check("after closing: closed for today", st(hours([reg]), "2026-10-01T23:30:00-04:00").kind === "closed_after_hours");
+    r = st(hours([], [], { status: "closed" }), "2026-10-01T12:00:00-04:00");
+    check("confirmed closed today: Closed today, red", r.kind === "closed_today" && r.text === "Closed today" && r.tone === "red" && r.confirmedClosed);
     // Special ticketed events never count as regular hours
     const ticketed = win("TICKETED_EVENT", "2026-10-01T19:00:00-04:00", "2026-10-02T00:00:00-04:00", "7:00 PM", "12:00 AM");
-    r = st(hours([reg], [ticketed]), "2026-10-01T23:00:00-04:00");
-    check("ticketed event after close does not make the park open", r.kind === "closed_after_hours");
+    check("ticketed event after close does not make the park open", st(hours([reg], [ticketed]), "2026-10-01T23:00:00-04:00").kind === "closed_after_hours");
     r = st(hours([], [ticketed], { status: "unknown" }), "2026-10-01T20:00:00-04:00");
-    check("only a ticketed event (unknown) is never open", r.kind === "unknown" && r.text === null && !r.confirmedClosed);
+    check("ticketed-only (unknown): Status unavailable, gray, never open", r.kind === "unknown" && r.text === "Status unavailable" && r.tone === "gray" && !r.confirmedClosed);
     // Two regular windows
     const w1 = win("OPERATING", "2026-10-01T09:00:00-04:00", "2026-10-01T12:00:00-04:00", "9:00 AM", "12:00 PM");
     const w2 = win("OPERATING", "2026-10-01T15:00:00-04:00", "2026-10-01T22:00:00-04:00", "3:00 PM", "10:00 PM");
     r = st(hours([w2, w1]), "2026-10-01T13:00:00-04:00");
-    check("between windows: closed, reopens at next", r.kind === "between" && r.text === "Closed \u00b7 reopens 3:00 PM" && r.confirmedClosed);
+    check("between windows: Closed · reopens, amber", r.kind === "between" && r.text === "Closed \u00b7 reopens 3:00 PM" && r.tone === "amber" && r.confirmedClosed);
     // Unknown / unavailable never guess
     for (const status of ["unknown", "unavailable"]) {
       const x = st(hours([reg], [], { status }), "2026-10-01T12:00:00-04:00");
-      check(`status ${status}: no claim`, x.kind === "unknown" && x.text === null && !x.confirmedClosed);
+      check(`status ${status}: Status unavailable, no closure`, x.kind === "unknown" && x.text === "Status unavailable" && x.tone === "gray" && !x.confirmedClosed);
     }
-    check("null (loading): no claim", st(null, "2026-10-01T12:00:00-04:00").kind === "unknown");
-    check("malformed window ignored → unknown", st(hours([{ ...reg, openingTime: "bad", closingTime: "bad" }]), "2026-10-01T12:00:00-04:00").kind === "unknown");
+    r = st(null, "2026-10-01T12:00:00-04:00");
+    check("null (loading): no text, no claim", r.kind === "unknown" && r.text === null && !r.confirmedClosed);
+    check("malformed window ignored → unavailable", st(hours([{ ...reg, openingTime: "bad", closingTime: "bad" }]), "2026-10-01T12:00:00-04:00").text === "Status unavailable");
     check("stale flag carried", st(hours([reg], [], { stale: true }), "2026-10-01T12:00:00-04:00").stale);
-    // Midnight rollover: previous-day data is degraded to unavailable by parkHoursForDisplay (no claim)
-    const nextDay = describeParkOperatingStatus(hours([reg], [], { status: "unavailable" }), at("2026-10-02T00:05:00-04:00"));
-    check("rollover: degraded previous-day data makes no claim", nextDay.kind === "unknown" && !nextDay.confirmedClosed);
+    check("stale flag carried on unavailable", st(hours([reg], [], { status: "unknown", stale: true }), "2026-10-01T12:00:00-04:00").stale);
 
-    // Empty wait messaging
+    // Overnight: yesterday's regular window crossing midnight
+    const late = win("OPERATING", "2026-09-30T09:00:00-04:00", "2026-10-01T01:00:00-04:00", "9:00 AM", "1:00 AM", "2026-09-30");
+    const inProg = { state: "in_progress", windows: [late] };
+    r = st(hours([reg], [], { overnight: inProg }), "2026-10-01T00:30:00-04:00");
+    check("after midnight, yesterday's window still running: Open · closes 1:00 AM", r.kind === "open" && r.text === "Open \u00b7 closes 1:00 AM" && r.tone === "green" && !r.confirmedClosed);
+    r = st(hours([reg], [], { overnight: inProg }), "2026-10-01T01:00:00-04:00");
+    check("exactly at overnight close: not carried (closed · opens)", r.kind === "before_open");
+    r = st(hours([reg], [], { overnight: NONE }), "2026-10-01T01:30:00-04:00");
+    check("after overnight window ended, verified: Closed · opens 9:00 AM", r.kind === "before_open" && r.text === "Closed \u00b7 opens 9:00 AM");
+    r = st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00");
+    check("overnight unverified before opening: unavailable, NOT closed", r.kind === "unknown" && r.text === "Status unavailable" && !r.confirmedClosed);
+    r = st(hours([reg], [], { overnight: undefined }), "2026-10-01T00:30:00-04:00");
+    check("missing overnight field (older payload) treated as unverified", r.kind === "unknown" && !r.confirmedClosed);
+    r = st(hours([], [], { status: "closed", overnight: inProg }), "2026-10-01T00:30:00-04:00");
+    check("no hours today but overnight running: open", r.kind === "open");
+    r = st(hours([], [], { status: "closed", overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00");
+    check("closed today but overnight unverified: unavailable, not closed", r.kind === "unknown" && !r.confirmedClosed);
+    r = st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T12:00:00-04:00");
+    check("daytime open needs no overnight verification", r.kind === "open");
+    r = st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T23:00:00-04:00");
+    check("after closing needs no overnight verification", r.kind === "closed_after_hours");
+    // Ticketed-only overnight event never counts as regular overnight hours
+    const lateTicketed = win("TICKETED_EVENT", "2026-09-30T20:00:00-04:00", "2026-10-01T02:00:00-04:00", "8:00 PM", "2:00 AM", "2026-09-30");
+    check("ticketed-only overnight event is not open (overnight none)", st(hours([reg], [], { overnight: NONE, additional: [lateTicketed] }), "2026-10-01T00:30:00-04:00").kind === "before_open");
+    // Rollover: degraded previous-day data makes no claim
+    r = describeParkOperatingStatus(hours([reg], [], { status: "unavailable" }), at("2026-10-02T00:05:00-04:00"));
+    check("rollover: degraded previous-day data makes no claim", r.kind === "unknown" && !r.confirmedClosed);
+
+    // Colours / no colour-only meaning
+    check("tone colours distinct and defined", new Set([C.green, C.amber, C.red, C.gray]).size === 4);
+    check("every non-loading status carries text", [st(hours([reg]), "2026-10-01T08:00:00-04:00"), st(hours([reg]), "2026-10-01T12:00:00-04:00"), st(hours([reg]), "2026-10-01T23:00:00-04:00"), st(hours([], [], { status: "unknown" }), "2026-10-01T12:00:00-04:00")].every((x) => !!x.text));
+
+    // Empty wait messaging reflects confirmed status
+    const confirmed = (d: ParkHours | null, iso: string) => describeParkOperatingStatus(d, at(iso)).confirmedClosed;
     check("closed + empty → park closed", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: true }) === "Park is currently closed.");
     check("open/unknown + empty → live unavailable", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: false }) === "Live wait times unavailable.");
     check("rows present → no message (closed park with waits keeps rankings)", waitListEmptyMessage({ waitsLoaded: true, rowCount: 3, parkConfirmedClosed: true }) === null);
     check("still loading → no message", waitListEmptyMessage({ waitsLoaded: false, rowCount: 0, parkConfirmedClosed: true }) === null);
-    // Missing Queue-Times data alone (park open or hours unknown) never yields a closure claim
-    check("no wait data never infers closure", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: describeParkOperatingStatus(null, at("2026-10-01T12:00:00-04:00")).confirmedClosed }) === "Live wait times unavailable.");
-    // Fallback-only live payload with open park → unavailable, not closed
+    check("overnight unverified + empty → live unavailable (not closed)", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: confirmed(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00") }) === "Live wait times unavailable.");
+    check("overnight running + empty → live unavailable (open)", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: confirmed(hours([reg], [], { overnight: inProg }), "2026-10-01T00:30:00-04:00") }) === "Live wait times unavailable.");
+    check("verified before opening + empty → park closed", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: confirmed(hours([reg]), "2026-10-01T06:00:00-04:00") }) === "Park is currently closed.");
+    check("no wait data never infers closure", waitListEmptyMessage({ waitsLoaded: true, rowCount: 0, parkConfirmedClosed: confirmed(null, "2026-10-01T12:00:00-04:00") }) === "Live wait times unavailable.");
     const fbOnly = rankLowestWaits(selectRankableAttractions([ride("f", 5, "OPERATING", "fallback")], "live"));
-    check("fallback-only live payload + open park → live unavailable", waitListEmptyMessage({ waitsLoaded: true, rowCount: fbOnly.length, parkConfirmedClosed: st(hours([reg]), "2026-10-01T12:00:00-04:00").confirmedClosed }) === "Live wait times unavailable.");
+    check("fallback-only live payload + open park → live unavailable", waitListEmptyMessage({ waitsLoaded: true, rowCount: fbOnly.length, parkConfirmedClosed: confirmed(hours([reg]), "2026-10-01T12:00:00-04:00") }) === "Live wait times unavailable.");
   }
 
   // Next shows
