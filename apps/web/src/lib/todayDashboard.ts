@@ -99,12 +99,14 @@ export interface ParkOperatingStatus {
   confirmedClosed: boolean;
   /** Derived from stale-if-error schedule data. */
   stale: boolean;
+  /** A schedule-derived claim is displayed (ThemeParks.wiki attribution owed) — true for every kind except `unknown`, including an overnight window when today's hours are unknown. */
+  presentsProviderData: boolean;
 }
 
-const LOADING_STATUS: ParkOperatingStatus = { kind: "unknown", tone: "gray", text: null, confirmedClosed: false, stale: false };
+const LOADING_STATUS: ParkOperatingStatus = { kind: "unknown", tone: "gray", text: null, confirmedClosed: false, stale: false, presentsProviderData: false };
 
 function unknownStatus(stale: boolean): ParkOperatingStatus {
-  return { kind: "unknown", tone: "gray", text: PARK_STATUS_UNAVAILABLE_TEXT, confirmedClosed: false, stale };
+  return { kind: "unknown", tone: "gray", text: PARK_STATUS_UNAVAILABLE_TEXT, confirmedClosed: false, stale, presentsProviderData: false };
 }
 
 /**
@@ -128,13 +130,13 @@ export function describeParkOperatingStatus(data: ParkHours | null, instant: Dat
   const carry = rawOvernight.state === "in_progress"
     ? rawOvernight.windows.filter((w) => Date.parse(w.closingTime) > nowMs).sort((a, b) => Date.parse(b.closingTime) - Date.parse(a.closingTime))[0]
     : undefined;
-  if (carry) return { kind: "open", tone: "green", text: `Open \u00b7 closes ${carry.closes}`, confirmedClosed: false, stale };
+  if (carry) return { kind: "open", tone: "green", text: `Open \u00b7 closes ${carry.closes}`, confirmedClosed: false, stale, presentsProviderData: true };
   // The fetched in-progress window(s) have since ended on this clock: yesterday was covered, so nothing runs on.
   const overnight = rawOvernight.state === "in_progress" ? { state: "none" as const, windows: [] } : rawOvernight;
 
   if (data.status === "closed") {
     return overnight.state === "none"
-      ? { kind: "closed_today", tone: "red", text: "Closed today", confirmedClosed: true, stale }
+      ? { kind: "closed_today", tone: "red", text: "Closed today", confirmedClosed: true, stale, presentsProviderData: true }
       : unknownStatus(stale);
   }
   if (data.status !== "hours") return unknownStatus(stale);
@@ -146,18 +148,18 @@ export function describeParkOperatingStatus(data: ParkHours | null, instant: Dat
   if (wins.length === 0) return unknownStatus(stale);
 
   const current = wins.find((x) => x.open <= nowMs && nowMs < x.close);
-  if (current) return { kind: "open", tone: "green", text: `Open \u00b7 closes ${current.w.closes}`, confirmedClosed: false, stale };
+  if (current) return { kind: "open", tone: "green", text: `Open \u00b7 closes ${current.w.closes}`, confirmedClosed: false, stale, presentsProviderData: true };
   const next = wins.find((x) => x.open > nowMs);
   if (next) {
     if (next === wins[0]) {
       // Before today's first opening: only claim closed once yesterday's hours are verified not to run on.
       return overnight.state === "none"
-        ? { kind: "before_open", tone: "amber", text: `Closed \u00b7 opens ${next.w.opens}`, confirmedClosed: true, stale }
+        ? { kind: "before_open", tone: "amber", text: `Closed \u00b7 opens ${next.w.opens}`, confirmedClosed: true, stale, presentsProviderData: true }
         : unknownStatus(stale);
     }
-    return { kind: "between", tone: "amber", text: `Closed \u00b7 reopens ${next.w.opens}`, confirmedClosed: true, stale };
+    return { kind: "between", tone: "amber", text: `Closed \u00b7 reopens ${next.w.opens}`, confirmedClosed: true, stale, presentsProviderData: true };
   }
-  return { kind: "closed_after_hours", tone: "red", text: "Closed for today", confirmedClosed: true, stale };
+  return { kind: "closed_after_hours", tone: "red", text: "Closed for today", confirmedClosed: true, stale, presentsProviderData: true };
 }
 
 /** Empty-state copy for the wait lists. Closure comes only from the schedule, never from missing Queue-Times data. */
@@ -356,6 +358,11 @@ export function runDevTodayDashboardCases(): string[] {
     check("exactly at overnight close: not carried (closed · opens)", r.kind === "before_open");
     r = st(hours([reg], [], { overnight: NONE }), "2026-10-01T01:30:00-04:00");
     check("after overnight window ended, verified: Closed · opens 9:00 AM", r.kind === "before_open" && r.text === "Closed \u00b7 opens 9:00 AM");
+    // Attribution: owed whenever a schedule-derived claim is shown, even if today's own hours are unknown.
+    r = st(hours([], [], { status: "unknown", overnight: inProg }), "2026-10-01T00:30:00-04:00");
+    check("overnight Open with today's hours unknown still owes attribution", r.kind === "open" && r.presentsProviderData);
+    check("confirmed statuses all owe attribution", [st(hours([reg]), "2026-10-01T08:00:00-04:00"), st(hours([reg]), "2026-10-01T12:00:00-04:00"), st(hours([reg]), "2026-10-01T23:00:00-04:00"), st(hours([], [], { status: "closed" }), "2026-10-01T12:00:00-04:00"), st(hours([w2, w1]), "2026-10-01T13:00:00-04:00")].every((x) => x.presentsProviderData));
+    check("unknown / loading statuses owe no attribution", !st(hours([reg], [], { status: "unknown" }), "2026-10-01T12:00:00-04:00").presentsProviderData && !st(null, "2026-10-01T12:00:00-04:00").presentsProviderData && !st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00").presentsProviderData);
     r = st(hours([reg], [], { overnight: inProg, stale: true }), "2026-10-01T00:30:00-04:00");
     check("stale overnight window: Open still carries the stale warning flag", r.kind === "open" && r.stale);
     r = st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00");

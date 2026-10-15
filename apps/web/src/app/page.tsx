@@ -537,7 +537,9 @@ export default function TodayPage() {
   const waitEmptyMessage = (rowCount: number) =>
     waitListEmptyMessage({ waitsLoaded, rowCount, parkConfirmedClosed: parkStatus.confirmedClosed });
   const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
-  const themeParksPresented = parkHoursPresented || nextShows.presentsProviderData;
+  // The status indicator is schedule-derived too: an overnight window can be shown while today's hours are unknown.
+  const parkStatusPresented = parkStatus.presentsProviderData;
+  const themeParksPresented = parkHoursPresented || parkStatusPresented || nextShows.presentsProviderData;
 
   return (
     <>
@@ -866,7 +868,7 @@ export default function TodayPage() {
         {/* ThemeParks.wiki attribution — owed whenever its park hours or showtimes are presented */}
         {themeParksPresented && (
           <div style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af", textAlign: "right" }}>
-            {parkHoursPresented && nextShows.presentsProviderData ? "Park hours and showtimes" : parkHoursPresented ? "Park hours" : "Showtimes"} powered by{" "}
+            {(parkHoursPresented || parkStatusPresented) && nextShows.presentsProviderData ? "Park hours and showtimes" : parkHoursPresented || parkStatusPresented ? "Park hours" : "Showtimes"} powered by{" "}
             <ThemeParksAttribution
               linkOnly
               style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
