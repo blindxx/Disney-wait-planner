@@ -126,6 +126,14 @@ export async function runDevParkHoursServiceCases(): Promise<string[]> {
   o = await run("2026-10-15T15:00:00Z", { default: [op("2026-10-16")] });
   check("service: month follow-up failure → unknown, not Closed", o.r.status === "unknown");
 
+  // Provider-request boundary: pre-open Today overnight checks add NO monthly lookups.
+  o = await run("2026-10-15T04:30:00Z", { default: [op("2026-10-15"), op("2026-10-16")], "2026-10": [op("2026-10-14")] });
+  check("service: pre-open normal day stays one default-window call", o.asked.join() === "mk:default" && o.r.overnight?.state === "unverified");
+  o = await run("2026-10-01T04:30:00Z", { default: [op("2026-10-01")], "2026-09": [op("2026-09-30")] });
+  check("service: first of month pre-open adds no previous-month call", o.asked.join() === "mk:default");
+  o = await run("2026-10-15T15:00:00Z", { default: [op("2026-10-16")], "2026-10": [op("2026-10-14"), op("2026-10-16")] });
+  check("service: closure follow-up month is reused as overnight evidence (no extra call)", o.asked.join() === "mk:default,mk:2026-10" && o.r.overnight?.state === "none");
+
   o = await run("2026-10-15T15:00:00Z", {});
   check("service: primary failure → unavailable, no follow-ups", o.r.status === "unavailable" && o.asked.length === 1);
 
