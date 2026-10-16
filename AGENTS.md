@@ -356,6 +356,9 @@ closure — it exists for closures that matter for trip planning:
   `parkHours.ts` header); absence of `OPERATING` alone is `unknown`, shown as
   "Unavailable". Monthly follow-up requests happen only for potential closures.
   DEV checks: `runDevParkHoursCases()` / `runDevParkHoursServiceCases()`.
+  Verified regular hours are persisted fire-and-forget (never awaited by the
+  response) via `parkHoursStore.ts`, registered with the serverless request
+  lifetime through `waitUntil` from `@vercel/functions` (Next 14 has no `after()`).
 - Exact-date park hours (Phase 12.6, My Plans): same `parkHours.ts` /
   `parkHoursService.ts` boundary, `/api/park-hours?parkId=&date=YYYY-MM-DD`
   (`ParkDateHours`; `getParkHoursForDate()` uses monthly `getSchedule()` for

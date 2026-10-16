@@ -32,22 +32,32 @@ import {
 } from "./parkHours";
 import { themeParks, type ThemeParksResult, type ThemeParksSchedule } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
+import { waitUntil } from "@vercel/functions";
 import { persistParkRegularHours, type PersistableScheduleResponse } from "./parkHoursStore";
 import type { ResortId } from "@disney-wait-planner/shared";
 
 /**
  * Phase 12.10.2A: hand the provider responses this request ALREADY fetched to
- * the durable store (no extra provider calls). FIRE-AND-FORGET: the response
- * never waits for persistence. The store itself owns the deadline, abort,
- * cooldown and single-flight bounds, so a stalled write is contained there;
- * here we only guarantee no throw and no unhandled rejection. Skipped when a
- * test injects `getSchedule` without `persist`.
+ * the durable store (no extra provider calls). FIRE-AND-FORGET w.r.t. the
+ * response — it never waits for persistence — but the work is registered with
+ * the serverless request lifetime so Vercel keeps the function alive until the
+ * (bounded) write settles. Next 14.2 has no `after()`; `waitUntil` from
+ * `@vercel/functions` is Vercel's supported API for Node route handlers (it
+ * reads the platform's request context, and is a no-op off-Vercel/local, where
+ * the process simply keeps running). The store owns the write's deadline,
+ * abort, cooldown and single-flight bounds; `BACKGROUND_PERSIST_MAX_MS` is an
+ * outer cap so the registered lifetime can never be unbounded. No throw, no
+ * unhandled rejection. Skipped when a test injects `getSchedule` without `persist`.
  */
 type PersistHours = (parkId: ParkId, responses: PersistableScheduleResponse[], instant: Date) => Promise<unknown> | void;
+type KeepAlive = (work: Promise<unknown>) => void;
+
+/** Outer cap on how long a response's persistence may hold the function alive. */
+export const BACKGROUND_PERSIST_MAX_MS = 5000;
 
 function persistFetched(
   parkId: ParkId,
-  opts: { getSchedule?: unknown; persist?: PersistHours },
+  opts: { getSchedule?: unknown; persist?: PersistHours; keepAlive?: KeepAlive },
   instant: Date,
   responses: PersistableScheduleResponse[],
 ): void {
@@ -55,7 +65,12 @@ function persistFetched(
   if (!persist) return;
   try {
     // Invoked synchronously (so its start is deterministic) but never awaited.
-    Promise.resolve(persist(parkId, responses, instant)).catch(() => { /* DB trouble never affects park hours */ });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const work = Promise.race([
+      Promise.resolve(persist(parkId, responses, instant)),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, BACKGROUND_PERSIST_MAX_MS); }),
+    ]).then(() => {}, () => { /* DB trouble never affects park hours */ }).finally(() => { if (timer) clearTimeout(timer); });
+    try { (opts.keepAlive ?? waitUntil)(work); } catch { /* no request context: work still runs */ }
   } catch { /* synchronous failure: same */ }
 }
 
@@ -66,7 +81,7 @@ type GetSchedule = (
 
 export async function getParkHours(
   parkId: ParkId,
-  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours } = {},
+  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours; keepAlive?: KeepAlive } = {},
 ): Promise<ParkHours> {
   const getSchedule: GetSchedule = opts.getSchedule ?? ((id, month) => themeParks.getSchedule(id, month));
   const resort = PARK_TO_RESORT[parkId] as ResortId;
@@ -101,7 +116,7 @@ export async function getParkHours(
 export async function getParkHoursForDate(
   parkId: ParkId,
   date: string,
-  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours } = {},
+  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours; keepAlive?: KeepAlive } = {},
 ): Promise<ParkDateHours> {
   const getSchedule: GetSchedule = opts.getSchedule ?? ((id, month) => themeParks.getSchedule(id, month));
   const id = THEMEPARKS_PARKS[parkId].entityId;
@@ -203,6 +218,40 @@ export async function runDevParkHoursServiceCases(): Promise<string[]> {
       const thr = await getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: () => { throw new Error("sync boom"); } });
       await new Promise((r) => setTimeout(r, 20));
       check("service: rejecting/throwing persistence leaves results intact with no unhandled rejection", rej.status === "closed" && thr.status === d.status && unhandled.length === 0);
+      // Request-lifetime registration: the bounded persistence promise is handed to keepAlive,
+      // and the response does not wait for it.
+      const kept: Promise<unknown>[] = [];
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((r) => { release = r; });
+      const rk = await within(getParkHours("mk", { instant, getSchedule, persist: () => gate, keepAlive: (w) => { kept.push(w); } }));
+      const rkd = await within(getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: () => gate, keepAlive: (w) => { kept.push(w); } }));
+      check("service: both paths register persistence with the request lifetime without awaiting it", kept.length === 2 && rk !== "timeout" && rkd !== "timeout");
+      let settled = 0; kept.forEach((w) => void w.then(() => { settled++; }));
+      await new Promise((r) => setTimeout(r, 20));
+      check("service: registered work stays pending while persistence is in flight", settled === 0);
+      release?.();
+      await Promise.all(kept);
+      check("service: registered work settles once persistence completes", settled === 2);
+      const rejKept: Promise<unknown>[] = [];
+      await getParkHours("mk", { instant, getSchedule, persist: () => Promise.reject(new Error("x")), keepAlive: (w) => { rejKept.push(w); } });
+      let rejected = false;
+      await rejKept[0].catch(() => { rejected = true; });
+      check("service: registered work never rejects", !rejected);
+      await getParkHours("mk", { instant, getSchedule, persist: async () => {}, keepAlive: () => { throw new Error("no context"); } });
+      check("service: a throwing keepAlive does not affect the result", true);
+      // Default keepAlive = @vercel/functions waitUntil, driven through the platform's request-context symbol.
+      const ctxKey = Symbol.for("@vercel/request-context");
+      const g = globalThis as unknown as Record<symbol, unknown>;
+      const prevCtx = g[ctxKey];
+      const registered: Promise<unknown>[] = [];
+      g[ctxKey] = { get: () => ({ waitUntil: (p: Promise<unknown>) => { registered.push(p); } }) };
+      try {
+        await getParkHours("mk", { instant, getSchedule, persist: async () => {} });
+        await getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: async () => {} });
+      } finally { if (prevCtx === undefined) delete g[ctxKey]; else g[ctxKey] = prevCtx; }
+      check("service: default path registers with Vercel's request context (waitUntil) on both paths", registered.length === 2);
+      await getParkHours("mk", { instant, getSchedule, persist: async () => {} });
+      check("service: no request context (local/dev) is a safe no-op", true);
       const started: string[] = [];
       await within(getParkHours("mk", { instant, getSchedule, persist: (_p, r) => { started.push(String(r.length)); return stall(); } }));
       check("service: persistence is still started for every request (before returning)", started.length === 1);
