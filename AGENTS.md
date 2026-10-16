@@ -36,7 +36,10 @@
 
 `apps/web/src/lib/db-schema.sql` defines the Postgres schema the app
 requires (NextAuth tables, `user_plans`, `user_planner`,
-`user_planner_revision_seq`, `user_planner_writes`, `user_profiles`).
+`user_planner_revision_seq`, `user_planner_writes`, `user_profiles`,
+`park_regular_hours` — durable verified ThemeParks regular park hours,
+written opportunistically by `parkHoursStore.ts`; it has no fallback, so
+migrate before deploy, and failures there never affect `/api/park-hours`).
 It's kept safely rerunnable (`CREATE ... IF NOT EXISTS` /
 `ADD COLUMN IF NOT EXISTS`), so fresh setup and migrating an existing
 database both go through the same file — never hand-write a separate
@@ -353,6 +356,9 @@ closure — it exists for closures that matter for trip planning:
   `parkHours.ts` header); absence of `OPERATING` alone is `unknown`, shown as
   "Unavailable". Monthly follow-up requests happen only for potential closures.
   DEV checks: `runDevParkHoursCases()` / `runDevParkHoursServiceCases()`.
+  Verified regular hours are persisted fire-and-forget (never awaited by the
+  response) via `parkHoursStore.ts`, registered with the serverless request
+  lifetime through `waitUntil` from `@vercel/functions` (Next 14 has no `after()`).
 - Exact-date park hours (Phase 12.6, My Plans): same `parkHours.ts` /
   `parkHoursService.ts` boundary, `/api/park-hours?parkId=&date=YYYY-MM-DD`
   (`ParkDateHours`; `getParkHoursForDate()` uses monthly `getSchedule()` for

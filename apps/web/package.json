@@ -12,6 +12,7 @@
     "@auth/pg-adapter": "^1.11.1",
     "@disney-wait-planner/shared": "workspace:*",
     "@vercel/analytics": "^2.0.1",
+    "@vercel/functions": "^3.10.1",
     "next": "^14.1.0",
     "next-auth": "^4.24.7",
     "nodemailer": "^7.0.13",

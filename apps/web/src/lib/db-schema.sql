@@ -186,3 +186,37 @@ CREATE TABLE IF NOT EXISTS user_profiles (
 -- doc) — without introducing a second ledger table or a new ordering
 -- system alongside the existing `revision` sequence.
 ALTER TABLE user_planner_writes ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'accepted';
+
+-- Phase 12.10.2A — durable ThemeParks.wiki REGULAR (OPERATING) park hours.
+-- Server-side cache of verified provider hours that survives redeploys and
+-- serverless instance recycling (see lib/parkHoursStore.ts for the write
+-- contract). One row per park + resort-local calendar date; `windows` holds
+-- every verified OPERATING window for that date (a date can have several, and
+-- an overnight window closes after midnight but stays dated by its opening
+-- day) as [{"opens": <UTC ISO>, "closes": <UTC ISO>}], ascending.
+-- Only dates the provider positively listed are stored: a missing date is
+-- never recorded as closed, and the CHECK below makes an empty window set
+-- impossible. `coverage` records how the date's complete entry set was
+-- obtained ('default_window' = the provider's upcoming window, 'month' = a
+-- monthly request). `source_fetched_at` is when the provider response was
+-- fetched; the writer only ever replaces a row with a strictly newer fetch.
+-- `windows_hash` lets the writer skip no-op rewrites. `verified_at` is when
+-- DWP last wrote the row. Rolling 7-day history is enforced by the writer
+-- deleting rows dated before (resort-local today - 7 days). Not user data;
+-- no user_id and no relation to planner/profile tables.
+CREATE TABLE IF NOT EXISTS park_regular_hours (
+  park_id               TEXT        NOT NULL,
+  hours_date            DATE        NOT NULL,
+  windows               JSONB       NOT NULL,
+  windows_hash          TEXT        NOT NULL,
+  coverage              TEXT        NOT NULL,
+  source_fetched_at     TIMESTAMPTZ NOT NULL,
+  provider_last_updated TIMESTAMPTZ,
+  first_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  verified_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (park_id, hours_date),
+  CONSTRAINT park_regular_hours_windows_nonempty
+    CHECK (jsonb_typeof(windows) = 'array' AND jsonb_array_length(windows) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS park_regular_hours_hours_date_idx ON park_regular_hours (hours_date);
