@@ -60,6 +60,7 @@ export type ParkRefreshStatus =
   | "persisted"
   | "nothing_to_write"
   | "provider_unavailable"
+  | "provider_stale"
   | "fetch_timeout"
   | "persist_busy"
   | "persist_cooldown"
@@ -101,7 +102,10 @@ const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 const OK_STATUSES = new Set<ParkRefreshStatus>(["persisted", "nothing_to_write"]);
 
 interface Captured { responses: PersistableScheduleResponse[]; instant: Date }
-interface FetchOutcome { attempts: number; captured: Captured | null; timedOut: boolean }
+interface FetchOutcome { attempts: number; captured: Captured | null; timedOut: boolean; sawStale: boolean }
+
+/** A refresh needs a FRESH success: stale-if-error (`origin: "stale"`) is last-known data, not a refresh. */
+const isFreshOk = (r: PersistableScheduleResponse): boolean => r.result.ok && r.result.meta.origin !== "stale";
 
 async function fetchPark(
   parkId: ParkId,
@@ -112,6 +116,7 @@ async function fetchPark(
   let attempts = 0;
   let captured: Captured | null = null;
   let abandoned = false;
+  let sawStale = false;
   const loop = (async () => {
     while (attempts < MAX_FETCH_ATTEMPTS && !abandoned) {
       if (attempts > 0) await sleep(FETCH_RETRY_PAUSE_MS);
@@ -129,7 +134,8 @@ async function fetchPark(
       } catch { /* provider/normalizer trouble: treated as an unusable attempt */ }
       if (abandoned) return;
       const c = cap as Captured | null;
-      if (c && c.responses.some((r) => r.result.ok)) { captured = c; return; }
+      if (c && c.responses.some(isFreshOk)) { captured = c; return; }
+      if (c && c.responses.some((r) => r.result.ok)) sawStale = true;
     }
   })();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -139,7 +145,7 @@ async function fetchPark(
   ]);
   if (timer) clearTimeout(timer);
   if (timedOut) abandoned = true; // late completion of this attempt is ignored
-  return { attempts, captured: timedOut ? null : captured, timedOut };
+  return { attempts, captured: timedOut ? null : captured, timedOut, sawStale: sawStale && !captured };
 }
 
 let running = false;
@@ -159,7 +165,7 @@ export async function runParkHoursRefresh(o: RefreshOptions = {}): Promise<ParkH
   try {
     const fetched = await Promise.all(
       REFRESH_PARK_IDS.map((p): Promise<FetchOutcome> =>
-        fetchPark(p, o, fetchDeadlineMs, sleep).catch(() => ({ attempts: 0, captured: null, timedOut: false }))),
+        fetchPark(p, o, fetchDeadlineMs, sleep).catch(() => ({ attempts: 0, captured: null, timedOut: false, sawStale: false }))),
     );
     const parks: ParkRefreshResult[] = [];
     for (let i = 0; i < REFRESH_PARK_IDS.length; i++) {
@@ -167,7 +173,7 @@ export async function runParkHoursRefresh(o: RefreshOptions = {}): Promise<ParkH
       const f = fetched[i];
       const row = (status: ParkRefreshStatus, persistAttempts = 0): ParkRefreshResult =>
         ({ parkId, status, ok: OK_STATUSES.has(status), fetchAttempts: f.attempts, persistAttempts });
-      if (!f.captured) { parks.push(row(f.timedOut ? "fetch_timeout" : "provider_unavailable")); continue; }
+      if (!f.captured) { parks.push(row(f.timedOut ? "fetch_timeout" : f.sawStale ? "provider_stale" : "provider_unavailable")); continue; }
       let status: ParkRefreshStatus = "skipped_deadline";
       let tries = 0;
       while (tries < MAX_PERSIST_ATTEMPTS && spent() < budgetMs) {
@@ -269,6 +275,29 @@ export async function runDevParkHoursRefreshCases(): Promise<string[]> {
     check("partial: persist failure on one park does not stop the others", get(rep, "epcot").status === "persist_failed" && rep.counts.failed === 2 && !rep.ok && get(rep, "dca").status === "persisted");
     rep = (await runParkHoursRefresh({ instant, getSchedule: async (id) => { if (idToPark.get(id) === "mk") throw new Error("boom"); return okResult(id); }, persist: async () => { throw new Error("db"); }, sleep: noSleep }))!;
     check("partial: throwing provider/persist never escapes the run", rep.parks.length === 6 && get(rep, "mk").status === "provider_unavailable" && get(rep, "hs").status === "persist_failed");
+
+    // --- stale-if-error responses are not refreshes ---
+    const stale = (id: string): ThemeParksResult<ThemeParksSchedule> => { const x = okResult(id); return x.ok ? { ...x, meta: { ...x.meta, origin: "stale" } } : x; };
+    let persistedParks: string[] = [];
+    const recordingPersist: PersistFn = async (p) => { persistedParks.push(p); return "persisted"; };
+    const staleCalls: Record<string, number> = {};
+    rep = (await runParkHoursRefresh({
+      instant,
+      getSchedule: async (id) => { const p = idToPark.get(id)!; staleCalls[p] = (staleCalls[p] ?? 0) + 1; return p === "ak" ? stale(id) : okResult(id); },
+      persist: recordingPersist, sleep: noSleep,
+    }))!;
+    check("stale: stale-only park is not persisted and not reported ok", get(rep, "ak").status === "provider_stale" && !get(rep, "ak").ok && !persistedParks.includes("ak") && persistedParks.length === 5);
+    check("stale: stale-only park uses bounded retries; others unaffected", staleCalls.ak === MAX_FETCH_ATTEMPTS && get(rep, "ak").fetchAttempts === MAX_FETCH_ATTEMPTS && get(rep, "mk").status === "persisted");
+    check("stale: report is partial (not ok, counts reflect one failure)", !rep.ok && rep.counts.ok === 5 && rep.counts.failed === 1);
+    persistedParks = [];
+    rep = (await runParkHoursRefresh({ instant, getSchedule: async (id) => stale(id), persist: recordingPersist, sleep: noSleep }))!;
+    check("stale: all-stale run persists nothing and reports total failure", persistedParks.length === 0 && rep.counts.ok === 0 && rep.counts.failed === 6 && !rep.ok && rep.parks.every((p) => p.status === "provider_stale"));
+    let seq = 0;
+    persistedParks = [];
+    rep = (await runParkHoursRefresh({ instant, getSchedule: async (id) => (idToPark.get(id) === "ak" && ++seq === 1 ? stale(id) : okResult(id)), persist: recordingPersist, sleep: noSleep }))!;
+    check("stale: stale then fresh on retry recovers and persists", get(rep, "ak").status === "persisted" && get(rep, "ak").fetchAttempts === 2 && rep.ok && persistedParks.includes("ak"));
+    rep = (await runParkHoursRefresh({ instant, getSchedule: async (id) => (idToPark.get(id) === "ak" ? fail : idToPark.get(id) === "mk" ? stale(id) : okResult(id)), persist: recordingPersist, sleep: noSleep }))!;
+    check("stale: failed and stale parks are reported distinctly", get(rep, "ak").status === "provider_unavailable" && get(rep, "mk").status === "provider_stale" && rep.counts.failed === 2);
 
     // --- retries on busy / cooldown ---
     let n = 0;
