@@ -31,7 +31,8 @@
 
 import { createHash } from "node:crypto";
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
-import { getPool } from "./db";
+import type { Pool, PoolClient } from "pg";
+import { getParkHoursPool } from "./db";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import { addDaysToLocalDate, getResortLocalDate, RESORT_TIME_ZONES } from "./resortTime";
@@ -244,24 +245,86 @@ interface Memo { hash: string; fetchedAt: number }
 const memo = new Map<string, Memo>();
 const retentionRanAt = new Map<ParkId, number>();
 let blockedUntil = 0;
+/** At most ONE persistence attempt in flight per server instance. */
+let inflight = false;
+/** Bumped when an attempt is abandoned; late completions of old attempts are ignored. */
+let generation = 0;
 
-/** Test hook: clear in-process memo / throttles / failure cooldown. */
+/** Test hook: clear in-process memo / throttles / cooldown / in-flight gate. */
 export function resetParkHoursStoreState(): void {
   memo.clear();
   retentionRanAt.clear();
   blockedUntil = 0;
+  inflight = false;
+  generation++;
+}
+
+/**
+ * Runs the persistence statements on ONE bounded connection and can tear that
+ * connection down. `abort()` must make any in-flight statement stop (for the
+ * real pool: destroy the client, so the server sees the disconnect and cancels
+ * the query) and must be safe to call at any time, repeatedly.
+ */
+export interface PersistExecutor {
+  run<T>(fn: (q: Queryable) => Promise<T>): Promise<T>;
+  abort(): void;
+}
+
+/**
+ * Server-side cap on each persistence statement (SET LOCAL: pooler-safe). Destroying a
+ * client socket does not by itself stop a statement the server is already executing, so
+ * this is what guarantees an abandoned write ends on the database within a few seconds.
+ */
+const STATEMENT_TIMEOUT_MS = 4000;
+
+/**
+ * Real executor: a client from the DEDICATED park-hours pool (never the shared
+ * auth/planner pool), one transaction with a server-side statement_timeout.
+ * Any failure or abort destroys the connection instead of returning it.
+ */
+export function createPoolExecutor(pool: Pool): PersistExecutor {
+  let client: PoolClient | null = null;
+  let done = false;
+  const finish = (destroy: boolean) => {
+    if (done || !client) { done = true; return; }
+    done = true;
+    try { client.release(destroy); } catch { /* already gone */ }
+  };
+  return {
+    async run<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
+      const c = await pool.connect();
+      if (done) { try { c.release(true); } catch { /* aborted while connecting */ } throw new Error("aborted"); }
+      client = c;
+      c.on("error", () => {}); // checked-out clients have no pool error listener
+      try {
+        await c.query("BEGIN");
+        await c.query(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
+        const out = await fn(c as unknown as Queryable);
+        await c.query("COMMIT");
+        finish(false);
+        return out;
+      } catch (err) {
+        finish(true);
+        throw err;
+      }
+    },
+    abort() { finish(true); },
+  };
 }
 
 export interface PersistOptions {
   instant?: Date;
-  /** Injected queryable (tests); default is the shared pool when DATABASE_URL is set. */
+  /** Injected queryable (tests); wrapped in a no-op-abort executor. */
   db?: Queryable;
+  /** Injected executor (tests); default is a dedicated-pool executor when DATABASE_URL is set. */
+  executor?: PersistExecutor;
   deadlineMs?: number;
+  /** Monotonic-enough wall clock for cooldown/throttles (tests). Default Date.now. */
+  clock?: () => number;
 }
 
-async function persistInner(parkId: ParkId, responses: PersistableScheduleResponse[], instant: Date, db: Queryable): Promise<void> {
-  const nowMs = instant.getTime();
-  if (nowMs < blockedUntil) return;
+/** Records still worth writing (not already known to this instance) + whether retention is due. */
+function planWork(parkId: ParkId, responses: PersistableScheduleResponse[], instant: Date, nowMs: number) {
   const fresh = buildRegularHoursRecords(parkId, responses, instant).filter((r) => {
     const m = memo.get(`${r.parkId}:${r.date}`);
     if (!m) return true;
@@ -269,25 +332,19 @@ async function persistInner(parkId: ParkId, responses: PersistableScheduleRespon
     return !(m.hash === r.windowsHash && r.sourceFetchedAt - m.fetchedAt < REVERIFY_MS);
   });
   const retentionDue = nowMs - (retentionRanAt.get(parkId) ?? 0) >= RETENTION_INTERVAL_MS && responses.some((x) => x.result.ok);
-  if (fresh.length === 0 && !retentionDue) return;
-  try {
-    await upsertRegularHours(db, fresh);
-    for (const r of fresh) memo.set(`${r.parkId}:${r.date}`, { hash: r.windowsHash, fetchedAt: r.sourceFetchedAt });
-    if (retentionDue) {
-      const resort = PARK_TO_RESORT[parkId] as ResortId;
-      await deleteExpiredRegularHours(db, parkId, retentionCutoffDate(resort, instant));
-      retentionRanAt.set(parkId, nowMs);
-    }
-  } catch (err) {
-    blockedUntil = nowMs + FAILURE_COOLDOWN_MS;
-    console.warn("[parkHoursStore] persist failed:", err instanceof Error ? err.message : String(err));
-  }
+  return { fresh, retentionDue };
 }
 
 /**
  * Persist verified regular hours from already-fetched responses. NEVER throws;
- * resolves within `deadlineMs` (the write may finish in the background).
- * No-op without DATABASE_URL (or an injected `db`).
+ * resolves within `deadlineMs`. Bounded by construction:
+ *  - single-flight: while an attempt is running, other callers return at once
+ *    (best effort — their records are re-offered by the next request);
+ *  - on deadline the attempt is ABORTED (connection destroyed) and the store
+ *    stays off the DB for a cooldown, so a permanently hung database costs at
+ *    most one abandoned attempt per cooldown and never accumulates;
+ *  - it only ever uses the dedicated one-connection pool, never the shared one.
+ * No-op without DATABASE_URL (or an injected db/executor).
  */
 export async function persistParkRegularHours(
   parkId: ParkId,
@@ -295,20 +352,58 @@ export async function persistParkRegularHours(
   opts: PersistOptions = {},
 ): Promise<void> {
   try {
+    const clock = opts.clock ?? Date.now;
     const instant = opts.instant ?? new Date();
-    let db = opts.db;
-    if (!db) {
+    const startedAt = clock();
+    if (startedAt < blockedUntil || inflight) return;
+    const { fresh, retentionDue } = planWork(parkId, responses, instant, startedAt);
+    if (fresh.length === 0 && !retentionDue) return;
+
+    let executor = opts.executor ?? (opts.db ? { run: (fn) => fn(opts.db as Queryable), abort() {} } as PersistExecutor : null);
+    if (!executor) {
       if (!process.env.DATABASE_URL) return;
-      db = getPool();
+      executor = createPoolExecutor(getParkHoursPool());
     }
+    const exec = executor;
+
+    inflight = true;
+    const mine = ++generation;
+    const current = () => mine === generation;
+    const work = exec.run(async (q) => {
+      await upsertRegularHours(q, fresh);
+      if (retentionDue) {
+        const resort = PARK_TO_RESORT[parkId] as ResortId;
+        await deleteExpiredRegularHours(q, parkId, retentionCutoffDate(resort, instant));
+      }
+    }).then(
+      () => {
+        if (!current()) return;
+        for (const r of fresh) memo.set(`${r.parkId}:${r.date}`, { hash: r.windowsHash, fetchedAt: r.sourceFetchedAt });
+        if (retentionDue) retentionRanAt.set(parkId, startedAt);
+      },
+      (err) => {
+        if (!current()) return;
+        blockedUntil = clock() + FAILURE_COOLDOWN_MS;
+        console.warn("[parkHoursStore] persist failed:", err instanceof Error ? err.message : String(err));
+      },
+    );
+
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<void>((resolve) => { timer = setTimeout(resolve, opts.deadlineMs ?? DEFAULT_DEADLINE_MS); });
-    try {
-      await Promise.race([persistInner(parkId, responses, instant, db), deadline]);
-    } finally {
-      if (timer) clearTimeout(timer);
+    const timedOut = await Promise.race([
+      work.then(() => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), opts.deadlineMs ?? DEFAULT_DEADLINE_MS); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (timedOut) {
+      // Abandon: stop the underlying query, ignore any late completion, back off.
+      generation++;
+      blockedUntil = clock() + FAILURE_COOLDOWN_MS;
+      try { exec.abort(); } catch { /* best effort */ }
+      console.warn("[parkHoursStore] persist timed out; aborted and cooling down");
     }
+    if (current() || timedOut) inflight = false;
   } catch (err) {
+    inflight = false;
     console.warn("[parkHoursStore] persist skipped:", err instanceof Error ? err.message : String(err));
   }
 }
@@ -322,7 +417,7 @@ export async function persistParkRegularHours(
  * retention, newer-wins) run only when `realDb` (a Queryable against a
  * DISPOSABLE database that has db-schema.sql applied) is supplied.
  */
-export async function runDevParkHoursStoreCases(realDb?: Queryable): Promise<string[]> {
+export async function runDevParkHoursStoreCases(realDb?: Queryable, realPool?: Pool): Promise<string[]> {
   const failures: string[] = [];
   const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
   const ID = THEMEPARKS_PARKS.mk.entityId;
@@ -415,6 +510,118 @@ export async function runDevParkHoursStoreCases(realDb?: Queryable): Promise<str
   check("store: unchanged repeat is memoized (no redundant DB call)", afterFirst > 0 && calls === afterFirst);
   await persistParkRegularHours("mk", [resp([ent("2026-10-15", "08:00", "22:00")], { fetchedAt: T + 2000 })], { instant: NOW, db: noop });
   check("store: changed windows reach the DB", calls > afterFirst);
+
+  // --- bounded in-flight work: hung writes, cooldown, recovery, concurrency ---
+  {
+    const warn2 = console.warn; console.warn = () => {};
+    try {
+      let t = 1_000_000;
+      const clock = () => t;
+      let n = 0;
+      const fresh = () => [resp([ent("2026-10-15", "09:00", "22:00")], { fetchedAt: T + 1000 * ++n })];
+      const mkExec = (impl: (fn: (q: Queryable) => Promise<unknown>) => Promise<unknown>) => {
+        const x = { runs: 0, aborts: 0, active: 0, maxActive: 0 };
+        const exec: PersistExecutor = {
+          run: (async (fn: (q: Queryable) => Promise<unknown>) => {
+            x.runs++; x.active++; x.maxActive = Math.max(x.maxActive, x.active);
+            try { return await impl(fn); } finally { /* active drops on abort/settle */ }
+          }) as PersistExecutor["run"],
+          abort: () => { x.aborts++; x.active = Math.max(0, x.active - 1); },
+        };
+        return { x, exec };
+      };
+      const okQ: Queryable = { query: async () => ({ rowCount: 1, rows: [] }) };
+      const hung = () => mkExec(() => new Promise(() => {}));
+
+      // permanently hung write
+      resetParkHoursStoreState();
+      let h = hung();
+      const t0 = Date.now();
+      await persistParkRegularHours("mk", fresh(), { instant: NOW, executor: h.exec, deadlineMs: 30, clock });
+      check("bounded: hung write returns at the deadline", Date.now() - t0 < 1000 && h.x.runs === 1);
+      check("bounded: hung write is aborted (underlying work torn down)", h.x.aborts === 1);
+
+      // repeated requests during cooldown never touch the DB
+      for (let i = 0; i < 25; i++) { t += 1000; await persistParkRegularHours("mk", fresh(), { instant: NOW, executor: h.exec, deadlineMs: 30, clock }); }
+      check("bounded: repeated requests after timeout make no DB attempts (cooldown)", h.x.runs === 1);
+
+      // cooldown over but DB still hung → exactly one more attempt, aborted again; never >1 active
+      for (let cycle = 0; cycle < 4; cycle++) {
+        t += 61_000;
+        await persistParkRegularHours("mk", fresh(), { instant: NOW, executor: h.exec, deadlineMs: 20, clock });
+      }
+      check("bounded: permanently hung DB → one attempt per cooldown, all aborted, none accumulate", h.x.runs === 5 && h.x.aborts === 5 && h.x.maxActive === 1);
+
+      // recovery
+      t += 61_000;
+      const good = mkExec((fn) => fn(okQ));
+      const batch = fresh();
+      await persistParkRegularHours("mk", batch, { instant: NOW, executor: good.exec, deadlineMs: 200, clock });
+      check("bounded: recovers after cooldown when the DB is healthy", good.x.runs === 1 && good.x.aborts === 0);
+      await persistParkRegularHours("mk", batch, { instant: NOW, executor: good.exec, deadlineMs: 200, clock });
+      check("bounded: recovered write is memoized (no redundant attempt)", good.x.runs === 1);
+
+      // failure (not timeout) also cools down and recovers
+      resetParkHoursStoreState();
+      const bad = mkExec(async () => { throw new Error("boom"); });
+      await persistParkRegularHours("mk", fresh(), { instant: NOW, executor: bad.exec, clock });
+      await persistParkRegularHours("mk", fresh(), { instant: NOW, executor: bad.exec, clock });
+      check("bounded: rejected write cools down", bad.x.runs === 1);
+      t += 61_000;
+      await persistParkRegularHours("mk", fresh(), { instant: NOW, executor: good.exec, clock });
+      check("bounded: recovery after a rejected write", good.x.runs === 2);
+
+      // concurrent callers: single-flight
+      resetParkHoursStoreState();
+      const slow = mkExec((fn) => new Promise((resolve, reject) => setTimeout(() => fn(okQ).then(resolve, reject), 60)));
+      const results = await Promise.all(Array.from({ length: 12 }, () => persistParkRegularHours("mk", fresh(), { instant: NOW, executor: slow.exec, deadlineMs: 500, clock })));
+      check("bounded: concurrent callers share one in-flight attempt and all resolve", results.length === 12 && slow.x.runs === 1 && slow.x.maxActive === 1);
+      await persistParkRegularHours("mk", [resp([ent("2026-10-15", "08:00", "21:00")], { fetchedAt: T + 1000 * ++n })], { instant: NOW, executor: slow.exec, deadlineMs: 500, clock });
+      check("bounded: gate reopens after completion", slow.x.runs === 2);
+
+      // late completion of an abandoned attempt must not poison state
+      resetParkHoursStoreState();
+      let release: (() => void) | undefined;
+      const late = mkExec(() => new Promise<void>((resolve) => { release = resolve; }));
+      const lateBatch = fresh();
+      await persistParkRegularHours("mk", lateBatch, { instant: NOW, executor: late.exec, deadlineMs: 20, clock });
+      release?.();
+      await new Promise((r) => setTimeout(r, 10));
+      t += 61_000;
+      const retry = mkExec((fn) => fn(okQ));
+      await persistParkRegularHours("mk", lateBatch, { instant: NOW, executor: retry.exec, clock });
+      check("bounded: late completion of an abandoned write does not mark records as stored", retry.x.runs === 1);
+
+      // work that never reaches the DB (nothing eligible) takes no gate and no connection
+      resetParkHoursStoreState();
+      const idle = mkExec((fn) => fn(okQ));
+      await persistParkRegularHours("mk", [{ coverage: "month", result: { ok: false, error: { kind: "timeout", message: "t" } } }], { instant: NOW, executor: idle.exec, clock });
+      check("bounded: failed provider response never acquires an executor run", idle.x.runs === 0);
+    } finally { console.warn = warn2; }
+  }
+
+  // --- real pool executor: abort destroys the connection and cancels the query ---
+  if (realPool) {
+    const pool = realPool;
+    const exec = createPoolExecutor(pool);
+    const started = Date.now();
+    // The server cannot be relied on to notice a dropped socket mid-query; statement_timeout is
+    // the server-side guarantee, so use a short one here to keep the check fast.
+    const p = exec.run(async (q) => { await q.query("SET LOCAL statement_timeout = 400"); return q.query("SELECT pg_sleep(30)"); }).then(() => "done", (e) => `err:${(e as Error).message}`);
+    await new Promise((r) => setTimeout(r, 150));
+    exec.abort();
+    const outcome = await Promise.race([p, new Promise<string>((r) => setTimeout(() => r("still-hung"), 3000))]);
+    check("pool: abort rejects the in-flight run promptly", outcome.startsWith("err:") && Date.now() - started < 3000);
+    await new Promise((r) => setTimeout(r, 1000));
+    const probe = await pool.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE query LIKE 'SELECT pg_sleep(30)%' AND state = 'active'`);
+    check("pool: server-side query is gone after abort", Number(probe.rows[0].n) === 0);
+    const ok = await createPoolExecutor(pool).run((q) => q.query("SELECT 1 AS x"));
+    check("pool: connection slot is reusable after abort", ok.rows[0].x === 1);
+    const exec2 = createPoolExecutor(pool);
+    let timedOut = false;
+    await exec2.run(async (q) => { await q.query("SET LOCAL statement_timeout = 100"); return q.query("SELECT pg_sleep(5)"); }).catch(() => { timedOut = true; });
+    check("pool: statement_timeout failure destroys and frees the slot", timedOut && (await createPoolExecutor(pool).run((q) => q.query("SELECT 2 AS x"))).rows[0].x === 2);
+  }
 
   // --- SQL semantics (real disposable Postgres) ---
   if (realDb) {
