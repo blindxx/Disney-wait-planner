@@ -121,6 +121,8 @@ export interface ParkOvernightHours {
   state: "in_progress" | "none" | "unverified";
   /** The in-progress earlier-dated OPERATING windows (empty unless in_progress). */
   windows: ParkHoursWindow[];
+  /** Phase 12.10.2C: set to "stored" when Neon-retained verified hours (not today's provider response) established the state. */
+  source?: "stored";
 }
 
 export interface ParkHours {
@@ -232,6 +234,94 @@ export function isClosureCandidate(
   if (!primary.ok) return false;
   const localDate = getResortLocalDate(resortOf(parkId), instant);
   return !primary.data.entries.some((e) => e.date === localDate);
+}
+
+// ============================================
+// Phase 12.10.2C — stored previous-day supplement
+// ============================================
+
+/** Stored verified regular hours for one date (shape of parkHoursStore's StoredRegularHours). */
+export interface StoredDayHours {
+  date: string;
+  windows: Array<{ opens: string; closes: string }>;
+  sourceFetchedAt: number;
+}
+
+/** A stored record is only trusted for overnight evidence this long after its last provider verification. */
+export const STORED_OVERNIGHT_MAX_AGE_MS = 48 * 3600_000;
+const STORED_MAX_WINDOWS = 8;
+const STORED_MAX_WINDOW_MS = 24 * 3600_000;
+const STORED_FUTURE_SKEW_MS = 5 * 60_000;
+
+/**
+ * Pure: whether `stored` is a trustworthy, complete record of yesterday's
+ * regular hours, returning its windows ascending (null = unusable). Checks:
+ * dated exactly `yesterday`; fetched no later than now (small skew) and within
+ * STORED_OVERNIGHT_MAX_AGE_MS; 1..8 windows with parseable instants, close
+ * after open, ≤ 24 h, opening on `yesterday` in resort-local time (DST-safe:
+ * the date is derived from the instant, never by adding 24 h), non-overlapping.
+ */
+export function validateStoredYesterday(
+  resort: ResortId,
+  yesterday: string | null,
+  stored: StoredDayHours | null | undefined,
+  instant: Date,
+): Array<{ opens: string; closes: string; openMs: number; closeMs: number }> | null {
+  if (!yesterday || !stored || stored.date !== yesterday || !Array.isArray(stored.windows)) return null;
+  const nowMs = instant.getTime();
+  const f = stored.sourceFetchedAt;
+  if (!Number.isFinite(f) || f > nowMs + STORED_FUTURE_SKEW_MS || nowMs - f > STORED_OVERNIGHT_MAX_AGE_MS) return null;
+  if (stored.windows.length === 0 || stored.windows.length > STORED_MAX_WINDOWS) return null;
+  const out: Array<{ opens: string; closes: string; openMs: number; closeMs: number }> = [];
+  for (const w of stored.windows) {
+    if (!w || typeof w.opens !== "string" || typeof w.closes !== "string") return null;
+    const openMs = Date.parse(w.opens);
+    const closeMs = Date.parse(w.closes);
+    if (!Number.isFinite(openMs) || !Number.isFinite(closeMs) || closeMs <= openMs || closeMs - openMs > STORED_MAX_WINDOW_MS) return null;
+    if (getResortLocalDate(resort, new Date(openMs)) !== yesterday) return null;
+    out.push({ opens: w.opens, closes: w.closes, openMs, closeMs });
+  }
+  out.sort((a, b) => a.openMs - b.openMs);
+  for (let i = 1; i < out.length; i++) if (out[i].openMs < out[i - 1].closeMs) return null;
+  return out;
+}
+
+/** Whether Neon evidence could change the outcome (and so is worth a DB read). */
+export function needsStoredOvernight(data: ParkHours, instant: Date): boolean {
+  if (data.stale || data.overnight?.state !== "unverified") return false;
+  if (data.status === "closed") return true;
+  if (data.status !== "hours") return false;
+  const firstOpen = Math.min(...data.operating.map((w) => Date.parse(w.openingTime)).filter(Number.isFinite));
+  // Overnight only matters before today's first regular opening.
+  return Number.isFinite(firstOpen) && instant.getTime() < firstOpen;
+}
+
+/**
+ * Pure: supplement an `unverified` overnight with validated stored hours for
+ * yesterday. Today's provider response stays authoritative (anything but
+ * `unverified`, stale data, or unavailable/unknown status is returned as-is).
+ * A stored window still running → in_progress; every stored window ended →
+ * none. Missing/invalid/stale records change nothing — never inferred closed.
+ */
+export function applyStoredOvernight(data: ParkHours, stored: StoredDayHours | null | undefined, instant: Date): ParkHours {
+  if (data.stale || data.overnight?.state !== "unverified") return data;
+  if (data.status !== "hours" && data.status !== "closed") return data;
+  const yesterday = addDaysToLocalDate(data.localDate, -1);
+  const wins = validateStoredYesterday(data.resort, yesterday, stored, instant);
+  if (!wins) return data;
+  const nowMs = instant.getTime();
+  const running = wins.filter((w) => w.openMs <= nowMs && nowMs < w.closeMs);
+  if (running.length > 0) {
+    const windows: ParkHoursWindow[] = running.map((w) => ({
+      date: yesterday as string, type: "OPERATING", description: null,
+      openingTime: w.opens, closingTime: w.closes,
+      opens: formatResortLocalTime(data.resort, new Date(w.openMs)), closes: formatResortLocalTime(data.resort, new Date(w.closeMs)),
+      lastUpdated: null,
+    }));
+    return { ...data, overnight: { state: "in_progress", windows, source: "stored" } };
+  }
+  if (wins.every((w) => w.closeMs <= nowMs)) return { ...data, overnight: { state: "none", windows: [], source: "stored" } };
+  return data; // a stored window not yet open (clock skew vs. date) proves nothing
 }
 
 /**

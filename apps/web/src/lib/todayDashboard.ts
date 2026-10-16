@@ -76,7 +76,7 @@ export type ParkOperatingKind =
   | "between" // between two regular windows
   | "closed_after_hours" // after today's last regular closing
   | "closed_today" // provider data safely establishes no operation today
-  | "unknown"; // unavailable / unverifiable (incl. overnight) — never guessed
+  | "unknown"; // unavailable / unverifiable (incl. overnight) — never guessed; gray "Scheduled to open at X" when only today's opening is known
 
 export type ParkStatusTone = "green" | "amber" | "red" | "gray";
 
@@ -153,9 +153,10 @@ export function describeParkOperatingStatus(data: ParkHours | null, instant: Dat
   if (next) {
     if (next === wins[0]) {
       // Before today's first opening: only claim closed once yesterday's hours are verified not to run on.
+      // Unverified overnight but today's opening is known (Phase 12.10.2C): neutral gray, never a closure claim.
       return overnight.state === "none"
         ? { kind: "before_open", tone: "amber", text: `Closed \u00b7 opens ${next.w.opens}`, confirmedClosed: true, stale, presentsProviderData: true }
-        : unknownStatus(stale);
+        : { kind: "unknown", tone: "gray", text: `Scheduled to open at ${next.w.opens}`, confirmedClosed: false, stale, presentsProviderData: true };
     }
     return { kind: "between", tone: "amber", text: `Closed \u00b7 reopens ${next.w.opens}`, confirmedClosed: true, stale, presentsProviderData: true };
   }
@@ -362,13 +363,15 @@ export function runDevTodayDashboardCases(): string[] {
     r = st(hours([], [], { status: "unknown", overnight: inProg }), "2026-10-01T00:30:00-04:00");
     check("overnight Open with today's hours unknown still owes attribution", r.kind === "open" && r.presentsProviderData);
     check("confirmed statuses all owe attribution", [st(hours([reg]), "2026-10-01T08:00:00-04:00"), st(hours([reg]), "2026-10-01T12:00:00-04:00"), st(hours([reg]), "2026-10-01T23:00:00-04:00"), st(hours([], [], { status: "closed" }), "2026-10-01T12:00:00-04:00"), st(hours([w2, w1]), "2026-10-01T13:00:00-04:00")].every((x) => x.presentsProviderData));
-    check("unknown / loading statuses owe no attribution", !st(hours([reg], [], { status: "unknown" }), "2026-10-01T12:00:00-04:00").presentsProviderData && !st(null, "2026-10-01T12:00:00-04:00").presentsProviderData && !st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00").presentsProviderData);
+    check("unknown / loading statuses owe no attribution", !st(hours([reg], [], { status: "unknown" }), "2026-10-01T12:00:00-04:00").presentsProviderData && !st(null, "2026-10-01T12:00:00-04:00").presentsProviderData && !st(hours([], [], { status: "closed", overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00").presentsProviderData);
     r = st(hours([reg], [], { overnight: inProg, stale: true }), "2026-10-01T00:30:00-04:00");
     check("stale overnight window: Open still carries the stale warning flag", r.kind === "open" && r.stale);
     r = st(hours([reg], [], { overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00");
-    check("overnight unverified before opening: unavailable, NOT closed", r.kind === "unknown" && r.text === "Status unavailable" && !r.confirmedClosed);
+    check("overnight unverified before opening: gray Scheduled to open (not Status unavailable), NOT closed", r.kind === "unknown" && r.text === "Scheduled to open at 9:00 AM" && r.tone === "gray" && !r.confirmedClosed && r.presentsProviderData);
     r = st(hours([reg], [], { overnight: undefined }), "2026-10-01T00:30:00-04:00");
-    check("missing overnight field (older payload) treated as unverified", r.kind === "unknown" && !r.confirmedClosed);
+    check("missing overnight field (older payload) treated as unverified", r.kind === "unknown" && r.text === "Scheduled to open at 9:00 AM" && !r.confirmedClosed);
+    r = st(hours([reg], [], { overnight: undefined, stale: true }), "2026-10-01T00:30:00-04:00");
+    check("gray scheduled fallback keeps the stale flag", r.text === "Scheduled to open at 9:00 AM" && r.stale);
     r = st(hours([], [], { status: "closed", overnight: inProg }), "2026-10-01T00:30:00-04:00");
     check("no hours today but overnight running: open", r.kind === "open");
     r = st(hours([], [], { status: "closed", overnight: { state: "unverified", windows: [] } }), "2026-10-01T00:30:00-04:00");
