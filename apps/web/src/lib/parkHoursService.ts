@@ -37,20 +37,26 @@ import type { ResortId } from "@disney-wait-planner/shared";
 
 /**
  * Phase 12.10.2A: hand the provider responses this request ALREADY fetched to
- * the durable store (no extra provider calls). Failure-isolated and bounded —
- * never throws. Skipped when a test injects `getSchedule` without `persist`.
+ * the durable store (no extra provider calls). FIRE-AND-FORGET: the response
+ * never waits for persistence. The store itself owns the deadline, abort,
+ * cooldown and single-flight bounds, so a stalled write is contained there;
+ * here we only guarantee no throw and no unhandled rejection. Skipped when a
+ * test injects `getSchedule` without `persist`.
  */
-type PersistHours = (parkId: ParkId, responses: PersistableScheduleResponse[], instant: Date) => Promise<void>;
+type PersistHours = (parkId: ParkId, responses: PersistableScheduleResponse[], instant: Date) => Promise<unknown> | void;
 
-async function persistFetched(
+function persistFetched(
   parkId: ParkId,
   opts: { getSchedule?: unknown; persist?: PersistHours },
   instant: Date,
   responses: PersistableScheduleResponse[],
-): Promise<void> {
+): void {
   const persist = opts.persist ?? (opts.getSchedule ? null : (p, r, i) => persistParkRegularHours(p, r, { instant: i }));
   if (!persist) return;
-  try { await persist(parkId, responses, instant); } catch { /* DB trouble never affects park hours */ }
+  try {
+    // Invoked synchronously (so its start is deterministic) but never awaited.
+    Promise.resolve(persist(parkId, responses, instant)).catch(() => { /* DB trouble never affects park hours */ });
+  } catch { /* synchronous failure: same */ }
 }
 
 type GetSchedule = (
@@ -77,7 +83,7 @@ export async function getParkHours(
     }
   }
   const result = normalizeParkHours(parkId, src, now());
-  await persistFetched(parkId, opts, now(), [
+  persistFetched(parkId, opts, now(), [
     { coverage: "default_window", result: src.primary },
     ...(src.currentMonth ? [{ coverage: "month" as const, result: src.currentMonth }] : []),
     ...(src.nextMonth ? [{ coverage: "month" as const, result: src.nextMonth }] : []),
@@ -112,7 +118,7 @@ export async function getParkHoursForDate(
   );
   if (need.prev && laterKnown) src.prevMonth = await getSchedule(id, previousResortMonth(date));
   const result = normalizeParkHoursForDate(parkId, date, src, now());
-  await persistFetched(parkId, opts, now(), (["month", "nextMonth", "prevMonth"] as const).flatMap((k) => (src[k] ? [{ coverage: "month" as const, result: src[k]! }] : [])));
+  persistFetched(parkId, opts, now(), (["month", "nextMonth", "prevMonth"] as const).flatMap((k) => (src[k] ? [{ coverage: "month" as const, result: src[k]! }] : [])));
   return result;
 }
 
@@ -180,6 +186,27 @@ export async function runDevParkHoursServiceCases(): Promise<string[]> {
     check("service: persist failure does not affect park hours", r2.status === "closed");
     const d = await getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: async (_p, rs) => { seen.push("date:" + rs.length); } });
     check("service: exact-date path persists its month response", seen.some((x) => x.startsWith("date:")) && d.status !== "unavailable");
+
+    // Stalled / failing persistence never delays or alters either result, and never leaks a rejection.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => { unhandled.push(e); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const stall = () => new Promise<void>(() => {});
+      // A regression (awaiting persistence) would hang forever; race a sentinel so it FAILS instead.
+      const within = <T,>(p: Promise<T>) => Promise.race([p, new Promise<"timeout">((r) => setTimeout(() => r("timeout"), 250))]);
+      const rs = await within(getParkHours("mk", { instant, getSchedule, persist: stall }));
+      const rd = await within(getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: stall }));
+      check("service: stalled persistence does not delay today's hours", rs !== "timeout" && rs.status === "closed");
+      check("service: stalled persistence does not delay exact-date hours", rd !== "timeout" && rd.status === d.status);
+      const rej = await getParkHours("mk", { instant, getSchedule, persist: () => Promise.reject(new Error("db down")) });
+      const thr = await getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: () => { throw new Error("sync boom"); } });
+      await new Promise((r) => setTimeout(r, 20));
+      check("service: rejecting/throwing persistence leaves results intact with no unhandled rejection", rej.status === "closed" && thr.status === d.status && unhandled.length === 0);
+      const started: string[] = [];
+      await within(getParkHours("mk", { instant, getSchedule, persist: (_p, r) => { started.push(String(r.length)); return stall(); } }));
+      check("service: persistence is still started for every request (before returning)", started.length === 1);
+    } finally { process.off("unhandledRejection", onUnhandled); }
   }
   return failures;
 }
