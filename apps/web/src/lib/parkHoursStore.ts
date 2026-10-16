@@ -20,10 +20,15 @@
  *
  * Write safety: one multi-row `INSERT … ON CONFLICT DO UPDATE … WHERE`
  * statement (atomic; rows sorted so concurrent writers lock in one order).
- * An existing row is replaced only by a STRICTLY newer provider fetch, and
- * only when the windows changed or the stored verification is > 6 h old, so
- * concurrent/duplicate/out-of-order writers converge and identical data costs
- * no write. An in-process memo avoids even the round trip for repeats.
+ * An existing row is touched only by a STRICTLY newer provider fetch.
+ * `source_fetched_at` is a monotonic high-water mark of the newest observation
+ * for the row: a newer observation with IDENTICAL windows advances it (and
+ * `verified_at`) but leaves the stored content columns as they were, so an
+ * older, different response can never overwrite newer verified hours (e.g.
+ * A(t0), A(t2), B(t1) ends as A@t2 whatever the writer order). Changed windows
+ * replace the content. Duplicate / out-of-order writers converge. An
+ * in-process memo skips the round trip for observations no newer than one this
+ * instance already persisted.
  *
  * Failure isolation: `persistParkRegularHours` never throws and never waits
  * longer than its deadline; after a failure it stays off the DB for a cooldown.
@@ -74,8 +79,6 @@ const MAX_WINDOWS_PER_DAY = 8;
 const MAX_WINDOW_MS = 24 * 3600_000;
 const MAX_SOURCE_AGE_MS = 24 * 3600_000;
 const FUTURE_SKEW_MS = 5 * 60_000;
-/** Mirror of the SQL refresh rule: identical data re-verified at most this often. */
-export const REVERIFY_MS = 6 * 3600_000;
 const RETENTION_INTERVAL_MS = 3600_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 const DEFAULT_DEADLINE_MS = 1500;
@@ -168,7 +171,8 @@ export function buildRegularHoursRecords(
 
 /**
  * Atomic batch upsert. Returns the number of rows actually inserted/updated
- * (rows skipped as unchanged or older-than-stored are not counted).
+ * (rows no newer than the stored observation are skipped and not counted; a
+ * newer identical observation counts: it advances the freshness mark only).
  */
 export async function upsertRegularHours(db: Queryable, records: RegularHoursRecord[]): Promise<number> {
   if (records.length === 0) return 0;
@@ -181,15 +185,13 @@ export async function upsertRegularHours(db: Queryable, records: RegularHoursRec
      FROM unnest($1::text[], $2::date[], $3::text[], $4::text[], $5::text[], $6::double precision[], $7::text[])
        AS x(p, d, w, h, c, f, u)
      ON CONFLICT (park_id, hours_date) DO UPDATE SET
-       windows = EXCLUDED.windows,
+       windows = CASE WHEN t.windows_hash = EXCLUDED.windows_hash THEN t.windows ELSE EXCLUDED.windows END,
        windows_hash = EXCLUDED.windows_hash,
-       coverage = EXCLUDED.coverage,
+       coverage = CASE WHEN t.windows_hash = EXCLUDED.windows_hash THEN t.coverage ELSE EXCLUDED.coverage END,
+       provider_last_updated = CASE WHEN t.windows_hash = EXCLUDED.windows_hash THEN t.provider_last_updated ELSE EXCLUDED.provider_last_updated END,
        source_fetched_at = EXCLUDED.source_fetched_at,
-       provider_last_updated = EXCLUDED.provider_last_updated,
        verified_at = NOW()
-     WHERE t.source_fetched_at < EXCLUDED.source_fetched_at
-       AND (t.windows_hash <> EXCLUDED.windows_hash
-            OR t.source_fetched_at < EXCLUDED.source_fetched_at - make_interval(secs => $8::double precision))`,
+     WHERE t.source_fetched_at < EXCLUDED.source_fetched_at`,
     [
       sorted.map((r) => r.parkId),
       sorted.map((r) => r.date),
@@ -198,7 +200,6 @@ export async function upsertRegularHours(db: Queryable, records: RegularHoursRec
       sorted.map((r) => r.coverage),
       sorted.map((r) => r.sourceFetchedAt),
       sorted.map((r) => r.providerLastUpdated),
-      REVERIFY_MS / 1000,
     ],
   );
   return res.rowCount ?? 0;
@@ -328,8 +329,7 @@ function planWork(parkId: ParkId, responses: PersistableScheduleResponse[], inst
   const fresh = buildRegularHoursRecords(parkId, responses, instant).filter((r) => {
     const m = memo.get(`${r.parkId}:${r.date}`);
     if (!m) return true;
-    if (r.sourceFetchedAt <= m.fetchedAt) return false; // mirrors SQL: only strictly newer fetches replace
-    return !(m.hash === r.windowsHash && r.sourceFetchedAt - m.fetchedAt < REVERIFY_MS);
+    return r.sourceFetchedAt > m.fetchedAt; // mirrors SQL: only strictly newer observations touch a row
   });
   const retentionDue = nowMs - (retentionRanAt.get(parkId) ?? 0) >= RETENTION_INTERVAL_MS && responses.some((x) => x.result.ok);
   return { fresh, retentionDue };
@@ -506,10 +506,13 @@ export async function runDevParkHoursStoreCases(realDb?: Queryable, realPool?: P
   check("store: failed provider response makes no DB call", calls === 0);
   await persistParkRegularHours("mk", [resp([ent("2026-10-15")])], { instant: NOW, db: noop });
   const afterFirst = calls;
+  await persistParkRegularHours("mk", [resp([ent("2026-10-15")])], { instant: NOW, db: noop });
+  check("store: same observation repeated is memoized (no redundant DB call)", afterFirst > 0 && calls === afterFirst);
   await persistParkRegularHours("mk", [resp([ent("2026-10-15")], { fetchedAt: T + 1000 })], { instant: NOW, db: noop });
-  check("store: unchanged repeat is memoized (no redundant DB call)", afterFirst > 0 && calls === afterFirst);
+  check("store: newer identical observation reaches the DB (freshness must advance)", calls > afterFirst);
+  const afterNewer = calls;
   await persistParkRegularHours("mk", [resp([ent("2026-10-15", "08:00", "22:00")], { fetchedAt: T + 2000 })], { instant: NOW, db: noop });
-  check("store: changed windows reach the DB", calls > afterFirst);
+  check("store: changed windows reach the DB", calls > afterNewer);
 
   // --- bounded in-flight work: hung writes, cooldown, recovery, concurrency ---
   {
@@ -639,12 +642,56 @@ export async function runDevParkHoursStoreCases(realDb?: Queryable, realPool?: P
     check("sql: older fetch never replaces newer row", (await upsertRegularHours(db, older)) === 0 && (await get("2026-10-15")).windows[0].opens === "2026-10-15T13:00:00.000Z");
     const sameTime = build([resp([ent("2026-10-15", "07:00", "22:00")], { fetchedAt: T })]);
     check("sql: equal fetch time never replaces (stable under ties)", (await upsertRegularHours(db, sameTime)) === 0);
-    const newerSame = build([resp([ent("2026-10-15")], { fetchedAt: T + 3600_000 })]);
-    check("sql: newer identical data within 6 h is not rewritten", (await upsertRegularHours(db, newerSame)) === 0 && (await get("2026-10-15")).sourceFetchedAt === T);
-    const reverifyRecs = buildRegularHoursRecords("mk", [resp([ent("2026-10-15")], { fetchedAt: T + 7 * 3600_000 })], new Date(T + 7 * 3600_000));
-    check("sql: identical data re-verified after 6 h", (await upsertRegularHours(db, reverifyRecs)) === 1 && (await get("2026-10-15")).sourceFetchedAt === T + 7 * 3600_000);
+    const newerSame = buildRegularHoursRecords("mk", [resp([ent("2026-10-15")], { fetchedAt: T + 3600_000 })], new Date(T + 3600_000));
+    const before = await get("2026-10-15");
+    check("sql: newer identical observation advances freshness only (content untouched)",
+      (await upsertRegularHours(db, newerSame)) === 1 &&
+      (await get("2026-10-15")).sourceFetchedAt === T + 3600_000 &&
+      JSON.stringify((await get("2026-10-15")).windows) === JSON.stringify(before.windows) &&
+      (await get("2026-10-15")).coverage === before.coverage);
+    check("sql: replaying the same observation is a no-op (idempotent)", (await upsertRegularHours(db, newerSame)) === 0);
+    check("sql: older identical observation is a no-op", (await upsertRegularHours(db, build([resp([ent("2026-10-15")], { fetchedAt: T + 1000 })]))) === 0);
     const changedRecs = buildRegularHoursRecords("mk", [resp([ent("2026-10-15", "08:00", "23:00")], { fetchedAt: T + 8 * 3600_000 })], new Date(T + 8 * 3600_000));
     check("sql: newer changed data replaces", (await upsertRegularHours(db, changedRecs)) === 1 && (await get("2026-10-15")).windows[0].opens === "2026-10-15T12:00:00.000Z");
+    // Regression (Codex P2): A(t0), A(t2), B(t1) must end as A@t2 in EVERY arrival order.
+    {
+      const A = (t: number) => buildRegularHoursRecords("mk", [resp([ent("2026-10-25", "09:00", "22:00")], { fetchedAt: t })], new Date(t));
+      const B = (t: number) => buildRegularHoursRecords("mk", [resp([ent("2026-10-25", "08:00", "23:00")], { fetchedAt: t })], new Date(t));
+      const t0 = T, t1 = T + 60_000, t2 = T + 120_000;
+      const orders: Array<Array<[string, () => RegularHoursRecord[]]>> = [
+        [["A0", () => A(t0)], ["A2", () => A(t2)], ["B1", () => B(t1)]],
+        [["A0", () => A(t0)], ["B1", () => B(t1)], ["A2", () => A(t2)]],
+        [["B1", () => B(t1)], ["A2", () => A(t2)], ["A0", () => A(t0)]],
+        [["A2", () => A(t2)], ["B1", () => B(t1)], ["A0", () => A(t0)]],
+        [["B1", () => B(t1)], ["A0", () => A(t0)], ["A2", () => A(t2)]],
+        [["A2", () => A(t2)], ["A0", () => A(t0)], ["B1", () => B(t1)]],
+      ];
+      let bad = "";
+      for (const order of orders) {
+        await db.query(`DELETE FROM park_regular_hours WHERE hours_date = '2026-10-25'`);
+        for (const [, mk] of order) await upsertRegularHours(db, mk()); // independent writers, sequential arrival
+        const row = (await readStoredRegularHours(db, "mk", "2026-10-25", "2026-10-25"))[0];
+        if (!row || row.windows[0].opens !== "2026-10-25T13:00:00.000Z" || row.sourceFetchedAt !== t2) bad += order.map((o) => o[0]).join(">") + " ";
+      }
+      check("sql: A(t0), A(t2), B(t1) ends as A@t2 for every arrival order (sequential writers)" + (bad ? ` [bad: ${bad}]` : ""), bad === "");
+      // truly concurrent independent writers, repeated to shake out lock ordering
+      let badC = 0;
+      for (let k = 0; k < 20; k++) {
+        await db.query(`DELETE FROM park_regular_hours WHERE hours_date = '2026-10-25'`);
+        await Promise.all([A(t0), A(t2), B(t1)].sort(() => Math.random() - 0.5).map((recs) => upsertRegularHours(db, recs)));
+        const row = (await readStoredRegularHours(db, "mk", "2026-10-25", "2026-10-25"))[0];
+        if (!row || row.windows[0].opens !== "2026-10-25T13:00:00.000Z" || row.sourceFetchedAt !== t2) badC++;
+      }
+      check("sql: concurrent independent writers A(t0), A(t2), B(t1) never end on B", badC === 0);
+      // via the opportunistic entry point with separate "instances" (state reset between = different process memo)
+      await db.query(`DELETE FROM park_regular_hours WHERE hours_date = '2026-10-25'`);
+      for (const [resps, at] of [[[resp([ent("2026-10-25", "09:00", "22:00")], { fetchedAt: t0 })], t0], [[resp([ent("2026-10-25", "09:00", "22:00")], { fetchedAt: t2 })], t2], [[resp([ent("2026-10-25", "08:00", "23:00")], { fetchedAt: t1 })], t1]] as const) {
+        resetParkHoursStoreState();
+        await persistParkRegularHours("mk", [...resps], { instant: new Date(at), db });
+      }
+      const via = (await readStoredRegularHours(db, "mk", "2026-10-25", "2026-10-25"))[0];
+      check("sql: persist entry point across independent instances keeps A@t2", via?.sourceFetchedAt === t2 && via.windows[0].opens === "2026-10-25T13:00:00.000Z");
+    }
     // concurrency: many parallel writers of overlapping batches, mixed freshness
     await db.query(`DELETE FROM park_regular_hours`);
     const base = Array.from({ length: 6 }, (_, i) => `2026-10-${String(15 + i).padStart(2, "0")}`);
