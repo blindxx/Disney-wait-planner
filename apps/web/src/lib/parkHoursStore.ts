@@ -239,6 +239,57 @@ export async function readStoredRegularHours(db: Queryable, parkId: ParkId, from
 }
 
 // ============================================
+// Phase 12.10.2C — bounded read of yesterday's verified hours
+// ============================================
+
+const READ_DEADLINE_MS = 1000;
+let readBlockedUntil = 0;
+
+/**
+ * Yesterday's stored verified regular hours for one park, for Today's overnight
+ * status. Read-only, one cheap PK-range query on the dedicated one-connection
+ * pool, bounded by a deadline (connection torn down on timeout) and a failure
+ * cooldown. NEVER throws: any problem (no DATABASE_URL, DB down, timeout,
+ * cooldown, busy single connection) returns null = "no evidence".
+ */
+export async function readStoredPreviousDayHours(
+  parkId: ParkId,
+  date: string,
+  opts: { db?: Queryable; executor?: PersistExecutor; deadlineMs?: number; clock?: () => number } = {},
+): Promise<StoredRegularHours | null> {
+  try {
+    if (!isValidIsoCalendarDate(date)) return null;
+    const clock = opts.clock ?? Date.now;
+    if (clock() < readBlockedUntil) return null;
+    let executor = opts.executor ?? (opts.db ? { run: (fn) => fn(opts.db as Queryable), abort() {} } as PersistExecutor : null);
+    if (!executor) {
+      if (!process.env.DATABASE_URL) return null;
+      executor = createPoolExecutor(getParkHoursPool());
+    }
+    const exec = executor;
+    let failed = false;
+    const work = exec.run((q) => readStoredRegularHours(q, parkId, date, date)).catch(() => { failed = true; return [] as StoredRegularHours[]; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const rows = await Promise.race([
+      work,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), opts.deadlineMs ?? READ_DEADLINE_MS); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (rows === null) {
+      readBlockedUntil = clock() + FAILURE_COOLDOWN_MS;
+      try { exec.abort(); } catch { /* best effort */ }
+      return null;
+    }
+    if (failed) { readBlockedUntil = clock() + FAILURE_COOLDOWN_MS; return null; }
+    return rows.find((r) => r.date === date) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function resetParkHoursReadState(): void { readBlockedUntil = 0; }
+
+// ============================================
 // Opportunistic, failure-isolated entry point
 // ============================================
 

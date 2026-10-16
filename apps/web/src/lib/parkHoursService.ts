@@ -22,6 +22,8 @@ import {
   nextResortMonth,
   normalizeParkHours,
   normalizeParkHoursForDate,
+  applyStoredOvernight,
+  needsStoredOvernight,
   parkDateFollowUps,
   parkDateRequestIssue,
   previousResortMonth,
@@ -29,11 +31,13 @@ import {
   type ParkDateSources,
   type ParkHours,
   type ParkHoursSources,
+  type StoredDayHours,
 } from "./parkHours";
 import { themeParks, type ThemeParksResult, type ThemeParksSchedule } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 import { waitUntil } from "@vercel/functions";
-import { persistParkRegularHours, type PersistableScheduleResponse } from "./parkHoursStore";
+import { persistParkRegularHours, readStoredPreviousDayHours, type PersistableScheduleResponse } from "./parkHoursStore";
+import { addDaysToLocalDate } from "./resortTime";
 import type { ResortId } from "@disney-wait-planner/shared";
 
 /**
@@ -74,6 +78,12 @@ function persistFetched(
   } catch { /* synchronous failure: same */ }
 }
 
+/**
+ * Phase 12.10.2C: bounded read of yesterday's Neon-retained verified hours.
+ * Resolves null on any problem. Injected in tests; `null` option disables.
+ */
+type ReadStoredPreviousDay = (parkId: ParkId, date: string) => Promise<StoredDayHours | null>;
+
 type GetSchedule = (
   id: string,
   month?: { year: number; month: number },
@@ -81,7 +91,7 @@ type GetSchedule = (
 
 export async function getParkHours(
   parkId: ParkId,
-  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours; keepAlive?: KeepAlive } = {},
+  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours; keepAlive?: KeepAlive; readStored?: ReadStoredPreviousDay } = {},
 ): Promise<ParkHours> {
   const getSchedule: GetSchedule = opts.getSchedule ?? ((id, month) => themeParks.getSchedule(id, month));
   const resort = PARK_TO_RESORT[parkId] as ResortId;
@@ -97,7 +107,17 @@ export async function getParkHours(
       src.nextMonth = await getSchedule(id, nextResortMonth(localDate));
     }
   }
-  const result = normalizeParkHours(parkId, src, now());
+  let result = normalizeParkHours(parkId, src, now());
+  // Phase 12.10.2C: today's provider response stays authoritative; Neon is read
+  // only when overnight is unverified AND it could change the outcome, and any
+  // failure leaves the provider-derived result untouched.
+  if (needsStoredOvernight(result, now())) {
+    const readStored = opts.readStored ?? (opts.getSchedule ? null : (p, d) => readStoredPreviousDayHours(p, d));
+    const yesterday = addDaysToLocalDate(result.localDate, -1);
+    if (readStored && yesterday) {
+      try { result = applyStoredOvernight(result, await readStored(parkId, yesterday), now()); } catch { /* DB trouble never affects park hours */ }
+    }
+  }
   persistFetched(parkId, opts, now(), [
     { coverage: "default_window", result: src.primary },
     ...(src.currentMonth ? [{ coverage: "month" as const, result: src.currentMonth }] : []),
@@ -298,5 +318,134 @@ export async function runDevParkHoursForDateServiceCases(): Promise<string[]> {
   check("date service: past date makes no provider call", o.asked.length === 0 && o.r.unavailableReason === "past_date");
   o = await run(N, "2026-02-30", {});
   check("date service: invalid date makes no provider call", o.asked.length === 0 && o.r.unavailableReason === "invalid_date");
+  return failures;
+}
+
+/** DEV check (run manually; returns failing labels): Phase 12.10.2C stored overnight supplement. */
+export async function runDevStoredOvernightCases(): Promise<string[]> {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const ID = THEMEPARKS_PARKS.mk.entityId;
+  type E = { date: string; type: string; openingTime: string; closingTime: string; description: null; lastUpdated: null };
+  const op = (date: string, open = "09:00:00", close = "22:00:00", off = "-04:00"): E => ({ date, type: "OPERATING", openingTime: `${date}T${open}${off}`, closingTime: `${date}T${close}${off}`, description: null, lastUpdated: null });
+  const res = (entries: E[], at: number): ThemeParksResult<ThemeParksSchedule> =>
+    ({ ok: true, data: { entityId: ID, name: "MK", timeZone: "America/New_York", entries, parks: [], droppedEntries: 0 }, meta: { origin: "network", fetchedAt: at, etag: null } });
+  const win = (opens: string, closes: string) => ({ opens: new Date(opens).toISOString(), closes: new Date(closes).toISOString() });
+  const stored = (date: string, windows: Array<{ opens: string; closes: string }>, fetchedAt: string): StoredDayHours => ({ date, windows, sourceFetchedAt: Date.parse(fetchedAt) });
+
+  // Today's provider data: default window starting today (yesterday unverified) — the case Neon supplements.
+  const run = async (now: string, entries: E[], readStored: ((p: ParkId, d: string) => Promise<StoredDayHours | null>) | undefined, origin?: "stale") => {
+    const instant = new Date(now);
+    let reads = 0; const dates: string[] = [];
+    const r = await getParkHours("mk", {
+      instant,
+      getSchedule: async () => { const x = res(entries, instant.getTime()); if (origin && x.ok) x.meta.origin = "stale"; return x; },
+      readStored: readStored ? async (p, d) => { reads++; dates.push(d); return readStored(p, d); } : undefined,
+    });
+    return { r, reads, dates };
+  };
+  const today = [op("2026-10-15")];
+  const NOW_PRE = "2026-10-15T04:30:00Z"; // 12:30 AM EDT Oct 15
+  const NOW_AFTER = "2026-10-15T06:30:00Z"; // 2:30 AM EDT
+  const yWin = win("2026-10-14T09:00:00-04:00", "2026-10-15T01:00:00-04:00"); // closes 1 AM Oct 15
+  const fetched = "2026-10-14T15:00:00Z";
+
+  // --- confirmed overnight open / closed
+  let o = await run(NOW_PRE, today, async () => stored("2026-10-14", [yWin], fetched));
+  check("stored: running overnight window → in_progress (source stored)", o.r.overnight?.state === "in_progress" && o.r.overnight.source === "stored" && o.r.overnight.windows[0].closes === "1:00 AM" && o.dates.join() === "2026-10-14");
+  o = await run(NOW_AFTER, today, async () => stored("2026-10-14", [yWin], fetched));
+  check("stored: ended overnight window → none (verified)", o.r.overnight?.state === "none" && o.r.overnight.source === "stored");
+  check("stored: exactly at close is ended", (await run("2026-10-15T05:00:00Z", today, async () => stored("2026-10-14", [yWin], fetched))).r.overnight?.state === "none");
+  // End-to-end through the Today status
+  const { describeParkOperatingStatus } = await import("./todayDashboard");
+  let s = describeParkOperatingStatus((await run(NOW_PRE, today, async () => stored("2026-10-14", [yWin], fetched))).r, new Date(NOW_PRE));
+  check("status: stored running overnight → green Open · closes 1:00 AM", s.kind === "open" && s.tone === "green" && s.text === "Open · closes 1:00 AM");
+  s = describeParkOperatingStatus((await run(NOW_AFTER, today, async () => stored("2026-10-14", [yWin], fetched))).r, new Date(NOW_AFTER));
+  check("status: stored verified-ended → amber Closed · opens 9:00 AM", s.kind === "before_open" && s.tone === "amber" && s.confirmedClosed && s.text === "Closed · opens 9:00 AM");
+
+  // --- missing / stale / invalid Neon → gray fallback, never closed
+  const grayCheck = async (label: string, reader: ((p: ParkId, d: string) => Promise<StoredDayHours | null>) | undefined, origin?: "stale") => {
+    const x = await run(NOW_AFTER, today, reader, origin);
+    const st = describeParkOperatingStatus(x.r, new Date(NOW_AFTER));
+    check(label, x.r.overnight?.state === "unverified" && st.kind === "unknown" && st.tone === "gray" && st.text === "Scheduled to open at 9:00 AM" && !st.confirmedClosed);
+  };
+  await grayCheck("missing record → gray scheduled", async () => null);
+  await grayCheck("stale record (older than 48h) → gray scheduled", async () => stored("2026-10-14", [yWin], "2026-10-12T20:00:00Z"));
+  await grayCheck("record fetched in the future → gray scheduled", async () => stored("2026-10-14", [yWin], "2026-10-16T00:00:00Z"));
+  await grayCheck("wrong date → gray scheduled", async () => stored("2026-10-13", [yWin], fetched));
+  await grayCheck("invalid window (close ≤ open) → gray scheduled", async () => stored("2026-10-14", [{ opens: yWin.closes, closes: yWin.opens }], fetched));
+  await grayCheck("unparseable window → gray scheduled", async () => stored("2026-10-14", [{ opens: "bad", closes: "bad" }], fetched));
+  await grayCheck("window not opening on yesterday → gray scheduled", async () => stored("2026-10-14", [win("2026-10-15T09:00:00-04:00", "2026-10-15T22:00:00-04:00")], fetched));
+  await grayCheck("window > 24h → gray scheduled", async () => stored("2026-10-14", [win("2026-10-14T09:00:00-04:00", "2026-10-15T10:00:00-04:00")], fetched));
+  await grayCheck("empty windows → gray scheduled", async () => stored("2026-10-14", [], fetched));
+  await grayCheck("overlapping windows → gray scheduled", async () => stored("2026-10-14", [win("2026-10-14T09:00:00-04:00", "2026-10-14T15:00:00-04:00"), win("2026-10-14T14:00:00-04:00", "2026-10-14T22:00:00-04:00")], fetched));
+  await grayCheck("DB read throws → gray scheduled, hours intact", async () => { throw new Error("db down"); });
+  await grayCheck("no reader / DB unconfigured → gray scheduled", undefined);
+  await grayCheck("stale provider data never takes the Neon supplement", async () => stored("2026-10-14", [yWin], fetched), "stale");
+
+  // --- no opening time → Status unavailable retained
+  {
+    const x = await run(NOW_AFTER, [], async () => stored("2026-10-14", [yWin], fetched));
+    check("no today hours: unknown stays Status unavailable", describeParkOperatingStatus(x.r, new Date(NOW_AFTER)).text === "Status unavailable");
+  }
+
+  // --- provider stays authoritative / avoid unnecessary reads
+  o = await run(NOW_PRE, [op("2026-10-14", "09:00:00", "22:00:00"), op("2026-10-15")], async () => stored("2026-10-14", [], fetched));
+  check("provider-verified overnight is never read from Neon", o.reads === 0 && o.r.overnight?.state === "none" && o.r.overnight.source === undefined);
+  o = await run("2026-10-15T16:00:00Z", today, async () => stored("2026-10-14", [yWin], fetched));
+  check("after today's opening: no DB read", o.reads === 0);
+
+  // --- multiple windows (split yesterday; the later one runs past midnight)
+  const w1 = win("2026-10-14T09:00:00-04:00", "2026-10-14T13:00:00-04:00");
+  const w2 = win("2026-10-14T18:00:00-04:00", "2026-10-15T01:00:00-04:00");
+  o = await run(NOW_PRE, today, async () => stored("2026-10-14", [w2, w1], fetched));
+  check("multiple windows: only the one still running is carried", o.r.overnight?.state === "in_progress" && o.r.overnight.windows.length === 1 && o.r.overnight.windows[0].opens === "6:00 PM");
+  o = await run(NOW_AFTER, today, async () => stored("2026-10-14", [w2, w1], fetched));
+  check("multiple windows: all ended → none", o.r.overnight?.state === "none");
+
+  // --- DST. Fall back Nov 1 2026 (EDT→EST at 2 AM): yesterday's 9 PM–3 AM window is 6 h long on the clock.
+  {
+    const dstWin = win("2026-10-31T21:00:00-04:00", "2026-11-01T03:00:00-05:00");
+    const dstToday = [op("2026-11-01", "09:00:00", "22:00:00", "-05:00")];
+    const at = (iso: string) => run(iso, dstToday, async () => stored("2026-10-31", [dstWin], "2026-10-31T15:00:00Z"));
+    check("DST fall-back: 1:30 AM EST (second 1:30) still running", (await at("2026-11-01T06:30:00Z")).r.overnight?.state === "in_progress");
+    check("DST fall-back: after 3 AM EST → none", (await at("2026-11-01T08:30:00Z")).r.overnight?.state === "none");
+    // Spring forward Mar 8 2026 (2 AM→3 AM): yesterday's 9 PM–3 AM EDT window (5 h elapsed).
+    const sprWin = win("2026-03-07T21:00:00-05:00", "2026-03-08T03:00:00-04:00");
+    const sprToday = [op("2026-03-08", "09:00:00", "22:00:00", "-04:00")];
+    const sp = (iso: string) => run(iso, sprToday, async () => stored("2026-03-07", [sprWin], "2026-03-07T15:00:00Z"));
+    check("DST spring-forward: 3:30 AM EDT is past close → none", (await sp("2026-03-08T07:30:00Z")).r.overnight?.state === "none");
+    check("DST spring-forward: 2:30 AM-equivalent (06:30Z=1:30 EST) still running", (await sp("2026-03-08T06:30:00Z")).r.overnight?.state === "in_progress");
+  }
+
+  // --- resort-local midnight: 03:59Z is 11:59 PM EDT Oct 14 (yesterday = Oct 13); 04:00Z is midnight Oct 15 (yesterday = Oct 14).
+  {
+    const asks: string[] = [];
+    await run("2026-10-15T03:59:00Z", [op("2026-10-14")], async (_p, d) => { asks.push(d); return null; });
+    await run("2026-10-15T04:00:00Z", [op("2026-10-15")], async (_p, d) => { asks.push(d); return null; });
+    check("midnight: 11:59 PM local needs no read; 12:00 AM local asks for the resort-local previous day (not UTC)", asks.join() === "2026-10-14");
+  }
+
+  // --- DB failure never breaks the response (covered by the throwing-reader case above).
+  // Real store reader: deadline + cooldown + failure isolation (fake executors).
+  {
+    const { readStoredPreviousDayHours, resetParkHoursReadState } = await import("./parkHoursStore");
+    resetParkHoursReadState();
+    let aborted = 0; let calls = 0;
+    const stall = { run: () => { calls++; return new Promise<never>(() => {}); }, abort() { aborted++; } };
+    let clock = 1000;
+    const t = await readStoredPreviousDayHours("mk", "2026-10-14", { executor: stall as never, deadlineMs: 30, clock: () => clock });
+    check("store read: stalled DB → null at the deadline, connection aborted", t === null && aborted === 1 && calls === 1);
+    const again = await readStoredPreviousDayHours("mk", "2026-10-14", { executor: stall as never, deadlineMs: 30, clock: () => clock });
+    check("store read: cooldown after timeout makes no new DB attempt", again === null && calls === 1);
+    clock += 61_000;
+    const failing = { run: async () => { throw new Error("boom"); }, abort() {} };
+    check("store read: DB error → null (never throws)", (await readStoredPreviousDayHours("mk", "2026-10-14", { executor: failing as never, clock: () => clock })) === null);
+    resetParkHoursReadState();
+    const okDb = { query: async () => ({ rowCount: 1, rows: [{ park_id: "mk", d: "2026-10-14", windows: [yWin], coverage: "month", f: Date.parse(fetched) }] }) };
+    const row = await readStoredPreviousDayHours("mk", "2026-10-14", { db: okDb });
+    check("store read: returns the stored row for the date", row?.date === "2026-10-14" && row.windows.length === 1);
+    check("store read: invalid date makes no query", (await readStoredPreviousDayHours("mk", "nope", { db: { query: async () => { throw new Error("x"); } } })) === null);
+  }
   return failures;
 }
