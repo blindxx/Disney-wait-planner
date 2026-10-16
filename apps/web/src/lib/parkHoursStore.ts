@@ -286,17 +286,26 @@ const STATEMENT_TIMEOUT_MS = 4000;
 export function createPoolExecutor(pool: Pool): PersistExecutor {
   let client: PoolClient | null = null;
   let done = false;
+  // Checked-out clients have no pool error listener, so an 'error' event (e.g. the
+  // socket dropping mid-query) would be unhandled. This guard covers exactly the
+  // checkout window. A reusable client gets it REMOVED before it returns to the
+  // pool, so pooled-client reuse never accumulates listeners; a client being
+  // destroyed keeps it (it is never reused, and late socket errors during teardown
+  // must still be swallowed).
+  const onClientError = () => {};
   const finish = (destroy: boolean) => {
-    if (done || !client) { done = true; return; }
+    if (done) return;
     done = true;
+    if (!client) return;
+    if (!destroy) client.removeListener("error", onClientError);
     try { client.release(destroy); } catch { /* already gone */ }
   };
   return {
     async run<T>(fn: (q: Queryable) => Promise<T>): Promise<T> {
       const c = await pool.connect();
+      c.on("error", onClientError); // before anything else can fail or abort
       if (done) { try { c.release(true); } catch { /* aborted while connecting */ } throw new Error("aborted"); }
       client = c;
-      c.on("error", () => {}); // checked-out clients have no pool error listener
       try {
         await c.query("BEGIN");
         await c.query(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
@@ -603,6 +612,60 @@ export async function runDevParkHoursStoreCases(realDb?: Queryable, realPool?: P
     } finally { console.warn = warn2; }
   }
 
+  // --- executor client-listener lifecycle (fake pool; deterministic, no DB) ---
+  {
+    const { EventEmitter } = await import("node:events");
+    type FakeClient = InstanceType<typeof EventEmitter> & { query: (t: string) => Promise<unknown>; release: (d?: boolean) => void; destroyed: boolean; released: number };
+    const mkClient = (failOn?: string, hang?: boolean): FakeClient => {
+      const c = new EventEmitter() as FakeClient;
+      c.destroyed = false; c.released = 0;
+      c.query = (t: string) => (hang && t.startsWith("SELECT") ? new Promise(() => {}) : failOn && t.startsWith(failOn) ? Promise.reject(new Error("q fail")) : Promise.resolve({ rows: [], rowCount: 0 }));
+      c.release = (d?: boolean) => { c.released++; if (d) c.destroyed = true; };
+      return c;
+    };
+    const poolOf = (c: FakeClient) => ({ connect: async () => c }) as unknown as Pool;
+    const L = (c: FakeClient) => c.listenerCount("error");
+
+    const shared = mkClient();
+    for (let i = 0; i < 25; i++) await createPoolExecutor(poolOf(shared)).run((q) => q.query("SELECT 1"));
+    check("listeners: reused pooled client accumulates no error listeners (success path)", L(shared) === 0 && shared.released === 25 && !shared.destroyed);
+
+    const during = mkClient(); let seen = -1;
+    await createPoolExecutor(poolOf(during)).run(async (q) => { seen = L(during); return q.query("SELECT 1"); });
+    check("listeners: exactly one guard while checked out", seen === 1 && L(during) === 0);
+
+    const guarded = mkClient(); let threw = false;
+    try { await createPoolExecutor(poolOf(guarded)).run(async () => { guarded.emit("error", new Error("socket reset")); throw new Error("x"); }); } catch { threw = true; }
+    check("listeners: error event while checked out is swallowed (no unhandled error)", threw);
+
+    const failing = mkClient("SET LOCAL");
+    let rejected = false;
+    await createPoolExecutor(poolOf(failing)).run((q) => q.query("SELECT 1")).catch(() => { rejected = true; });
+    check("listeners: failure path destroys the client and still guards teardown errors", rejected && failing.destroyed && failing.released === 1 && L(failing) === 1);
+    let unhandled = false;
+    try { failing.emit("error", new Error("late socket error")); } catch { unhandled = true; }
+    check("listeners: late error on a destroyed client is handled", !unhandled);
+
+    const hungC = mkClient(undefined, true);
+    const ex = createPoolExecutor(poolOf(hungC));
+    const pr = ex.run((q) => q.query("SELECT pg_sleep(30)")).then(() => "done", () => "err");
+    await new Promise((r) => setTimeout(r, 10));
+    ex.abort(); ex.abort();
+    check("listeners: abort destroys once (idempotent) and keeps teardown guard", hungC.destroyed && hungC.released === 1 && L(hungC) === 1);
+    let late = false;
+    try { hungC.emit("error", new Error("terminated")); } catch { late = true; }
+    check("listeners: error after abort is handled", !late);
+    void pr;
+
+    // abort while still connecting: guard attached, client destroyed, run rejects
+    const slowC = mkClient(); let connectDone: (() => void) | undefined;
+    const slowPool = { connect: () => new Promise<FakeClient>((res) => { connectDone = () => res(slowC); }) } as unknown as Pool;
+    const ex2 = createPoolExecutor(slowPool);
+    const pr2 = ex2.run((q) => q.query("SELECT 1")).then(() => "ran", () => "aborted");
+    ex2.abort(); connectDone?.();
+    check("listeners: abort during connect destroys the late client, guarded", (await pr2) === "aborted" && slowC.destroyed && L(slowC) === 1);
+  }
+
   // --- real pool executor: abort destroys the connection and cancels the query ---
   if (realPool) {
     const pool = realPool;
@@ -618,6 +681,16 @@ export async function runDevParkHoursStoreCases(realDb?: Queryable, realPool?: P
     await new Promise((r) => setTimeout(r, 1000));
     const probe = await pool.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE query LIKE 'SELECT pg_sleep(30)%' AND state = 'active'`);
     check("pool: server-side query is gone after abort", Number(probe.rows[0].n) === 0);
+    {
+      // A max-1 pool guarantees every run reuses the SAME underlying client.
+      const one = new (pool.constructor as new (o: object) => Pool)({ ...(pool as unknown as { options: object }).options, max: 1 });
+      try {
+        const probeCount = async () => { const c = await one.connect(); const n = c.listenerCount("error"); c.release(); return n; };
+        const base = await probeCount();
+        for (let i = 0; i < 15; i++) await createPoolExecutor(one).run((q) => q.query("SELECT 1"));
+        check("pool: 15 reuses of the real pooled connection add no error listeners", (await probeCount()) === base);
+      } finally { await one.end(); }
+    }
     const ok = await createPoolExecutor(pool).run((q) => q.query("SELECT 1 AS x"));
     check("pool: connection slot is reusable after abort", ok.rows[0].x === 1);
     const exec2 = createPoolExecutor(pool);
