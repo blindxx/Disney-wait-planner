@@ -355,22 +355,32 @@ function planWork(parkId: ParkId, responses: PersistableScheduleResponse[], inst
  *  - it only ever uses the dedicated one-connection pool, never the shared one.
  * No-op without DATABASE_URL (or an injected db/executor).
  */
+export type PersistOutcome =
+  | "persisted"        // statement committed
+  | "nothing_to_write" // no eligible/new records and no retention due
+  | "busy"             // another attempt in flight on this instance (not written)
+  | "cooldown"         // off the DB after a recent failure (not written)
+  | "unconfigured"     // no DATABASE_URL / executor (not written)
+  | "failed"           // statement failed (not written)
+  | "timed_out";       // deadline hit; aborted (not written)
+
 export async function persistParkRegularHours(
   parkId: ParkId,
   responses: PersistableScheduleResponse[],
   opts: PersistOptions = {},
-): Promise<void> {
+): Promise<PersistOutcome> {
   try {
     const clock = opts.clock ?? Date.now;
     const instant = opts.instant ?? new Date();
     const startedAt = clock();
-    if (startedAt < blockedUntil || inflight) return;
+    if (startedAt < blockedUntil) return "cooldown";
+    if (inflight) return "busy";
     const { fresh, retentionDue } = planWork(parkId, responses, instant, startedAt);
-    if (fresh.length === 0 && !retentionDue) return;
+    if (fresh.length === 0 && !retentionDue) return "nothing_to_write";
 
     let executor = opts.executor ?? (opts.db ? { run: (fn) => fn(opts.db as Queryable), abort() {} } as PersistExecutor : null);
     if (!executor) {
-      if (!process.env.DATABASE_URL) return;
+      if (!process.env.DATABASE_URL) return "unconfigured";
       executor = createPoolExecutor(getParkHoursPool());
     }
     const exec = executor;
@@ -378,6 +388,7 @@ export async function persistParkRegularHours(
     inflight = true;
     const mine = ++generation;
     const current = () => mine === generation;
+    let failed = false;
     const work = exec.run(async (q) => {
       await upsertRegularHours(q, fresh);
       if (retentionDue) {
@@ -391,6 +402,7 @@ export async function persistParkRegularHours(
         if (retentionDue) retentionRanAt.set(parkId, startedAt);
       },
       (err) => {
+        failed = true;
         if (!current()) return;
         blockedUntil = clock() + FAILURE_COOLDOWN_MS;
         console.warn("[parkHoursStore] persist failed:", err instanceof Error ? err.message : String(err));
@@ -411,9 +423,11 @@ export async function persistParkRegularHours(
       console.warn("[parkHoursStore] persist timed out; aborted and cooling down");
     }
     if (current() || timedOut) inflight = false;
+    return timedOut ? "timed_out" : failed ? "failed" : "persisted";
   } catch (err) {
     inflight = false;
     console.warn("[parkHoursStore] persist skipped:", err instanceof Error ? err.message : String(err));
+    return "failed";
   }
 }
 
