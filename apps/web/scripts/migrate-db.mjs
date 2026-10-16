@@ -194,6 +194,24 @@ const TABLE_CONTRACTS = {
     ],
     primaryKey: ["user_id", "profile_id"],
   },
+  // Phase 12.10.2A — durable regular park hours (lib/parkHoursStore.ts).
+  // The writer's ON CONFLICT (park_id, hours_date) requires that exact
+  // PRIMARY KEY; `windows` must be JSONB and `hours_date` a DATE (retention
+  // and date-keyed reads compare it as a calendar date).
+  park_regular_hours: {
+    columns: [
+      { name: "park_id", dataType: "text", notNull: true },
+      { name: "hours_date", dataType: "date", notNull: true },
+      { name: "windows", dataType: "jsonb", notNull: true },
+      { name: "windows_hash", dataType: "text", notNull: true },
+      { name: "coverage", dataType: "text", notNull: true },
+      { name: "source_fetched_at", dataType: "timestamp with time zone", notNull: true },
+      { name: "provider_last_updated", dataType: "timestamp with time zone", notNull: false },
+      { name: "first_seen_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "verified_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+    ],
+    primaryKey: ["park_id", "hours_date"],
+  },
 };
 
 // SH.2.7 — route.ts (`Number(rows[0].revision)`) and syncHelper.ts both

@@ -32,7 +32,26 @@ import {
 } from "./parkHours";
 import { themeParks, type ThemeParksResult, type ThemeParksSchedule } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
+import { persistParkRegularHours, type PersistableScheduleResponse } from "./parkHoursStore";
 import type { ResortId } from "@disney-wait-planner/shared";
+
+/**
+ * Phase 12.10.2A: hand the provider responses this request ALREADY fetched to
+ * the durable store (no extra provider calls). Failure-isolated and bounded —
+ * never throws. Skipped when a test injects `getSchedule` without `persist`.
+ */
+type PersistHours = (parkId: ParkId, responses: PersistableScheduleResponse[], instant: Date) => Promise<void>;
+
+async function persistFetched(
+  parkId: ParkId,
+  opts: { getSchedule?: unknown; persist?: PersistHours },
+  instant: Date,
+  responses: PersistableScheduleResponse[],
+): Promise<void> {
+  const persist = opts.persist ?? (opts.getSchedule ? null : (p, r, i) => persistParkRegularHours(p, r, { instant: i }));
+  if (!persist) return;
+  try { await persist(parkId, responses, instant); } catch { /* DB trouble never affects park hours */ }
+}
 
 type GetSchedule = (
   id: string,
@@ -41,7 +60,7 @@ type GetSchedule = (
 
 export async function getParkHours(
   parkId: ParkId,
-  opts: { instant?: Date; getSchedule?: GetSchedule } = {},
+  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours } = {},
 ): Promise<ParkHours> {
   const getSchedule: GetSchedule = opts.getSchedule ?? ((id, month) => themeParks.getSchedule(id, month));
   const resort = PARK_TO_RESORT[parkId] as ResortId;
@@ -57,7 +76,13 @@ export async function getParkHours(
       src.nextMonth = await getSchedule(id, nextResortMonth(localDate));
     }
   }
-  return normalizeParkHours(parkId, src, now());
+  const result = normalizeParkHours(parkId, src, now());
+  await persistFetched(parkId, opts, now(), [
+    { coverage: "default_window", result: src.primary },
+    ...(src.currentMonth ? [{ coverage: "month" as const, result: src.currentMonth }] : []),
+    ...(src.nextMonth ? [{ coverage: "month" as const, result: src.nextMonth }] : []),
+  ]);
+  return result;
 }
 
 /**
@@ -70,7 +95,7 @@ export async function getParkHours(
 export async function getParkHoursForDate(
   parkId: ParkId,
   date: string,
-  opts: { instant?: Date; getSchedule?: GetSchedule } = {},
+  opts: { instant?: Date; getSchedule?: GetSchedule; persist?: PersistHours } = {},
 ): Promise<ParkDateHours> {
   const getSchedule: GetSchedule = opts.getSchedule ?? ((id, month) => themeParks.getSchedule(id, month));
   const id = THEMEPARKS_PARKS[parkId].entityId;
@@ -86,7 +111,9 @@ export async function getParkHoursForDate(
     (r) => r && r.ok && r.data.entries.some((e) => e.type === "OPERATING" && e.date > date),
   );
   if (need.prev && laterKnown) src.prevMonth = await getSchedule(id, previousResortMonth(date));
-  return normalizeParkHoursForDate(parkId, date, src, now());
+  const result = normalizeParkHoursForDate(parkId, date, src, now());
+  await persistFetched(parkId, opts, now(), (["month", "nextMonth", "prevMonth"] as const).flatMap((k) => (src[k] ? [{ coverage: "month" as const, result: src[k]! }] : [])));
+  return result;
 }
 
 /** DEV check (run manually; returns failing labels): provider UUID, call economy, month boundaries. */
@@ -140,6 +167,20 @@ export async function runDevParkHoursServiceCases(): Promise<string[]> {
   // Resort-local date, not server date: 03:00Z Oct 16 is still Oct 15 in Orlando.
   o = await run("2026-10-16T03:00:00Z", { default: [op("2026-10-15"), op("2026-10-16")] });
   check("service: uses the resort-local date", o.r.localDate === "2026-10-15" && o.r.status === "hours");
+
+  // Phase 12.10.2A: persistence reuses fetched responses; its failure is invisible.
+  {
+    const instant = new Date("2026-10-15T15:00:00Z");
+    const asked: string[] = [];
+    const seen: string[] = [];
+    const getSchedule: GetSchedule = async (id, month) => { asked.push(month ? "m" : "d"); return res(month ? [op("2026-10-14"), op("2026-10-16")] : [op("2026-10-16")], instant.getTime()); };
+    const r = await getParkHours("mk", { instant, getSchedule, persist: async (_p, rs) => { seen.push(rs.map((x) => x.coverage).join("+")); } });
+    check("service: persist receives the fetched responses, no extra provider calls", asked.join() === "d,m" && seen.join() === "default_window+month" && r.status === "closed");
+    const r2 = await getParkHours("mk", { instant, getSchedule, persist: async () => { throw new Error("db down"); } });
+    check("service: persist failure does not affect park hours", r2.status === "closed");
+    const d = await getParkHoursForDate("mk", "2026-10-20", { instant, getSchedule, persist: async (_p, rs) => { seen.push("date:" + rs.length); } });
+    check("service: exact-date path persists its month response", seen.some((x) => x.startsWith("date:")) && d.status !== "unavailable");
+  }
   return failures;
 }
 
