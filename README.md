@@ -149,6 +149,10 @@ app code) whenever `db-schema.sql` changes.
 - `DATABASE_URL` — Postgres connection string used by the auth adapter and sync
 - `EMAIL_SERVER`, `EMAIL_FROM` — email provider settings for magic-link sign-in
 
+**Daily park-hours refresh** (server-only)
+
+- `CRON_SECRET` — required by `/api/cron/park-hours` (Vercel Cron, 02:00 UTC daily via `apps/web/vercel.json`); the route fails closed (500) when unset. Vercel sends it as `Authorization: Bearer`.
+
 **Ask Tom** (server-only — never expose these as `NEXT_PUBLIC_*`)
 
 - `TOM_API_URL` — Tom Railway API base URL
