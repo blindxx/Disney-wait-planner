@@ -27,6 +27,7 @@ Reviewers should verify that:
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
   type AttractionWait,
   type ParkId,
@@ -1227,18 +1228,27 @@ export default function WaitTimesPage() {
           if (entertainment.length === 0) return null;
           return (
             <div style={{ marginTop: "20px" }}>
-              <h2
-                id="entertainment"
-                className="wait-section"
-                style={{
-                  fontSize: "16px",
-                  fontWeight: 700,
-                  color: "#111827",
-                  marginBottom: "2px",
-                }}
-              >
-                Entertainment
-              </h2>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "4px", marginBottom: "2px" }}>
+                <h2
+                  id="entertainment"
+                  className="wait-section"
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: 700,
+                    color: "#111827",
+                    margin: 0,
+                  }}
+                >
+                  Entertainment
+                </h2>
+                {/* Phase 12.11 — hidden All Entertainment page; park carried so it opens on the same park. */}
+                <Link
+                  href={`/entertainment/all?park=${encodeURIComponent(selectedPark)}`}
+                  style={{ fontSize: "13px", color: "#2563eb" }}
+                >
+                  View All Entertainment &rarr;
+                </Link>
+              </div>
               <p
                 style={{
                   fontSize: "12px",
