@@ -33,6 +33,7 @@ import {
   allEntryViewAt,
   filterAllEntertainment,
   resolveAllEntertainmentResponse,
+  showtimesRegionId,
   sortAllEntertainment,
   toggleExpanded,
   type AllEntertainmentEntry,
@@ -126,7 +127,7 @@ function AllEntertainmentCard({
   const isUpcoming = view.status === "upcoming";
   const providerStatus = allEntryProviderStatus(entry);
   const showFull = expanded && view.times.length > 0;
-  const timesId = `times-${entry.id}`;
+  const timesId = showtimesRegionId(entry.id);
 
   return (
     <div className="entertainment-card">

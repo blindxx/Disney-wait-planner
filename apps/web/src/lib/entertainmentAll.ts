@@ -268,6 +268,16 @@ export function filterAllEntertainment(
   );
 }
 
+/**
+ * DOM id for a card's showtimes region (aria-controls target). Entry ids can
+ * hold spaces/punctuation (curated ids embed the DWP name), which an id
+ * reference must not. Every char outside [A-Za-z0-9-] — "_" included — becomes
+ * `_<hex>_`, so the result is whitespace-free and distinct entry ids never collide.
+ */
+export function showtimesRegionId(entryId: string): string {
+  return `times-${entryId.replace(/[^A-Za-z0-9-]/g, (c) => `_${c.charCodeAt(0).toString(16)}_`)}`;
+}
+
 /** Immutable expansion toggle; ids are stable so expansion survives data refreshes and clock ticks. */
 export function toggleExpanded(expanded: ReadonlySet<string>, id: string): Set<string> {
   const next = new Set(expanded);
@@ -410,6 +420,14 @@ export function runDevEntertainmentAllCases(): string[] {
     const closed = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "Closed One", [], { status: "CLOSED" }), entry(PROVIDER_ONLY_B, "Open One", [])]), NOW);
     check("filtering: operating-only keeps OPERATING only", filterAllEntertainment(closed.entries, { operatingOnly: true }).map((e) => e.name).join() === "Open One");
     check("filtering: no filters keeps all", filterAllEntertainment(base.entries, {}).length === base.entries.length);
+  }
+
+  // ---- accessibility ----
+  {
+    const ids = ["curated:hs:Fantasmic!", "curated:mk:Happily Ever After", "curated:mk:Happily_Ever After", "provider:abc"].map(showtimesRegionId);
+    check("a11y: region id has no whitespace and only id-safe chars", ids.every((i) => /^[A-Za-z0-9_-]+$/.test(i)));
+    check("a11y: region id is deterministic and unique per entry id", showtimesRegionId("curated:hs:Fantasmic!") === ids[0] && new Set(ids).size === ids.length);
+    check("a11y: every inventory entry yields a whitespace-free id", base.entries.every((e) => !/\s/.test(showtimesRegionId(e.id))));
   }
 
   // ---- attribution ----
