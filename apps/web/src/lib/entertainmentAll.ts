@@ -74,6 +74,11 @@ export interface AllEntertainmentEntry {
   showtime: EntertainmentShowtimeEntry;
 }
 
+/** Shown with the list when the provider payload had discarded (malformed) entries: the inventory may be missing shows. */
+export const INVENTORY_INCOMPLETE_NOTE = "Some entertainment may be missing from this list.";
+/** Empty-list copy when nothing could be confirmed and the payload was incomplete (vs. valid-empty). */
+export const INVENTORY_INCOMPLETE_EMPTY_MESSAGE = "No entertainment could be confirmed for this park right now. The provider's list may be incomplete.";
+
 export interface ParkAllEntertainment {
   parkId: ParkId;
   resort: ResortId;
@@ -84,6 +89,12 @@ export interface ParkAllEntertainment {
   stale: boolean;
   meta: EntertainmentShowtimeMeta | null;
   error: ThemeParksError | null;
+  /**
+   * True when the live payload discarded entries during validation
+   * (`droppedEntries > 0`): valid entries are kept, but the inventory cannot be
+   * claimed complete. False on provider failure (there is `error` instead).
+   */
+  inventoryIncomplete: boolean;
   entries: AllEntertainmentEntry[];
 }
 
@@ -162,6 +173,7 @@ export function buildParkAllEntertainment(
     stale: curated.stale,
     meta: curated.meta,
     error: curated.error,
+    inventoryIncomplete: !!live && live.droppedEntries > 0,
     entries,
   };
 }
@@ -190,9 +202,18 @@ export function allEntertainmentForDisplay(data: ParkAllEntertainment | null, in
   return unavailablePark(data.parkId, instant, "Showtimes are for a previous day");
 }
 
-/** ThemeParks.wiki attribution is owed whenever provider-backed inventory is presented. */
+/**
+ * ThemeParks.wiki attribution is owed whenever a successful provider response
+ * is presented — including a valid-empty one ("nothing listed" is provider
+ * data). Failed requests (and previous-day degradation) present none.
+ */
 export function allEntertainmentPresentsProviderData(data: ParkAllEntertainment | null): boolean {
-  return !!data && !data.error && data.entries.length > 0;
+  return !!data && !data.error;
+}
+
+/** Whether the list must be flagged as possibly incomplete (tolerates older bodies lacking the field). */
+export function allEntertainmentIsIncomplete(data: ParkAllEntertainment | null): boolean {
+  return !!data && !data.error && data.inventoryIncomplete === true;
 }
 
 // ============================================
@@ -489,7 +510,31 @@ export function runDevEntertainmentAllCases(): string[] {
 
   // ---- attribution ----
   check("attribution: owed when inventory presented", allEntertainmentPresentsProviderData(base));
-  check("attribution: not owed on failure/empty/null", !allEntertainmentPresentsProviderData(buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) && !allEntertainmentPresentsProviderData(buildParkAllEntertainment("hs", live([]), NOW)) && !allEntertainmentPresentsProviderData(null));
+  check("attribution: owed for a successful valid-empty response", allEntertainmentPresentsProviderData(buildParkAllEntertainment("hs", live([]), NOW)));
+  check("attribution: not owed on failed request / null / previous-day degrade",
+    !allEntertainmentPresentsProviderData(buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) &&
+    !allEntertainmentPresentsProviderData(null) &&
+    !allEntertainmentPresentsProviderData(allEntertainmentForDisplay(base, new Date("2026-10-02T12:00:00Z"))) &&
+    !allEntertainmentPresentsProviderData(resolveAllEntertainmentResponse("hs", null, NOW)));
+
+  // ---- incomplete inventory (droppedEntries) ----
+  {
+    const withDropped = (entries: ReturnType<typeof entry>[], droppedEntries: number): ThemeParksResult<ThemeParksLive> => {
+      const r = live(entries) as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>;
+      return { ...r, data: { ...r.data, droppedEntries } };
+    };
+    const kept = buildParkAllEntertainment("hs", withDropped([entry(PROVIDER_ONLY_A, "Kept Show", [st("2026-10-01T20:00:00-04:00")])], 2), NOW);
+    check("incomplete: dropped entries flag the inventory", kept.inventoryIncomplete && allEntertainmentIsIncomplete(kept));
+    check("incomplete: valid entries and their showtimes preserved (nothing fabricated)", kept.entries.length === 1 && kept.entries[0].showtime.performances.length === 1);
+    const emptyIncomplete = buildParkAllEntertainment("hs", withDropped([], 1), NOW);
+    check("incomplete: empty + dropped is incomplete-empty (not valid-empty)", emptyIncomplete.entries.length === 0 && allEntertainmentIsIncomplete(emptyIncomplete));
+    const validEmpty = buildParkAllEntertainment("hs", live([]), NOW);
+    check("incomplete: valid-empty is complete", !validEmpty.inventoryIncomplete && !allEntertainmentIsIncomplete(validEmpty));
+    check("incomplete: clean payload with entries is complete", !base.inventoryIncomplete);
+    check("incomplete: failure is an error, not 'incomplete'", !buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW).inventoryIncomplete);
+    check("incomplete: both incomplete states still owe attribution", allEntertainmentPresentsProviderData(emptyIncomplete) && allEntertainmentPresentsProviderData(kept));
+    check("incomplete: older body without the field is treated as complete", !allEntertainmentIsIncomplete({ ...validEmpty, inventoryIncomplete: undefined } as unknown as ParkAllEntertainment));
+  }
   check("copy: partial note constant reused", PARTIAL_SHOWTIMES_NOTE === "More showtimes may be unavailable");
 
   return failures;

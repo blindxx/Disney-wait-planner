@@ -27,7 +27,10 @@ import {
 import {
   allEntertainmentForDisplay,
   allEntertainmentLands,
+  allEntertainmentIsIncomplete,
   allEntertainmentPresentsProviderData,
+  INVENTORY_INCOMPLETE_EMPTY_MESSAGE,
+  INVENTORY_INCOMPLETE_NOTE,
   allEntryLocationLabel,
   allEntryProviderStatus,
   allEntryViewAt,
@@ -79,7 +82,7 @@ const RESPONSIVE_CSS = `
     .all-page { padding: 20px; }
     .resort-tab { flex: 0 1 auto; padding: 8px 16px; }
     .park-tab { flex: 0 1 auto; padding: 10px 20px; }
-    .entertainment-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; border: none; border-radius: 0; overflow: visible; align-items: start; }
+    .entertainment-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; border: none; border-radius: 0; overflow: visible; }
     .entertainment-card { border: 1px solid #e5e7eb; border-radius: 8px; }
     .entertainment-card:last-child { border: 1px solid #e5e7eb; }
     .all-empty { grid-column: 1 / -1; border: 1px solid #e5e7eb; border-radius: 8px; }
@@ -391,7 +394,9 @@ export default function AllEntertainmentPage() {
           ) : all.error ? (
             <div className="all-empty">Entertainment is unavailable right now. Try again shortly.</div>
           ) : all.entries.length === 0 ? (
-            <div className="all-empty">No live entertainment is listed for this park right now.</div>
+            <div className="all-empty">
+              {allEntertainmentIsIncomplete(all) ? INVENTORY_INCOMPLETE_EMPTY_MESSAGE : "No live entertainment is listed for this park right now."}
+            </div>
           ) : visible.length === 0 ? (
             <div className="all-empty">No entertainment matches your filters.</div>
           ) : (
@@ -412,6 +417,9 @@ export default function AllEntertainmentPage() {
           <div style={{ marginTop: "10px", fontSize: "13px", color: "#9ca3af" }}>
             Showing {visible.length} entertainment {visible.length === 1 ? "experience" : "experiences"}
           </div>
+        )}
+        {allEntertainmentIsIncomplete(all) && all!.entries.length > 0 && (
+          <div role="note" style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af" }}>{INVENTORY_INCOMPLETE_NOTE}</div>
         )}
       </div>
 
