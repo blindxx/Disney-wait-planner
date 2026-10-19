@@ -27,9 +27,9 @@ import {
 import {
   allEntertainmentForDisplay,
   allEntertainmentLands,
+  allEntertainmentEmptyState,
   allEntertainmentIsIncomplete,
   allEntertainmentPresentsProviderData,
-  INVENTORY_INCOMPLETE_EMPTY_MESSAGE,
   INVENTORY_INCOMPLETE_NOTE,
   allEntryLocationLabel,
   allEntryProviderStatus,
@@ -395,7 +395,8 @@ export default function AllEntertainmentPage() {
             <div className="all-empty">Entertainment is unavailable right now. Try again shortly.</div>
           ) : all.entries.length === 0 ? (
             <div className="all-empty">
-              {allEntertainmentIsIncomplete(all) ? INVENTORY_INCOMPLETE_EMPTY_MESSAGE : "No live entertainment is listed for this park right now."}
+              {allEntertainmentEmptyState(all)?.message}
+              {all.stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
             </div>
           ) : visible.length === 0 ? (
             <div className="all-empty">No entertainment matches your filters.</div>

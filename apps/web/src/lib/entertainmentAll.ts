@@ -211,6 +211,19 @@ export function allEntertainmentPresentsProviderData(data: ParkAllEntertainment 
   return !!data && !data.error;
 }
 
+/** Copy for a successful but empty inventory (valid-empty vs. incomplete-empty). */
+export const INVENTORY_EMPTY_MESSAGE = "No live entertainment is listed for this park right now.";
+
+/**
+ * Empty-inventory state for a successful response: the message plus whether the
+ * existing stale-data warning ("may be outdated") must accompany it (stale-if-error
+ * payloads). null when there is an error or entries exist.
+ */
+export function allEntertainmentEmptyState(data: ParkAllEntertainment | null): { message: string; stale: boolean } | null {
+  if (!data || data.error || data.entries.length > 0) return null;
+  return { message: allEntertainmentIsIncomplete(data) ? INVENTORY_INCOMPLETE_EMPTY_MESSAGE : INVENTORY_EMPTY_MESSAGE, stale: data.stale };
+}
+
 /** Whether the list must be flagged as possibly incomplete (tolerates older bodies lacking the field). */
 export function allEntertainmentIsIncomplete(data: ParkAllEntertainment | null): boolean {
   return !!data && !data.error && data.inventoryIncomplete === true;
@@ -516,6 +529,23 @@ export function runDevEntertainmentAllCases(): string[] {
     !allEntertainmentPresentsProviderData(null) &&
     !allEntertainmentPresentsProviderData(allEntertainmentForDisplay(base, new Date("2026-10-02T12:00:00Z"))) &&
     !allEntertainmentPresentsProviderData(resolveAllEntertainmentResponse("hs", null, NOW)));
+
+  // ---- stale empty inventory ----
+  {
+    const staleEmpty = buildParkAllEntertainment("hs", live([], "stale"), NOW);
+    const s = allEntertainmentEmptyState(staleEmpty);
+    check("stale-empty: complete-empty shows empty message with stale warning", !!s && s.stale && s.message === INVENTORY_EMPTY_MESSAGE);
+    const staleIncomplete = (() => {
+      const r = live([], "stale") as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>;
+      return buildParkAllEntertainment("hs", { ...r, data: { ...r.data, droppedEntries: 1 } }, NOW);
+    })();
+    const si = allEntertainmentEmptyState(staleIncomplete);
+    check("stale-empty: incomplete-empty shows incomplete message with stale warning", !!si && si.stale && si.message === INVENTORY_INCOMPLETE_EMPTY_MESSAGE);
+    const fresh = allEntertainmentEmptyState(buildParkAllEntertainment("hs", live([]), NOW));
+    check("stale-empty: fresh empty has no stale warning", !!fresh && !fresh.stale && fresh.message === INVENTORY_EMPTY_MESSAGE);
+    check("stale-empty: stale attribution still owed", allEntertainmentPresentsProviderData(staleEmpty) && allEntertainmentPresentsProviderData(staleIncomplete));
+    check("stale-empty: provider failure / null / populated → no empty state", allEntertainmentEmptyState(buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) === null && allEntertainmentEmptyState(null) === null && allEntertainmentEmptyState(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [])], "stale"), NOW)) === null);
+  }
 
   // ---- incomplete inventory (droppedEntries) ----
   {
