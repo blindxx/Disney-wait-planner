@@ -25,10 +25,10 @@ import {
   type ParkHours,
 } from "../../../lib/parkHours";
 import {
-  ALL_ENTERTAINMENT_SOURCE_LABELS,
   allEntertainmentForDisplay,
   allEntertainmentLands,
   allEntertainmentPresentsProviderData,
+  allEntryLocationLabel,
   allEntryProviderStatus,
   allEntryViewAt,
   filterAllEntertainment,
@@ -126,41 +126,36 @@ function AllEntertainmentCard({
   const view = allEntryViewAt(entry, now);
   const isUpcoming = view.status === "upcoming";
   const providerStatus = allEntryProviderStatus(entry);
+  const nonOperating = providerStatus && providerStatus !== "OPERATING" ? humanizeStatus(providerStatus) : null;
+  const locationLabel = allEntryLocationLabel(entry);
   const showFull = expanded && view.times.length > 0;
   const timesId = showtimesRegionId(entry.id);
 
   return (
     <div className="entertainment-card">
       <div
+        title={entry.name}
         style={{
           fontWeight: 600,
           fontSize: "15px",
           lineHeight: "1.3",
           color: "#111827",
           display: "-webkit-box",
-          WebkitLineClamp: 2,
+          WebkitLineClamp: 3,
           WebkitBoxOrient: "vertical" as const,
           overflow: "hidden",
+          overflowWrap: "anywhere",
         }}
       >
         {entry.name}
       </div>
-      <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: "2px" }}>
-        <span
-          style={{
-            fontSize: "11px",
-            fontWeight: 600,
-            padding: "1px 6px",
-            borderRadius: "999px",
-            backgroundColor: entry.source === "curated" ? "#e0e7ff" : "#f3f4f6",
-            color: entry.source === "curated" ? "#3730a3" : "#4b5563",
-          }}
-        >
-          {ALL_ENTERTAINMENT_SOURCE_LABELS[entry.source]}
-        </span>
-        {entry.land && <> {entry.land}</>}
-        {providerStatus && providerStatus !== "OPERATING" && <> &bull; {humanizeStatus(providerStatus)}</>}
-      </div>
+      {(locationLabel || nonOperating) && (
+        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: "2px" }}>
+          {locationLabel}
+          {locationLabel && nonOperating && <> &bull; </>}
+          {nonOperating}
+        </div>
+      )}
       {(view.collapsedText || showFull) && (
         <div
           id={timesId}
@@ -295,9 +290,6 @@ export default function AllEntertainmentPage() {
     [all, effectiveLand, operatingOnly, displayNow],
   );
 
-  const curatedCount = visible.filter((e) => e.source === "curated").length;
-  const providerOnlyCount = visible.length - curatedCount;
-
   return (
     <>
       <style>{RESPONSIVE_CSS}</style>
@@ -390,8 +382,7 @@ export default function AllEntertainmentPage() {
         </div>
 
         <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: 0, marginBottom: "10px" }}>
-          Live shows for this park, sorted by next showtime. Curated entries are in the Disney Wait Planner catalog;
-          provider-only entries come straight from ThemeParks.wiki and have no land.
+          Explore today&apos;s entertainment and showtimes throughout the park.
         </p>
 
         <div className="entertainment-grid">
@@ -419,7 +410,7 @@ export default function AllEntertainmentPage() {
 
         {all && !all.error && all.entries.length > 0 && (
           <div style={{ marginTop: "10px", fontSize: "13px", color: "#9ca3af" }}>
-            Showing {visible.length} {visible.length === 1 ? "show" : "shows"} ({curatedCount} curated, {providerOnlyCount} provider-only)
+            Showing {visible.length} entertainment {visible.length === 1 ? "experience" : "experiences"}
           </div>
         )}
       </div>

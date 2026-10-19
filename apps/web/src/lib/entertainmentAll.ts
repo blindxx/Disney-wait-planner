@@ -10,7 +10,11 @@
  *                  unchanged `normalizeParkEntertainmentShowtimes` entry)
  *   provider_only  a live SHOW entity that no explicit mapping claims. Shown
  *                  under the provider's own name; never added to a DWP
- *                  catalog, and no land is claimed (provider data has none).
+ *                  catalog. Its land/venue come only from the explicit
+ *                  park+UUID table in entertainmentProviderLocations.ts;
+ *                  otherwise they stay unknown (never inferred from name or
+ *                  coordinates). The source classification is internal — the
+ *                  UI shows no badge.
  * Labels come only from the explicit mapping (entity-id membership) — there is
  * no runtime name matching.
  *
@@ -44,6 +48,7 @@ import {
   type EntertainmentShowtimeStatus,
 } from "./entertainmentShowtimes";
 import { PARK_TO_RESORT } from "./parkMetadata";
+import { getProviderEntertainmentLocation } from "./entertainmentProviderLocations";
 import { getResortLocalDate } from "./resortTime";
 import type { ThemeParksError, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 import { THEMEPARKS_ENTERTAINMENT_MAPPING } from "./themeParksEntertainmentMapping";
@@ -55,19 +60,16 @@ import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 export type AllEntertainmentSource = "curated" | "provider_only";
 
-export const ALL_ENTERTAINMENT_SOURCE_LABELS: Record<AllEntertainmentSource, string> = {
-  curated: "Curated",
-  provider_only: "Provider-only",
-};
-
 export interface AllEntertainmentEntry {
   /** Stable across refreshes (expansion state keys off it): curated → park + DWP name; provider-only → provider entity id. */
   id: string;
   source: AllEntertainmentSource;
   /** Curated: DWP name. Provider-only: the provider's own name (display only). */
   name: string;
-  /** Curated catalog land; always null for provider-only (no land is inferred). */
+  /** Curated: catalog land. Provider-only: land from the explicit location table, else null (unknown). */
   land: string | null;
+  /** Specific venue, only from the explicit location table (provider-only); null when unknown. */
+  venue: string | null;
   /** Normalized showtimes. For provider-only, `dwpName` merely carries the provider's display name. */
   showtime: EntertainmentShowtimeEntry;
 }
@@ -120,7 +122,7 @@ export function buildParkAllEntertainment(
   for (const e of curated.entries) {
     if (e.status === "unmapped") continue; // never provider-checked
     if (!e.provider.some((r) => r.present)) continue; // no live presence: dormant-only, or provider failure
-    entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), showtime: e });
+    entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e });
   }
 
   const live = result.ok ? result.data : null;
@@ -146,7 +148,8 @@ export function buildParkAllEntertainment(
         nowMs,
         payloadCurrent,
       );
-      entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: null, showtime });
+      const location = getProviderEntertainmentLocation(parkId, key);
+      entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime });
     }
   }
 
@@ -253,12 +256,18 @@ export function allEntryProviderStatus(entry: AllEntertainmentEntry): string | n
   return present[0]?.status ?? null;
 }
 
-/** Lands available from curated entries (provider-only entries have none). */
+/** "Land · Venue" when both are known, the land alone when the venue is unknown, null when the location is unknown. */
+export function allEntryLocationLabel(entry: AllEntertainmentEntry): string | null {
+  if (!entry.land) return null;
+  return entry.venue ? `${entry.land} · ${entry.venue}` : entry.land;
+}
+
+/** Lands present in the inventory (curated catalog lands + verified provider-only lands). */
 export function allEntertainmentLands(entries: AllEntertainmentEntry[]): string[] {
   return [...new Set(entries.map((e) => e.land).filter((l): l is string => !!l))].sort();
 }
 
-/** Shared land filter + operating-only toggle. A selected land excludes provider-only entries (no land is claimed for them). */
+/** Shared land filter + operating-only toggle. Entries with unknown location match only "All Lands". */
 export function filterAllEntertainment(
   entries: AllEntertainmentEntry[],
   opts: { land?: string; operatingOnly?: boolean },
@@ -346,9 +355,35 @@ export function runDevEntertainmentAllCases(): string[] {
   // ---- classification ----
   const fant = byName(base, "Fantasmic!")!;
   const po = byName(base, "Provider Street Band")!;
-  check("classification: curated label + catalog land", fant.source === "curated" && fant.land !== null && ALL_ENTERTAINMENT_SOURCE_LABELS[fant.source] === "Curated");
-  check("classification: provider-only label, no land inferred", po.source === "provider_only" && po.land === null && ALL_ENTERTAINMENT_SOURCE_LABELS[po.source] === "Provider-only");
+  check("classification: curated source + catalog land, no venue", fant.source === "curated" && fant.land !== null && fant.venue === null);
+  check("classification: unlisted provider-only keeps source, location unknown (never inferred)", po.source === "provider_only" && po.land === null && po.venue === null && allEntryLocationLabel(po) === null);
   check("classification: provider-only id keyed by entity id", po.id === `provider:${PROVIDER_ONLY_A}`);
+
+  // ---- locations (explicit park+UUID table only) ----
+  {
+    const DRUM_CORPS = "bc2c2ffe-3cf0-4e75-a408-bf5e86515c4c"; // hs → Toy Story Land (no venue)
+    const MEET_ARIEL = "c113b1cf-7b6d-416a-8e21-bf8f387ecd77"; // hs → Animation Courtyard · Walt Disney Presents
+    const loc = buildParkAllEntertainment("hs", live([
+      entry(DRUM_CORPS, "Green Army Drum Corps", [st("2026-10-01T20:00:00-04:00")]),
+      entry(MEET_ARIEL, "Meet Ariel", [st("2026-10-01T20:30:00-04:00")]),
+      entry(PROVIDER_ONLY_A, "Not Listed", [st("2026-10-01T20:15:00-04:00")]),
+    ]), NOW);
+    const drum = loc.entries.find((e) => e.id === `provider:${DRUM_CORPS}`)!;
+    const ariel = loc.entries.find((e) => e.id === `provider:${MEET_ARIEL}`)!;
+    const unlisted = loc.entries.find((e) => e.id === `provider:${PROVIDER_ONLY_A}`)!;
+    check("locations: listed provider-only gets land; source stays provider_only", drum.land === "Toy Story Land" && drum.venue === null && drum.source === "provider_only");
+    check("locations: land + venue label 'Land · Venue'", ariel.venue === "Walt Disney Presents" && allEntryLocationLabel(ariel) === "Animation Courtyard · Walt Disney Presents");
+    check("locations: land alone when venue unknown", allEntryLocationLabel(drum) === "Toy Story Land");
+    check("locations: unknown location → no label, no land", allEntryLocationLabel(unlisted) === null && unlisted.land === null);
+    check("locations: lands list includes verified provider-only lands", allEntertainmentLands(loc.entries).join() === "Animation Courtyard,Toy Story Land");
+    check("filter: verified provider-only land selectable", filterAllEntertainment(loc.entries, { land: "Toy Story Land" }).map((e) => e.id).join() === drum.id);
+    check("filter: unknown locations stay visible under All Lands only", filterAllEntertainment(loc.entries, {}).includes(unlisted) && !filterAllEntertainment(loc.entries, { land: "Toy Story Land" }).includes(unlisted));
+    // park-qualified: the same UUID in another park's payload resolves to nothing
+    const wrongPark = buildParkAllEntertainment("mk", { ...live([entry(DRUM_CORPS, "Green Army Drum Corps", [], { parkId: THEMEPARKS_PARKS.mk.entityId })]) }, NOW);
+    check("locations: park-qualified uuid match (hs id in mk → unknown)", wrongPark.entries.length === 1 && wrongPark.entries[0].land === null);
+    // curated entries never take their land from the provider-location table
+    check("locations: curated land comes from the catalog", fant.land === "Sunset Boulevard");
+  }
 
   // ---- performance-type filtering / no fabricated times ----
   const meet = byName(base, "Meet a Character")!;
@@ -414,9 +449,9 @@ export function runDevEntertainmentAllCases(): string[] {
   // ---- filtering ----
   {
     const land = fant.land!;
-    check("filtering: land keeps matching curated only", filterAllEntertainment(base.entries, { land }).every((e) => e.land === land) && filterAllEntertainment(base.entries, { land }).length === 1);
-    check("filtering: land excludes provider-only (no land claimed)", !filterAllEntertainment(base.entries, { land }).some((e) => e.source === "provider_only"));
-    check("filtering: lands from curated only", allEntertainmentLands(base.entries).join() === land);
+    check("filtering: land keeps matching entries only", filterAllEntertainment(base.entries, { land }).every((e) => e.land === land) && filterAllEntertainment(base.entries, { land }).length === 1);
+    check("filtering: land excludes unknown-location provider-only entries", !filterAllEntertainment(base.entries, { land }).some((e) => e.source === "provider_only"));
+    check("filtering: lands list = known lands only", allEntertainmentLands(base.entries).join() === land);
     const closed = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "Closed One", [], { status: "CLOSED" }), entry(PROVIDER_ONLY_B, "Open One", [])]), NOW);
     check("filtering: operating-only keeps OPERATING only", filterAllEntertainment(closed.entries, { operatingOnly: true }).map((e) => e.name).join() === "Open One");
     check("filtering: no filters keeps all", filterAllEntertainment(base.entries, {}).length === base.entries.length);
