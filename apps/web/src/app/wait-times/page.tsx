@@ -52,6 +52,7 @@ import {
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 import ResortClock from "../../components/ResortClock";
 import ThemeParksAttribution from "../../components/ThemeParksAttribution";
+import { allEntertainmentHref, waitsEntertainmentSectionState } from "../../lib/entertainmentAll";
 import ParkHoursLine from "../../components/ParkHoursLine";
 import {
   describeParkHours,
@@ -1225,7 +1226,7 @@ export default function WaitTimesPage() {
         {/* ---- Entertainment ---- */}
         {(() => {
           const entertainment = visibleEntertainment;
-          if (entertainment.length === 0) return null;
+          const section = waitsEntertainmentSectionState(entertainment.length);
           return (
             <div style={{ marginTop: "20px" }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "4px", marginBottom: "2px" }}>
@@ -1241,14 +1242,17 @@ export default function WaitTimesPage() {
                 >
                   Entertainment
                 </h2>
-                {/* Phase 12.11 — hidden All Entertainment page; park carried so it opens on the same park. */}
-                <Link
-                  href={`/entertainment/all?park=${encodeURIComponent(selectedPark)}`}
-                  style={{ fontSize: "13px", color: "#2563eb" }}
-                >
-                  View All Entertainment &rarr;
-                </Link>
+                {/* Phase 12.11 — hidden All Entertainment page; always reachable, even when a land filter leaves no curated shows. */}
+                {section.showLink && (
+                  <Link
+                    href={allEntertainmentHref(selectedPark)}
+                    style={{ fontSize: "13px", color: "#2563eb" }}
+                  >
+                    View All Entertainment &rarr;
+                  </Link>
+                )}
               </div>
+              {section.showGrid && (<>
               <p
                 style={{
                   fontSize: "12px",
@@ -1270,6 +1274,7 @@ export default function WaitTimesPage() {
                   />
                 ))}
               </div>
+              </>)}
             </div>
           );
         })()}

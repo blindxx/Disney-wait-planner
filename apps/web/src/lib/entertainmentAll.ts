@@ -287,6 +287,21 @@ export function showtimesRegionId(entryId: string): string {
   return `times-${entryId.replace(/[^A-Za-z0-9-]/g, (c) => `_${c.charCodeAt(0).toString(16)}_`)}`;
 }
 
+/** Link target from Waits & Shows; carries the park so the page opens on it. */
+export function allEntertainmentHref(parkId: ParkId): string {
+  return `/entertainment/all?park=${encodeURIComponent(parkId)}`;
+}
+
+/**
+ * Waits & Shows Entertainment section layout. The All Entertainment link is
+ * independent of the curated list (a land filter can leave no curated shows
+ * while the park still has live entertainment), so it is always shown; the
+ * description and grid render only when curated cards remain.
+ */
+export function waitsEntertainmentSectionState(visibleCuratedCount: number): { showLink: boolean; showGrid: boolean } {
+  return { showLink: true, showGrid: visibleCuratedCount > 0 };
+}
+
 /** Immutable expansion toggle; ids are stable so expansion survives data refreshes and clock ticks. */
 export function toggleExpanded(expanded: ReadonlySet<string>, id: string): Set<string> {
   const next = new Set(expanded);
@@ -463,6 +478,13 @@ export function runDevEntertainmentAllCases(): string[] {
     check("a11y: region id has no whitespace and only id-safe chars", ids.every((i) => /^[A-Za-z0-9_-]+$/.test(i)));
     check("a11y: region id is deterministic and unique per entry id", showtimesRegionId("curated:hs:Fantasmic!") === ids[0] && new Set(ids).size === ids.length);
     check("a11y: every inventory entry yields a whitespace-free id", base.entries.every((e) => !/\s/.test(showtimesRegionId(e.id))));
+  }
+
+  // ---- Waits & Shows link ----
+  {
+    check("link: shown even when the land filter leaves no curated shows", waitsEntertainmentSectionState(0).showLink);
+    check("link: no empty curated grid when nothing is visible", !waitsEntertainmentSectionState(0).showGrid && waitsEntertainmentSectionState(3).showGrid && waitsEntertainmentSectionState(3).showLink);
+    check("link: carries the selected park", allEntertainmentHref("epcot") === "/entertainment/all?park=epcot");
   }
 
   // ---- attribution ----
