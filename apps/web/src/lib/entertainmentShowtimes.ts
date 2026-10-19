@@ -243,6 +243,61 @@ export function collectPerformances(
   return { performances, unrecognizedTypes: [...unrecognized].sort() };
 }
 
+/** Longest provider "Operating" interval accepted; anything longer is treated as invalid data, never displayed. */
+export const MAX_OPERATING_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export interface EntertainmentOperatingInterval {
+  /** Offset-aware ISO instants, verbatim from the provider. */
+  startTime: string;
+  endTime: string;
+  /** Resort-local "9:00 AM–5:00 PM"; an end on a later resort-local day is suffixed " (next day)". */
+  label: string;
+}
+
+/**
+ * Today's provider "Operating" intervals (Phase 12.12) — operating hours, kept
+ * separate from performances. An interval belongs to `localDate` by its
+ * resort-local START (same rule as performances); one that began the previous
+ * day and runs past midnight is not claimed for today. Only complete,
+ * well-ordered intervals ≤ 24 h are kept (no end, invalid, reversed or
+ * zero-length → dropped, never guessed). Duplicates and overlapping/touching
+ * intervals from several refs are merged. Labels are formatted per-instant in
+ * the resort zone, so DST days and overnight spans stay correct.
+ */
+export function collectOperatingIntervals(
+  resort: ResortId,
+  localDate: string,
+  raw: ThemeParksShowtime[],
+): EntertainmentOperatingInterval[] {
+  const spans: Array<{ s: number; e: number; startTime: string; endTime: string }> = [];
+  for (const x of raw) {
+    if (x.type === null || !NON_PERFORMANCE_SHOWTIME_TYPES.includes(x.type) || !x.endTime) continue;
+    const s = toMs(x.startTime);
+    const e = toMs(x.endTime);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s || e - s > MAX_OPERATING_INTERVAL_MS) continue;
+    if (getResortLocalDate(resort, new Date(s)) !== localDate) continue;
+    spans.push({ s, e, startTime: x.startTime, endTime: x.endTime });
+  }
+  spans.sort((a, b) => a.s - b.s || a.e - b.e);
+  const merged: typeof spans = [];
+  for (const sp of spans) {
+    const last = merged[merged.length - 1];
+    if (last && sp.s <= last.e) {
+      if (sp.e > last.e) { last.e = sp.e; last.endTime = sp.endTime; }
+    } else {
+      merged.push({ ...sp });
+    }
+  }
+  return merged.map((m) => {
+    const nextDay = getResortLocalDate(resort, new Date(m.e)) !== localDate;
+    return {
+      startTime: m.startTime,
+      endTime: m.endTime,
+      label: `${formatResortLocalTime(resort, new Date(m.s))}–${formatResortLocalTime(resort, new Date(m.e))}${nextDay ? " (next day)" : ""}`,
+    };
+  });
+}
+
 export function entryFromMapping(
   m: EntertainmentProviderMapping,
   live: ThemeParksLive | null,

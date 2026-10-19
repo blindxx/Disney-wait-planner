@@ -39,10 +39,12 @@ import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
 import {
   PARTIAL_SHOWTIMES_NOTE,
   SHOWTIME_STATUS_MESSAGES,
+  collectOperatingIntervals,
   entryDisplayAt,
   entryFromMapping,
   isPerformancePassed,
   normalizeParkEntertainmentShowtimes,
+  type EntertainmentOperatingInterval,
   type EntertainmentShowtimeEntry,
   type EntertainmentShowtimeMeta,
   type EntertainmentShowtimeStatus,
@@ -72,7 +74,16 @@ export interface AllEntertainmentEntry {
   venue: string | null;
   /** Normalized showtimes. For provider-only, `dwpName` merely carries the provider's display name. */
   showtime: EntertainmentShowtimeEntry;
+  /**
+   * Today's provider "Operating" intervals (Phase 12.12), separate from
+   * performances. Empty when none are published, when the payload was fetched on
+   * a previous resort-local day, or on an older body lacking the field.
+   */
+  operatingHours?: EntertainmentOperatingInterval[];
 }
+
+/** Prefix of the operating-hours line. */
+export const OPERATING_HOURS_PREFIX = "Operating hours: ";
 
 /** Shown with the list when the provider payload had discarded (malformed) entries: the inventory may be missing shows. */
 export const INVENTORY_INCOMPLETE_NOTE = "Some entertainment may be missing from this list.";
@@ -129,11 +140,20 @@ export function buildParkAllEntertainment(
   const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant);
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const entries: AllEntertainmentEntry[] = [];
+  const liveForHours = result.ok ? result.data : null;
+  // A payload fetched on another resort-local day cannot vouch for today's hours.
+  const hoursCurrent = curated.fetchedLocalDate === curated.localDate;
+  const hoursFor = (entityIds: string[]): EntertainmentOperatingInterval[] => {
+    if (!liveForHours || !hoursCurrent) return [];
+    const ids = new Set(entityIds.map((i) => i.toLowerCase()));
+    const raw = liveForHours.entries.filter((x) => ids.has(x.entityId.toLowerCase())).flatMap((x) => x.showtimes);
+    return collectOperatingIntervals(resort, curated.localDate, raw);
+  };
 
   for (const e of curated.entries) {
     if (e.status === "unmapped") continue; // never provider-checked
     if (!e.provider.some((r) => r.present)) continue; // no live presence: dormant-only, or provider failure
-    entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e });
+    entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e, operatingHours: hoursFor(e.provider.map((r) => r.entityId)) });
   }
 
   const live = result.ok ? result.data : null;
@@ -160,7 +180,7 @@ export function buildParkAllEntertainment(
         payloadCurrent,
       );
       const location = getProviderEntertainmentLocation(parkId, key);
-      entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime });
+      entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime, operatingHours: hoursFor([le.entityId]) });
     }
   }
 
@@ -247,6 +267,8 @@ export interface AllEntertainmentView {
   incomplete: boolean;
   /** Next/in-progress performance start (ms), null when none remain. */
   nextStartMs: number | null;
+  /** "Operating hours: 9:00 AM–5:00 PM", shown after performances; null when no verified hours. */
+  hoursText: string | null;
 }
 
 export function allEntryViewAt(entry: AllEntertainmentEntry, now: Date = new Date()): AllEntertainmentView {
@@ -256,14 +278,18 @@ export function allEntryViewAt(entry: AllEntertainmentEntry, now: Date = new Dat
     localTime: p.localTime,
     passed: isPerformancePassed(new Date(p.startTime).getTime(), p.endTime ? new Date(p.endTime).getTime() : NaN, nowMs),
   }));
+  const hours = entry.operatingHours ?? [];
+  const hoursText = hours.length > 0 ? `${OPERATING_HOURS_PREFIX}${hours.map((h) => h.label).join(", ")}` : null;
   return {
     status: d.status,
-    collapsedText: d.status === "upcoming" ? d.remaining.map((p) => p.localTime).join(" • ") : d.message,
+    // Verified hours replace only the "No showtimes posted" claim; every other message stays.
+    collapsedText: d.status === "upcoming" ? d.remaining.map((p) => p.localTime).join(" • ") : d.status === "none_posted" && hoursText ? null : d.message,
     partial: d.partial,
     times,
     expandable: times.length > d.remaining.length,
     incomplete: entry.showtime.incomplete,
     nextStartMs: d.remaining.length > 0 ? new Date(d.remaining[0].startTime).getTime() : null,
+    hoursText,
   };
 }
 
@@ -564,6 +590,72 @@ export function runDevEntertainmentAllCases(): string[] {
     check("incomplete: failure is an error, not 'incomplete'", !buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW).inventoryIncomplete);
     check("incomplete: both incomplete states still owe attribution", allEntertainmentPresentsProviderData(emptyIncomplete) && allEntertainmentPresentsProviderData(kept));
     check("incomplete: older body without the field is treated as complete", !allEntertainmentIsIncomplete({ ...validEmpty, inventoryIncomplete: undefined } as unknown as ParkAllEntertainment));
+  }
+  // ---- operating hours (Phase 12.12) ----
+  {
+    const HOURS = "Operating hours: 9:00 AM–5:00 PM";
+    const op = (a: string, b: string | null) => st(a, "Operating", b);
+    const one = (shows: ThemeParksShowtime[], over: Partial<ThemeParksLive["entries"][number]> = {}, res = live([entry(PROVIDER_ONLY_A, "P", shows, over)]), at = NOW) => {
+      const e = buildParkAllEntertainment("hs", res, at).entries[0];
+      return { e, v: allEntryViewAt(e, at) };
+    };
+    const only = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]);
+    check("hours: operating-only replaces 'No showtimes posted'", only.v.status === "none_posted" && only.v.collapsedText === null && only.v.hoursText === HOURS && only.e.showtime.performances.length === 0);
+    check("hours: operating-only keeps none_posted sort rank (sorting unchanged)", sortAllEntertainment(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "A Hours Only", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]), entry(PROVIDER_ONLY_B, "B Plain", [])]), NOW).entries, NOW).map((x) => x.name).join() === "A Hours Only,B Plain");
+    const none = one([]);
+    check("hours: none published → 'No showtimes posted' unchanged, no hours line", none.v.collapsedText === SHOWTIME_STATUS_MESSAGES.none_posted && none.v.hoursText === null);
+    const mixed = one([st("2026-10-01T20:00:00-04:00"), op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]);
+    check("hours: mixed → performances first, hours second", mixed.v.status === "upcoming" && mixed.v.collapsedText === "8:00 PM" && mixed.v.hoursText === HOURS && mixed.e.showtime.performances.length === 1);
+    const closed = one([st("2026-10-01T20:00:00-04:00"), op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")], { status: "CLOSED" });
+    check("hours: provider CLOSED still keeps upcoming performances", closed.v.status === "upcoming" && closed.v.collapsedText === "8:00 PM" && allEntryProviderStatus(closed.e) === "CLOSED");
+    const passed = allEntryViewAt(mixed.e, new Date("2026-10-02T02:00:00Z"));
+    check("hours: all-passed message kept (only none_posted is replaced)", passed.collapsedText === SHOWTIME_STATUS_MESSAGES.all_passed && passed.hoursText === HOURS);
+    const unavailable = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00"), st("2026-10-01T20:00:00-04:00", "Mystery Type")]);
+    check("hours: unavailable message kept alongside hours", unavailable.v.status === "unavailable" && unavailable.v.collapsedText === SHOWTIME_STATUS_MESSAGES.unavailable && unavailable.v.hoursText === HOURS);
+    check("hours: curated entry uses its mapped refs", buildParkAllEntertainment("hs", live([entry(FANTASMIC_HS, "x", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW).entries[0].operatingHours?.[0].label === "9:00 AM–5:00 PM");
+
+    // invalid / incomplete intervals are never displayed or guessed
+    check("hours: missing end dropped", one([op("2026-10-01T09:00:00-04:00", null)]).v.hoursText === null);
+    check("hours: unparseable start/end dropped", one([op("garbage", "2026-10-01T17:00:00-04:00"), op("2026-10-01T09:00:00-04:00", "garbage")]).v.hoursText === null);
+    check("hours: reversed and zero-length dropped", one([op("2026-10-01T17:00:00-04:00", "2026-10-01T09:00:00-04:00"), op("2026-10-01T09:00:00-04:00", "2026-10-01T09:00:00-04:00")]).v.hoursText === null);
+    check("hours: >24h interval dropped as invalid", one([op("2026-10-01T09:00:00-04:00", "2026-10-02T09:00:01-04:00")]).v.hoursText === null);
+    check("hours: other days ignored (resort-local start)", one([op("2026-09-30T09:00:00-04:00", "2026-09-30T17:00:00-04:00"), op("2026-10-02T09:00:00-04:00", "2026-10-02T17:00:00-04:00")]).v.hoursText === null);
+    check("hours: unrecognized/performance types never become hours", one([st("2026-10-01T09:00:00-04:00", "Performance Time", "2026-10-01T17:00:00-04:00"), st("2026-10-01T09:00:00-04:00", "Mystery Type", "2026-10-01T17:00:00-04:00")]).v.hoursText === null);
+
+    // dedupe / merge
+    const dup = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00"), op("2026-10-01T13:00:00Z", "2026-10-01T21:00:00Z")]);
+    check("hours: duplicate (same instants, different offsets) collapses", dup.v.hoursText === HOURS);
+    const ov = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T13:00:00-04:00"), op("2026-10-01T12:00:00-04:00", "2026-10-01T17:00:00-04:00")]);
+    check("hours: overlapping intervals merge", ov.v.hoursText === HOURS);
+    const two = one([op("2026-10-01T17:00:00-04:00", "2026-10-01T21:00:00-04:00"), op("2026-10-01T09:00:00-04:00", "2026-10-01T13:00:00-04:00")]);
+    check("hours: separate intervals sorted and comma-joined", two.v.hoursText === "Operating hours: 9:00 AM–1:00 PM, 5:00 PM–9:00 PM");
+
+    // overnight + resort-local day (UTC date differs) + DST
+    const night = one([op("2026-10-01T21:00:00-04:00", "2026-10-02T01:00:00-04:00")]);
+    check("hours: overnight span labelled next day", night.v.hoursText === "Operating hours: 9:00 PM–1:00 AM (next day)");
+    const utcTrap = one([op("2026-10-02T02:00:00Z", "2026-10-02T03:30:00Z")]); // 10 PM–11:30 PM EDT Oct 1 (UTC says Oct 2)
+    check("hours: resort-local date decides, not UTC", utcTrap.v.hoursText === "Operating hours: 10:00 PM–11:30 PM");
+    const dlr = buildParkAllEntertainment("disneyland", { ok: true, data: { entityId: "p", name: "p", timeZone: null, entries: [entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T08:00:00-07:00", "2026-10-01T22:00:00-07:00")], { parkId: THEMEPARKS_PARKS.disneyland.entityId })], droppedEntries: 0, droppedShowtimes: 0 }, meta: { origin: "network", fetchedAt: new Date("2026-10-01T20:00:00Z").getTime(), etag: null } }, new Date("2026-10-01T20:00:00Z"));
+    check("hours: DLR formatted in PDT", allEntryViewAt(dlr.entries[0], new Date("2026-10-01T20:00:00Z")).hoursText === "Operating hours: 8:00 AM–10:00 PM");
+    // DST fall-back 2026-11-01 (WDW): 1:00 AM EDT → 1:00 AM EST repeats; 9 AM–5 PM EST is 8 elapsed hours
+    const dstNow = new Date("2026-11-01T17:00:00Z");
+    const dst = one([op("2026-11-01T09:00:00-05:00", "2026-11-01T17:00:00-05:00")], {}, live([entry(PROVIDER_ONLY_A, "P", [op("2026-11-01T09:00:00-05:00", "2026-11-01T17:00:00-05:00")])], "network", dstNow.getTime()), dstNow);
+    check("hours: DST fall-back day shows EST wall times", dst.v.hoursText === HOURS);
+    const dstNight = one([op("2026-11-01T00:00:00-04:00", "2026-11-01T03:00:00-05:00")], {}, live([entry(PROVIDER_ONLY_A, "P", [op("2026-11-01T00:00:00-04:00", "2026-11-01T03:00:00-05:00")])], "network", dstNow.getTime()), dstNow);
+    check("hours: span across the repeated hour keeps real elapsed time", dstNight.v.hoursText === "Operating hours: 12:00 AM–3:00 AM");
+
+    // stale / previous-day payloads
+    const staleSame = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")], {}, live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])], "stale"));
+    check("hours: same-day stale-if-error still shows hours (page flags it stale)", staleSame.v.hoursText === HOURS && buildParkAllEntertainment("hs", live([], "stale"), NOW).stale);
+    const prev = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")], {}, live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])], "network", new Date("2026-09-30T19:00:00Z").getTime()));
+    check("hours: previous-day payload cannot vouch for today's hours", prev.v.hoursText === null);
+    const nextDay = allEntertainmentForDisplay(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW), new Date("2026-10-02T12:00:00Z"));
+    check("hours: resort-local rollover drops yesterday's hours with the entries", !!nextDay && nextDay.entries.length === 0);
+    check("hours: provider failure → no hours fabricated", buildParkAllEntertainment("hs", { ok: false, error: { kind: "timeout", message: "t" } }, NOW).entries.length === 0);
+    check("hours: older body without the field renders no hours line", allEntryViewAt({ ...only.e, operatingHours: undefined }, NOW).hoursText === null);
+
+    // curated API untouched
+    check("hours: curated showtimes entry shape unchanged (no hours field)", !("operatingHours" in only.e.showtime) && !("operatingHours" in normalizeParkEntertainmentShowtimes("hs", live([entry(FANTASMIC_HS, "x", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW).entries[0]));
   }
   check("copy: partial note constant reused", PARTIAL_SHOWTIMES_NOTE === "More showtimes may be unavailable");
 
