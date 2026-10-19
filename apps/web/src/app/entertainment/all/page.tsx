@@ -31,6 +31,7 @@ import {
   allEntertainmentIsIncomplete,
   allEntertainmentPresentsProviderData,
   INVENTORY_INCOMPLETE_NOTE,
+  allEntryLayout,
   allEntryLocationLabel,
   allEntryProviderStatus,
   allEntryViewAt,
@@ -131,7 +132,7 @@ function AllEntertainmentCard({
   const providerStatus = allEntryProviderStatus(entry);
   const nonOperating = providerStatus && providerStatus !== "OPERATING" ? humanizeStatus(providerStatus) : null;
   const locationLabel = allEntryLocationLabel(entry);
-  const showFull = expanded && view.times.length > 0;
+  const { showFull, showShowtimes, showtimesStale, hoursStale } = allEntryLayout(view, expanded, stale);
   const timesId = showtimesRegionId(entry.id);
 
   return (
@@ -159,7 +160,7 @@ function AllEntertainmentCard({
           {nonOperating}
         </div>
       )}
-      {(view.collapsedText || showFull || view.hoursText) && (
+      {showShowtimes && (
         <div
           id={timesId}
           style={{ fontSize: "13px", lineHeight: "1.3", color: isUpcoming ? "#374151" : "#9ca3af", marginTop: "4px" }}
@@ -180,13 +181,13 @@ function AllEntertainmentCard({
               {view.partial && <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>}
             </>
           )}
-          {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
+          {showtimesStale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
       {view.hoursText && (
-        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: view.collapsedText || showFull ? "2px" : "4px" }}>
+        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: showShowtimes ? "2px" : "4px" }}>
           {view.hoursText}
-          {stale && !(view.collapsedText || showFull) && <span title="Hours may be out of date"> (may be outdated)</span>}
+          {hoursStale && <span title="Hours may be out of date"> (may be outdated)</span>}
         </div>
       )}
       {view.expandable && (

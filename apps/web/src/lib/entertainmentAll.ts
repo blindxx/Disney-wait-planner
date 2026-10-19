@@ -293,6 +293,27 @@ export function allEntryViewAt(entry: AllEntertainmentEntry, now: Date = new Dat
   };
 }
 
+/**
+ * Card layout flags. The showtimes container renders only with showtime content
+ * (collapsed text or an expanded schedule); operating hours never open it. The
+ * stale warning goes on the showtimes line when that renders, else beside the hours.
+ */
+export function allEntryLayout(view: AllEntertainmentView, expanded: boolean, stale: boolean): {
+  showFull: boolean;
+  showShowtimes: boolean;
+  showtimesStale: boolean;
+  hoursStale: boolean;
+} {
+  const showFull = expanded && view.times.length > 0;
+  const showShowtimes = !!view.collapsedText || showFull;
+  return {
+    showFull,
+    showShowtimes,
+    showtimesStale: stale && showShowtimes,
+    hoursStale: stale && !showShowtimes && !!view.hoursText,
+  };
+}
+
 const STATUS_RANK: Record<EntertainmentShowtimeStatus, number> = { upcoming: 0, all_passed: 1, none_posted: 2, unavailable: 3, unmapped: 4 };
 
 /** Sort by next (or in-progress) showtime at `now`; entries with none remaining follow, then by name. */
@@ -656,6 +677,25 @@ export function runDevEntertainmentAllCases(): string[] {
 
     // curated API untouched
     check("hours: curated showtimes entry shape unchanged (no hours field)", !("operatingHours" in only.e.showtime) && !("operatingHours" in normalizeParkEntertainmentShowtimes("hs", live([entry(FANTASMIC_HS, "x", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW).entries[0]));
+  }
+  // ---- card layout (hours-only must not open an empty showtimes container) ----
+  {
+    const H = [st("2026-10-01T09:00:00-04:00", "Operating", "2026-10-01T17:00:00-04:00")];
+    const lay = (shows: ThemeParksShowtime[], expanded: boolean, stale: boolean) => {
+      const e = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", shows)]), NOW).entries[0];
+      const v = allEntryViewAt(e, NOW);
+      return { v, l: allEntryLayout(v, expanded, stale) };
+    };
+    const ho = lay(H, false, true);
+    check("layout: hours-only → no showtimes container, stale beside hours", !!ho.v.hoursText && !ho.l.showShowtimes && !ho.l.showtimesStale && ho.l.hoursStale);
+    check("layout: hours-only not-stale → no stale anywhere", !lay(H, false, false).l.hoursStale && !lay(H, false, false).l.showtimesStale);
+    check("layout: hours-only expanded still no container", !lay(H, true, true).l.showShowtimes);
+    const mx = lay([st("2026-10-01T20:00:00-04:00"), ...H], false, true);
+    check("layout: mixed → showtimes container, stale on showtimes line only", mx.l.showShowtimes && mx.l.showtimesStale && !mx.l.hoursStale && !!mx.v.hoursText);
+    const none = lay([], false, true);
+    check("layout: none posted without hours keeps message container + stale", none.l.showShowtimes && none.l.showtimesStale && !none.l.hoursStale);
+    const done = allEntryLayout(allEntryViewAt(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T10:00:00-04:00"), ...H])]), NOW).entries[0], NOW), true, false);
+    check("layout: expanded schedule shows full list", done.showFull && done.showShowtimes);
   }
   check("copy: partial note constant reused", PARTIAL_SHOWTIMES_NOTE === "More showtimes may be unavailable");
 
