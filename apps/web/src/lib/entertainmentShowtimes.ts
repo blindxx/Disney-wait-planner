@@ -188,7 +188,7 @@ export function isPerformancePassed(startMs: number, endMs: number, nowMs: numbe
 }
 
 /** Single status rule over today's known performances (shared by the normalizer and display re-evaluation). */
-function statusForPerformances(
+export function statusForPerformances(
   performances: Array<{ passed: boolean }>,
   incomplete: boolean,
 ): EntertainmentShowtimeStatus {
@@ -198,7 +198,7 @@ function statusForPerformances(
   return performances.length > 0 ? "all_passed" : "none_posted";
 }
 
-function collectPerformances(
+export function collectPerformances(
   resort: ResortId,
   localDate: string,
   nowMs: number,
@@ -243,7 +243,7 @@ function collectPerformances(
   return { performances, unrecognizedTypes: [...unrecognized].sort() };
 }
 
-function entryFromMapping(
+export function entryFromMapping(
   m: EntertainmentProviderMapping,
   live: ThemeParksLive | null,
   resort: ResortId,

@@ -27,6 +27,7 @@ Reviewers should verify that:
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import {
   type AttractionWait,
   type ParkId,
@@ -51,6 +52,7 @@ import {
 import { getEntertainmentForPark, type EntertainmentPlace } from "../../lib/entertainmentSuggestions";
 import ResortClock from "../../components/ResortClock";
 import ThemeParksAttribution from "../../components/ThemeParksAttribution";
+import { allEntertainmentHref, waitsEntertainmentSectionState } from "../../lib/entertainmentAll";
 import ParkHoursLine from "../../components/ParkHoursLine";
 import {
   describeParkHours,
@@ -1224,21 +1226,33 @@ export default function WaitTimesPage() {
         {/* ---- Entertainment ---- */}
         {(() => {
           const entertainment = visibleEntertainment;
-          if (entertainment.length === 0) return null;
+          const section = waitsEntertainmentSectionState(entertainment.length);
           return (
             <div style={{ marginTop: "20px" }}>
-              <h2
-                id="entertainment"
-                className="wait-section"
-                style={{
-                  fontSize: "16px",
-                  fontWeight: 700,
-                  color: "#111827",
-                  marginBottom: "2px",
-                }}
-              >
-                Entertainment
-              </h2>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "4px", marginBottom: "2px" }}>
+                <h2
+                  id="entertainment"
+                  className="wait-section"
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: 700,
+                    color: "#111827",
+                    margin: 0,
+                  }}
+                >
+                  Entertainment
+                </h2>
+                {/* Phase 12.11 — hidden All Entertainment page; always reachable, even when a land filter leaves no curated shows. */}
+                {section.showLink && (
+                  <Link
+                    href={allEntertainmentHref(selectedPark)}
+                    style={{ fontSize: "13px", color: "#2563eb" }}
+                  >
+                    View All Entertainment &rarr;
+                  </Link>
+                )}
+              </div>
+              {section.showGrid && (<>
               <p
                 style={{
                   fontSize: "12px",
@@ -1260,6 +1274,7 @@ export default function WaitTimesPage() {
                   />
                 ))}
               </div>
+              </>)}
             </div>
           );
         })()}
