@@ -31,6 +31,7 @@ import {
   allEntertainmentIsIncomplete,
   allEntertainmentPresentsProviderData,
   INVENTORY_INCOMPLETE_NOTE,
+  allEntryLayout,
   allEntryLocationLabel,
   allEntryProviderStatus,
   allEntryViewAt,
@@ -131,7 +132,7 @@ function AllEntertainmentCard({
   const providerStatus = allEntryProviderStatus(entry);
   const nonOperating = providerStatus && providerStatus !== "OPERATING" ? humanizeStatus(providerStatus) : null;
   const locationLabel = allEntryLocationLabel(entry);
-  const showFull = expanded && view.times.length > 0;
+  const { showFull, showShowtimes, showtimesStale, hoursStale, staleScope } = allEntryLayout(view, expanded, stale);
   const timesId = showtimesRegionId(entry.id);
 
   return (
@@ -159,7 +160,7 @@ function AllEntertainmentCard({
           {nonOperating}
         </div>
       )}
-      {(view.collapsedText || showFull) && (
+      {showShowtimes && (
         <div
           id={timesId}
           style={{ fontSize: "13px", lineHeight: "1.3", color: isUpcoming ? "#374151" : "#9ca3af", marginTop: "4px" }}
@@ -180,7 +181,17 @@ function AllEntertainmentCard({
               {view.partial && <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>}
             </>
           )}
-          {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
+          {showtimesStale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
+        </div>
+      )}
+      {view.hoursText && (
+        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: showShowtimes ? "2px" : "4px" }}>
+          {view.hoursText}
+          {hoursStale && (
+            <span title={staleScope === "both" ? "Showtimes and hours may be out of date" : "Hours may be out of date"}>
+              {staleScope === "both" ? " (showtimes and hours may be outdated)" : " (may be outdated)"}
+            </span>
+          )}
         </div>
       )}
       {view.expandable && (
