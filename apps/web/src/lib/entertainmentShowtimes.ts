@@ -269,13 +269,29 @@ export function collectOperatingIntervals(
   localDate: string,
   raw: ThemeParksShowtime[],
 ): EntertainmentOperatingInterval[] {
+  return scanOperatingIntervals(resort, localDate, raw).intervals;
+}
+
+/**
+ * As `collectOperatingIntervals`, plus `rejected`: the number of "Operating"
+ * records that could not be used (unparseable start, missing/invalid/reversed/
+ * over-long end) for today or an unknown date. Valid intervals on other days are
+ * not rejections. Used to qualify hours as possibly incomplete.
+ */
+export function scanOperatingIntervals(
+  resort: ResortId,
+  localDate: string,
+  raw: ThemeParksShowtime[],
+): { intervals: EntertainmentOperatingInterval[]; rejected: number } {
   const spans: Array<{ s: number; e: number; startTime: string; endTime: string }> = [];
+  let rejected = 0;
   for (const x of raw) {
-    if (x.type === null || !NON_PERFORMANCE_SHOWTIME_TYPES.includes(x.type) || !x.endTime) continue;
+    if (x.type === null || !NON_PERFORMANCE_SHOWTIME_TYPES.includes(x.type)) continue;
     const s = toMs(x.startTime);
-    const e = toMs(x.endTime);
-    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s || e - s > MAX_OPERATING_INTERVAL_MS) continue;
+    if (!Number.isFinite(s)) { rejected++; continue; }
     if (getResortLocalDate(resort, new Date(s)) !== localDate) continue;
+    const e = x.endTime ? toMs(x.endTime) : NaN;
+    if (!x.endTime || !Number.isFinite(e) || e <= s || e - s > MAX_OPERATING_INTERVAL_MS) { rejected++; continue; }
     spans.push({ s, e, startTime: x.startTime, endTime: x.endTime });
   }
   spans.sort((a, b) => a.s - b.s || a.e - b.e);
@@ -288,7 +304,7 @@ export function collectOperatingIntervals(
       merged.push({ ...sp });
     }
   }
-  return merged.map((m) => {
+  const intervals = merged.map((m) => {
     const nextDay = getResortLocalDate(resort, new Date(m.e)) !== localDate;
     return {
       startTime: m.startTime,
@@ -296,6 +312,7 @@ export function collectOperatingIntervals(
       label: `${formatResortLocalTime(resort, new Date(m.s))}–${formatResortLocalTime(resort, new Date(m.e))}${nextDay ? " (next day)" : ""}`,
     };
   });
+  return { intervals, rejected };
 }
 
 export function entryFromMapping(

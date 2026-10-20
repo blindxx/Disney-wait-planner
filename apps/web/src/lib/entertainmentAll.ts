@@ -39,7 +39,7 @@ import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
 import {
   PARTIAL_SHOWTIMES_NOTE,
   SHOWTIME_STATUS_MESSAGES,
-  collectOperatingIntervals,
+  scanOperatingIntervals,
   entryDisplayAt,
   entryFromMapping,
   isPerformancePassed,
@@ -80,7 +80,17 @@ export interface AllEntertainmentEntry {
    * a previous resort-local day, or on an older body lacking the field.
    */
   operatingHours?: EntertainmentOperatingInterval[];
+  /**
+   * True when the hours may not be the full schedule: a mapped ref was absent,
+   * provider showtime records were dropped by validation, or an Operating record
+   * was unusable. Valid intervals are kept but must be qualified, never presented
+   * as complete.
+   */
+  operatingHoursIncomplete?: boolean;
 }
+
+/** Appended to the hours line when the hours may be partial. */
+export const OPERATING_HOURS_INCOMPLETE_NOTE = "(may be incomplete)";
 
 /** Prefix of the operating-hours line. */
 export const OPERATING_HOURS_PREFIX = "Operating hours: ";
@@ -143,17 +153,24 @@ export function buildParkAllEntertainment(
   const liveForHours = result.ok ? result.data : null;
   // A payload fetched on another resort-local day cannot vouch for today's hours.
   const hoursCurrent = curated.fetchedLocalDate === curated.localDate;
-  const hoursFor = (entityIds: string[]): EntertainmentOperatingInterval[] => {
-    if (!liveForHours || !hoursCurrent) return [];
+  const hoursFor = (
+    entityIds: string[],
+    provider: EntertainmentShowtimeEntry["provider"],
+  ): { operatingHours: EntertainmentOperatingInterval[]; operatingHoursIncomplete: boolean } => {
+    if (!liveForHours || !hoursCurrent) return { operatingHours: [], operatingHoursIncomplete: false };
     const ids = new Set(entityIds.map((i) => i.toLowerCase()));
     const raw = liveForHours.entries.filter((x) => ids.has(x.entityId.toLowerCase())).flatMap((x) => x.showtimes);
-    return collectOperatingIntervals(resort, curated.localDate, raw);
+    const { intervals, rejected } = scanOperatingIntervals(resort, curated.localDate, raw);
+    return {
+      operatingHours: intervals,
+      operatingHoursIncomplete: intervals.length > 0 && (rejected > 0 || provider.some((r) => !r.present || r.droppedShowtimeCount > 0)),
+    };
   };
 
   for (const e of curated.entries) {
     if (e.status === "unmapped") continue; // never provider-checked
     if (!e.provider.some((r) => r.present)) continue; // no live presence: dormant-only, or provider failure
-    entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e, operatingHours: hoursFor(e.provider.map((r) => r.entityId)) });
+    entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e, ...hoursFor(e.provider.map((r) => r.entityId), e.provider) });
   }
 
   const live = result.ok ? result.data : null;
@@ -180,7 +197,7 @@ export function buildParkAllEntertainment(
         payloadCurrent,
       );
       const location = getProviderEntertainmentLocation(parkId, key);
-      entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime, operatingHours: hoursFor([le.entityId]) });
+      entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime, ...hoursFor([le.entityId], showtime.provider) });
     }
   }
 
@@ -269,6 +286,8 @@ export interface AllEntertainmentView {
   nextStartMs: number | null;
   /** "Operating hours: 9:00 AM–5:00 PM", shown after performances; null when no verified hours. */
   hoursText: string | null;
+  /** Hours shown but possibly partial (already reflected in `hoursText`). */
+  hoursIncomplete: boolean;
 }
 
 export function allEntryViewAt(entry: AllEntertainmentEntry, now: Date = new Date()): AllEntertainmentView {
@@ -279,7 +298,10 @@ export function allEntryViewAt(entry: AllEntertainmentEntry, now: Date = new Dat
     passed: isPerformancePassed(new Date(p.startTime).getTime(), p.endTime ? new Date(p.endTime).getTime() : NaN, nowMs),
   }));
   const hours = entry.operatingHours ?? [];
-  const hoursText = hours.length > 0 ? `${OPERATING_HOURS_PREFIX}${hours.map((h) => h.label).join(", ")}` : null;
+  const hoursIncomplete = hours.length > 0 && entry.operatingHoursIncomplete === true;
+  const hoursText = hours.length > 0
+    ? `${OPERATING_HOURS_PREFIX}${hours.map((h) => h.label).join(", ")}${hoursIncomplete ? ` ${OPERATING_HOURS_INCOMPLETE_NOTE}` : ""}`
+    : null;
   return {
     status: d.status,
     // Verified hours replace only the "No showtimes posted" claim; every other message stays.
@@ -290,6 +312,7 @@ export function allEntryViewAt(entry: AllEntertainmentEntry, now: Date = new Dat
     incomplete: entry.showtime.incomplete,
     nextStartMs: d.remaining.length > 0 ? new Date(d.remaining[0].startTime).getTime() : null,
     hoursText,
+    hoursIncomplete,
   };
 }
 
@@ -303,14 +326,19 @@ export function allEntryLayout(view: AllEntertainmentView, expanded: boolean, st
   showShowtimes: boolean;
   showtimesStale: boolean;
   hoursStale: boolean;
+  /** What the single stale warning covers: hours-only → "hours"; showtimes + hours → "both" (shown once, on the hours line). */
+  staleScope: "showtimes" | "hours" | "both" | null;
 } {
   const showFull = expanded && view.times.length > 0;
   const showShowtimes = !!view.collapsedText || showFull;
+  const hasHours = !!view.hoursText;
+  const staleScope = !stale ? null : showShowtimes && hasHours ? "both" : hasHours ? "hours" : showShowtimes ? "showtimes" : null;
   return {
     showFull,
     showShowtimes,
-    showtimesStale: stale && showShowtimes,
-    hoursStale: stale && !showShowtimes && !!view.hoursText,
+    showtimesStale: staleScope === "showtimes",
+    hoursStale: staleScope === "hours" || staleScope === "both",
+    staleScope,
   };
 }
 
@@ -678,6 +706,30 @@ export function runDevEntertainmentAllCases(): string[] {
     // curated API untouched
     check("hours: curated showtimes entry shape unchanged (no hours field)", !("operatingHours" in only.e.showtime) && !("operatingHours" in normalizeParkEntertainmentShowtimes("hs", live([entry(FANTASMIC_HS, "x", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW).entries[0]));
   }
+  // ---- incomplete hours qualification ----
+  {
+    const op = (a: string, b: string | null) => st(a, "Operating", b);
+    const GOOD = op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00");
+    const view = (shows: ThemeParksShowtime[], over: Partial<ThemeParksLive["entries"][number]> = {}) =>
+      allEntryViewAt(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", shows, over)]), NOW).entries[0], NOW);
+    const full = view([GOOD]);
+    check("incomplete hours: complete data → no qualifier", full.hoursText === "Operating hours: 9:00 AM–5:00 PM" && !full.hoursIncomplete);
+    const dropped = view([GOOD], { droppedShowtimes: 1 });
+    check("incomplete hours: dropped records → valid hours kept, qualified", dropped.hoursText === "Operating hours: 9:00 AM–5:00 PM (may be incomplete)" && dropped.hoursIncomplete);
+    const bad = view([GOOD, op("2026-10-01T18:00:00-04:00", null)]);
+    check("incomplete hours: unusable Operating record → qualified", bad.hoursText?.endsWith("(may be incomplete)") === true);
+    const badStart = view([GOOD, op("garbage", "2026-10-01T20:00:00-04:00")]);
+    check("incomplete hours: unparseable Operating start → qualified", badStart.hoursIncomplete);
+    const otherDay = view([GOOD, op("2026-10-02T09:00:00-04:00", "2026-10-02T17:00:00-04:00")]);
+    check("incomplete hours: valid other-day interval is not a rejection", !otherDay.hoursIncomplete);
+    const onlyDropped = view([], { droppedShowtimes: 2 });
+    check("incomplete hours: dropped with no valid interval → no hours fabricated", onlyDropped.hoursText === null && !onlyDropped.hoursIncomplete);
+    const mixedDropped = view([st("2026-10-01T20:00:00-04:00"), GOOD], { droppedShowtimes: 1 });
+    check("incomplete hours: mixed keeps performances first, qualified hours second", mixedDropped.collapsedText === "8:00 PM" && mixedDropped.partial && !!mixedDropped.hoursText?.endsWith("(may be incomplete)"));
+    const multi = buildParkAllEntertainment("disneyland", { ok: true, data: { entityId: "p", name: "p", timeZone: null, entries: [entry("0bd8e001-83f8-4c9e-9e14-df5a2d6400c3", "x", [op("2026-10-01T09:00:00-07:00", "2026-10-01T17:00:00-07:00")], { parkId: THEMEPARKS_PARKS.disneyland.entityId })], droppedEntries: 0, droppedShowtimes: 0 }, meta: { origin: "network", fetchedAt: new Date("2026-10-01T20:00:00Z").getTime(), etag: null } }, new Date("2026-10-01T20:00:00Z")).entries[0];
+    check("incomplete hours: curated multi-ref with an absent ref → qualified", multi.operatingHoursIncomplete === true && allEntryViewAt(multi, new Date("2026-10-01T20:00:00Z")).hoursIncomplete);
+  }
+
   // ---- card layout (hours-only must not open an empty showtimes container) ----
   {
     const H = [st("2026-10-01T09:00:00-04:00", "Operating", "2026-10-01T17:00:00-04:00")];
@@ -687,11 +739,12 @@ export function runDevEntertainmentAllCases(): string[] {
       return { v, l: allEntryLayout(v, expanded, stale) };
     };
     const ho = lay(H, false, true);
-    check("layout: hours-only → no showtimes container, stale beside hours", !!ho.v.hoursText && !ho.l.showShowtimes && !ho.l.showtimesStale && ho.l.hoursStale);
+    check("layout: hours-only → no showtimes container, stale beside hours", !!ho.v.hoursText && !ho.l.showShowtimes && !ho.l.showtimesStale && ho.l.hoursStale && ho.l.staleScope === "hours");
     check("layout: hours-only not-stale → no stale anywhere", !lay(H, false, false).l.hoursStale && !lay(H, false, false).l.showtimesStale);
     check("layout: hours-only expanded still no container", !lay(H, true, true).l.showShowtimes);
     const mx = lay([st("2026-10-01T20:00:00-04:00"), ...H], false, true);
-    check("layout: mixed → showtimes container, stale on showtimes line only", mx.l.showShowtimes && mx.l.showtimesStale && !mx.l.hoursStale && !!mx.v.hoursText);
+    check("layout: mixed stale → one warning, on the hours line, scoped to both", mx.l.showShowtimes && !mx.l.showtimesStale && mx.l.hoursStale && mx.l.staleScope === "both" && !!mx.v.hoursText);
+    check("layout: mixed not stale → no warning", lay([st("2026-10-01T20:00:00-04:00"), ...H], false, false).l.staleScope === null);
     const none = lay([], false, true);
     check("layout: none posted without hours keeps message container + stale", none.l.showShowtimes && none.l.showtimesStale && !none.l.hoursStale);
     const done = allEntryLayout(allEntryViewAt(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T10:00:00-04:00"), ...H])]), NOW).entries[0], NOW), true, false);

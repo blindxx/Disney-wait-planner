@@ -132,7 +132,7 @@ function AllEntertainmentCard({
   const providerStatus = allEntryProviderStatus(entry);
   const nonOperating = providerStatus && providerStatus !== "OPERATING" ? humanizeStatus(providerStatus) : null;
   const locationLabel = allEntryLocationLabel(entry);
-  const { showFull, showShowtimes, showtimesStale, hoursStale } = allEntryLayout(view, expanded, stale);
+  const { showFull, showShowtimes, showtimesStale, hoursStale, staleScope } = allEntryLayout(view, expanded, stale);
   const timesId = showtimesRegionId(entry.id);
 
   return (
@@ -187,7 +187,11 @@ function AllEntertainmentCard({
       {view.hoursText && (
         <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: showShowtimes ? "2px" : "4px" }}>
           {view.hoursText}
-          {hoursStale && <span title="Hours may be out of date"> (may be outdated)</span>}
+          {hoursStale && (
+            <span title={staleScope === "both" ? "Showtimes and hours may be out of date" : "Hours may be out of date"}>
+              {staleScope === "both" ? " (showtimes and hours may be outdated)" : " (may be outdated)"}
+            </span>
+          )}
         </div>
       )}
       {view.expandable && (
