@@ -128,6 +128,12 @@
   --wait-text-green: #4ade80;
   --wait-text-yellow: #fbbf24;
   --wait-text-red: #f87171;
+
+  /* Today park-status dot + text (lib/todayDashboard.ts). */
+  --park-status-green: #4ade80;
+  --park-status-amber: #fbbf24;
+  --park-status-red: #f87171;
+  --park-status-gray: #a9b2c0;
 }
 
 * {
