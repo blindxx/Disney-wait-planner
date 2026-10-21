@@ -73,6 +73,13 @@
   --info-fg-strong: #1e40af;
   --info-fg-soft: #93c5fd;
   --info-accent: #3b82f6;
+
+  /* Ask Tom / Help (Phase 13.3) */
+  --accent-link: #1e3a5f;
+  --border-hover: #cbd5e1;
+  --tooltip-bg: #111827;
+  --danger-border: #fecaca;
+  --danger-fg-strong: #991b1b;
 }
 
 :root[data-theme="dark"] {
@@ -130,6 +137,12 @@
   --info-fg-strong: #bfdbfe;
   --info-fg-soft: #7aa7e0;
   --info-accent: #60a5fa;
+
+  --accent-link: #93c5fd;
+  --border-hover: #4b5262;
+  --tooltip-bg: #2f3542;
+  --danger-border: #7a3a3e;
+  --danger-fg-strong: #fca5a5;
 }
 
 /*
