@@ -44,12 +44,12 @@ export default function ResortClock({
       aria-label={RESORT_CLOCK_LABELS[resort]}
       style={{ marginBottom, lineHeight: 1.3 }}
     >
-      <div style={{ fontSize: "15px", fontWeight: 500, color: "#4b5563", minHeight: "20px" }}>
+      <div style={{ fontSize: "15px", fontWeight: 500, color: "var(--text-mid)", minHeight: "20px" }}>
         {now
           ? `${formatResortLocalTime(resort, now)} ${getResortTimeZoneAbbreviation(resort, now)}`
           : " "}
       </div>
-      <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+      <div style={{ fontSize: "12px", color: "var(--text-faint)" }}>
         {RESORT_CLOCK_LABELS[resort]}
       </div>
     </div>

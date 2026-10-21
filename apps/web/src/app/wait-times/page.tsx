@@ -177,7 +177,7 @@ const RESPONSIVE_CSS = `
     flex: 1 1 0%;
     padding: 8px 6px;
     border-radius: 8px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border);
     cursor: pointer;
     font-weight: 600;
     font-size: 13px;
@@ -202,7 +202,7 @@ const RESPONSIVE_CSS = `
 
   /* ---- Grid container — mobile: bordered list ---- */
   .wait-grid {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border-soft);
     border-radius: 8px;
     overflow: hidden;
   }
@@ -214,8 +214,8 @@ const RESPONSIVE_CSS = `
     gap: 12px;
     padding: 12px 16px;
     min-height: 56px;
-    border-bottom: 1px solid #e5e7eb;
-    background-color: #fff;
+    border-bottom: 1px solid var(--border-soft);
+    background-color: var(--surface);
   }
   .wait-card:last-child {
     border-bottom: none;
@@ -225,14 +225,14 @@ const RESPONSIVE_CSS = `
   .wait-empty {
     padding: 48px 20px;
     text-align: center;
-    color: #6b7280;
+    color: var(--text-muted);
     font-size: 15px;
-    background-color: #fff;
+    background-color: var(--surface);
   }
 
   /* ---- Entertainment grid — mobile: bordered list (same model as .wait-grid) ---- */
   .entertainment-grid {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--border-soft);
     border-radius: 8px;
     overflow: hidden;
   }
@@ -241,8 +241,8 @@ const RESPONSIVE_CSS = `
   .entertainment-card {
     padding: 12px 16px;
     min-height: 56px;
-    border-bottom: 1px solid #e5e7eb;
-    background-color: #fff;
+    border-bottom: 1px solid var(--border-soft);
+    background-color: var(--surface);
   }
   .entertainment-card:last-child {
     border-bottom: none;
@@ -276,16 +276,16 @@ const RESPONSIVE_CSS = `
     }
 
     .wait-card {
-      border: 1px solid #e5e7eb;
+      border: 1px solid var(--border-soft);
       border-radius: 8px;
     }
     .wait-card:last-child {
-      border: 1px solid #e5e7eb;
+      border: 1px solid var(--border-soft);
     }
 
     .wait-empty {
       grid-column: 1 / -1;
-      border: 1px solid #e5e7eb;
+      border: 1px solid var(--border-soft);
       border-radius: 8px;
     }
 
@@ -299,11 +299,11 @@ const RESPONSIVE_CSS = `
     }
 
     .entertainment-card {
-      border: 1px solid #e5e7eb;
+      border: 1px solid var(--border-soft);
       border-radius: 8px;
     }
     .entertainment-card:last-child {
-      border: 1px solid #e5e7eb;
+      border: 1px solid var(--border-soft);
     }
   }
 
@@ -346,9 +346,9 @@ const RESPONSIVE_CSS = `
   .section-jump a {
     padding: 6px 14px;
     border-radius: 999px;
-    border: 1px solid #d1d5db;
-    background-color: #fff;
-    color: #374151;
+    border: 1px solid var(--border);
+    background-color: var(--surface);
+    color: var(--text);
     font-size: 13px;
     font-weight: 600;
     text-decoration: none;
@@ -356,8 +356,8 @@ const RESPONSIVE_CSS = `
     display: inline-flex;
     align-items: center;
   }
-  .section-jump a:hover { background-color: #f3f4f6; }
-  .section-jump a:focus-visible { outline: 2px solid #1e3a5f; outline-offset: 2px; }
+  .section-jump a:hover { background-color: var(--surface-muted); }
+  .section-jump a:focus-visible { outline: 2px solid var(--focus-ring-strong); outline-offset: 2px; }
   .wait-section { scroll-margin-top: 12px; }
   @media (prefers-reduced-motion: no-preference) {
     html { scroll-behavior: smooth; }
@@ -375,14 +375,14 @@ const RESPONSIVE_CSS = `
     padding: 10px 16px;
     border-radius: 999px;
     border: none;
-    background-color: #1e3a5f;
+    background-color: var(--control-selected-bg);
     color: #fff;
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
   }
-  .tomhg-back-to-top:hover { background-color: #16324f; }
+  .tomhg-back-to-top:hover { background-color: var(--control-selected-hover); }
   @media (max-width: 480px) {
     .tomhg-back-to-top {
       right: 16px;
@@ -406,7 +406,7 @@ function WaitBadge({ attraction }: { attraction: AttractionWait }) {
   // Fallback for OPERATING attractions whose waitMins is unexpectedly null
   const { label, style } = badge ?? {
     label: "\u2014",
-    style: { backgroundColor: "#f3f4f6", color: "#6b7280" },
+    style: { backgroundColor: "var(--surface-muted)", color: "var(--text-muted)" },
   };
 
   return (
@@ -444,7 +444,7 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
             fontWeight: 600,
             fontSize: "15px",
             lineHeight: "1.3",
-            color: "#111827",
+            color: "var(--text-strong)",
             display: "-webkit-box",
             WebkitLineClamp: 2,
             WebkitBoxOrient: "vertical" as const,
@@ -458,7 +458,7 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
             style={{
               fontSize: "13px",
               lineHeight: "1.3",
-              color: "#6b7280",
+              color: "var(--text-muted)",
               marginTop: "2px",
             }}
           >
@@ -476,7 +476,7 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
             style={{
               fontSize: "11px",
               lineHeight: "1.3",
-              color: "#9ca3af",
+              color: "var(--text-faint)",
               marginTop: "2px",
             }}
           >
@@ -526,7 +526,7 @@ function EntertainmentCard({
           fontWeight: 600,
           fontSize: "15px",
           lineHeight: "1.3",
-          color: "#111827",
+          color: "var(--text-strong)",
           display: "-webkit-box",
           WebkitLineClamp: 2,
           WebkitBoxOrient: "vertical" as const,
@@ -540,7 +540,7 @@ function EntertainmentCard({
           style={{
             fontSize: "13px",
             lineHeight: "1.3",
-            color: "#6b7280",
+            color: "var(--text-muted)",
             marginTop: "2px",
           }}
         >
@@ -552,13 +552,13 @@ function EntertainmentCard({
           style={{
             fontSize: "13px",
             lineHeight: "1.3",
-            color: isUpcoming ? "#374151" : "#9ca3af",
+            color: isUpcoming ? "var(--text)" : "var(--text-faint)",
             marginTop: "4px",
           }}
         >
           {showtimeText}
           {display?.partial && (
-            <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>
+            <span style={{ color: "var(--text-faint)", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>
           )}
           {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
@@ -581,7 +581,7 @@ function SkeletonCard() {
             height: "14px",
             width: "65%",
             borderRadius: "4px",
-            backgroundColor: "#e5e7eb",
+            backgroundColor: "var(--skeleton)",
           }}
         />
         <div
@@ -590,7 +590,7 @@ function SkeletonCard() {
             height: "12px",
             width: "40%",
             borderRadius: "4px",
-            backgroundColor: "#f3f4f6",
+            backgroundColor: "var(--surface-muted)",
             marginTop: "6px",
           }}
         />
@@ -601,7 +601,7 @@ function SkeletonCard() {
           height: "26px",
           width: "58px",
           borderRadius: "6px",
-          backgroundColor: "#e5e7eb",
+          backgroundColor: "var(--skeleton)",
           flexShrink: 0,
         }}
       />
@@ -953,11 +953,11 @@ export default function WaitTimesPage() {
       <div className="wait-page">
         {/* Page Header */}
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "16px" }}>
-          <h1 style={{ fontSize: "22px", fontWeight: 700, color: "#111827", margin: 0 }}>
+          <h1 style={{ fontSize: "22px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}>
             Waits &amp; Shows
           </h1>
           {activeProfileName && (
-            <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
+            <span style={{ fontSize: "12px", color: "var(--text-faint)" }}>Profile: {activeProfileName}</span>
           )}
         </div>
 
@@ -974,9 +974,9 @@ export default function WaitTimesPage() {
                   className="resort-tab"
                   onClick={() => handleResortChange(resortId)}
                   style={{
-                    backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-                    color: selectedResort === resortId ? "#fff" : "#374151",
-                    borderColor: selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+                    backgroundColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                    color: selectedResort === resortId ? "var(--control-selected-fg)" : "var(--text)",
+                    borderColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--border)",
                   }}
                 >
                   {RESORT_LABELS[resortId]}
@@ -999,8 +999,8 @@ export default function WaitTimesPage() {
                     } catch {}
                   }}
                   style={{
-                    backgroundColor: selectedPark === parkId ? "#2563eb" : "#f3f4f6",
-                    color: selectedPark === parkId ? "#fff" : "#374151",
+                    backgroundColor: selectedPark === parkId ? "var(--accent-selected-bg)" : "var(--surface-muted)",
+                    color: selectedPark === parkId ? "var(--control-selected-fg)" : "var(--text)",
                   }}
                 >
                   {PARK_TAB_LABELS[parkId]}
@@ -1016,7 +1016,7 @@ export default function WaitTimesPage() {
                   padding: "4px 0",
                   marginBottom: "8px",
                   fontSize: "12px",
-                  color: "#9ca3af",
+                  color: "var(--text-faint)",
                 }}
               >
                 Default
@@ -1037,7 +1037,7 @@ export default function WaitTimesPage() {
                   padding: "4px 0",
                   marginBottom: "8px",
                   fontSize: "12px",
-                  color: "#6b7280",
+                  color: "var(--text-muted)",
                   cursor: "pointer",
                   textDecoration: "underline",
                   display: "block",
@@ -1055,12 +1055,12 @@ export default function WaitTimesPage() {
           /* Skeleton placeholders preserve layout while hydration runs */
           <>
             <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
-              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
             <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
-              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
             <div style={{ height: 20, marginBottom: "8px" }} />
             <div style={{ height: 35, marginBottom: "12px" }} />
@@ -1076,7 +1076,7 @@ export default function WaitTimesPage() {
             gap: "10px",
             marginBottom: "12px",
             padding: "10px 12px",
-            backgroundColor: "#f9fafb",
+            backgroundColor: "var(--surface-subtle)",
             borderRadius: "8px",
           }}
         >
@@ -1088,7 +1088,7 @@ export default function WaitTimesPage() {
               gap: "6px",
               cursor: "pointer",
               fontSize: "14px",
-              color: "#374151",
+              color: "var(--text)",
               minHeight: "32px",
             }}
           >
@@ -1103,15 +1103,16 @@ export default function WaitTimesPage() {
 
           {/* Land Filter */}
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <span style={{ fontSize: "13px", color: "#6b7280" }}>Land:</span>
+            <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
             <select
               value={selectedLand}
               onChange={(e) => setSelectedLand(e.target.value)}
               style={{
                 padding: "6px 10px",
                 borderRadius: "6px",
-                border: "1px solid #d1d5db",
-                backgroundColor: "#fff",
+                border: "1px solid var(--border)",
+                backgroundColor: "var(--surface)",
+                color: "var(--text-strong)",
                 fontSize: "14px",
                 cursor: "pointer",
               }}
@@ -1130,15 +1131,16 @@ export default function WaitTimesPage() {
 
           {/* Sort Dropdown */}
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <span style={{ fontSize: "13px", color: "#6b7280" }}>Sort:</span>
+            <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Sort:</span>
             <select
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as SortOption)}
               style={{
                 padding: "6px 10px",
                 borderRadius: "6px",
-                border: "1px solid #d1d5db",
-                backgroundColor: "#fff",
+                border: "1px solid var(--border)",
+                backgroundColor: "var(--surface)",
+                color: "var(--text-strong)",
                 fontSize: "14px",
                 cursor: "pointer",
               }}
@@ -1165,7 +1167,7 @@ export default function WaitTimesPage() {
         <h2
           id="attractions"
           className="wait-section"
-          style={{ fontSize: "16px", fontWeight: 700, color: "#111827", margin: "0 0 10px" }}
+          style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-strong)", margin: "0 0 10px" }}
         >
           Attractions
         </h2>
@@ -1200,7 +1202,7 @@ export default function WaitTimesPage() {
             <div
               style={{
                 fontSize: "13px",
-                color: "#9ca3af",
+                color: "var(--text-faint)",
               }}
             >
               Showing {filteredAttractions.length} attraction
@@ -1209,7 +1211,7 @@ export default function WaitTimesPage() {
             <div
               style={{
                 fontSize: "12px",
-                color: "#9ca3af",
+                color: "var(--text-faint)",
               }}
             >
               {dataSource === "live" ? "Live" : "Mock"} &bull; Updated{" "}
@@ -1236,7 +1238,7 @@ export default function WaitTimesPage() {
                   style={{
                     fontSize: "16px",
                     fontWeight: 700,
-                    color: "#111827",
+                    color: "var(--text-strong)",
                     margin: 0,
                   }}
                 >
@@ -1246,7 +1248,7 @@ export default function WaitTimesPage() {
                 {section.showLink && (
                   <Link
                     href={allEntertainmentHref(selectedPark)}
-                    style={{ fontSize: "13px", color: "#2563eb" }}
+                    style={{ fontSize: "13px", color: "var(--status-info)" }}
                   >
                     View All Entertainment &rarr;
                   </Link>
@@ -1256,7 +1258,7 @@ export default function WaitTimesPage() {
               <p
                 style={{
                   fontSize: "12px",
-                  color: "#9ca3af",
+                  color: "var(--text-faint)",
                   marginTop: 0,
                   marginBottom: "10px",
                 }}
@@ -1309,7 +1311,7 @@ export default function WaitTimesPage() {
                 style={{
                   fontSize: "16px",
                   fontWeight: 700,
-                  color: "#111827",
+                  color: "var(--text-strong)",
                   marginBottom: "10px",
                 }}
               >
@@ -1317,7 +1319,7 @@ export default function WaitTimesPage() {
               </h2>
               <div
                 style={{
-                  border: "1px solid #e5e7eb",
+                  border: "1px solid var(--border-soft)",
                   borderRadius: "8px",
                   overflow: "hidden",
                 }}
@@ -1327,7 +1329,7 @@ export default function WaitTimesPage() {
                     key={key}
                     style={{
                       padding: "12px 16px",
-                      borderBottom: "1px solid #e5e7eb",
+                      borderBottom: "1px solid var(--border-soft)",
                       display: "flex",
                       flexWrap: "wrap",
                       alignItems: "center",
@@ -1338,7 +1340,7 @@ export default function WaitTimesPage() {
                       style={{
                         fontWeight: 600,
                         fontSize: "15px",
-                        color: "#111827",
+                        color: "var(--text-strong)",
                         lineHeight: "1.3",
                         flex: "1 1 auto",
                         order: 1,
@@ -1350,7 +1352,7 @@ export default function WaitTimesPage() {
                       <div
                         style={{
                           fontSize: "13px",
-                          color: "#6b7280",
+                          color: "var(--text-muted)",
                           marginTop: "2px",
                           flex: "0 0 100%",
                           order: 3,
@@ -1363,11 +1365,11 @@ export default function WaitTimesPage() {
                       <div
                         style={{
                           fontSize: "12px",
-                          color: "#6b7280",
+                          color: "var(--text-muted)",
                           padding: "2px 8px",
                           borderRadius: "4px",
-                          backgroundColor: "#f3f4f6",
-                          border: "1px solid #e5e7eb",
+                          backgroundColor: "var(--surface-muted)",
+                          border: "1px solid var(--border-soft)",
                           whiteSpace: "nowrap",
                           flex: "0 0 auto",
                           order: 2,
@@ -1380,11 +1382,11 @@ export default function WaitTimesPage() {
                       <div
                         style={{
                           fontSize: "12px",
-                          color: "#1d4ed8",
+                          color: "var(--info-fg)",
                           padding: "2px 8px",
                           borderRadius: "4px",
-                          backgroundColor: "#eff6ff",
-                          border: "1px solid #bfdbfe",
+                          backgroundColor: "var(--info-bg)",
+                          border: "1px solid var(--info-border)",
                           whiteSpace: "nowrap",
                           flex: "0 0 auto",
                           order: 2,
@@ -1410,7 +1412,7 @@ export default function WaitTimesPage() {
             textAlign: "center",
             fontSize: "12px",
             lineHeight: 1.5,
-            color: "#9ca3af",
+            color: "var(--text-faint)",
           }}
         >
           {LIVE_ENABLED && (
@@ -1420,7 +1422,7 @@ export default function WaitTimesPage() {
                 href="https://queue-times.com"
                 target="_blank"
                 rel="noopener noreferrer"
-                style={{ color: "#6b7280", textDecoration: "underline" }}
+                style={{ color: "var(--text-muted)", textDecoration: "underline" }}
               >
                 Queue-Times.com
               </a>
@@ -1432,7 +1434,7 @@ export default function WaitTimesPage() {
               {parkHoursPresented && showtimesPresented ? "Park hours and showtimes" : parkHoursPresented ? "Park hours" : "Showtimes"} powered by{" "}
               <ThemeParksAttribution
                 linkOnly
-                style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
+                style={{ fontSize: "inherit", color: "var(--text-muted)", opacity: 1, textDecoration: "underline" }}
               />
             </>
           )}

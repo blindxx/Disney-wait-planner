@@ -20,6 +20,7 @@
   --text-strong: #111827;
   --text: #374151;
   --text-muted: #6b7280;
+  --text-mid: #4b5563;
   --text-faint: #9ca3af;
   --text-disabled: #9ca3af;
 
@@ -33,6 +34,16 @@
   --accent-selected-bg: #2563eb;
   --accent-selected-fg: #ffffff;
   --focus-ring: #2563eb;
+  --focus-ring-strong: #1e3a5f;
+  --control-selected-hover: #16324f;
+  --accent-hover: #1d4ed8;
+
+  /* Informational (top pick, upcoming) */
+  --info-bg: #eff6ff;
+  --info-bg-top: #f0f7ff;
+  --info-bg-strong: #dbeafe;
+  --info-border: #bfdbfe;
+  --info-fg: #1d4ed8;
 
   /* Navigation */
   --nav-bg: #1a1a2e;
@@ -54,6 +65,7 @@
   --skeleton: #2a2f3a;
   --text-strong: #f3f4f6;
   --text: #d1d5db;
+  --text-mid: #b8c0cc;
   --text-muted: #a9b2c0;
   --text-faint: #8b95a5;
   --text-disabled: #6b7381;
@@ -64,8 +76,17 @@
   --input-bg: #0f1116;
   --control-selected-bg: #2b4c7e;
   --control-selected-fg: #ffffff;
+  --control-selected-hover: #3a5f96;
   --accent-selected-bg: #2563eb;
   --accent-selected-fg: #ffffff;
+  --accent-hover: #1d4ed8;
+  --focus-ring-strong: #60a5fa;
+
+  --info-bg: #14233b;
+  --info-bg-top: #162a47;
+  --info-bg-strong: #1e3a66;
+  --info-border: #2c4a7c;
+  --info-fg: #93c5fd;
 
   --nav-bg: #111827;
   --nav-fg: #f3f4f6;
@@ -91,6 +112,22 @@
   --text-title: #f3f4f6;
   --text-subtitle: #a9b2c0;
   --focus-ring: #60a5fa;
+
+  /* Wait badges / numbers (consumed with light fallbacks by lib/waitBadge.ts,
+     so unconverted routes such as /plans keep their light colors). */
+  --wait-green-bg: #14391f;
+  --wait-green-fg: #86efac;
+  --wait-yellow-bg: #3f3510;
+  --wait-yellow-fg: #fde68a;
+  --wait-red-bg: #4a1d1d;
+  --wait-red-fg: #fca5a5;
+  --wait-orange-bg: #4a2a10;
+  --wait-orange-fg: #fdba74;
+  --wait-gray-bg: #272b34;
+  --wait-gray-fg: #a9b2c0;
+  --wait-text-green: #4ade80;
+  --wait-text-yellow: #fbbf24;
+  --wait-text-red: #f87171;
 }
 
 * {
