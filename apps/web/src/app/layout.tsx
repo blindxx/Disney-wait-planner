@@ -3,6 +3,8 @@ import Link from "next/link";
 import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 import SessionProviderWrapper from "@/components/SessionProviderWrapper";
+import AppearanceController from "@/components/AppearanceController";
+import { APPEARANCE_INIT_SCRIPT } from "@/lib/appearance";
 
 export const metadata: Metadata = {
   title: "Disney Wait Planner",
@@ -23,9 +25,15 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // suppressHydrationWarning: the pre-paint script sets data-theme and
+  // style.colorScheme on <html> before React hydrates.
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: APPEARANCE_INIT_SCRIPT }} />
+      </head>
       <body>
+        <AppearanceController />
         <nav className="nav">
           <ul className="nav-list">
             {navLinks.map((link) => (

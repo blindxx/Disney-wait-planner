@@ -12,7 +12,7 @@
  *   dw:settings:defaultPark    — park id string
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import {
   getSettingsDefaults,
@@ -20,6 +20,13 @@ import {
   SETTINGS_PARK_KEY,
 } from "../../lib/settingsDefaults";
 import { useSession, signIn, signOut } from "next-auth/react";
+import {
+  DEFAULT_APPEARANCE,
+  readPreference,
+  setPreference as setAppearancePreference,
+  subscribePreference,
+  type AppearancePreference,
+} from "@/lib/appearance";
 import {
   getSyncStateForProfile,
   SYNC_STATE_CHANGED_EVENT,
@@ -91,10 +98,10 @@ function formatRelativeTime(isoString: string): string {
 }
 
 const SYNC_STATUS_COLOR: Record<"idle" | "syncing" | "error" | "unresolved", string> = {
-  idle: "#6b7280",
-  syncing: "#2563eb",
-  error: "#dc2626",
-  unresolved: "#d97706",
+  idle: "var(--status-idle)",
+  syncing: "var(--status-info)",
+  error: "var(--status-danger)",
+  unresolved: "var(--status-warning)",
 };
 
 const SYNC_STATUS_LABEL: Record<"idle" | "syncing" | "error" | "unresolved", string> = {
@@ -104,6 +111,12 @@ const SYNC_STATUS_LABEL: Record<"idle" | "syncing" | "error" | "unresolved", str
   unresolved: "Confirming\u2026",
 };
 
+const APPEARANCE_OPTIONS: { value: AppearancePreference; label: string }[] = [
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+  { value: "system", label: "System" },
+];
+
 /** Minimum ms "Syncing…" remains visible — prevents sub-100ms flicker. */
 const MIN_SYNC_DISPLAY_MS = 400;
 
@@ -112,6 +125,12 @@ const MIN_SYNC_DISPLAY_MS = 400;
 // ============================================
 
 export default function SettingsPage() {
+  // Device-local appearance (lib/appearance.ts) — not profile-scoped, not synced.
+  const appearance = useSyncExternalStore(
+    subscribePreference,
+    readPreference,
+    () => DEFAULT_APPEARANCE
+  );
   const [defaultResort, setDefaultResort] = useState<ResortId>("DLR");
   const [defaultPark, setDefaultPark] = useState<ParkId>("disneyland");
   // Prevents a DLR→WDW flip on pages where the stored default differs from
@@ -634,7 +653,7 @@ export default function SettingsPage() {
         style={{
           fontSize: "24px",
           fontWeight: 700,
-          color: "#111827",
+          color: "var(--text-strong)",
           marginBottom: "8px",
         }}
       >
@@ -643,7 +662,7 @@ export default function SettingsPage() {
       <p
         style={{
           fontSize: "14px",
-          color: "#6b7280",
+          color: "var(--text-muted)",
           marginBottom: "28px",
           lineHeight: "1.5",
         }}
@@ -660,21 +679,21 @@ export default function SettingsPage() {
             style={{
               fontSize: "15px",
               fontWeight: 600,
-              color: "#374151",
+              color: "var(--text)",
               marginBottom: "4px",
             }}
           >
             Current Park Context
           </h2>
-          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 3px" }}>
+          <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: "0 0 3px" }}>
             <span>Resort: </span>
-            <span style={{ color: "#111827", fontWeight: 500 }}>{RESORT_LABELS[contextResort]}</span>
+            <span style={{ color: "var(--text-strong)", fontWeight: 500 }}>{RESORT_LABELS[contextResort]}</span>
           </p>
-          <p style={{ fontSize: "13px", color: "#6b7280", margin: "0 0 8px" }}>
+          <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: "0 0 8px" }}>
             <span>Park: </span>
-            <span style={{ color: "#111827", fontWeight: 500 }}>{contextParkLabel}</span>
+            <span style={{ color: "var(--text-strong)", fontWeight: 500 }}>{contextParkLabel}</span>
           </p>
-          <p style={{ fontSize: "12px", color: "#9ca3af", margin: 0, lineHeight: "1.4" }}>
+          <p style={{ fontSize: "12px", color: "var(--text-faint)", margin: 0, lineHeight: "1.4" }}>
             Current context reflects your active park selection. Defaults apply when no current selection exists or after using Reset.
           </p>
         </section>
@@ -689,7 +708,7 @@ export default function SettingsPage() {
               style={{
                 fontSize: "15px",
                 fontWeight: 600,
-                color: "#374151",
+                color: "var(--text)",
                 marginBottom: "10px",
               }}
             >
@@ -700,16 +719,17 @@ export default function SettingsPage() {
                 <button
                   key={resort}
                   onClick={() => handleResortChange(resort)}
+                  aria-pressed={defaultResort === resort}
                   style={{
                     flex: 1,
                     padding: "10px 12px",
                     borderRadius: "8px",
-                    border: `1px solid ${defaultResort === resort ? "#1e3a5f" : "#d1d5db"}`,
+                    border: `1px solid ${defaultResort === resort ? "var(--control-selected-bg)" : "var(--border)"}`,
                     cursor: "pointer",
                     fontWeight: 600,
                     fontSize: "14px",
-                    backgroundColor: defaultResort === resort ? "#1e3a5f" : "#f9fafb",
-                    color: defaultResort === resort ? "#fff" : "#374151",
+                    backgroundColor: defaultResort === resort ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                    color: defaultResort === resort ? "var(--control-selected-fg)" : "var(--text)",
                     minHeight: "44px",
                     transition: "background-color 0.15s ease, color 0.15s ease",
                   }}
@@ -725,7 +745,7 @@ export default function SettingsPage() {
               style={{
                 fontSize: "15px",
                 fontWeight: 600,
-                color: "#374151",
+                color: "var(--text)",
                 marginBottom: "10px",
               }}
             >
@@ -736,6 +756,7 @@ export default function SettingsPage() {
                 <button
                   key={parkId}
                   onClick={() => handleParkChange(parkId)}
+                  aria-pressed={defaultPark === parkId}
                   style={{
                     flex: "1 1 calc(50% - 4px)",
                     padding: "10px 12px",
@@ -744,8 +765,8 @@ export default function SettingsPage() {
                     cursor: "pointer",
                     fontWeight: 600,
                     fontSize: "14px",
-                    backgroundColor: defaultPark === parkId ? "#2563eb" : "#f3f4f6",
-                    color: defaultPark === parkId ? "#fff" : "#374151",
+                    backgroundColor: defaultPark === parkId ? "var(--accent-selected-bg)" : "var(--surface-muted)",
+                    color: defaultPark === parkId ? "var(--accent-selected-fg)" : "var(--text)",
                     minHeight: "44px",
                     transition: "background-color 0.15s ease, color 0.15s ease",
                   }}
@@ -755,22 +776,79 @@ export default function SettingsPage() {
               ))}
             </div>
           </section>
+
+          <fieldset style={{ marginBottom: "28px", border: "none", minWidth: 0 }}>
+            <legend
+              style={{
+                fontSize: "15px",
+                fontWeight: 600,
+                color: "var(--text)",
+                marginBottom: "10px",
+                padding: 0,
+              }}
+            >
+              Appearance
+            </legend>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+              {APPEARANCE_OPTIONS.map(({ value, label }) => {
+                const selected = appearance === value;
+                return (
+                  <label key={value} style={{ flex: "1 1 84px", display: "flex", position: "relative", cursor: "pointer" }}>
+                    {/* Visually hidden but still a native radio: keyboard, arrow-key
+                        grouping and screen-reader semantics are preserved. The sibling
+                        span is the visible button (see .dwp-choice-input in globals.css). */}
+                    <input
+                      type="radio"
+                      name="dwp-appearance"
+                      value={value}
+                      checked={selected}
+                      onChange={() => setAppearancePreference(value)}
+                      className="dwp-choice-input"
+                    />
+                    <span
+                      className="dwp-choice-label"
+                      style={{
+                        flex: 1,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: "10px 12px",
+                        borderRadius: "8px",
+                        border: `1px solid ${selected ? "var(--control-selected-bg)" : "var(--border)"}`,
+                        fontWeight: 600,
+                        fontSize: "14px",
+                        backgroundColor: selected ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                        color: selected ? "var(--control-selected-fg)" : "var(--text)",
+                        minHeight: "44px",
+                        transition: "background-color 0.15s ease, color 0.15s ease",
+                      }}
+                    >
+                      {label}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "8px", lineHeight: "1.4" }}>
+              System follows your device setting. Saved on this device only; it does not sync or change with profiles.
+            </p>
+          </fieldset>
         </>
       ) : (
         /* Skeleton placeholders for resort + park buttons while hydrating */
         <>
           <section style={{ marginBottom: "28px" }}>
-            <div style={{ height: "21px", width: "100px", borderRadius: 4, backgroundColor: "#f3f4f6", marginBottom: "10px" }} />
+            <div style={{ height: "21px", width: "100px", borderRadius: 4, backgroundColor: "var(--surface-muted)", marginBottom: "10px" }} />
             <div style={{ display: "flex", gap: "8px" }}>
-              <div style={{ flex: 1, height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 44, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 44, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
           </section>
           <section style={{ marginBottom: "28px" }}>
-            <div style={{ height: "21px", width: "80px", borderRadius: 4, backgroundColor: "#f3f4f6", marginBottom: "10px" }} />
+            <div style={{ height: "21px", width: "80px", borderRadius: 4, backgroundColor: "var(--surface-muted)", marginBottom: "10px" }} />
             <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
-              <div style={{ flex: "1 1 calc(50% - 4px)", height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: "1 1 calc(50% - 4px)", height: 44, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: "1 1 calc(50% - 4px)", height: 44, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: "1 1 calc(50% - 4px)", height: 44, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
           </section>
         </>
@@ -783,7 +861,7 @@ export default function SettingsPage() {
             style={{
               fontSize: "15px",
               fontWeight: 600,
-              color: "#374151",
+              color: "var(--text)",
               marginBottom: "10px",
             }}
           >
@@ -791,7 +869,7 @@ export default function SettingsPage() {
           </h2>
           <label
             htmlFor="activeProfileSelect"
-            style={{ display: "block", fontSize: "13px", color: "#6b7280", marginBottom: "8px" }}
+            style={{ display: "block", fontSize: "13px", color: "var(--text-muted)", marginBottom: "8px" }}
           >
             Active Profile:
           </label>
@@ -806,8 +884,8 @@ export default function SettingsPage() {
               border: "1px solid #d1d5db",
               fontSize: "14px",
               minHeight: "44px",
-              backgroundColor: "#fff",
-              color: "#111827",
+              backgroundColor: "var(--input-bg)",
+              color: "var(--text-strong)",
               marginBottom: "10px",
               cursor: "pointer",
             }}
@@ -829,8 +907,8 @@ export default function SettingsPage() {
                 cursor: "pointer",
                 fontWeight: 600,
                 fontSize: "13px",
-                backgroundColor: "#f9fafb",
-                color: "#374151",
+                backgroundColor: "var(--surface-subtle)",
+                color: "var(--text)",
                 minHeight: "44px",
               }}
             >
@@ -846,8 +924,8 @@ export default function SettingsPage() {
                 cursor: "pointer",
                 fontWeight: 600,
                 fontSize: "13px",
-                backgroundColor: "#f9fafb",
-                color: "#374151",
+                backgroundColor: "var(--surface-subtle)",
+                color: "var(--text)",
                 minHeight: "44px",
               }}
             >
@@ -860,19 +938,19 @@ export default function SettingsPage() {
                 flex: "1 1 auto",
                 padding: "10px 12px",
                 borderRadius: "8px",
-                border: `1px solid ${(profiles.length <= 1 || activeProfileId === "default") ? "#e5e7eb" : "#fca5a5"}`,
+                border: `1px solid ${(profiles.length <= 1 || activeProfileId === "default") ? "var(--border-disabled)" : "var(--status-danger-border)"}`,
                 cursor: (profiles.length <= 1 || activeProfileId === "default") ? "not-allowed" : "pointer",
                 fontWeight: 600,
                 fontSize: "13px",
-                backgroundColor: "#f9fafb",
-                color: (profiles.length <= 1 || activeProfileId === "default") ? "#9ca3af" : "#dc2626",
+                backgroundColor: "var(--surface-subtle)",
+                color: (profiles.length <= 1 || activeProfileId === "default") ? "var(--text-disabled)" : "var(--status-danger)",
                 minHeight: "44px",
               }}
             >
               Delete
             </button>
           </div>
-          <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: "8px" }}>
+          <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "8px" }}>
             Each profile stores separate Plans, Lightning, and park context. Signed-in profile names sync across devices; planner data stays separate for each profile.
           </p>
         </section>
@@ -883,8 +961,8 @@ export default function SettingsPage() {
         style={{
           padding: "16px",
           borderRadius: "8px",
-          border: "1px solid #e5e7eb",
-          backgroundColor: "#f9fafb",
+          border: "1px solid var(--border-soft)",
+          backgroundColor: "var(--surface-subtle)",
           marginBottom: "4px",
         }}
       >
@@ -892,7 +970,7 @@ export default function SettingsPage() {
           style={{
             fontSize: "15px",
             fontWeight: 600,
-            color: "#374151",
+            color: "var(--text)",
             marginBottom: "12px",
           }}
         >
@@ -901,13 +979,13 @@ export default function SettingsPage() {
 
         {/* Loading skeleton while session resolves */}
         {sessionStatus === "loading" && (
-          <div style={{ height: 44, borderRadius: 8, backgroundColor: "#e5e7eb" }} />
+          <div style={{ height: 44, borderRadius: 8, backgroundColor: "var(--skeleton)" }} />
         )}
 
         {/* Signed-out state */}
         {sessionStatus === "unauthenticated" && !signInSent && (
           <div>
-            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "10px" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "10px" }}>
               We&apos;ll email you a link to sign in. No password.
             </p>
             <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
@@ -924,9 +1002,8 @@ export default function SettingsPage() {
                   border: "1px solid #d1d5db",
                   fontSize: "14px",
                   minHeight: "44px",
-                  backgroundColor: "#fff",
-                  color: "#111827",
-                  outline: "none",
+                  backgroundColor: "var(--input-bg)",
+                  color: "var(--text-strong)",
                 }}
               />
               <button
@@ -939,8 +1016,8 @@ export default function SettingsPage() {
                   cursor: "pointer",
                   fontWeight: 600,
                   fontSize: "14px",
-                  backgroundColor: "#1e3a5f",
-                  color: "#fff",
+                  backgroundColor: "var(--control-selected-bg)",
+                  color: "var(--control-selected-fg)",
                   minHeight: "44px",
                   whiteSpace: "nowrap",
                 }}
@@ -949,7 +1026,7 @@ export default function SettingsPage() {
               </button>
             </div>
             {signInError && (
-              <p style={{ fontSize: "13px", color: "#dc2626", marginTop: "8px" }}>
+              <p style={{ fontSize: "13px", color: "var(--status-danger)", marginTop: "8px" }}>
                 {signInError}
               </p>
             )}
@@ -958,7 +1035,7 @@ export default function SettingsPage() {
 
         {/* Email sent confirmation */}
         {sessionStatus === "unauthenticated" && signInSent && (
-          <p style={{ fontSize: "14px", color: "#374151" }}>
+          <p style={{ fontSize: "14px", color: "var(--text)" }}>
             Check your inbox — we sent a sign-in link to{" "}
             <strong>{emailInput}</strong>.
           </p>
@@ -967,18 +1044,18 @@ export default function SettingsPage() {
         {/* Signed-in state */}
         {sessionStatus === "authenticated" && session?.user && (
           <div>
-            <p style={{ fontSize: "14px", color: "#374151", marginBottom: "4px" }}>
+            <p style={{ fontSize: "14px", color: "var(--text)", marginBottom: "4px" }}>
               Signed in as <strong>{session.user.email}</strong>
             </p>
-            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "2px" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "2px" }}>
               Syncing profile:{" "}
-              <strong style={{ color: "#111827" }}>
+              <strong style={{ color: "var(--text-strong)" }}>
                 {profiles.find((p) => p.id === activeProfileId)?.name ?? activeProfileId}
               </strong>
             </p>
 
             {/* Sync status row — rendered from displayedSyncState for min-duration stability */}
-            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "2px" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "2px" }}>
               Status:{" "}
               <span
                 className={displayedSyncState.status === "syncing" ? "dwp-syncing" : undefined}
@@ -987,14 +1064,14 @@ export default function SettingsPage() {
                 {SYNC_STATUS_LABEL[displayedSyncState.status]}
               </span>
             </p>
-            <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: displayedSyncState.status === "error" ? "4px" : "12px" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: displayedSyncState.status === "error" ? "4px" : "12px" }}>
               Last synced:{" "}
               {displayedLastSyncedAt ? formatRelativeTime(displayedLastSyncedAt) : "--"}
             </p>
 
             {/* Error message — persists until next successful sync */}
             {displayedSyncState.status === "error" && (
-              <p style={{ fontSize: "13px", color: "#dc2626", marginBottom: "12px" }}>
+              <p style={{ fontSize: "13px", color: "var(--status-danger)", marginBottom: "12px" }}>
                 Last sync failed
                 {displayedSyncState.lastError ? ` (${displayedSyncState.lastError})` : ""}.
                 {" "}Changes are stored locally.
@@ -1010,8 +1087,8 @@ export default function SettingsPage() {
                 cursor: "pointer",
                 fontWeight: 600,
                 fontSize: "14px",
-                backgroundColor: "#f9fafb",
-                color: "#374151",
+                backgroundColor: "var(--surface-subtle)",
+                color: "var(--text)",
                 minHeight: "44px",
               }}
             >
@@ -1022,7 +1099,7 @@ export default function SettingsPage() {
 
         {/* Signed-out sync status note */}
         {sessionStatus === "unauthenticated" && (
-          <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: "8px", marginBottom: "0" }}>
+          <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "8px", marginBottom: "0" }}>
             Not signed in — local-only mode. Sign in above to enable cloud sync.
           </p>
         )}
@@ -1034,13 +1111,13 @@ export default function SettingsPage() {
           style={{
             fontSize: "15px",
             fontWeight: 600,
-            color: "#374151",
+            color: "var(--text)",
             marginBottom: "6px",
           }}
         >
           Reset Current Selection
         </h2>
-        <p style={{ fontSize: "13px", color: "#6b7280", marginBottom: "12px" }}>
+        <p style={{ fontSize: "13px", color: "var(--text-muted)", marginBottom: "12px" }}>
           Clears your current resort &amp; park selection so Settings defaults
           apply again on your next visit.
         </p>
@@ -1059,8 +1136,8 @@ export default function SettingsPage() {
             cursor: "pointer",
             fontWeight: 600,
             fontSize: "14px",
-            backgroundColor: "#f9fafb",
-            color: "#374151",
+            backgroundColor: "var(--surface-subtle)",
+            color: "var(--text)",
             minHeight: "44px",
           }}
         >
