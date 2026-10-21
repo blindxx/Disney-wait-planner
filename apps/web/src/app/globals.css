@@ -168,3 +168,21 @@ textarea:focus-visible,
   font-size: 1.25rem;
   color: var(--text-subtitle);
 }
+
+/* Visually hidden native radio; its sibling .dwp-choice-label is the visible button. */
+.dwp-choice-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+  opacity: 0;
+}
+
+.dwp-choice-input:focus-visible + .dwp-choice-label {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}

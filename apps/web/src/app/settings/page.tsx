@@ -793,34 +793,38 @@ export default function SettingsPage() {
               {APPEARANCE_OPTIONS.map(({ value, label }) => {
                 const selected = appearance === value;
                 return (
-                  <label
-                    key={value}
-                    style={{
-                      flex: "1 1 96px",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: "8px",
-                      padding: "10px 12px",
-                      borderRadius: "8px",
-                      border: `1px solid ${selected ? "var(--control-selected-bg)" : "var(--border)"}`,
-                      cursor: "pointer",
-                      fontWeight: 600,
-                      fontSize: "14px",
-                      backgroundColor: selected ? "var(--control-selected-bg)" : "var(--surface-subtle)",
-                      color: selected ? "var(--control-selected-fg)" : "var(--text)",
-                      minHeight: "44px",
-                    }}
-                  >
+                  <label key={value} style={{ flex: "1 1 84px", display: "flex", position: "relative", cursor: "pointer" }}>
+                    {/* Visually hidden but still a native radio: keyboard, arrow-key
+                        grouping and screen-reader semantics are preserved. The sibling
+                        span is the visible button (see .dwp-choice-input in globals.css). */}
                     <input
                       type="radio"
                       name="dwp-appearance"
                       value={value}
                       checked={selected}
                       onChange={() => setAppearancePreference(value)}
-                      style={{ accentColor: "var(--accent-selected-bg)" }}
+                      className="dwp-choice-input"
                     />
-                    {label}
+                    <span
+                      className="dwp-choice-label"
+                      style={{
+                        flex: 1,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: "10px 12px",
+                        borderRadius: "8px",
+                        border: `1px solid ${selected ? "var(--control-selected-bg)" : "var(--border)"}`,
+                        fontWeight: 600,
+                        fontSize: "14px",
+                        backgroundColor: selected ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                        color: selected ? "var(--control-selected-fg)" : "var(--text)",
+                        minHeight: "44px",
+                        transition: "background-color 0.15s ease, color 0.15s ease",
+                      }}
+                    >
+                      {label}
+                    </span>
                   </label>
                 );
               })}
