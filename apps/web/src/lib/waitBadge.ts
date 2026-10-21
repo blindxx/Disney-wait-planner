@@ -27,23 +27,25 @@ import type { WaitStatus } from "@disney-wait-planner/shared";
 type StatusInput = WaitStatus | string;
 
 // ---------------------------------------------------------------------------
-// Internal color maps — copied verbatim from the pages they replace
+// Internal color maps — copied verbatim from the pages they replace.
+// Each value is a theme variable (defined only on dark-converted routes, see
+// globals.css) with the original light color as the fallback.
 // ---------------------------------------------------------------------------
 
 /** Inline-style colors for badge spans (colored background + dark text). */
 const BADGE_STYLE = {
-  green:  { backgroundColor: "#dcfce7", color: "#166534" },
-  yellow: { backgroundColor: "#fef9c3", color: "#854d0e" },
-  red:    { backgroundColor: "#fee2e2", color: "#991b1b" },
-  orange: { backgroundColor: "#ffedd5", color: "#c2410c" },
-  gray:   { backgroundColor: "#f3f4f6", color: "#6b7280" },
+  green:  { backgroundColor: "var(--wait-green-bg, #dcfce7)", color: "var(--wait-green-fg, #166534)" },
+  yellow: { backgroundColor: "var(--wait-yellow-bg, #fef9c3)", color: "var(--wait-yellow-fg, #854d0e)" },
+  red:    { backgroundColor: "var(--wait-red-bg, #fee2e2)", color: "var(--wait-red-fg, #991b1b)" },
+  orange: { backgroundColor: "var(--wait-orange-bg, #ffedd5)", color: "var(--wait-orange-fg, #c2410c)" },
+  gray:   { backgroundColor: "var(--wait-gray-bg, #f3f4f6)", color: "var(--wait-gray-fg, #6b7280)" },
 } as const;
 
 /** Text-only colors for the home page wait-number display (on a white background). */
 const TEXT_COLOR = {
-  green:  "#16a34a",
-  yellow: "#d97706",
-  red:    "#dc2626",
+  green:  "var(--wait-text-green, #16a34a)",
+  yellow: "var(--wait-text-yellow, #d97706)",
+  red:    "var(--wait-text-red, #dc2626)",
 } as const;
 
 // ---------------------------------------------------------------------------

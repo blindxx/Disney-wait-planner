@@ -169,16 +169,16 @@ const RESPONSIVE_CSS = `
     justify-content: space-between;
     gap: 12px;
     padding: 10px 14px;
-    background-color: #fff;
-    border: 1px solid #e5e7eb;
+    background-color: var(--surface);
+    border: 1px solid var(--border-soft);
     border-radius: 10px;
     min-height: 56px;
     position: relative;
   }
 
   .option-item-top {
-    border-color: #bfdbfe;
-    background-color: #f0f7ff;
+    border-color: var(--info-border);
+    background-color: var(--info-bg-top);
   }
 
   /* Top pick badge */
@@ -188,8 +188,8 @@ const RESPONSIVE_CSS = `
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #1d4ed8;
-    background-color: #dbeafe;
+    color: var(--info-fg);
+    background-color: var(--info-bg-strong);
     padding: 2px 8px;
     border-radius: 4px;
     line-height: 1.4;
@@ -214,7 +214,7 @@ const RESPONSIVE_CSS = `
 
   .wait-label {
     font-size: 11px;
-    color: #6b7280;
+    color: var(--text-muted);
     margin-top: 2px;
     text-transform: uppercase;
     letter-spacing: 0.03em;
@@ -227,8 +227,8 @@ const RESPONSIVE_CSS = `
     padding: 16px 24px;
     border-radius: 8px;
     border: none;
-    background-color: #2563eb;
-    color: #fff;
+    background-color: var(--accent-selected-bg);
+    color: var(--accent-selected-fg);
     font-weight: 600;
     font-size: 16px;
     text-align: center;
@@ -240,19 +240,19 @@ const RESPONSIVE_CSS = `
   }
 
   .primary-btn:hover {
-    background-color: #1d4ed8;
+    background-color: var(--accent-hover);
   }
 
   .today-section-title {
     font-size: 17px;
     font-weight: 600;
-    color: #111827;
+    color: var(--text-strong);
     margin: 0 0 8px;
   }
 
   .today-empty {
     font-size: 14px;
-    color: #6b7280;
+    color: var(--text-muted);
     padding: 4px 0 12px;
   }
 
@@ -262,8 +262,8 @@ const RESPONSIVE_CSS = `
     justify-content: space-between;
     gap: 12px;
     padding: 10px 14px;
-    background-color: #fff;
-    border: 1px solid #e5e7eb;
+    background-color: var(--surface);
+    border: 1px solid var(--border-soft);
     border-radius: 10px;
   }
 
@@ -579,11 +579,11 @@ export default function TodayPage() {
       <div className="today-page">
         {/* Page Title */}
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: "8px" }}>
-          <h1 style={{ fontSize: "28px", fontWeight: 700, color: "#111827", margin: 0 }}>
+          <h1 style={{ fontSize: "28px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}>
             Today
           </h1>
           {activeProfileName && (
-            <span style={{ fontSize: "12px", color: "#9ca3af" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-faint)" }}>
               Profile: {activeProfileName}
             </span>
           )}
@@ -613,12 +613,12 @@ export default function TodayPage() {
                     flex: 1,
                     padding: "8px 6px",
                     borderRadius: 8,
-                    border: `1px solid ${selectedResort === resort ? "#1e3a5f" : "#d1d5db"}`,
+                    border: `1px solid ${selectedResort === resort ? "var(--control-selected-bg)" : "var(--border)"}`,
                     cursor: "pointer",
                     fontWeight: 600,
                     fontSize: 13,
-                    backgroundColor: selectedResort === resort ? "#1e3a5f" : "#f9fafb",
-                    color: selectedResort === resort ? "#fff" : "#374151",
+                    backgroundColor: selectedResort === resort ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                    color: selectedResort === resort ? "var(--control-selected-fg)" : "var(--text)",
                     minHeight: 36,
                   }}
                 >
@@ -641,8 +641,8 @@ export default function TodayPage() {
                     } catch {}
                   }}
                   style={{
-                    backgroundColor: selectedPark === parkId ? "#2563eb" : "#f3f4f6",
-                    color: selectedPark === parkId ? "#fff" : "#374151",
+                    backgroundColor: selectedPark === parkId ? "var(--accent-selected-bg)" : "var(--surface-muted)",
+                    color: selectedPark === parkId ? "var(--control-selected-fg)" : "var(--text)",
                   }}
                 >
                   {label}
@@ -658,7 +658,7 @@ export default function TodayPage() {
                   padding: "4px 0",
                   marginBottom: "12px",
                   fontSize: "12px",
-                  color: "#9ca3af",
+                  color: "var(--text-faint)",
                 }}
               >
                 Default
@@ -679,7 +679,7 @@ export default function TodayPage() {
                   padding: "4px 0",
                   marginBottom: "12px",
                   fontSize: "12px",
-                  color: "#6b7280",
+                  color: "var(--text-muted)",
                   cursor: "pointer",
                   textDecoration: "underline",
                   display: "block",
@@ -693,12 +693,12 @@ export default function TodayPage() {
           /* Skeleton placeholders preserve layout while hydration runs */
           <>
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
-              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
             <div style={{ height: 24, marginBottom: "12px" }} />
           </>
@@ -726,7 +726,7 @@ export default function TodayPage() {
             />
             <span>
               {parkStatus.text}
-              {parkStatus.stale && <span style={{ fontWeight: 400, color: "#9ca3af" }}> (may be outdated)</span>}
+              {parkStatus.stale && <span style={{ fontWeight: 400, color: "var(--text-faint)" }}> (may be outdated)</span>}
             </span>
           </div>
         )}
@@ -762,7 +762,7 @@ export default function TodayPage() {
                       fontWeight: 600,
                       fontSize: "15px",
                       lineHeight: "1.3",
-                      color: "#111827",
+                      color: "var(--text-strong)",
                       wordWrap: "break-word",
                     }}
                   >
@@ -772,7 +772,7 @@ export default function TodayPage() {
                     <div
                       style={{
                         fontSize: "12px",
-                        color: "#9ca3af",
+                        color: "var(--text-faint)",
                         marginTop: "2px",
                         lineHeight: "1.3",
                       }}
@@ -781,7 +781,7 @@ export default function TodayPage() {
                     </div>
                   )}
                   {isFallbackWait(attraction) && (
-                    <div style={{ fontSize: "11px", lineHeight: "1.3", color: "#9ca3af", marginTop: "2px" }}>{FALLBACK_WAIT_LABEL}</div>
+                    <div style={{ fontSize: "11px", lineHeight: "1.3", color: "var(--text-faint)", marginTop: "2px" }}>{FALLBACK_WAIT_LABEL}</div>
                   )}
                 </div>
 
@@ -807,16 +807,16 @@ export default function TodayPage() {
           {longestWaits.map((attraction) => (
             <div key={attraction.id} className="option-item">
               <div style={{ flex: "1 1 0%", minWidth: 0 }}>
-                <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "#111827", wordWrap: "break-word" }}>
+                <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "var(--text-strong)", wordWrap: "break-word" }}>
                   {attraction.name}
                 </div>
                 {attraction.land && (
-                  <div style={{ fontSize: "12px", color: "#9ca3af", marginTop: "2px", lineHeight: "1.3" }}>
+                  <div style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", lineHeight: "1.3" }}>
                     {attraction.land}
                   </div>
                 )}
                 {isFallbackWait(attraction) && (
-                  <div style={{ fontSize: "11px", lineHeight: "1.3", color: "#9ca3af", marginTop: "2px" }}>{FALLBACK_WAIT_LABEL}</div>
+                  <div style={{ fontSize: "11px", lineHeight: "1.3", color: "var(--text-faint)", marginTop: "2px" }}>{FALLBACK_WAIT_LABEL}</div>
                 )}
               </div>
               <div className="wait-block">
@@ -832,35 +832,35 @@ export default function TodayPage() {
 
         <section className="today-grid-full">
         <h2 className="today-section-title">{NEXT_SHOWS_HEADING}</h2>
-        <div style={{ fontSize: "12px", color: "#9ca3af", margin: "-4px 0 8px" }}>{NEXT_SHOWS_SCOPE_NOTE}</div>
+        <div style={{ fontSize: "12px", color: "var(--text-faint)", margin: "-4px 0 8px" }}>{NEXT_SHOWS_SCOPE_NOTE}</div>
         <div className="options-list">
           {nextShows.state === "loading" && <div className="today-empty" aria-hidden style={{ minHeight: 20 }} />}
           {nextShows.state === "upcoming" &&
             nextShows.performances.map((p) => (
               <div key={`${p.dwpName}|${p.startMs}`} className="show-item">
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "#111827", wordWrap: "break-word" }}>
+                  <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "var(--text-strong)", wordWrap: "break-word" }}>
                     {p.dwpName}
                   </div>
                   {landByShow.get(p.dwpName) && (
-                    <div style={{ fontSize: "12px", color: "#9ca3af", marginTop: "2px", lineHeight: "1.3" }}>
+                    <div style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", lineHeight: "1.3" }}>
                       {landByShow.get(p.dwpName)}
                     </div>
                   )}
                 </div>
-                <div style={{ fontWeight: 700, fontSize: "16px", color: "#374151", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
+                <div style={{ fontWeight: 700, fontSize: "16px", color: "var(--text)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
                   {p.localTime}
                 </div>
               </div>
             ))}
           {nextShows.state === "upcoming" && nextShows.partial && (
-            <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+            <div style={{ fontSize: "12px", color: "var(--text-faint)" }}>
               {PARTIAL_SHOWTIMES_NOTE}
               {nextShows.stale && " (may be outdated)"}
             </div>
           )}
           {nextShows.state === "upcoming" && !nextShows.partial && nextShows.stale && (
-            <div style={{ fontSize: "12px", color: "#9ca3af" }}>Showtimes may be out of date</div>
+            <div style={{ fontSize: "12px", color: "var(--text-faint)" }}>Showtimes may be out of date</div>
           )}
           {nextShows.state === "none_remaining" && (
             <div className="today-empty">
@@ -883,7 +883,7 @@ export default function TodayPage() {
           style={{
             marginTop: "12px",
             fontSize: "12px",
-            color: "#9ca3af",
+            color: "var(--text-faint)",
             textAlign: "right",
           }}
         >
@@ -898,11 +898,11 @@ export default function TodayPage() {
 
         {/* ThemeParks.wiki attribution — owed whenever its park hours or showtimes are presented */}
         {themeParksPresented && (
-          <div style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af", textAlign: "right" }}>
+          <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--text-faint)", textAlign: "right" }}>
             {(parkHoursPresented || parkStatusPresented) && nextShows.presentsProviderData ? "Park hours and showtimes" : parkHoursPresented || parkStatusPresented ? "Park hours" : "Showtimes"} powered by{" "}
             <ThemeParksAttribution
               linkOnly
-              style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }}
+              style={{ fontSize: "inherit", color: "var(--text-muted)", opacity: 1, textDecoration: "underline" }}
             />
           </div>
         )}

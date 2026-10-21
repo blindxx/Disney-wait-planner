@@ -65,7 +65,7 @@ const PARK_TAB_LABELS: Record<ParkId, string> = {
 const RESPONSIVE_CSS = `
   .all-page { max-width: 800px; margin: 0 auto; padding: 16px; overflow-x: hidden; }
   .resort-tab {
-    flex: 1 1 0%; padding: 8px 6px; border-radius: 8px; border: 1px solid #d1d5db; cursor: pointer;
+    flex: 1 1 0%; padding: 8px 6px; border-radius: 8px; border: 1px solid var(--border); cursor: pointer;
     font-weight: 600; font-size: 13px; line-height: 1.2; text-align: center;
     transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
   }
@@ -74,19 +74,19 @@ const RESPONSIVE_CSS = `
     font-weight: 600; font-size: 14px; line-height: 1.2; text-align: center;
     transition: background-color 0.15s ease, color 0.15s ease;
   }
-  .entertainment-grid { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
-  .entertainment-card { padding: 12px 16px; min-height: 56px; border-bottom: 1px solid #e5e7eb; background-color: #fff; }
+  .entertainment-grid { border: 1px solid var(--border-soft); border-radius: 8px; overflow: hidden; }
+  .entertainment-card { padding: 12px 16px; min-height: 56px; border-bottom: 1px solid var(--border-soft); background-color: var(--surface); }
   .entertainment-card:last-child { border-bottom: none; }
-  .all-empty { padding: 48px 20px; text-align: center; color: #6b7280; font-size: 15px; background-color: #fff; }
-  .all-toggle { background: none; border: none; padding: 4px 0; margin-top: 2px; font-size: 12px; color: #2563eb; cursor: pointer; }
+  .all-empty { padding: 48px 20px; text-align: center; color: var(--text-muted); font-size: 15px; background-color: var(--surface); }
+  .all-toggle { background: none; border: none; padding: 4px 0; margin-top: 2px; font-size: 12px; color: var(--status-info); cursor: pointer; }
   @media (min-width: 768px) {
     .all-page { padding: 20px; }
     .resort-tab { flex: 0 1 auto; padding: 8px 16px; }
     .park-tab { flex: 0 1 auto; padding: 10px 20px; }
     .entertainment-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; border: none; border-radius: 0; overflow: visible; }
-    .entertainment-card { border: 1px solid #e5e7eb; border-radius: 8px; }
-    .entertainment-card:last-child { border: 1px solid #e5e7eb; }
-    .all-empty { grid-column: 1 / -1; border: 1px solid #e5e7eb; border-radius: 8px; }
+    .entertainment-card { border: 1px solid var(--border-soft); border-radius: 8px; }
+    .entertainment-card:last-child { border: 1px solid var(--border-soft); }
+    .all-empty { grid-column: 1 / -1; border: 1px solid var(--border-soft); border-radius: 8px; }
   }
   @media (min-width: 1024px) {
     .all-page { max-width: 1100px; padding: 24px; }
@@ -98,8 +98,9 @@ const RESPONSIVE_CSS = `
 const selectStyle = {
   padding: "6px 10px",
   borderRadius: "6px",
-  border: "1px solid #d1d5db",
-  backgroundColor: "#fff",
+  border: "1px solid var(--border)",
+  backgroundColor: "var(--surface)",
+  color: "var(--text-strong)",
   fontSize: "14px",
   cursor: "pointer",
 } as const;
@@ -143,7 +144,7 @@ function AllEntertainmentCard({
           fontWeight: 600,
           fontSize: "15px",
           lineHeight: "1.3",
-          color: "#111827",
+          color: "var(--text-strong)",
           display: "-webkit-box",
           WebkitLineClamp: 3,
           WebkitBoxOrient: "vertical" as const,
@@ -154,7 +155,7 @@ function AllEntertainmentCard({
         {entry.name}
       </div>
       {(locationLabel || nonOperating) && (
-        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: "2px" }}>
+        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text-muted)", marginTop: "2px" }}>
           {locationLabel}
           {locationLabel && nonOperating && <> &bull; </>}
           {nonOperating}
@@ -163,29 +164,29 @@ function AllEntertainmentCard({
       {showShowtimes && (
         <div
           id={timesId}
-          style={{ fontSize: "13px", lineHeight: "1.3", color: isUpcoming ? "#374151" : "#9ca3af", marginTop: "4px" }}
+          style={{ fontSize: "13px", lineHeight: "1.3", color: isUpcoming ? "var(--text)" : "var(--text-faint)", marginTop: "4px" }}
         >
           {showFull ? (
             <>
               {view.times.map((t, i) => (
-                <span key={i} style={{ color: t.passed ? "#9ca3af" : "#374151" }}>
-                  {i > 0 && <span style={{ color: "#9ca3af" }}> • </span>}
+                <span key={i} style={{ color: t.passed ? "var(--text-faint)" : "var(--text)" }}>
+                  {i > 0 && <span style={{ color: "var(--text-faint)" }}> • </span>}
                   {t.localTime}
                 </span>
               ))}
-              {view.incomplete && <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>}
+              {view.incomplete && <span style={{ color: "var(--text-faint)", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>}
             </>
           ) : (
             <>
               {view.collapsedText}
-              {view.partial && <span style={{ color: "#9ca3af", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>}
+              {view.partial && <span style={{ color: "var(--text-faint)", fontSize: "12px" }}> ({PARTIAL_SHOWTIMES_NOTE})</span>}
             </>
           )}
           {showtimesStale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
       {view.hoursText && (
-        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "#6b7280", marginTop: showShowtimes ? "2px" : "4px" }}>
+        <div style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text-muted)", marginTop: showShowtimes ? "2px" : "4px" }}>
           {view.hoursText}
           {hoursStale && (
             <span title={staleScope === "both" ? "Showtimes and hours may be out of date" : "Hours may be out of date"}>
@@ -309,8 +310,8 @@ export default function AllEntertainmentPage() {
       <style>{RESPONSIVE_CSS}</style>
       <div className="all-page">
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "4px", marginBottom: "16px" }}>
-          <h1 style={{ fontSize: "22px", fontWeight: 700, color: "#111827", margin: 0 }}>All Entertainment</h1>
-          <Link href="/wait-times" style={{ fontSize: "13px", color: "#2563eb" }}>&larr; Waits &amp; Shows</Link>
+          <h1 style={{ fontSize: "22px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}>All Entertainment</h1>
+          <Link href="/wait-times" style={{ fontSize: "13px", color: "var(--status-info)" }}>&larr; Waits &amp; Shows</Link>
         </div>
 
         {ready ? (
@@ -322,9 +323,9 @@ export default function AllEntertainmentPage() {
                   className="resort-tab"
                   onClick={() => { if (resortId !== selectedResort) selectPark(RESORT_PARKS[resortId][0]); }}
                   style={{
-                    backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-                    color: selectedResort === resortId ? "#fff" : "#374151",
-                    borderColor: selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+                    backgroundColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                    color: selectedResort === resortId ? "var(--control-selected-fg)" : "var(--text)",
+                    borderColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--border)",
                   }}
                 >
                   {RESORT_LABELS[resortId]}
@@ -338,8 +339,8 @@ export default function AllEntertainmentPage() {
                   className="park-tab"
                   onClick={() => { if (parkId !== selectedPark) selectPark(parkId); }}
                   style={{
-                    backgroundColor: selectedPark === parkId ? "#2563eb" : "#f3f4f6",
-                    color: selectedPark === parkId ? "#fff" : "#374151",
+                    backgroundColor: selectedPark === parkId ? "var(--accent-selected-bg)" : "var(--surface-muted)",
+                    color: selectedPark === parkId ? "var(--control-selected-fg)" : "var(--text)",
                   }}
                 >
                   {PARK_TAB_LABELS[parkId]}
@@ -352,12 +353,12 @@ export default function AllEntertainmentPage() {
         ) : (
           <>
             <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
-              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
             <div style={{ display: "flex", gap: "8px", marginBottom: "12px" }}>
-              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+              <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
             </div>
             <div style={{ height: 55, marginBottom: "12px" }} />
           </>
@@ -371,11 +372,11 @@ export default function AllEntertainmentPage() {
             gap: "10px",
             marginBottom: "12px",
             padding: "10px 12px",
-            backgroundColor: "#f9fafb",
+            backgroundColor: "var(--surface-subtle)",
             borderRadius: "8px",
           }}
         >
-          <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "#374151", minHeight: "32px" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "var(--text)", minHeight: "32px" }}>
             <input
               type="checkbox"
               checked={operatingOnly}
@@ -385,7 +386,7 @@ export default function AllEntertainmentPage() {
             Operating only
           </label>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <span style={{ fontSize: "13px", color: "#6b7280" }}>Land:</span>
+            <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
             <select value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
               <option value="">All Lands</option>
               {lands.map((land) => (
@@ -395,7 +396,7 @@ export default function AllEntertainmentPage() {
           </div>
         </div>
 
-        <p style={{ fontSize: "12px", color: "#9ca3af", marginTop: 0, marginBottom: "10px" }}>
+        <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
           Explore today&apos;s entertainment and showtimes throughout the park.
         </p>
 
@@ -426,17 +427,17 @@ export default function AllEntertainmentPage() {
         </div>
 
         {all && !all.error && all.entries.length > 0 && (
-          <div style={{ marginTop: "10px", fontSize: "13px", color: "#9ca3af" }}>
+          <div style={{ marginTop: "10px", fontSize: "13px", color: "var(--text-faint)" }}>
             Showing {visible.length} entertainment {visible.length === 1 ? "experience" : "experiences"}
           </div>
         )}
         {allEntertainmentIsIncomplete(all) && all!.entries.length > 0 && (
-          <div role="note" style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af" }}>{INVENTORY_INCOMPLETE_NOTE}</div>
+          <div role="note" style={{ marginTop: "6px", fontSize: "12px", color: "var(--text-faint)" }}>{INVENTORY_INCOMPLETE_NOTE}</div>
         )}
       </div>
 
       {(inventoryPresented || parkHoursPresented) && (
-        <div style={{ textAlign: "center", padding: "16px", fontSize: "12px", color: "#9ca3af" }}>
+        <div style={{ textAlign: "center", padding: "16px", fontSize: "12px", color: "var(--text-faint)" }}>
           {inventoryPresented && parkHoursPresented ? "Park hours and showtimes" : parkHoursPresented ? "Park hours" : "Showtimes"} powered by{" "}
           <ThemeParksAttribution linkOnly />
         </div>

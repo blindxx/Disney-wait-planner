@@ -80,12 +80,16 @@ export type ParkOperatingKind =
 
 export type ParkStatusTone = "green" | "amber" | "red" | "gray";
 
-/** Dot + text colour per tone (the text label always carries the meaning too). */
+/**
+ * Dot + text colour per tone (the text label always carries the meaning too).
+ * Theme variables (dark values in globals.css) with the original light colours
+ * as fallbacks.
+ */
 export const PARK_STATUS_TONE_COLORS: Record<ParkStatusTone, string> = {
-  green: "#15803d",
-  amber: "#b45309",
-  red: "#b91c1c",
-  gray: "#6b7280",
+  green: "var(--park-status-green, #15803d)",
+  amber: "var(--park-status-amber, #b45309)",
+  red: "var(--park-status-red, #b91c1c)",
+  gray: "var(--park-status-gray, #6b7280)",
 };
 
 export const PARK_STATUS_UNAVAILABLE_TEXT = "Status unavailable";
