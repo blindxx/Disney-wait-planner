@@ -34,7 +34,7 @@ const GUIDE_CSS = `
   .tomhg-back {
     display: inline-block;
     margin-bottom: 16px;
-    color: #1e3a5f;
+    color: var(--accent-link);
     font-size: 13px;
     font-weight: 600;
     text-decoration: none;
@@ -45,19 +45,19 @@ const GUIDE_CSS = `
   .tomhg-title {
     font-size: 28px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-strong);
     margin: 0 0 8px;
   }
   .tomhg-intro {
     font-size: 15px;
     line-height: 1.6;
-    color: #374151;
+    color: var(--text);
     margin: 0 0 24px;
   }
 
   .tomhg-toc {
-    border: 1px solid #e5e7eb;
-    background-color: #f9fafb;
+    border: 1px solid var(--border-soft);
+    background-color: var(--surface-subtle);
     border-radius: 12px;
     padding: 16px 18px;
     margin-bottom: 32px;
@@ -68,7 +68,7 @@ const GUIDE_CSS = `
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #6b7280;
+    color: var(--text-muted);
   }
   .tomhg-toc-list {
     display: grid;
@@ -79,14 +79,14 @@ const GUIDE_CSS = `
     list-style: none;
   }
   .tomhg-toc-group-start {
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-soft);
     padding-top: 8px;
     margin-top: 4px;
   }
   @media (min-width: 481px) {
     /* At the two-column width, also line up the item beside a group-start entry so the divider reads as one row. */
     .tomhg-toc-group-start + li {
-      border-top: 1px solid #e5e7eb;
+      border-top: 1px solid var(--border-soft);
       padding-top: 8px;
       margin-top: 4px;
     }
@@ -94,7 +94,7 @@ const GUIDE_CSS = `
   .tomhg-toc-list a {
     display: block;
     padding: 4px 0;
-    color: #1e3a5f;
+    color: var(--accent-link);
     font-size: 14px;
     font-weight: 500;
     text-decoration: none;
@@ -105,7 +105,7 @@ const GUIDE_CSS = `
 
   .tomhg-section {
     padding: 20px 0;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-soft);
     scroll-margin-top: 16px;
   }
   .tomhg-section:first-of-type {
@@ -115,20 +115,20 @@ const GUIDE_CSS = `
     margin: 0 0 8px;
     font-size: 19px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-strong);
   }
   .tomhg-section p {
     margin: 0 0 10px;
     font-size: 14px;
     line-height: 1.6;
-    color: #374151;
+    color: var(--text);
   }
   .tomhg-section ul {
     margin: 0 0 10px;
     padding-left: 20px;
     font-size: 14px;
     line-height: 1.7;
-    color: #374151;
+    color: var(--text);
   }
 
   .tomhg-examples-label {
@@ -138,7 +138,7 @@ const GUIDE_CSS = `
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #6b7280;
+    color: var(--text-muted);
   }
   .tomhg-examples {
     display: flex;
@@ -151,9 +151,9 @@ const GUIDE_CSS = `
   .tomhg-example-chip {
     padding: 7px 12px;
     border-radius: 999px;
-    border: 1px solid #d1d5db;
-    background-color: #fff;
-    color: #1e3a5f;
+    border: 1px solid var(--border);
+    background-color: var(--surface);
+    color: var(--accent-link);
     font-size: 13px;
     font-weight: 500;
   }
@@ -161,7 +161,7 @@ const GUIDE_CSS = `
   .tomhg-footer-nav {
     margin-top: 24px;
     padding-top: 20px;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-soft);
   }
 
   .tomhg-back-to-top {
@@ -175,15 +175,15 @@ const GUIDE_CSS = `
     padding: 10px 16px;
     border-radius: 999px;
     border: none;
-    background-color: #1e3a5f;
-    color: #fff;
+    background-color: var(--control-selected-bg);
+    color: var(--control-selected-fg);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
   }
   .tomhg-back-to-top:hover {
-    background-color: #16324f;
+    background-color: var(--control-selected-hover);
   }
 
   @media (max-width: 480px) {

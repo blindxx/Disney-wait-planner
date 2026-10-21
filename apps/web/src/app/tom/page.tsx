@@ -484,15 +484,15 @@ const CHAT_CSS = `
     padding: 6px 14px;
     border-radius: 999px;
     border: none;
-    background-color: #1e3a5f;
-    color: #fff;
+    background-color: var(--control-selected-bg);
+    color: var(--control-selected-fg);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
   }
   .tom-jump-btn:hover {
-    background-color: #16324f;
+    background-color: var(--control-selected-hover);
   }
 
   .tom-header {
@@ -520,7 +520,7 @@ const CHAT_CSS = `
   .tom-title {
     font-size: 20px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-strong);
     margin: 0;
   }
   .tom-header-actions {
@@ -533,21 +533,21 @@ const CHAT_CSS = `
     flex-shrink: 0;
     padding: 6px 14px;
     border-radius: 999px;
-    border: 1px solid #d1d5db;
-    background-color: #fff;
-    color: #1e3a5f;
+    border: 1px solid var(--border);
+    background-color: var(--surface);
+    color: var(--accent-link);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
   }
   .tom-new-chat-btn:hover {
-    background-color: #f3f4f6;
+    background-color: var(--surface-muted);
   }
   .tom-helper {
     margin: 4px 0 0;
     font-size: 13px;
     line-height: 1.4;
-    color: #6b7280;
+    color: var(--text-muted);
   }
 
   .tom-info-wrap {
@@ -559,9 +559,9 @@ const CHAT_CSS = `
     height: 20px;
     flex-shrink: 0;
     border-radius: 50%;
-    border: 1px solid #9ca3af;
-    background-color: #fff;
-    color: #6b7280;
+    border: 1px solid var(--text-faint);
+    background-color: var(--surface);
+    color: var(--text-muted);
     font-size: 12px;
     font-style: italic;
     font-weight: 700;
@@ -573,7 +573,7 @@ const CHAT_CSS = `
     cursor: pointer;
   }
   .tom-info-btn:focus-visible {
-    outline: 2px solid #1e3a5f;
+    outline: 2px solid var(--focus-ring-strong);
     outline-offset: 2px;
   }
   .tom-info-tooltip {
@@ -586,7 +586,7 @@ const CHAT_CSS = `
     max-width: 75vw;
     padding: 10px 12px;
     border-radius: 8px;
-    background-color: #111827;
+    background-color: var(--tooltip-bg);
     color: #f9fafb;
     font-size: 12px;
     line-height: 1.45;
@@ -654,18 +654,18 @@ const CHAT_CSS = `
     word-break: break-word;
   }
   .tom-bubble.user {
-    background-color: #1e3a5f;
-    color: #fff;
+    background-color: var(--control-selected-bg);
+    color: var(--control-selected-fg);
     border-bottom-right-radius: 4px;
   }
   .tom-bubble.tom {
-    background-color: #f3f4f6;
-    color: #111827;
+    background-color: var(--surface-muted);
+    color: var(--text-strong);
     border-bottom-left-radius: 4px;
   }
 
   .tom-link {
-    color: #1e3a5f;
+    color: var(--accent-link);
     text-decoration: underline;
     word-break: break-all;
   }
@@ -686,13 +686,13 @@ const CHAT_CSS = `
     flex-direction: column;
     overflow: hidden;
     border-radius: 8px;
-    border: 1px solid #e5e7eb;
-    background-color: #fff;
+    border: 1px solid var(--border-soft);
+    background-color: var(--surface);
     text-decoration: none;
     color: inherit;
   }
   .tom-preview-card:hover {
-    border-color: #cbd5e1;
+    border-color: var(--border-hover);
   }
   .tom-preview-image {
     width: 100%;
@@ -706,7 +706,7 @@ const CHAT_CSS = `
     height: 160px;
     object-fit: cover;
     display: block;
-    background-color: #f3f4f6;
+    background-color: var(--surface-muted);
   }
   .tom-preview-body {
     padding: 8px 10px;
@@ -720,12 +720,12 @@ const CHAT_CSS = `
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: #6b7280;
+    color: var(--text-muted);
   }
   .tom-preview-title {
     font-size: 13px;
     font-weight: 600;
-    color: #111827;
+    color: var(--text-strong);
     overflow-wrap: anywhere;
     display: -webkit-box;
     -webkit-line-clamp: 2;
@@ -735,7 +735,7 @@ const CHAT_CSS = `
   .tom-preview-desc {
     font-size: 12px;
     line-height: 1.35;
-    color: #6b7280;
+    color: var(--text-muted);
     overflow-wrap: anywhere;
     display: -webkit-box;
     -webkit-line-clamp: 2;
@@ -748,17 +748,17 @@ const CHAT_CSS = `
     margin-top: 6px;
     padding: 8px 10px;
     border-radius: 8px;
-    background-color: #f9fafb;
-    border: 1px solid #e5e7eb;
+    background-color: var(--surface-subtle);
+    border: 1px solid var(--border-soft);
     font-size: 12px;
-    color: #6b7280;
+    color: var(--text-muted);
   }
   .tom-sources-label {
     font-weight: 600;
     font-size: 10px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: #6b7280;
+    color: var(--text-muted);
   }
   .tom-sources ul {
     list-style: none;
@@ -781,7 +781,7 @@ const CHAT_CSS = `
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background-color: #9ca3af;
+    background-color: var(--text-disabled);
     animation: tom-typing-bounce 1.2s infinite ease-in-out;
   }
   .tom-typing span:nth-child(2) { animation-delay: 0.15s; }
@@ -795,9 +795,9 @@ const CHAT_CSS = `
     margin: 8px 2px;
     padding: 10px 14px;
     border-radius: 8px;
-    background-color: #fef2f2;
-    border: 1px solid #fecaca;
-    color: #991b1b;
+    background-color: var(--danger-bg);
+    border: 1px solid var(--danger-border);
+    color: var(--danger-fg-strong);
     font-size: 14px;
   }
 
@@ -805,19 +805,21 @@ const CHAT_CSS = `
     display: flex;
     gap: 8px;
     padding-top: 10px;
-    border-top: 1px solid #e5e7eb;
+    border-top: 1px solid var(--border-soft);
   }
 
   .tom-input {
     flex: 1 1 auto;
     padding: 10px 14px;
     border-radius: 20px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--border);
+    background-color: var(--input-bg);
+    color: var(--text-strong);
     font-size: 15px;
     outline: none;
   }
   .tom-input:focus {
-    border-color: #1e3a5f;
+    border-color: var(--focus-ring-strong);
   }
 
   .tom-send {
@@ -825,27 +827,27 @@ const CHAT_CSS = `
     padding: 10px 20px;
     border-radius: 20px;
     border: none;
-    background-color: #1e3a5f;
-    color: #fff;
+    background-color: var(--control-selected-bg);
+    color: var(--control-selected-fg);
     font-weight: 600;
     font-size: 14px;
     cursor: pointer;
   }
   .tom-send:disabled {
-    background-color: #9ca3af;
+    background-color: var(--text-disabled);
     cursor: not-allowed;
   }
 
   .tom-empty {
     text-align: center;
-    color: #6b7280;
+    color: var(--text-muted);
     font-size: 14px;
     padding: 40px 20px;
     line-height: 1.5;
     margin: auto 0;
   }
   .tom-empty-title {
-    color: #374151;
+    color: var(--text);
     font-weight: 600;
     margin-bottom: 4px;
   }
@@ -868,15 +870,15 @@ const CHAT_CSS = `
   .tom-example-chip {
     padding: 8px 14px;
     border-radius: 999px;
-    border: 1px solid #d1d5db;
-    background-color: #fff;
-    color: #1e3a5f;
+    border: 1px solid var(--border);
+    background-color: var(--surface);
+    color: var(--accent-link);
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
   }
   .tom-example-chip:hover {
-    background-color: #f3f4f6;
+    background-color: var(--surface-muted);
   }
   .tom-example-chip:disabled {
     opacity: 0.6;
@@ -899,7 +901,7 @@ const CHAT_CSS = `
     max-height: 85vh;
     max-height: 85dvh;
     overflow-y: auto;
-    background-color: #fff;
+    background-color: var(--surface);
     border-radius: 12px;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
     display: flex;
@@ -916,8 +918,8 @@ const CHAT_CSS = `
     flex-direction: column;
     gap: 4px;
     padding: 16px 18px;
-    border-bottom: 1px solid #e5e7eb;
-    background-color: #fff;
+    border-bottom: 1px solid var(--border-soft);
+    background-color: var(--surface);
     border-radius: 12px 12px 0 0;
   }
   .tom-help-header-row {
@@ -930,19 +932,19 @@ const CHAT_CSS = `
     margin: 0;
     font-size: 17px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-strong);
   }
   .tom-help-hint {
     margin: 0;
     font-size: 12px;
     line-height: 1.4;
-    color: #6b7280;
+    color: var(--text-muted);
   }
   .tom-help-guide-link {
     align-self: flex-start;
     font-size: 12px;
     font-weight: 600;
-    color: #1e3a5f;
+    color: var(--accent-link);
     text-decoration: underline;
   }
   .tom-help-close {
@@ -950,9 +952,9 @@ const CHAT_CSS = `
     width: 28px;
     height: 28px;
     border-radius: 50%;
-    border: 1px solid #d1d5db;
-    background-color: #fff;
-    color: #374151;
+    border: 1px solid var(--border);
+    background-color: var(--surface);
+    color: var(--text);
     font-size: 18px;
     line-height: 1;
     cursor: pointer;
@@ -961,10 +963,10 @@ const CHAT_CSS = `
     justify-content: center;
   }
   .tom-help-close:hover {
-    background-color: #f3f4f6;
+    background-color: var(--surface-muted);
   }
   .tom-help-close:focus-visible {
-    outline: 2px solid #1e3a5f;
+    outline: 2px solid var(--focus-ring-strong);
     outline-offset: 2px;
   }
   .tom-help-body {
@@ -977,20 +979,20 @@ const CHAT_CSS = `
     margin: 0 0 6px;
     font-size: 14px;
     font-weight: 700;
-    color: #111827;
+    color: var(--text-strong);
   }
   .tom-help-section p {
     margin: 0 0 6px;
     font-size: 13px;
     line-height: 1.5;
-    color: #374151;
+    color: var(--text);
   }
   .tom-help-section ul {
     margin: 0;
     padding-left: 18px;
     font-size: 13px;
     line-height: 1.6;
-    color: #374151;
+    color: var(--text);
   }
   .tom-help-examples {
     justify-content: flex-start;
@@ -1723,8 +1725,8 @@ export default function TomChatPage() {
                 <LinkPreviewCards urls={extractSafeUrls(message.text)} onCardsChange={handlePreviewCardsChange} />
               )}
               {message.role === "tom" && message.themeParksAttribution && (
-                <div style={{ marginLeft: "38px", fontSize: "12px", color: "#6b7280" }}>
-                  <ThemeParksAttribution style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }} />
+                <div style={{ marginLeft: "38px", fontSize: "12px", color: "var(--text-muted)" }}>
+                  <ThemeParksAttribution style={{ fontSize: "inherit", color: "var(--text-muted)", opacity: 1, textDecoration: "underline" }} />
                 </div>
               )}
               {message.sources && message.sources.length > 0 && (
@@ -1736,7 +1738,7 @@ export default function TomChatPage() {
                       return (
                         <li key={i}>
                           {href ? (
-                            <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "#6b7280" }}>
+                            <a href={href} target="_blank" rel="noopener noreferrer" style={{ color: "var(--text-muted)" }}>
                               {sourceLabel(source)}
                             </a>
                           ) : (
