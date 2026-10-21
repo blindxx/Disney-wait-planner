@@ -25,7 +25,7 @@ export const APPEARANCE_CHANGED_EVENT = "dwp:appearance-changed";
  * Routes whose page content is fully themed. Extend as 13.1-13.3 convert pages.
  * "/" (Today) matches exactly only: the `r + "/"` prefix test can't match "//".
  */
-export const THEMED_ROUTES: readonly string[] = ["/", "/settings", "/wait-times", "/entertainment/all"];
+export const THEMED_ROUTES: readonly string[] = ["/", "/settings", "/wait-times", "/entertainment/all", "/plans", "/lightning"];
 
 export function isThemedRoute(pathname: string): boolean {
   return THEMED_ROUTES.some((r) => pathname === r || pathname.startsWith(r + "/"));

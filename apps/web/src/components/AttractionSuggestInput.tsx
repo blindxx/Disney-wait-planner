@@ -91,8 +91,8 @@ export function AttractionSuggestInput({
             top: "100%",
             marginTop: 0,
             zIndex: 9999,
-            background: "#fff",
-            border: "1px solid #d1d5db",
+            background: "var(--surface)",
+            border: "1px solid var(--border)",
             borderTop: 0,
             borderRadius: "0 0 8px 8px",
             boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
@@ -116,11 +116,11 @@ export function AttractionSuggestInput({
                 padding: "0 0.875rem",
                 cursor: "pointer",
                 fontSize: "0.95rem",
-                color: "#111827",
-                borderBottom: "1px solid #f3f4f6",
+                color: "var(--text-strong)",
+                borderBottom: "1px solid var(--surface-muted)",
               }}
               onMouseEnter={(e) => {
-                (e.currentTarget as HTMLDivElement).style.background = "#f3f4f6";
+                (e.currentTarget as HTMLDivElement).style.background = "var(--surface-muted)";
               }}
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLDivElement).style.background = "";

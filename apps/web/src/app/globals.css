@@ -56,6 +56,23 @@
   --status-danger: #dc2626;
   --status-danger-border: #fca5a5;
   --status-warning: #d97706;
+
+  /* Planner / Lightning (Phase 13.2): callouts + solid action buttons */
+  --btn-primary-bg: #1a1a2e;
+  --danger-bg: #fef2f2;
+  --danger-fg: #b91c1c;
+  --danger-soft-fg: #ef4444;
+  --danger-solid-bg: #dc2626;
+  --danger-solid-hover: #b91c1c;
+  --success-solid-bg: #16a34a;
+  --warning-bg: #fffbeb;
+  --warning-fg: #92400e;
+  --warning-fg-strong: #78350f;
+  --warning-border: #fcd34d;
+  --warning-border-soft: #fde68a;
+  --info-fg-strong: #1e40af;
+  --info-fg-soft: #93c5fd;
+  --info-accent: #3b82f6;
 }
 
 :root[data-theme="dark"] {
@@ -97,6 +114,22 @@
   --status-danger: #f87171;
   --status-danger-border: #8a4a4a;
   --status-warning: #fbbf24;
+
+  --btn-primary-bg: #2b4c7e;
+  --danger-bg: #2a1618;
+  --danger-fg: #fca5a5;
+  --danger-soft-fg: #f87171;
+  --danger-solid-bg: #b91c1c;
+  --danger-solid-hover: #991b1b;
+  --success-solid-bg: #15803d;
+  --warning-bg: #2a2110;
+  --warning-fg: #fcd34d;
+  --warning-fg-strong: #fde68a;
+  --warning-border: #7a5f1a;
+  --warning-border-soft: #4a3a14;
+  --info-fg-strong: #bfdbfe;
+  --info-fg-soft: #7aa7e0;
+  --info-accent: #60a5fa;
 }
 
 /*
@@ -114,7 +147,7 @@
   --focus-ring: #60a5fa;
 
   /* Wait badges / numbers (consumed with light fallbacks by lib/waitBadge.ts,
-     so unconverted routes such as /plans keep their light colors). */
+     so unconverted routes keep their light colors). */
   --wait-green-bg: #14391f;
   --wait-green-fg: #86efac;
   --wait-yellow-bg: #3f3510;

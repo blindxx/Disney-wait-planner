@@ -95,12 +95,12 @@ export default function PlannerParkHours({
   if (!data) return <div style={{ minHeight: 20 }} aria-hidden />;
   const d = describeParkDateHours(data);
   return (
-    <div aria-label="Park hours for this day" style={{ lineHeight: 1.4, fontSize: "14px", color: "#4b5563", margin: "4px 0 8px" }}>
+    <div aria-label="Park hours for this day" style={{ lineHeight: 1.4, fontSize: "14px", color: "var(--text-mid)", margin: "4px 0 8px" }}>
       <div style={{ fontWeight: 500 }}>
         {d.headline}
-        {d.stale && <span title="Park hours may be out of date" style={{ fontWeight: 400, color: "#9ca3af" }}> (may be outdated)</span>}
+        {d.stale && <span title="Park hours may be out of date" style={{ fontWeight: 400, color: "var(--text-faint)" }}> (may be outdated)</span>}
       </div>
-      {d.extras.length > 0 && <div style={{ fontSize: "12px", color: "#6b7280" }}>{d.extras.join(" • ")}</div>}
+      {d.extras.length > 0 && <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>{d.extras.join(" • ")}</div>}
     </div>
   );
 }
