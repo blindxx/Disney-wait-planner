@@ -1,3 +1,126 @@
+/*
+ * Semantic theme tokens (Phase 13.0). Light values are the app's original
+ * colors. Dark applies via <html data-theme="dark"> (set before paint by the
+ * inline script in layout.tsx; see lib/appearance.ts). The prefers-color-scheme
+ * block below only covers the no-JS case, where no data-theme is ever set.
+ */
+:root {
+  color-scheme: light;
+
+  /* Page + surfaces */
+  --bg: #f5f5f5;
+  --surface: #ffffff;
+  --surface-subtle: #f9fafb;
+  --surface-muted: #f3f4f6;
+  --skeleton: #e5e7eb;
+
+  /* Text */
+  --text-body: #333333;
+  --text-title: #1a1a2e;
+  --text-subtitle: #666666;
+  --text-strong: #111827;
+  --text: #374151;
+  --text-muted: #6b7280;
+  --text-faint: #9ca3af;
+  --text-disabled: #9ca3af;
+
+  /* Borders + controls */
+  --border: #d1d5db;
+  --border-soft: #e5e7eb;
+  --border-disabled: #e5e7eb;
+  --input-bg: #ffffff;
+  --control-selected-bg: #1e3a5f;
+  --control-selected-fg: #ffffff;
+  --accent-selected-bg: #2563eb;
+  --accent-selected-fg: #ffffff;
+  --focus-ring: #2563eb;
+
+  /* Navigation */
+  --nav-bg: #1a1a2e;
+  --nav-fg: #ffffff;
+  --nav-hover: rgba(255, 255, 255, 0.1);
+
+  /* Status */
+  --status-idle: #6b7280;
+  --status-info: #2563eb;
+  --status-danger: #dc2626;
+  --status-danger-border: #fca5a5;
+  --status-warning: #d97706;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0b0b0f;
+  --surface: #17191f;
+  --surface-subtle: #1c2028;
+  --surface-muted: #222630;
+  --skeleton: #2a2f3a;
+
+  --text-body: #e5e7eb;
+  --text-title: #f3f4f6;
+  --text-subtitle: #a9b2c0;
+  --text-strong: #f3f4f6;
+  --text: #d1d5db;
+  --text-muted: #a9b2c0;
+  --text-faint: #8b95a5;
+  --text-disabled: #6b7381;
+
+  --border: #3a404c;
+  --border-soft: #303540;
+  --border-disabled: #272b34;
+  --input-bg: #0f1116;
+  --control-selected-bg: #2b4c7e;
+  --control-selected-fg: #ffffff;
+  --accent-selected-bg: #2563eb;
+  --accent-selected-fg: #ffffff;
+  --focus-ring: #60a5fa;
+
+  --nav-bg: #111827;
+  --nav-fg: #f3f4f6;
+  --nav-hover: rgba(255, 255, 255, 0.12);
+
+  --status-idle: #a9b2c0;
+  --status-info: #60a5fa;
+  --status-danger: #f87171;
+  --status-danger-border: #8a4a4a;
+  --status-warning: #fbbf24;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --bg: #0b0b0f;
+    --surface: #17191f;
+    --surface-subtle: #1c2028;
+    --surface-muted: #222630;
+    --skeleton: #2a2f3a;
+    --text-body: #e5e7eb;
+    --text-title: #f3f4f6;
+    --text-subtitle: #a9b2c0;
+    --text-strong: #f3f4f6;
+    --text: #d1d5db;
+    --text-muted: #a9b2c0;
+    --text-faint: #8b95a5;
+    --text-disabled: #6b7381;
+    --border: #3a404c;
+    --border-soft: #303540;
+    --border-disabled: #272b34;
+    --input-bg: #0f1116;
+    --control-selected-bg: #2b4c7e;
+    --focus-ring: #60a5fa;
+    --nav-bg: #111827;
+    --nav-fg: #f3f4f6;
+    --nav-hover: rgba(255, 255, 255, 0.12);
+    --status-idle: #a9b2c0;
+    --status-info: #60a5fa;
+    --status-danger: #f87171;
+    --status-danger-border: #8a4a4a;
+    --status-warning: #fbbf24;
+  }
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -7,12 +130,22 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
     Ubuntu, sans-serif;
-  background-color: #f5f5f5;
-  color: #333;
+  background-color: var(--bg);
+  color: var(--text-body);
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .nav {
-  background-color: #1a1a2e;
+  background-color: var(--nav-bg);
   padding: 1rem;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
@@ -29,7 +162,7 @@ body {
 }
 
 .nav-link {
-  color: #fff;
+  color: var(--nav-fg);
   text-decoration: none;
   font-weight: 500;
   padding: 0.5rem 1rem;
@@ -40,7 +173,11 @@ body {
 }
 
 .nav-link:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+  background-color: var(--nav-hover);
+}
+
+.nav-link:focus-visible {
+  outline-color: var(--nav-fg);
 }
 
 .main {
@@ -51,11 +188,11 @@ body {
 
 .title {
   font-size: 2.5rem;
-  color: #1a1a2e;
+  color: var(--text-title);
   margin-bottom: 1rem;
 }
 
 .subtitle {
   font-size: 1.25rem;
-  color: #666;
+  color: var(--text-subtitle);
 }
