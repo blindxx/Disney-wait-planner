@@ -1,8 +1,7 @@
 /*
  * Semantic theme tokens (Phase 13.0). Light values are the app's original
  * colors. Dark applies via <html data-theme="dark"> (set before paint by the
- * inline script in layout.tsx; see lib/appearance.ts). The prefers-color-scheme
- * block below only covers the no-JS case, where no data-theme is ever set.
+ * inline script in layout.tsx; see lib/appearance.ts).
  */
 :root {
   color-scheme: light;
@@ -49,17 +48,10 @@
 }
 
 :root[data-theme="dark"] {
-  color-scheme: dark;
-
-  --bg: #0b0b0f;
   --surface: #17191f;
   --surface-subtle: #1c2028;
   --surface-muted: #222630;
   --skeleton: #2a2f3a;
-
-  --text-body: #e5e7eb;
-  --text-title: #f3f4f6;
-  --text-subtitle: #a9b2c0;
   --text-strong: #f3f4f6;
   --text: #d1d5db;
   --text-muted: #a9b2c0;
@@ -74,7 +66,6 @@
   --control-selected-fg: #ffffff;
   --accent-selected-bg: #2563eb;
   --accent-selected-fg: #ffffff;
-  --focus-ring: #60a5fa;
 
   --nav-bg: #111827;
   --nav-fg: #f3f4f6;
@@ -87,38 +78,19 @@
   --status-warning: #fbbf24;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    color-scheme: dark;
-
-    --bg: #0b0b0f;
-    --surface: #17191f;
-    --surface-subtle: #1c2028;
-    --surface-muted: #222630;
-    --skeleton: #2a2f3a;
-    --text-body: #e5e7eb;
-    --text-title: #f3f4f6;
-    --text-subtitle: #a9b2c0;
-    --text-strong: #f3f4f6;
-    --text: #d1d5db;
-    --text-muted: #a9b2c0;
-    --text-faint: #8b95a5;
-    --text-disabled: #6b7381;
-    --border: #3a404c;
-    --border-soft: #303540;
-    --border-disabled: #272b34;
-    --input-bg: #0f1116;
-    --control-selected-bg: #2b4c7e;
-    --focus-ring: #60a5fa;
-    --nav-bg: #111827;
-    --nav-fg: #f3f4f6;
-    --nav-hover: rgba(255, 255, 255, 0.12);
-    --status-idle: #a9b2c0;
-    --status-info: #60a5fa;
-    --status-danger: #f87171;
-    --status-danger-border: #8a4a4a;
-    --status-warning: #fbbf24;
-  }
+/*
+ * Page-level dark values (surface, body/title text, native-control color-scheme,
+ * focus ring) apply only on routes already converted (THEMED_ROUTES in
+ * lib/appearance.ts). Unconverted routes hardcode dark text on this surface, so
+ * they stay light until Phases 13.1-13.3. Navigation tokens above are global.
+ */
+:root[data-theme="dark"][data-themed-route] {
+  color-scheme: dark;
+  --bg: #0b0b0f;
+  --text-body: #e5e7eb;
+  --text-title: #f3f4f6;
+  --text-subtitle: #a9b2c0;
+  --focus-ring: #60a5fa;
 }
 
 * {

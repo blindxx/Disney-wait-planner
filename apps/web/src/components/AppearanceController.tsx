@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect } from "react";
+import { usePathname } from "next/navigation";
 import {
   applyTheme,
+  applyThemedRoute,
   readPreference,
   resolveTheme,
   subscribePreference,
@@ -16,6 +18,12 @@ import {
  * or another tab. Renders nothing; independent of auth/profile lifecycle.
  */
 export default function AppearanceController() {
+  const pathname = usePathname();
+  // Layout effect: flip the route scope before paint on client navigation.
+  useLayoutEffect(() => {
+    applyThemedRoute(pathname ?? window.location.pathname);
+  }, [pathname]);
+
   useEffect(() => {
     const sync = () => applyTheme(resolveTheme(readPreference()));
     sync();
