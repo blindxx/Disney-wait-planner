@@ -3095,7 +3095,7 @@ export default function LightningPage() {
     return (
       <div style={{ maxWidth: 560, margin: "0 auto", padding: "2rem 1rem", textAlign: "center" }}>
         <p>Verifying your account&rsquo;s saved data for this profile&hellip;</p>
-        <p style={{ color: "#6b7280", fontSize: "0.9rem" }}>This only takes a moment.</p>
+        <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>This only takes a moment.</p>
       </div>
     );
   }
@@ -3106,13 +3106,13 @@ export default function LightningPage() {
         <h1 className="title" style={{ margin: 0 }}>Lightning Lane</h1>
         <div className="lightning-header-actions">
           {activeProfileName && (
-            <span style={{ fontSize: "12px", color: "#9ca3af" }}>Profile: {activeProfileName}</span>
+            <span style={{ fontSize: "12px", color: "var(--text-faint)" }}>Profile: {activeProfileName}</span>
           )}
           <button
             style={{
-              background: "#fff",
-              color: "#dc2626",
-              border: "1px solid #fca5a5",
+              background: "var(--surface)",
+              color: "var(--status-danger)",
+              border: "1px solid var(--status-danger-border)",
               borderRadius: 8,
               fontSize: "0.85rem",
               fontWeight: 600,
@@ -3155,18 +3155,18 @@ export default function LightningPage() {
 
       {/* Phase 8.9.2 — Clear Day Lightning confirmation (target captured at click time) */}
       {clearDayLightningTarget !== null && (
-        <div style={{ marginBottom: "1rem", padding: "0.6rem 1rem", background: "#fef2f2", border: "1px solid #fca5a5", borderRadius: 8, display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
-          <span style={{ fontSize: "0.9rem", color: "#b91c1c", flex: "1 1 auto", minWidth: 0 }}>
+        <div style={{ marginBottom: "1rem", padding: "0.6rem 1rem", background: "var(--danger-bg)", border: "1px solid var(--status-danger-border)", borderRadius: 8, display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+          <span style={{ fontSize: "0.9rem", color: "var(--danger-fg)", flex: "1 1 auto", minWidth: 0 }}>
             {`Clear all Lightning selections from ${dayContextLabel(clearDayLightningTarget, dayMeta, knownDays)}?`}
           </span>
           <button
-            style={{ background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", whiteSpace: "nowrap" }}
+            style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", whiteSpace: "nowrap" }}
             onClick={() => setClearDayLightningTarget(null)}
           >
             Cancel
           </button>
           <button
-            style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", fontWeight: 600, whiteSpace: "nowrap" }}
+            style={{ background: "var(--danger-solid-bg)", color: "#fff", border: "none", borderRadius: 6, padding: "0.3rem 0.75rem", cursor: "pointer", fontSize: "0.85rem", fontWeight: 600, whiteSpace: "nowrap" }}
             onClick={handleClearDayLightning}
           >
             Yes, clear
@@ -3187,9 +3187,9 @@ export default function LightningPage() {
                 aria-pressed={isActive}
                 onClick={() => handleSelectDay(dayId)}
                 style={{
-                  background: isActive ? "#1e3a5f" : "#f9fafb",
-                  color: isActive ? "#fff" : "#374151",
-                  border: `1px solid ${isActive ? "#1e3a5f" : "#d1d5db"}`,
+                  background: isActive ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                  color: isActive ? "#fff" : "var(--text)",
+                  border: `1px solid ${isActive ? "var(--control-selected-bg)" : "var(--border)"}`,
                   borderRadius: 8,
                   fontSize: "0.85rem",
                   fontWeight: 600,
@@ -3209,8 +3209,8 @@ export default function LightningPage() {
       {loaded && (
         <div
           style={{
-            background: "#eff6ff",
-            border: "1px solid #bfdbfe",
+            background: "var(--info-bg)",
+            border: "1px solid var(--info-border)",
             borderRadius: 10,
             padding: "0.6rem 1rem",
             marginBottom: "1rem",
@@ -3221,16 +3221,16 @@ export default function LightningPage() {
           }}
         >
           <div>
-            <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "#1e40af", lineHeight: 1.3 }}>
+            <div style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--info-fg-strong)", lineHeight: 1.3 }}>
               {dayContextLabel(safeActiveDayId, dayMeta, knownDays)}
             </div>
             {resolvedDayPark ? (
-              <div style={{ fontSize: "0.78rem", color: "#3b82f6", marginTop: 1 }}>
+              <div style={{ fontSize: "0.78rem", color: "var(--info-accent)", marginTop: 1 }}>
                 {PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark}{" "}
-                <span style={{ color: "#93c5fd" }}>({dayParkMode})</span>
+                <span style={{ color: "var(--info-fg-soft)" }}>({dayParkMode})</span>
               </div>
             ) : (
-              <div style={{ fontSize: "0.78rem", color: "#93c5fd", marginTop: 1 }}>
+              <div style={{ fontSize: "0.78rem", color: "var(--info-fg-soft)", marginTop: 1 }}>
                 Auto — no park set yet
               </div>
             )}
@@ -3247,12 +3247,12 @@ export default function LightningPage() {
           style={{
             marginBottom: "1rem",
             padding: "0.75rem 1rem",
-            background: "#fffbeb",
-            border: "1px solid #fcd34d",
+            background: "var(--warning-bg)",
+            border: "1px solid var(--warning-border)",
             borderRadius: 8,
           }}
         >
-          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "0.4rem", marginBottom: "0.2rem" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--warning-fg-strong)", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "0.4rem", marginBottom: "0.2rem" }}>
             Lightning Lane on Multiple Days
           </div>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
@@ -3261,9 +3261,9 @@ export default function LightningPage() {
                 key={dup.identityKey}
                 style={{
                   fontSize: "0.8rem",
-                  color: "#92400e",
+                  color: "var(--warning-fg)",
                   padding: "0.25rem 0",
-                  borderTop: i === 0 ? "none" : "1px solid #fde68a",
+                  borderTop: i === 0 ? "none" : "1px solid var(--warning-border-soft)",
                   display: "flex",
                   flexDirection: "column",
                   gap: "0.1rem",
@@ -3271,7 +3271,7 @@ export default function LightningPage() {
               >
                 <span style={{ fontWeight: 500 }}>{dup.displayName}</span>
                 {dup.parkSections.map((sec) => (
-                  <span key={sec.parkLabel} style={{ color: "#b45309" }}>
+                  <span key={sec.parkLabel} style={{ color: "var(--warning-fg)" }}>
                     {sec.parkLabel}:{" "}
                     {sec.dayIds.map((d, di) => (
                       <span key={d}>
@@ -3299,12 +3299,12 @@ export default function LightningPage() {
           style={{
             marginBottom: "1rem",
             padding: "0.75rem 1rem",
-            background: "#fffbeb",
-            border: "1px solid #fcd34d",
+            background: "var(--warning-bg)",
+            border: "1px solid var(--warning-border)",
             borderRadius: 8,
           }}
         >
-          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "#78350f", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "0.4rem", marginBottom: "0.2rem" }}>
+          <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--warning-fg-strong)", textTransform: "uppercase", letterSpacing: "0.04em", marginTop: "0.4rem", marginBottom: "0.2rem" }}>
             Lightning Lane conflicts
           </div>
           <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
@@ -3313,13 +3313,13 @@ export default function LightningPage() {
                 key={c.id}
                 style={{
                   fontSize: "0.8rem",
-                  color: "#92400e",
+                  color: "var(--warning-fg)",
                   padding: "0.25rem 0",
-                  borderTop: i === 0 ? "none" : "1px solid #fde68a",
+                  borderTop: i === 0 ? "none" : "1px solid var(--warning-border-soft)",
                 }}
               >
                 <span style={{ fontWeight: 500 }}>{c.attractionName}</span>
-                <span style={{ color: "#b45309" }}>
+                <span style={{ color: "var(--warning-fg)" }}>
                   {" "}
                   — Plan {formatTimeLabel(c.planTime)} · Lightning {formatTimeLabel(c.lightningTime)}
                 </span>
@@ -3332,7 +3332,7 @@ export default function LightningPage() {
       {/* ── Add Form ── */}
       <div
         style={{
-          background: "#fff",
+          background: "var(--surface)",
           borderRadius: 12,
           padding: "1.25rem",
           marginBottom: "1.5rem",
@@ -3344,7 +3344,7 @@ export default function LightningPage() {
             fontSize: "1.05rem",
             fontWeight: 600,
             marginBottom: "1rem",
-            color: "#1a1a2e",
+            color: "var(--text-title)",
           }}
         >
           Add Reservation
@@ -3353,7 +3353,7 @@ export default function LightningPage() {
         {/* Ride Name */}
         <div style={{ marginBottom: "0.875rem" }}>
           <label style={labelStyle}>
-            Ride name <span style={{ color: "#dc2626" }}>*</span>
+            Ride name <span style={{ color: "var(--status-danger)" }}>*</span>
           </label>
           <AttractionSuggestInput
             value={rideName}
@@ -3372,13 +3372,13 @@ export default function LightningPage() {
               display: "flex",
               alignItems: "flex-start",
               gap: "0.4rem",
-              background: "#fffbeb",
-              border: "1px solid #fcd34d",
+              background: "var(--warning-bg)",
+              border: "1px solid var(--warning-border)",
               borderRadius: 8,
               padding: "0.5rem 0.75rem",
               marginBottom: "0.875rem",
               fontSize: "0.8rem",
-              color: "#92400e",
+              color: "var(--warning-fg)",
             }}
           >
             <span style={{ flexShrink: 0 }}>⚠</span>
@@ -3389,7 +3389,7 @@ export default function LightningPage() {
         {/* Start Time */}
         <div style={{ marginBottom: "0.875rem" }}>
           <label style={labelStyle}>
-            Return window start <span style={{ color: "#dc2626" }}>*</span>
+            Return window start <span style={{ color: "var(--status-danger)" }}>*</span>
           </label>
           <input
             type="text"
@@ -3410,7 +3410,7 @@ export default function LightningPage() {
         <div style={{ marginBottom: "1.25rem" }}>
           <label style={labelStyle}>
             Return window end{" "}
-            <span style={{ color: "#6b7280", fontWeight: 400 }}>(optional)</span>
+            <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>(optional)</span>
           </label>
           <input
             type="text"
@@ -3437,8 +3437,8 @@ export default function LightningPage() {
             fontWeight: 600,
             borderRadius: 8,
             border: "none",
-            background: formValid ? "#1a1a2e" : "#e5e7eb",
-            color: formValid ? "#fff" : "#9ca3af",
+            background: formValid ? "var(--btn-primary-bg)" : "var(--border-disabled)",
+            color: formValid ? "#fff" : "var(--text-disabled)",
             cursor: formValid ? "pointer" : "not-allowed",
             minHeight: 48,
             transition: "background 0.15s",
@@ -3463,14 +3463,14 @@ export default function LightningPage() {
                 flex: "1 1 0%",
                 padding: "8px 6px",
                 borderRadius: 8,
-                border: `1px solid ${selectedResort === resortId ? "#1e3a5f" : "#d1d5db"}`,
+                border: `1px solid ${selectedResort === resortId ? "var(--control-selected-bg)" : "var(--border)"}`,
                 cursor: "pointer",
                 fontWeight: 600,
                 fontSize: 13,
                 lineHeight: 1.2,
                 textAlign: "center",
-                backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-                color: selectedResort === resortId ? "#fff" : "#374151",
+                backgroundColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                color: selectedResort === resortId ? "#fff" : "var(--text)",
                 minHeight: 36,
               }}
             >
@@ -3480,11 +3480,11 @@ export default function LightningPage() {
         </div>
       ) : (
         <div style={{ display: "flex", gap: 8, marginBottom: "0.5rem" }}>
-          <div style={{ flex: "1 1 0%", height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-          <div style={{ flex: "1 1 0%", height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+          <div style={{ flex: "1 1 0%", height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+          <div style={{ flex: "1 1 0%", height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
         </div>
       )}
-      <p style={{ fontSize: "0.7rem", color: "#9ca3af", marginBottom: "0.75rem" }}>
+      <p style={{ fontSize: "0.7rem", color: "var(--text-faint)", marginBottom: "0.75rem" }}>
         Wait overlay: {selectedResort}
       </p>
 
@@ -3492,7 +3492,7 @@ export default function LightningPage() {
       {!loaded ? null : displayedItems.length === 0 ? (
         <p
           style={{
-            color: "#9ca3af",
+            color: "var(--text-faint)",
             textAlign: "center",
             padding: "2.5rem 1rem",
             fontSize: "0.95rem",
@@ -3622,19 +3622,19 @@ function ReservationCard({
 
   const borderColor =
     bucket === "now"
-      ? "#16a34a"
+      ? "var(--success-solid-bg)"
       : bucket === "soon"
-      ? "#d97706"
+      ? "var(--status-warning)"
       : bucket === "upcoming"
-      ? "#2563eb"
-      : "#d1d5db";
+      ? "var(--status-info)"
+      : "var(--border)";
 
-  const countdownColor = bucket === "soon" ? "#d97706" : "#2563eb";
+  const countdownColor = bucket === "soon" ? "var(--status-warning)" : "var(--status-info)";
 
   return (
     <div
       style={{
-        background: bucket === "expired" ? "#f9fafb" : "#fff",
+        background: bucket === "expired" ? "var(--surface-subtle)" : "var(--surface)",
         borderRadius: 12,
         padding: "1rem 1.25rem",
         boxShadow: "0 1px 4px rgba(0,0,0,0.08)",
@@ -3666,10 +3666,10 @@ function ReservationCard({
                   padding: "0.5rem 0.65rem",
                   fontSize: "1rem",
                   borderRadius: 8,
-                  border: "1.5px solid #2563eb",
+                  border: "1.5px solid var(--accent-selected-bg)",
                   outline: "none",
                   boxSizing: "border-box",
-                  background: "#fff",
+                  background: "var(--surface)",
                 }}
                 onKeyDown={(e) => { if (e.key === "Escape") onEditCancel(); }}
                 autoFocus
@@ -3681,13 +3681,13 @@ function ReservationCard({
                     display: "flex",
                     alignItems: "flex-start",
                     gap: "0.3rem",
-                    background: "#fffbeb",
-                    border: "1px solid #fcd34d",
+                    background: "var(--warning-bg)",
+                    border: "1px solid var(--warning-border)",
                     borderRadius: 6,
                     padding: "0.35rem 0.6rem",
                     marginTop: 6,
                     fontSize: "0.75rem",
-                    color: "#92400e",
+                    color: "var(--warning-fg)",
                   }}
                 >
                   <span style={{ flexShrink: 0 }}>⚠</span>
@@ -3706,14 +3706,14 @@ function ReservationCard({
                     padding: "0.45rem 0.65rem",
                     fontSize: "0.9rem",
                     borderRadius: 8,
-                    border: `1.5px solid ${editingStartErr ? "#dc2626" : "#d1d5db"}`,
+                    border: `1.5px solid ${editingStartErr ? "var(--status-danger)" : "var(--border)"}`,
                     outline: "none",
                     boxSizing: "border-box",
-                    background: "#fff",
+                    background: "var(--surface)",
                   }}
                 />
                 {editingStartErr && (
-                  <p style={{ color: "#dc2626", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
+                  <p style={{ color: "var(--status-danger)", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
                     {editingStartErr}
                   </p>
                 )}
@@ -3730,14 +3730,14 @@ function ReservationCard({
                     padding: "0.45rem 0.65rem",
                     fontSize: "0.9rem",
                     borderRadius: 8,
-                    border: `1.5px solid ${editingEndErr ? "#dc2626" : "#d1d5db"}`,
+                    border: `1.5px solid ${editingEndErr ? "var(--status-danger)" : "var(--border)"}`,
                     outline: "none",
                     boxSizing: "border-box",
-                    background: "#fff",
+                    background: "var(--surface)",
                   }}
                 />
                 {editingEndErr && (
-                  <p style={{ color: "#dc2626", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
+                  <p style={{ color: "var(--status-danger)", fontSize: "0.75rem", margin: "0.2rem 0 0" }}>
                     {editingEndErr}
                   </p>
                 )}
@@ -3753,8 +3753,8 @@ function ReservationCard({
                     fontWeight: 600,
                     borderRadius: 7,
                     border: "none",
-                    background: editingName.trim() ? "#1a1a2e" : "#e5e7eb",
-                    color: editingName.trim() ? "#fff" : "#9ca3af",
+                    background: editingName.trim() ? "var(--btn-primary-bg)" : "var(--border-disabled)",
+                    color: editingName.trim() ? "#fff" : "var(--text-disabled)",
                     cursor: editingName.trim() ? "pointer" : "not-allowed",
                     minHeight: 36,
                   }}
@@ -3768,9 +3768,9 @@ function ReservationCard({
                     padding: "0.4rem 0.75rem",
                     fontSize: "0.85rem",
                     borderRadius: 7,
-                    border: "1.5px solid #e5e7eb",
+                    border: "1.5px solid var(--border-soft)",
                     background: "none",
-                    color: "#6b7280",
+                    color: "var(--text-muted)",
                     cursor: "pointer",
                     minHeight: 36,
                   }}
@@ -3785,7 +3785,7 @@ function ReservationCard({
                 style={{
                   fontWeight: 600,
                   fontSize: "1.05rem",
-                  color: bucket === "expired" ? "#6b7280" : "#1a1a2e",
+                  color: bucket === "expired" ? "var(--text-muted)" : "var(--text-title)",
                   wordBreak: "break-word",
                 }}
               >
@@ -3821,7 +3821,7 @@ function ReservationCard({
                 <div
                   style={{
                     fontSize: "0.7rem",
-                    color: "#9ca3af",
+                    color: "var(--text-faint)",
                     fontStyle: "italic",
                     lineHeight: 1.3,
                     marginTop: "0.1rem",
@@ -3835,7 +3835,7 @@ function ReservationCard({
                 <div
                   style={{
                     fontSize: "0.7rem",
-                    color: "#9ca3af",
+                    color: "var(--text-faint)",
                     lineHeight: 1.3,
                     marginTop: "0.1rem",
                     marginBottom: "0.15rem",
@@ -3855,7 +3855,7 @@ function ReservationCard({
             <div
               style={{
                 fontSize: "0.7rem",
-                color: "#d97706",
+                color: "var(--status-warning)",
                 fontWeight: 600,
                 lineHeight: 1.3,
                 marginTop: "0.1rem",
@@ -3870,7 +3870,7 @@ function ReservationCard({
             <div
               style={{
                 fontSize: "0.7rem",
-                color: refurbishment.variant === "warning" ? "#d97706" : "#9ca3af",
+                color: refurbishment.variant === "warning" ? "var(--status-warning)" : "var(--text-faint)",
                 lineHeight: 1.3,
                 marginTop: "0.1rem",
                 marginBottom: "0.15rem",
@@ -3885,7 +3885,7 @@ function ReservationCard({
           <div
             style={{
               fontSize: "0.875rem",
-              color: "#6b7280",
+              color: "var(--text-muted)",
               marginBottom: "0.6rem",
             }}
           >
@@ -3898,7 +3898,7 @@ function ReservationCard({
             <span
               style={{
                 display: "inline-block",
-                background: "#16a34a",
+                background: "var(--success-solid-bg)",
                 color: "#fff",
                 fontWeight: 700,
                 fontSize: "0.95rem",
@@ -3923,7 +3923,7 @@ function ReservationCard({
               >
                 {countdown}
               </span>
-              <span style={{ fontSize: "0.8rem", color: "#6b7280" }}>
+              <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
                 until start
               </span>
             </div>
@@ -3933,7 +3933,7 @@ function ReservationCard({
             <span
               style={{
                 fontSize: "0.8rem",
-                color: "#9ca3af",
+                color: "var(--text-faint)",
                 fontStyle: "italic",
               }}
             >
@@ -3942,11 +3942,11 @@ function ReservationCard({
           )}
 
           {isInvalid ? (
-            <p style={{ fontSize: "0.8rem", color: "#dc2626", margin: "0.3rem 0 0" }}>
+            <p style={{ fontSize: "0.8rem", color: "var(--status-danger)", margin: "0.3rem 0 0" }}>
               ⚠️ End time is before start time
             </p>
           ) : overlapCount > 0 ? (
-            <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.3rem 0 0" }}>
+            <p style={{ fontSize: "0.8rem", color: "var(--status-warning)", margin: "0.3rem 0 0" }}>
               ⚠️ Overlaps with {overlapCount === 1 ? "1 other item" : `${overlapCount} other items`}
             </p>
           ) : null}
@@ -3961,11 +3961,11 @@ function ReservationCard({
               aria-label={`Edit ${item.name}`}
               style={{
                 background: "none",
-                border: "1px solid #e5e7eb",
+                border: "1px solid var(--border-soft)",
                 borderRadius: 6,
                 padding: 0,
                 fontSize: "1rem",
-                color: "#6b7280",
+                color: "var(--text-muted)",
                 cursor: "pointer",
                 minWidth: 44,
                 minHeight: 44,
@@ -3975,7 +3975,7 @@ function ReservationCard({
                 transition: "background-color 0.15s",
               }}
               onMouseEnter={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "#f9fafb";
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "var(--surface-subtle)";
               }}
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
@@ -3989,11 +3989,11 @@ function ReservationCard({
               aria-label={`Remove ${item.name}`}
               style={{
                 background: "none",
-                border: "1px solid #fca5a5",
+                border: "1px solid var(--status-danger-border)",
                 borderRadius: 6,
                 padding: 0,
                 fontSize: "1rem",
-                color: "#dc2626",
+                color: "var(--status-danger)",
                 cursor: "pointer",
                 minWidth: 44,
                 minHeight: 44,
@@ -4003,7 +4003,7 @@ function ReservationCard({
                 transition: "background-color 0.15s",
               }}
               onMouseEnter={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "#fef2f2";
+                (e.currentTarget as HTMLButtonElement).style.backgroundColor = "var(--danger-bg)";
               }}
               onMouseLeave={(e) => {
                 (e.currentTarget as HTMLButtonElement).style.backgroundColor = "";
@@ -4025,11 +4025,11 @@ const labelStyle: React.CSSProperties = {
   fontSize: "0.875rem",
   fontWeight: 500,
   marginBottom: "0.3rem",
-  color: "#374151",
+  color: "var(--text)",
 };
 
 const errorStyle: React.CSSProperties = {
-  color: "#dc2626",
+  color: "var(--status-danger)",
   fontSize: "0.8rem",
   marginTop: "0.25rem",
 };
@@ -4040,9 +4040,9 @@ function inputStyle(hasError = false): React.CSSProperties {
     padding: "0.65rem 0.75rem",
     fontSize: "1rem",
     borderRadius: 8,
-    border: `1.5px solid ${hasError ? "#dc2626" : "#d1d5db"}`,
+    border: `1.5px solid ${hasError ? "var(--status-danger)" : "var(--border)"}`,
     outline: "none",
     boxSizing: "border-box",
-    background: "#fff",
+    background: "var(--surface)",
   };
 }

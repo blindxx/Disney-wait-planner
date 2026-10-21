@@ -5747,7 +5747,7 @@ export default function PlansPage() {
     return (
       <div style={{ maxWidth: 480, margin: "0 auto", padding: "2rem 1rem", textAlign: "center" }}>
         <p>Verifying your account&rsquo;s saved data for this profile&hellip;</p>
-        <p style={{ color: "#6b7280", fontSize: "0.9rem" }}>This only takes a moment.</p>
+        <p style={{ color: "var(--text-muted)", fontSize: "0.9rem" }}>This only takes a moment.</p>
       </div>
     );
   }
@@ -5770,11 +5770,11 @@ export default function PlansPage() {
         .plans-title {
           font-size: 1.75rem;
           font-weight: 700;
-          color: #1a1a2e;
+          color: var(--text-title);
         }
         .plans-disclaimer {
           font-size: 0.75rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           line-height: 1.4;
           margin: -0.75rem 0 1.25rem;
         }
@@ -5784,7 +5784,7 @@ export default function PlansPage() {
           flex-shrink: 0;
         }
         .btn-add {
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: #fff;
           border: none;
           border-radius: 8px;
@@ -5797,15 +5797,15 @@ export default function PlansPage() {
           white-space: nowrap;
         }
         .btn-add:active {
-          background-color: #1d4ed8;
+          background-color: var(--accent-hover);
         }
         .btn-import {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          background-color: #fff;
-          color: #2563eb;
-          border: 1px solid #2563eb;
+          background-color: var(--surface);
+          color: var(--status-info);
+          border: 1px solid var(--accent-selected-bg);
           border-radius: 8px;
           font-size: 1rem;
           font-weight: 600;
@@ -5818,16 +5818,16 @@ export default function PlansPage() {
           box-sizing: border-box;
         }
         .btn-import:active {
-          background-color: #eff6ff;
+          background-color: var(--info-bg);
         }
         .btn-import:disabled {
           opacity: 0.3;
           cursor: not-allowed;
         }
         .btn-clear {
-          background-color: #fff;
-          color: #dc2626;
-          border: 1px solid #fca5a5;
+          background-color: var(--surface);
+          color: var(--status-danger);
+          border: 1px solid var(--status-danger-border);
           border-radius: 8px;
           font-size: 1rem;
           font-weight: 600;
@@ -5838,7 +5838,7 @@ export default function PlansPage() {
           white-space: nowrap;
         }
         .btn-clear:active {
-          background-color: #fef2f2;
+          background-color: var(--danger-bg);
         }
         .btn-clear:disabled {
           opacity: 0.3;
@@ -5883,7 +5883,7 @@ export default function PlansPage() {
           align-items: center;
           gap: 0.5rem;
           font-size: 0.875rem;
-          color: #374151;
+          color: var(--text);
           cursor: pointer;
           min-height: 44px;
           user-select: none;
@@ -5892,13 +5892,13 @@ export default function PlansPage() {
           width: 18px;
           height: 18px;
           cursor: pointer;
-          accent-color: #2563eb;
+          accent-color: var(--accent-selected-bg);
           flex-shrink: 0;
         }
         .empty-state {
           text-align: center;
           padding: 3rem 1rem;
-          color: #6b7280;
+          color: var(--text-muted);
         }
         .empty-icon {
           font-size: 3rem;
@@ -5910,7 +5910,7 @@ export default function PlansPage() {
         }
         .empty-hint {
           font-size: 0.9rem;
-          color: #9ca3af;
+          color: var(--text-faint);
         }
         .timeline {
           list-style: none;
@@ -5923,7 +5923,7 @@ export default function PlansPage() {
           top: 0;
           bottom: 0;
           width: 2px;
-          background-color: #e5e7eb;
+          background-color: var(--skeleton);
           z-index: 0;
         }
         .timeline-item {
@@ -5941,7 +5941,7 @@ export default function PlansPage() {
           width: 42px;
           height: 42px;
           border-radius: 50%;
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: #fff;
           font-size: 0.875rem;
           font-weight: 700;
@@ -5952,11 +5952,11 @@ export default function PlansPage() {
           flex-shrink: 0;
         }
         .item-card {
-          background: #fff;
+          background: var(--surface);
           border-radius: 10px;
           padding: 0.75rem 1rem;
           box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-          border: 1px solid #e5e7eb;
+          border: 1px solid var(--border-soft);
           min-height: 72px;
           display: flex;
           flex-direction: column;
@@ -5971,13 +5971,13 @@ export default function PlansPage() {
         .item-name {
           font-size: 1rem;
           font-weight: 600;
-          color: #111827;
+          color: var(--text-strong);
           word-break: break-word;
           overflow-wrap: break-word;
         }
         .item-canonical {
           font-size: 0.7rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           font-style: italic;
           line-height: 1.3;
           margin-top: 0.1rem;
@@ -5985,14 +5985,14 @@ export default function PlansPage() {
         }
         .item-park {
           font-size: 0.7rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
         }
         .item-availability {
           font-size: 0.7rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           font-style: italic;
           line-height: 1.3;
           margin-top: 0.1rem;
@@ -6000,7 +6000,7 @@ export default function PlansPage() {
         }
         .item-legacy {
           font-size: 0.7rem;
-          color: #d97706;
+          color: var(--status-warning);
           font-weight: 600;
           line-height: 1.3;
           margin-top: 0.1rem;
@@ -6008,21 +6008,21 @@ export default function PlansPage() {
         }
         .item-refurb-warning {
           font-size: 0.7rem;
-          color: #d97706;
+          color: var(--status-warning);
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
         }
         .item-refurb-info {
           font-size: 0.7rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           line-height: 1.3;
           margin-top: 0.1rem;
           word-break: break-word;
         }
         .item-time {
           font-size: 0.8rem;
-          color: #6b7280;
+          color: var(--text-muted);
           margin-top: 0.1rem;
         }
         .item-actions {
@@ -6033,7 +6033,7 @@ export default function PlansPage() {
         }
         .icon-btn {
           background: none;
-          border: 1px solid #e5e7eb;
+          border: 1px solid var(--border-soft);
           border-radius: 6px;
           cursor: pointer;
           display: flex;
@@ -6042,26 +6042,26 @@ export default function PlansPage() {
           min-width: 44px;
           min-height: 44px;
           font-size: 1rem;
-          color: #6b7280;
+          color: var(--text-muted);
           padding: 0;
           transition: background-color 0.15s;
         }
         .icon-btn:active {
-          background-color: #f3f4f6;
+          background-color: var(--surface-muted);
         }
         .icon-btn:disabled {
           opacity: 0.3;
           cursor: not-allowed;
         }
         .icon-btn.danger {
-          color: #dc2626;
-          border-color: #fca5a5;
+          color: var(--status-danger);
+          border-color: var(--status-danger-border);
         }
         .reorder-group {
           display: flex;
           gap: 0.25rem;
           margin-top: 0.5rem;
-          border-top: 1px solid #f3f4f6;
+          border-top: 1px solid var(--surface-muted);
           padding-top: 0.5rem;
         }
         .confirm-row {
@@ -6070,17 +6070,17 @@ export default function PlansPage() {
           gap: 0.75rem;
           margin-top: 0.5rem;
           padding: 0.5rem 0.75rem;
-          background-color: #fef2f2;
+          background-color: var(--danger-bg);
           border-radius: 6px;
-          border: 1px solid #fca5a5;
+          border: 1px solid var(--status-danger-border);
         }
         .confirm-text {
           font-size: 0.85rem;
-          color: #dc2626;
+          color: var(--status-danger);
           flex: 1;
         }
         .btn-confirm-delete {
-          background-color: #dc2626;
+          background-color: var(--danger-solid-bg);
           color: #fff;
           border: none;
           border-radius: 6px;
@@ -6092,17 +6092,17 @@ export default function PlansPage() {
           white-space: nowrap;
         }
         .btn-confirm-delete:active {
-          background-color: #b91c1c;
+          background-color: var(--danger-solid-hover);
         }
         .btn-cancel-delete {
           background: none;
-          border: 1px solid #e5e7eb;
+          border: 1px solid var(--border-soft);
           border-radius: 6px;
           font-size: 0.8rem;
           padding: 0.4rem 0.75rem;
           cursor: pointer;
           min-height: 36px;
-          color: #6b7280;
+          color: var(--text-muted);
         }
         .backdrop {
           position: fixed;
@@ -6119,7 +6119,7 @@ export default function PlansPage() {
           }
         }
         .modal {
-          background: #fff;
+          background: var(--surface);
           border-radius: 16px 16px 0 0;
           width: 100%;
           max-width: 480px;
@@ -6143,7 +6143,7 @@ export default function PlansPage() {
         .modal-title {
           font-size: 1.25rem;
           font-weight: 700;
-          color: #1a1a2e;
+          color: var(--text-title);
           padding: 1.5rem 1.25rem 0;
           flex-shrink: 0;
           margin-bottom: 1.25rem;
@@ -6165,37 +6165,37 @@ export default function PlansPage() {
           display: block;
           font-size: 0.875rem;
           font-weight: 600;
-          color: #374151;
+          color: var(--text);
           margin-bottom: 0.4rem;
         }
         .form-input {
           width: 100%;
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           border-radius: 8px;
           padding: 0.7rem 0.875rem;
           font-size: 1rem;
-          color: #111827;
-          background: #fff;
+          color: var(--text-strong);
+          background: var(--surface);
           outline: none;
           min-height: 48px;
           font-family: inherit;
           box-sizing: border-box;
         }
         .form-input:focus {
-          border-color: #2563eb;
+          border-color: var(--accent-selected-bg);
           box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
         }
         .form-input.error {
-          border-color: #dc2626;
+          border-color: var(--status-danger);
         }
         .form-textarea {
           width: 100%;
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           border-radius: 8px;
           padding: 0.7rem 0.875rem;
           font-size: 0.9rem;
-          color: #111827;
-          background: #fff;
+          color: var(--text-strong);
+          background: var(--surface);
           outline: none;
           font-family: inherit;
           resize: vertical;
@@ -6207,17 +6207,17 @@ export default function PlansPage() {
           opacity: 0.6;
         }
         .form-textarea:focus {
-          border-color: #2563eb;
+          border-color: var(--accent-selected-bg);
           box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
         }
         .form-error {
           font-size: 0.8rem;
-          color: #dc2626;
+          color: var(--status-danger);
           margin-top: 0.3rem;
         }
         .form-hint {
           font-size: 0.78rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           margin-top: 0.25rem;
         }
         .modal-actions {
@@ -6227,11 +6227,11 @@ export default function PlansPage() {
           padding: 1rem 1.25rem;
           /* Keep safe distance from the home indicator on notched devices */
           padding-bottom: max(1rem, env(safe-area-inset-bottom));
-          border-top: 1px solid #f3f4f6;
+          border-top: 1px solid var(--surface-muted);
         }
         .btn-save {
           flex: 1;
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: #fff;
           border: none;
           border-radius: 8px;
@@ -6242,21 +6242,21 @@ export default function PlansPage() {
           min-height: 48px;
         }
         .btn-save:active {
-          background-color: #1d4ed8;
+          background-color: var(--accent-hover);
         }
         .btn-cancel {
           flex: 1;
           background: none;
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           border-radius: 8px;
           font-size: 1rem;
-          color: #374151;
+          color: var(--text);
           padding: 0.75rem;
           cursor: pointer;
           min-height: 48px;
         }
         .btn-cancel:active {
-          background-color: #f3f4f6;
+          background-color: var(--surface-muted);
         }
         .file-input-hidden {
           display: none;
@@ -6265,9 +6265,9 @@ export default function PlansPage() {
           display: inline-flex;
           align-items: center;
           gap: 0.4rem;
-          background-color: #fff;
-          color: #374151;
-          border: 1px solid #d1d5db;
+          background-color: var(--surface);
+          color: var(--text);
+          border: 1px solid var(--border);
           border-radius: 8px;
           font-size: 0.9rem;
           font-weight: 500;
@@ -6277,7 +6277,7 @@ export default function PlansPage() {
           white-space: nowrap;
         }
         .btn-file-label:active {
-          background-color: #f3f4f6;
+          background-color: var(--surface-muted);
         }
         .item-name-row {
           display: flex;
@@ -6303,7 +6303,7 @@ export default function PlansPage() {
         }
         .wait-scope-label {
           font-size: 0.7rem;
-          color: #9ca3af;
+          color: var(--text-faint);
           margin: -0.4rem 0 0.75rem;
         }
         /* Resort toggle — matches Wait Times page visual style */
@@ -6316,7 +6316,7 @@ export default function PlansPage() {
           flex: 1 1 0%;
           padding: 8px 6px;
           border-radius: 8px;
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           cursor: pointer;
           font-weight: 600;
           font-size: 13px;
@@ -6337,7 +6337,7 @@ export default function PlansPage() {
           min-width: 0;
           padding: 6px 4px;
           border-radius: 8px;
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           cursor: pointer;
           font-weight: 500;
           font-size: 12px;
@@ -6356,9 +6356,9 @@ export default function PlansPage() {
         }
         /* Phase 8.0 — standalone "btn-day" used for + Add Day button only */
         .btn-day {
-          background-color: #f9fafb;
-          color: #374151;
-          border: 1px solid #d1d5db;
+          background-color: var(--surface-subtle);
+          color: var(--text);
+          border: 1px solid var(--border);
           border-radius: 8px;
           font-size: 0.875rem;
           font-weight: 600;
@@ -6377,15 +6377,15 @@ export default function PlansPage() {
           align-items: stretch;
           border-radius: 8px;
           overflow: hidden;
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           white-space: nowrap;
         }
         .day-pill-active {
-          border-color: #2563eb;
+          border-color: var(--accent-selected-bg);
         }
         .btn-day-select {
-          background-color: #f9fafb;
-          color: #374151;
+          background-color: var(--surface-subtle);
+          color: var(--text);
           border: none;
           font-size: 0.875rem;
           font-weight: 600;
@@ -6395,7 +6395,7 @@ export default function PlansPage() {
           transition: background-color 0.15s ease, color 0.15s ease;
         }
         .day-pill-active .btn-day-select {
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: #fff;
         }
         .btn-day-select:active {
@@ -6409,7 +6409,7 @@ export default function PlansPage() {
         }
         .day-pill-divider {
           width: 1px;
-          background-color: #d1d5db;
+          background-color: var(--border);
           flex-shrink: 0;
         }
         .day-pill-active .day-pill-divider {
@@ -6424,15 +6424,15 @@ export default function PlansPage() {
            consistent rather than introducing a new treatment. */
         .day-pill-group-divider {
           width: 3px;
-          background-color: #d1d5db;
+          background-color: var(--border);
           flex-shrink: 0;
         }
         .day-pill-active .day-pill-group-divider {
           background-color: rgba(255, 255, 255, 0.3);
         }
         .btn-day-icon {
-          background-color: #f9fafb;
-          color: #9ca3af;
+          background-color: var(--surface-subtle);
+          color: var(--text-faint);
           border: none;
           font-size: 0.75rem;
           padding: 0 0.45rem;
@@ -6446,15 +6446,15 @@ export default function PlansPage() {
           line-height: 1;
         }
         .day-pill-active .btn-day-icon {
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: rgba(255, 255, 255, 0.7);
         }
         .btn-day-icon:hover {
-          background-color: #e5e7eb;
-          color: #374151;
+          background-color: var(--skeleton);
+          color: var(--text);
         }
         .day-pill-active .btn-day-icon:hover {
-          background-color: #1d4ed8;
+          background-color: var(--accent-hover);
           color: #fff;
         }
         /* Phase 11.2 — boundary Move Up/Down (already first/last day) */
@@ -6463,16 +6463,25 @@ export default function PlansPage() {
           cursor: not-allowed;
         }
         .btn-day-icon:disabled:hover {
-          background-color: #f9fafb;
-          color: #9ca3af;
+          background-color: var(--surface-subtle);
+          color: var(--text-faint);
         }
         .day-pill-active .btn-day-icon:disabled:hover {
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: rgba(255, 255, 255, 0.7);
         }
+        /* Phase 13.2 — keep disabled controls legible on dark surfaces */
+        :root[data-theme="dark"] .btn-import:disabled,
+        :root[data-theme="dark"] .btn-clear:disabled,
+        :root[data-theme="dark"] .icon-btn:disabled {
+          opacity: 0.55;
+        }
+        :root[data-theme="dark"] .btn-day-icon:disabled {
+          opacity: 0.6;
+        }
         .btn-day-remove {
-          background-color: #f9fafb;
-          color: #9ca3af;
+          background-color: var(--surface-subtle);
+          color: var(--text-faint);
           border: none;
           font-size: 1rem;
           padding: 0 0.45rem;
@@ -6486,15 +6495,15 @@ export default function PlansPage() {
           line-height: 1;
         }
         .day-pill-active .btn-day-remove {
-          background-color: #2563eb;
+          background-color: var(--accent-selected-bg);
           color: rgba(255, 255, 255, 0.65);
         }
         .btn-day-remove:hover {
-          background-color: #fef2f2;
-          color: #dc2626;
+          background-color: var(--danger-bg);
+          color: var(--danger-soft-fg);
         }
         .day-pill-active .btn-day-remove:hover {
-          background-color: #1d4ed8;
+          background-color: var(--accent-hover);
           color: #fca5a5;
         }
         /* Phase 8.1.2 — keyboard focus inside clipped pill boundary.
@@ -6502,7 +6511,7 @@ export default function PlansPage() {
            outline-offset:-2px to draw the indicator inside the element.
            :focus-visible only fires for keyboard navigation, never mouse. */
         .day-pill button:focus-visible {
-          outline: 2px solid #2563eb;
+          outline: 2px solid var(--focus-ring);
           outline-offset: -2px;
         }
         .day-pill-active button:focus-visible {
@@ -6517,27 +6526,27 @@ export default function PlansPage() {
           align-items: center;
           gap: 0.35rem;
           font-size: 0.8rem;
-          color: #374151;
+          color: var(--text);
           white-space: nowrap;
           flex-shrink: 0;
         }
         .day-park-row-select {
-          border: 1px solid #d1d5db;
+          border: 1px solid var(--border);
           border-radius: 6px;
-          background: #fff;
-          color: #374151;
+          background: var(--surface);
+          color: var(--text);
           font-size: 0.8rem;
           padding: 0.25rem 0.4rem;
           cursor: pointer;
           min-height: 32px;
         }
         .day-park-row-select:focus {
-          outline: 2px solid #2563eb;
+          outline: 2px solid var(--focus-ring);
           outline-offset: -1px;
         }
         .day-park-hint {
           font-size: 0.75rem;
-          color: #6b7280;
+          color: var(--text-muted);
           margin: 0.2rem 0 0.5rem;
         }
         .day-remove-confirm-row {
@@ -6549,21 +6558,21 @@ export default function PlansPage() {
         .cross-day-checks {
           margin-top: 1.5rem;
           padding: 0.75rem 1rem;
-          background-color: #fffbeb;
-          border: 1px solid #fcd34d;
+          background-color: var(--warning-bg);
+          border: 1px solid var(--warning-border);
           border-radius: 8px;
         }
         .cross-day-checks-title {
           font-size: 0.8rem;
           font-weight: 600;
-          color: #92400e;
+          color: var(--warning-fg);
           margin-bottom: 0.5rem;
           letter-spacing: 0.01em;
         }
         .cross-day-checks-group-label {
           font-size: 0.75rem;
           font-weight: 600;
-          color: #78350f;
+          color: var(--warning-fg-strong);
           margin: 0.9rem 0 0.2rem;
           text-transform: uppercase;
           letter-spacing: 0.04em;
@@ -6574,7 +6583,7 @@ export default function PlansPage() {
         .cross-day-checks-subgroup-label {
           font-size: 0.8rem;
           font-weight: 600;
-          color: #78350f;
+          color: var(--warning-fg-strong);
           margin: 0.6rem 0 0.1rem;
           opacity: 0.85;
         }
@@ -6585,13 +6594,13 @@ export default function PlansPage() {
         }
         .cross-day-checks-item {
           font-size: 0.8rem;
-          color: #92400e;
+          color: var(--warning-fg);
           padding: 0.25rem 0;
           display: flex;
           gap: 0.35rem;
           align-items: baseline;
           flex-wrap: wrap;
-          border-top: 1px solid #fde68a;
+          border-top: 1px solid var(--warning-border-soft);
         }
         .cross-day-checks-item:first-child {
           border-top: none;
@@ -6601,7 +6610,7 @@ export default function PlansPage() {
           word-break: break-word;
         }
         .cross-day-checks-days {
-          color: #b45309;
+          color: var(--warning-fg);
           word-break: break-word;
         }
         .cross-day-checks-park-section {
@@ -6614,7 +6623,7 @@ export default function PlansPage() {
           width: 100%;
         }
         .cross-day-checks-park-label {
-          color: #78350f;
+          color: var(--warning-fg-strong);
           font-weight: 500;
           min-width: 0;
           margin-right: 0.3rem;
@@ -6625,12 +6634,12 @@ export default function PlansPage() {
         }
         .cross-day-checks-severity {
           font-weight: 400;
-          color: #b45309;
+          color: var(--warning-fg);
           font-size: 0.75rem;
         }
         .cross-day-checks-time-flag {
           font-weight: 400;
-          color: #ef4444;
+          color: var(--status-danger);
           font-size: 0.75rem;
         }
         @media (max-width: 480px) {
@@ -6648,7 +6657,7 @@ export default function PlansPage() {
           <div>
             <h1 className="plans-title">My Plans</h1>
             {activeProfileName && (
-              <span style={{ fontSize: "12px", color: "#9ca3af", display: "block", marginTop: "2px" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-faint)", display: "block", marginTop: "2px" }}>
                 Profile: {activeProfileName}
               </span>
             )}
@@ -6731,9 +6740,9 @@ export default function PlansPage() {
                   handleSetDayPark(activeDayId, RESORT_PARKS[resortId][0]);
                 }}
                 style={{
-                  backgroundColor: selectedResort === resortId ? "#1e3a5f" : "#f9fafb",
-                  color: selectedResort === resortId ? "#fff" : "#374151",
-                  borderColor: selectedResort === resortId ? "#1e3a5f" : "#d1d5db",
+                  backgroundColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                  color: selectedResort === resortId ? "#fff" : "var(--text)",
+                  borderColor: selectedResort === resortId ? "var(--control-selected-bg)" : "var(--border)",
                 }}
               >
                 {RESORT_LABELS[resortId]}
@@ -6742,8 +6751,8 @@ export default function PlansPage() {
           </div>
         ) : (
           <div className="plans-resort-row">
-            <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-            <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+            <div style={{ flex: 1, height: 36, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
           </div>
         )}
 
@@ -6758,9 +6767,9 @@ export default function PlansPage() {
                 className="plans-park-tab"
                 onClick={() => handleSetDayPark(activeDayId, parkId)}
                 style={{
-                  backgroundColor: activeDayPark === parkId ? "#1e3a5f" : "#f9fafb",
-                  color: activeDayPark === parkId ? "#fff" : "#374151",
-                  borderColor: activeDayPark === parkId ? "#1e3a5f" : "#d1d5db",
+                  backgroundColor: activeDayPark === parkId ? "var(--control-selected-bg)" : "var(--surface-subtle)",
+                  color: activeDayPark === parkId ? "#fff" : "var(--text)",
+                  borderColor: activeDayPark === parkId ? "var(--control-selected-bg)" : "var(--border)",
                 }}
               >
                 {PARK_LABELS[parkId]}
@@ -6769,8 +6778,8 @@ export default function PlansPage() {
           </div>
         ) : (
           <div className="plans-park-row">
-            <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
-            <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
+            <div style={{ flex: 1, height: 32, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
           </div>
         )}
 
@@ -6897,7 +6906,7 @@ export default function PlansPage() {
         ) : (
           /* Skeleton shown before localStorage hydration to prevent Day 1 flash */
           <div className="day-selector-row" aria-hidden="true">
-            <div style={{ height: 36, width: 56, borderRadius: 8, backgroundColor: "#f3f4f6" }} />
+            <div style={{ height: 36, width: 56, borderRadius: 8, backgroundColor: "var(--surface-muted)" }} />
           </div>
         )}
 
@@ -7022,8 +7031,8 @@ export default function PlansPage() {
         {/* Phase 8.2 — Day import error display */}
         {dayImportError && (
           <div className="clear-confirm-row">
-            <div className="confirm-row" style={{ borderColor: "#fca5a5", backgroundColor: "#fef2f2" }}>
-              <span className="confirm-text" style={{ color: "#dc2626" }}>{dayImportError}</span>
+            <div className="confirm-row" style={{ borderColor: "var(--status-danger-border)", backgroundColor: "var(--danger-bg)" }}>
+              <span className="confirm-text" style={{ color: "var(--status-danger)" }}>{dayImportError}</span>
               <button
                 className="btn-cancel-delete"
                 onClick={() => setDayImportError("")}
@@ -7183,11 +7192,11 @@ export default function PlansPage() {
                   </div>
 
                   {invalidIds.has(item.id) ? (
-                    <p style={{ fontSize: "0.8rem", color: "#dc2626", margin: "0.25rem 0 0" }}>
+                    <p style={{ fontSize: "0.8rem", color: "var(--status-danger)", margin: "0.25rem 0 0" }}>
                       ⚠️ End time is before start time
                     </p>
                   ) : (overlapCountById[item.id] ?? 0) > 0 ? (
-                    <p style={{ fontSize: "0.8rem", color: "#d97706", margin: "0.25rem 0 0" }}>
+                    <p style={{ fontSize: "0.8rem", color: "var(--status-warning)", margin: "0.25rem 0 0" }}>
                       ⚠️ Overlaps with {overlapCountById[item.id] === 1 ? "1 other item" : `${overlapCountById[item.id]} other items`}
                     </p>
                   ) : null}
@@ -7345,9 +7354,9 @@ export default function PlansPage() {
 
       {/* Attribution — ThemeParks.wiki, once at the page bottom when park hours are presented (Waits & Shows footer pattern) */}
       {parkHoursPresented && (
-        <div style={{ marginTop: "16px", padding: "0 16px", textAlign: "center", fontSize: "12px", lineHeight: 1.5, color: "#9ca3af" }}>
+        <div style={{ marginTop: "16px", padding: "0 16px", textAlign: "center", fontSize: "12px", lineHeight: 1.5, color: "var(--text-faint)" }}>
           Park hours powered by{" "}
-          <ThemeParksAttribution linkOnly style={{ fontSize: "inherit", color: "#6b7280", opacity: 1, textDecoration: "underline" }} />
+          <ThemeParksAttribution linkOnly style={{ fontSize: "inherit", color: "var(--text-muted)", opacity: 1, textDecoration: "underline" }} />
         </div>
       )}
 
@@ -7398,7 +7407,7 @@ export default function PlansPage() {
               </div>
 
               {/* Divider */}
-              <div style={{ borderTop: "1px solid #e5e7eb", margin: "1rem 0" }} />
+              <div style={{ borderTop: "1px solid var(--border-soft)", margin: "1rem 0" }} />
 
               {/* Restore section */}
               <div className="form-field">
@@ -7409,7 +7418,7 @@ export default function PlansPage() {
 
                 {restoreConfirmPayload ? (
                   <div>
-                    <div style={{ marginBottom: "0.75rem", fontSize: "0.8125rem", color: "#6b7280", lineHeight: 1.5 }}>
+                    <div style={{ marginBottom: "0.75rem", fontSize: "0.8125rem", color: "var(--text-muted)", lineHeight: 1.5 }}>
                       <div>
                         <strong>Created:</strong>{" "}
                         {(() => {
@@ -7497,7 +7506,7 @@ export default function PlansPage() {
                   <div className="form-field">
                     <label className="form-label" htmlFor="day-label">
                       Label{" "}
-                      <span style={{ color: "#9ca3af", fontWeight: 400 }}>(optional)</span>
+                      <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>(optional)</span>
                     </label>
                     <input
                       id="day-label"
@@ -7515,7 +7524,7 @@ export default function PlansPage() {
                   <div className="form-field">
                     <label className="form-label" htmlFor="day-date">
                       Date{" "}
-                      <span style={{ color: "#9ca3af", fontWeight: 400 }}>(optional)</span>
+                      <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>(optional)</span>
                     </label>
                     <input
                       id="day-date"
@@ -7536,8 +7545,8 @@ export default function PlansPage() {
                       </p>
                     )}
                   </div>
-                  <div className="form-field" style={{ borderTop: "1px solid #f3f4f6", paddingTop: "1rem" }}>
-                    <p style={{ fontSize: "0.875rem", color: "#6b7280", marginBottom: "0.5rem" }}>
+                  <div className="form-field" style={{ borderTop: "1px solid var(--surface-muted)", paddingTop: "1rem" }}>
+                    <p style={{ fontSize: "0.875rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>
                       Clear this day
                     </p>
                     {editingDayId && (itemCountByDay[editingDayId] ?? 0) > 0 ? (
@@ -7557,7 +7566,7 @@ export default function PlansPage() {
                         Remove {itemCountByDay[editingDayId]} {itemCountByDay[editingDayId] === 1 ? "item" : "items"} from this day
                       </button>
                     ) : (
-                      <p style={{ fontSize: "0.8rem", color: "#9ca3af" }}>
+                      <p style={{ fontSize: "0.8rem", color: "var(--text-faint)" }}>
                         No items on this day.
                       </p>
                     )}
@@ -7648,7 +7657,7 @@ export default function PlansPage() {
                   <div className="form-field">
                     <label className="form-label" htmlFor="plan-name">
                       Activity name{" "}
-                      <span style={{ color: "#dc2626" }}>*</span>
+                      <span style={{ color: "var(--status-danger)" }}>*</span>
                     </label>
                     <AttractionSuggestInput
                       id="plan-name"
@@ -7679,7 +7688,7 @@ export default function PlansPage() {
                       <div className="form-field">
                         <label className="form-label" htmlFor="plan-custom-type">
                           Activity type{" "}
-                          <span style={{ color: "#9ca3af", fontWeight: 400 }}>
+                          <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>
                             (optional)
                           </span>
                         </label>
@@ -7704,7 +7713,7 @@ export default function PlansPage() {
                   <div className="form-field">
                     <label className="form-label" htmlFor="plan-time">
                       Time window{" "}
-                      <span style={{ color: "#9ca3af", fontWeight: 400 }}>
+                      <span style={{ color: "var(--text-faint)", fontWeight: 400 }}>
                         (optional)
                       </span>
                     </label>
