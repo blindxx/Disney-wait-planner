@@ -4,6 +4,11 @@
 
 - This is a pnpm workspace (`apps/*`, `packages/*`). The web app lives in
   `apps/web`; shared types/mock data live in `packages/shared`.
+- Runtime baseline: Next.js 16, React 19, Node.js 24 (`.nvmrc`), pnpm 9
+  (`packageManager`). `apps/web/package.json` and `pnpm-lock.yaml` are
+  authoritative for actual dependency versions; do not rely on the
+  versions named here. Next.js 16 uses Turbopack by default for
+  `next dev` and `next build`.
 - Next.js App Router lives in `apps/web/src/app`, not `apps/web/app`.
 - Use filtered workspace commands rather than running app commands blindly
   at repo root:
@@ -358,7 +363,8 @@ closure — it exists for closures that matter for trip planning:
   DEV checks: `runDevParkHoursCases()` / `runDevParkHoursServiceCases()`.
   Verified regular hours are persisted fire-and-forget (never awaited by the
   response) via `parkHoursStore.ts`, registered with the serverless request
-  lifetime through `waitUntil` from `@vercel/functions` (Next 14 has no `after()`).
+  lifetime through `waitUntil` from `@vercel/functions` (keep this existing mechanism;
+  do not swap it for Next's `after()` without an explicit phase).
 - Exact-date park hours (Phase 12.6, My Plans): same `parkHours.ts` /
   `parkHoursService.ts` boundary, `/api/park-hours?parkId=&date=YYYY-MM-DD`
   (`ParkDateHours`; `getParkHoursForDate()` uses monthly `getSchedule()` for
