@@ -174,6 +174,17 @@ export const SEASONAL_EVENT_SEASONS: SeasonalEventSeasonRecord[] = [
     eventId: "epcot-festival-of-the-holidays", seasonYear: 2026, startDate: "2026-11-27", endDate: "2026-12-30",
     sourceUrl: `${DPB}/wdw/epcot-festival-of-the-holidays-dates-details/`, sourcePublishedDate: "2026-06-24", verifiedOn: V,
   },
+  // ── 2027 season (confirmed early; announced 2026-09-10) ─────────────
+  {
+    eventId: "epcot-festival-of-the-arts", seasonYear: 2027, startDate: "2027-01-15", endDate: "2027-03-01",
+    sourceUrl: `${DPB}/wdw/epcot-international-festival-of-the-arts-dates-and-offerings/`, sourcePublishedDate: "2026-09-10", verifiedOn: "2026-10-29",
+    note: "Source text gives month/day only; year follows from its September 2026 publication and 2027 title.",
+  },
+  {
+    eventId: "epcot-flower-and-garden", seasonYear: 2027, startDate: "2027-03-10", endDate: "2027-05-31",
+    sourceUrl: `${DPB}/wdw/epcot-international-flower-and-garden-festival-dates-and-details/`, sourcePublishedDate: "2026-09-10", verifiedOn: "2026-10-29",
+    note: "Source text gives month/day only; year follows from its September 2026 publication and 2027 title.",
+  },
   // ── 2025 season (verified records only) ──────────────────────────────
   {
     eventId: "epcot-food-and-wine", seasonYear: 2025, startDate: "2025-08-28", endDate: "2025-11-22",
