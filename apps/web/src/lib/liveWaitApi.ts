@@ -32,6 +32,7 @@ import {
   isClosureStatusEnforced,
   normalizeAttractionName,
 } from "./plannedClosures";
+import { resolveAttractionDisplayNameAt } from "./seasonalAttractionOverlays";
 
 // ============================================
 // CONFIG
@@ -556,6 +557,7 @@ function normalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
   parkId: ParkId,
+  nowOverride?: Date,
 ): AttractionWait[] {
   const mockPark = mockAttractionWaits.filter(
     (a) => a.resortId === resortId && a.parkId === parkId,
@@ -641,7 +643,7 @@ function normalizeQueueTimesResponse(
     }
   }
 
-  const now = new Date();
+  const now = nowOverride ?? new Date();
 
   // Overlay live values onto mock rides; keep mock where no match exists.
   // Status priority:
@@ -713,7 +715,20 @@ function normalizeQueueTimesResponse(
   // whichever has the freshest `updatedAt`. This guarantees the array the UI
   // actually renders and sorts can never contain a stale duplicate, even if
   // some other path were to introduce one upstream of this point.
-  return dedupeByCanonicalIdentity(resolved, aliasMap);
+  const deduped = dedupeByCanonicalIdentity(resolved, aliasMap);
+
+  // Phase 14.3: seasonal DISPLAY name only. Reads the already-selected
+  // (freshest) provider row's raw name; never alters status/wait/updatedAt/
+  // waitSource or which row was selected, and `name` stays canonical.
+  return deduped.map((a) => {
+    const selected = liveByName.get(normalizeAttractionName(a.name));
+    const displayName = resolveAttractionDisplayNameAt(
+      resortId,
+      { canonicalId: a.id, selectedProviderName: selected?.name },
+      now,
+    );
+    return displayName ? { ...a, displayName } : a;
+  });
 }
 
 /**
@@ -977,8 +992,9 @@ export function devNormalizeQueueTimesResponse(
   body: unknown,
   resortId: ResortId,
   parkId: ParkId,
+  now?: Date,
 ): AttractionWait[] {
-  return normalizeQueueTimesResponse(body, resortId, parkId);
+  return normalizeQueueTimesResponse(body, resortId, parkId, now);
 }
 
 /** Builds a minimal Queue-Times ride record for DEV case construction. */
@@ -1005,7 +1021,7 @@ function devQTRide(
  *
  *   import { DEV_QUEUE_TIMES_DEDUPE_CASES, devNormalizeQueueTimesResponse } from "@/lib/liveWaitApi";
  *   for (const c of DEV_QUEUE_TIMES_DEDUPE_CASES) {
- *     const result = devNormalizeQueueTimesResponse(c.body, c.resortId, c.parkId);
+ *     const result = devNormalizeQueueTimesResponse(c.body, c.resortId, c.parkId, c.now);
  *     const failure = c.check(result);
  *     console.log(failure ? `✗ FAIL ${c.description}: ${failure}` : `✓ ${c.description}`);
  *   }
@@ -1015,6 +1031,8 @@ export const DEV_QUEUE_TIMES_DEDUPE_CASES: Array<{
   resortId: ResortId;
   parkId: ParkId;
   body: unknown;
+  /** Fixed "now" for date-dependent cases (pass to devNormalizeQueueTimesResponse). */
+  now?: Date;
   /** Returns null on pass, or a failure message. */
   check: (result: AttractionWait[]) => string | null;
 }> = [
@@ -1464,4 +1482,106 @@ DEV_QUEUE_TIMES_DEDUPE_CASES.push(
       return null;
     },
   })),
+);
+
+// Phase 14.3: seasonal overlay DISPLAY names. Each case pins `now` and checks
+// the display name AND that status/wait/updatedAt/waitSource and card count
+// are exactly what the canonical (non-overlay) path produces.
+const DEV_OVERLAY_T0 = "2026-11-20T12:00:00Z";
+const DEV_OVERLAY_T1 = "2026-11-20T12:05:00Z";
+const devOverlayBody = (land: string, ...rides: QTRide[]) => ({ lands: [{ id: 1, name: land, rides }] });
+const devOverlayCheck = (
+  id: string,
+  expect: { displayName: string | undefined; status: AttractionWait["status"]; waitMins: number | null; updatedAt: string },
+) => (result: AttractionWait[]): string | null => {
+  const matches = result.filter((a) => a.id === id);
+  if (matches.length !== 1) return `expected exactly 1 card, got ${matches.length}`;
+  const a = matches[0];
+  if (a.displayName !== expect.displayName) return `expected displayName ${expect.displayName}, got ${a.displayName}`;
+  if (a.status !== expect.status || a.waitMins !== expect.waitMins) return `expected ${expect.status}/${expect.waitMins}, got ${a.status}/${a.waitMins}`;
+  if (a.updatedAt !== expect.updatedAt) return `expected updatedAt ${expect.updatedAt}, got ${a.updatedAt}`;
+  if (a.waitSource !== "live") return `expected waitSource "live", got ${a.waitSource}`;
+  if (a.name !== mockAttractionWaits.find((m) => m.id === id)?.name) return `canonical name changed: ${a.name}`;
+  return null;
+};
+
+DEV_QUEUE_TIMES_DEDUPE_CASES.push(
+  {
+    description: "Overlay: small world Holiday provider row after confirmed start shows overlay name; canonical name and live wait unchanged",
+    resortId: "DLR", parkId: "disneyland", now: new Date(DEV_OVERLAY_T0),
+    body: devOverlayBody("Fantasyland", devQTRide(307, "\"it's a small world\" Holiday", true, 35, DEV_OVERLAY_T0)),
+    check: devOverlayCheck("dl-its-a-small-world", { displayName: "\"it's a small world\" Holiday", status: "OPERATING", waitMins: 35, updatedAt: DEV_OVERLAY_T0 }),
+  },
+  {
+    description: "Overlay: provider switches back to canonical small world name after start (unknown end) → canonical display",
+    resortId: "DLR", parkId: "disneyland", now: new Date(DEV_OVERLAY_T0),
+    body: devOverlayBody("Fantasyland", devQTRide(307, "\"it's a small world\"", true, 35, DEV_OVERLAY_T0)),
+    check: devOverlayCheck("dl-its-a-small-world", { displayName: undefined, status: "OPERATING", waitMins: 35, updatedAt: DEV_OVERLAY_T0 }),
+  },
+  {
+    description: "Overlay: small world Holiday provider row BEFORE confirmed start → canonical display, status still live",
+    resortId: "DLR", parkId: "disneyland", now: new Date("2026-11-12T20:00:00Z"),
+    body: devOverlayBody("Fantasyland", devQTRide(307, "\"it's a small world\" Holiday", false, 0, "2026-11-12T20:00:00Z")),
+    check: devOverlayCheck("dl-its-a-small-world", { displayName: undefined, status: "DOWN", waitMins: null, updatedAt: "2026-11-12T20:00:00Z" }),
+  },
+  {
+    description: "Overlay: Luigi's Haul-O-Ween row after confirmed end (2026-11-01) → canonical display; one card; live closed status preserved",
+    resortId: "DLR", parkId: "dca", now: new Date("2026-11-01T20:00:00Z"),
+    body: devOverlayBody("Cars Land", devQTRide(2608, "Luigi's Honkin' Haul-O-Ween", false, 0, "2026-11-01T20:00:00Z")),
+    check: devOverlayCheck("dca-luigis", { displayName: undefined, status: "DOWN", waitMins: null, updatedAt: "2026-11-01T20:00:00Z" }),
+  },
+  {
+    description: "Overlay: inside confirmed window the overlay name shows even when Queue-Times still sends the regular name",
+    resortId: "DLR", parkId: "dca", now: new Date("2026-09-15T20:00:00Z"),
+    body: devOverlayBody("Cars Land", devQTRide(295, "Luigi's Rollickin' Roadsters", true, 20, "2026-09-15T20:00:00Z")),
+    check: devOverlayCheck("dca-luigis", { displayName: "Luigi's Honkin' Haul-O-Ween", status: "OPERATING", waitMins: 20, updatedAt: "2026-09-15T20:00:00Z" }),
+  },
+  {
+    description: "Overlay: regular + overlay rows both present — freshest row still supplies wait/status; display name per rules; no duplicate card",
+    resortId: "DLR", parkId: "dca", now: new Date("2026-09-15T20:00:00Z"),
+    body: {
+      lands: [{ id: 1, name: "Cars Land", rides: [
+        devQTRide(295, "Luigi's Rollickin' Roadsters", true, 45, "2026-09-15T19:00:00Z"),
+        devQTRide(2608, "Luigi's Honkin' Haul-O-Ween", true, 10, "2026-09-15T20:00:00Z"),
+      ] }],
+    },
+    check: devOverlayCheck("dca-luigis", { displayName: "Luigi's Honkin' Haul-O-Ween", status: "OPERATING", waitMins: 10, updatedAt: "2026-09-15T20:00:00Z" }),
+  },
+  {
+    description: "Overlay: both rows, stale overlay row + fresher regular row → fresher row's wait/status kept (selection unchanged); open-ended Mater's Jingle follows that row",
+    resortId: "DLR", parkId: "dca", now: new Date(DEV_OVERLAY_T1),
+    body: {
+      lands: [{ id: 1, name: "Cars Land", rides: [
+        devQTRide(4724, "Mater's Jingle Jamboree", true, 5, DEV_OVERLAY_T0),
+        devQTRide(296, "Mater's Junkyard Jamboree", true, 15, DEV_OVERLAY_T1),
+      ] }],
+    },
+    check: devOverlayCheck("dca-maters", { displayName: undefined, status: "OPERATING", waitMins: 15, updatedAt: DEV_OVERLAY_T1 }),
+  },
+  {
+    description: "Overlay: Living with the Land + Glimmering Greenhouses rows (undated overlay) → one card, name follows selected (freshest) row, wait from same row",
+    resortId: "WDW", parkId: "epcot", now: new Date(DEV_OVERLAY_T1),
+    body: {
+      lands: [{ id: 1, name: "World Nature", rides: [
+        devQTRide(156, "Living with the Land", true, 5, DEV_OVERLAY_T0),
+        devQTRide(17914, "Living with the Land – Glimmering Greenhouses", true, 12, DEV_OVERLAY_T1),
+      ] }],
+    },
+    check: devOverlayCheck("epcot-living-with-the-land", { displayName: "Living with the Land – Glimmering Greenhouses", status: "OPERATING", waitMins: 12, updatedAt: DEV_OVERLAY_T1 }),
+  },
+  {
+    description: "Overlay: Haunted Mansion Holiday provider row after its confirmed start (open end) → overlay (status/wait from the same row)",
+    resortId: "DLR", parkId: "disneyland", now: new Date("2026-10-30T18:20:39Z"),
+    body: devOverlayBody("New Orleans Square", devQTRide(325, "Haunted Mansion Holiday", true, 50, "2026-10-30T18:20:39.000Z")),
+    check: devOverlayCheck("dl-haunted-mansion", { displayName: "Haunted Mansion Holiday", status: "OPERATING", waitMins: 50, updatedAt: "2026-10-30T18:20:39.000Z" }),
+  },
+  {
+    description: "Overlay: Guardians Monsters After Dark row is NOT aliased — Mission: BREAKOUT! wait/status unaffected and never date-renamed",
+    resortId: "DLR", parkId: "dca", now: new Date("2026-10-30T18:20:39Z"),
+    body: devOverlayBody("Avengers Campus",
+      devQTRide(329, "Guardians of the Galaxy - Mission: BREAKOUT!", true, 60, "2026-10-30T18:20:39.000Z"),
+      devQTRide(5146, "Guardians of the Galaxy - Monsters After Dark", false, 0, "2026-10-31T18:20:39.000Z"),
+    ),
+    check: devOverlayCheck("dca-guardians", { displayName: undefined, status: "OPERATING", waitMins: 60, updatedAt: "2026-10-30T18:20:39.000Z" }),
+  },
 );

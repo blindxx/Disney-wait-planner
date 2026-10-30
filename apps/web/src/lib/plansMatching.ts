@@ -139,6 +139,14 @@ export const ALIASES_DLR: Record<string, string> = {
   "maters graveyard jambooree":  "maters junkyard jamboree",
   "maters jingle jamboree":      "maters junkyard jamboree",
 
+  // ---- Guardians of the Galaxy – Monsters After Dark (DCA Halloween Time
+  // overlay of Mission: BREAKOUT!) — Queue-Times row 5146 confirmed
+  // 2026-10-30. Plan-text matching only: deliberately NOT mirrored in
+  // liveWaitApi.ts's ALIASES_DLR (separate simultaneous provider row; see
+  // Phase 14.3 report). ----
+  "guardians of the galaxy monsters after dark": "guardians of the galaxy mission breakout",
+  "guardians monsters after dark":               "guardians of the galaxy mission breakout",
+
   // ---- Common shorthands (Disneyland Park) ----
   "pirates":                     "pirates of the caribbean",
   "guardians":                   "guardians of the galaxy mission breakout",
@@ -561,6 +569,8 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "Luigi's Joy to the Whirl",       resort: "DLR", expectedKey: "luigis rollickin roadsters" },
   { input: "Mater's Graveyard JamBOOree",    resort: "DLR", expectedKey: "maters junkyard jamboree" },
   { input: "Mater's Jingle Jamboree",        resort: "DLR", expectedKey: "maters junkyard jamboree" },
+  { input: "Guardians of the Galaxy – Monsters After Dark", resort: "DLR", expectedKey: "guardians of the galaxy mission breakout" },
+  { input: "Guardians Monsters After Dark",  resort: "DLR", expectedKey: "guardians of the galaxy mission breakout" },
   // --- Targeted patch: WDW ---
   { input: "mickey and minnie",     resort: "WDW", expectedKey: "mickey minnies runaway railway" },
   { input: "dumbo",                 resort: "WDW", expectedKey: "dumbo the flying elephant" },

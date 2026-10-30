@@ -766,7 +766,7 @@ export default function TodayPage() {
                       wordWrap: "break-word",
                     }}
                   >
-                    {attraction.name}
+                    {attraction.displayName ?? attraction.name}
                   </div>
                   {attraction.land && (
                     <div
@@ -808,7 +808,7 @@ export default function TodayPage() {
             <div key={attraction.id} className="option-item">
               <div style={{ flex: "1 1 0%", minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "var(--text-strong)", wordWrap: "break-word" }}>
-                  {attraction.name}
+                  {attraction.displayName ?? attraction.name}
                 </div>
                 {attraction.land && (
                   <div style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", lineHeight: "1.3" }}>

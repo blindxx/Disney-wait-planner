@@ -451,7 +451,7 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
             overflow: "hidden",
           }}
         >
-          {attraction.name}
+          {attraction.displayName ?? attraction.name}
         </div>
         {attraction.land && (
           <div
