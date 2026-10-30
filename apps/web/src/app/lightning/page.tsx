@@ -30,7 +30,7 @@ import {
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
 import { expandVariantWaitRows, getVariantSuggestionNames } from "@/lib/attractionVariants";
-import { getPlannerItemMetadata } from "@/lib/plannerItemMetadata";
+import { getPlannerItemMetadata, resolveMismatchAttractionPark } from "@/lib/plannerItemMetadata";
 import {
   resolveRefurbishmentLine,
   LEGACY_ATTRACTION_WARNING,
@@ -2838,8 +2838,7 @@ export default function LightningPage() {
     if (!resolvedDayPark || !rideName.trim()) return null;
     const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
     const waitEntry = lookupWait(rideName.trim(), mismatchWaitMap, aliases);
-    if (!waitEntry) return null;
-    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    const attractionPark = resolveMismatchAttractionPark(rideName.trim(), mismatchResort, waitEntry, mismatchParkIdMap);
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
@@ -2851,8 +2850,7 @@ export default function LightningPage() {
     if (!resolvedDayPark || !editingName.trim()) return null;
     const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
     const waitEntry = lookupWait(editingName.trim(), mismatchWaitMap, aliases);
-    if (!waitEntry) return null;
-    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    const attractionPark = resolveMismatchAttractionPark(editingName.trim(), mismatchResort, waitEntry, mismatchParkIdMap);
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
