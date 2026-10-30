@@ -569,7 +569,7 @@ function normalizeQueueTimesResponse(
     typeof body !== "object" ||
     !Array.isArray((body as QTResponse).lands)
   ) {
-    return mockPark;
+    return withFallbackDisplayNames(mockPark, resortId, nowOverride);
   }
 
   const qt = body as QTResponse;
@@ -720,15 +720,45 @@ function normalizeQueueTimesResponse(
   // Phase 14.3: seasonal DISPLAY name only. Reads the already-selected
   // (freshest) provider row's raw name; never alters status/wait/updatedAt/
   // waitSource or which row was selected, and `name` stays canonical.
-  return deduped.map((a) => {
-    const selected = liveByName.get(normalizeAttractionName(a.name));
-    const displayName = resolveAttractionDisplayNameAt(
+  return deduped.map((a) =>
+    withSeasonalDisplayName(
+      a,
       resortId,
-      { canonicalId: a.id, selectedProviderName: selected?.name },
+      liveByName.get(normalizeAttractionName(a.name))?.name,
       now,
-    );
-    return displayName ? { ...a, displayName } : a;
-  });
+    ),
+  );
+}
+
+/**
+ * Presentation-only seasonal display name (see seasonalAttractionOverlays.ts).
+ * Returns the same object when no overlay applies; otherwise a copy with only
+ * `displayName` added — status/wait/updatedAt/waitSource are never touched.
+ */
+function withSeasonalDisplayName(
+  attraction: AttractionWait,
+  resortId: ResortId,
+  selectedProviderName: string | undefined,
+  now: Date,
+): AttractionWait {
+  const displayName = resolveAttractionDisplayNameAt(
+    resortId,
+    { canonicalId: attraction.id, selectedProviderName },
+    now,
+  );
+  return displayName ? { ...attraction, displayName } : attraction;
+}
+
+/**
+ * Mock/fallback rides carry no provider evidence, so only CONFIRMED date
+ * windows can name an overlay; unknown/open-ended records stay canonical.
+ */
+function withFallbackDisplayNames(
+  rides: AttractionWait[],
+  resortId: ResortId,
+  now: Date = new Date(),
+): AttractionWait[] {
+  return rides.map((a) => withSeasonalDisplayName(a, resortId, undefined, now));
 }
 
 /**
@@ -837,8 +867,11 @@ async function fetchLiveData(
 
 function getMockDataset(resortId: ResortId, parkId: ParkId): WaitDataset {
   return {
-    data: mockAttractionWaits.filter(
-      (a) => a.resortId === resortId && a.parkId === parkId,
+    data: withFallbackDisplayNames(
+      mockAttractionWaits.filter(
+        (a) => a.resortId === resortId && a.parkId === parkId,
+      ),
+      resortId,
     ),
     dataSource: "mock",
     lastUpdated: null,
@@ -995,6 +1028,21 @@ export function devNormalizeQueueTimesResponse(
   now?: Date,
 ): AttractionWait[] {
   return normalizeQueueTimesResponse(body, resortId, parkId, now);
+}
+
+/** Dev-only: the mock/fallback dataset exactly as getWaitDataset() falls back to it. */
+export function devGetMockDataset(
+  resortId: ResortId,
+  parkId: ParkId,
+  now?: Date,
+): AttractionWait[] {
+  return now
+    ? withFallbackDisplayNames(
+        mockAttractionWaits.filter((a) => a.resortId === resortId && a.parkId === parkId),
+        resortId,
+        now,
+      )
+    : getMockDataset(resortId, parkId).data;
 }
 
 /** Builds a minimal Queue-Times ride record for DEV case construction. */
@@ -1585,3 +1633,75 @@ DEV_QUEUE_TIMES_DEDUPE_CASES.push(
     check: devOverlayCheck("dca-guardians", { displayName: undefined, status: "OPERATING", waitMins: 60, updatedAt: "2026-10-30T18:20:39.000Z" }),
   },
 );
+
+// Phase 14.3 fallback correction: mock/fallback datasets (live disabled,
+// unmapped park, fetch failure, or an unusable response body) still get
+// CONFIRMED-window overlay names, and nothing else changes.
+export const DEV_OVERLAY_FALLBACK_CASES: Array<{
+  description: string;
+  check: () => string | null;
+}> = [
+  {
+    description: "Fallback: inside Luigi's confirmed Halloween window → overlay displayName; canonical name/status/wait/source untouched",
+    check: () => {
+      const result = devGetMockDataset("DLR", "dca", new Date("2026-09-15T20:00:00Z"));
+      const base = mockAttractionWaits.find((m) => m.id === "dca-luigis")!;
+      const a = result.find((r) => r.id === "dca-luigis");
+      if (!a) return "card missing";
+      if (a.displayName !== "Luigi's Honkin' Haul-O-Ween") return `displayName ${a.displayName}`;
+      if (a.name !== base.name || a.status !== base.status || a.waitMins !== base.waitMins || a.updatedAt !== base.updatedAt || a.waitSource !== "fallback") return "canonical fields changed";
+      if (new Set(result.map((r) => r.id)).size !== result.length) return "duplicate ids";
+      if (result.length !== mockAttractionWaits.filter((m) => m.resortId === "DLR" && m.parkId === "dca").length) return "card count changed";
+      return null;
+    },
+  },
+  {
+    description: "Fallback: Mater's too, and both rows are one card each",
+    check: () => {
+      const result = devGetMockDataset("DLR", "dca", new Date("2026-10-31T20:00:00Z"));
+      const m = result.filter((r) => r.id === "dca-maters");
+      return m.length === 1 && m[0].displayName === "Mater's Graveyard JamBOOree" ? null : "Mater's overlay missing or duplicated";
+    },
+  },
+  {
+    description: "Fallback: before start and after end of confirmed window → canonical (no displayName)",
+    check: () => {
+      for (const iso of ["2026-08-20T20:00:00Z", "2026-11-01T20:00:00Z"]) {
+        const a = devGetMockDataset("DLR", "dca", new Date(iso)).find((r) => r.id === "dca-luigis");
+        if (!a || a.displayName !== undefined) return `unexpected displayName at ${iso}`;
+      }
+      return null;
+    },
+  },
+  {
+    description: "Fallback: unknown/open-ended overlays (HMH, small world, Greenhouses, Guardians) stay canonical without provider evidence",
+    check: () => {
+      const at = new Date("2026-11-20T20:00:00Z");
+      const rows = [
+        ...devGetMockDataset("DLR", "disneyland", at),
+        ...devGetMockDataset("WDW", "epcot", at),
+        ...devGetMockDataset("DLR", "dca", at),
+      ];
+      const withName = rows.filter((r) => r.displayName !== undefined).map((r) => r.id);
+      return withName.length === 0 ? null : `unexpected displayName on ${withName.join(",")}`;
+    },
+  },
+  {
+    description: "Fallback: unusable Queue-Times body uses the same fallback path (overlay inside window, mock values kept)",
+    check: () => {
+      const result = devNormalizeQueueTimesResponse({ nope: true }, "DLR", "dca", new Date("2026-09-15T20:00:00Z"));
+      const a = result.find((r) => r.id === "dca-luigis");
+      const base = mockAttractionWaits.find((m) => m.id === "dca-luigis")!;
+      if (!a || a.displayName !== "Luigi's Honkin' Haul-O-Ween") return "overlay missing";
+      return a.status === base.status && a.waitMins === base.waitMins && a.waitSource === "fallback" ? null : "mock values changed";
+    },
+  },
+  {
+    description: "Fallback: default-clock getMockDataset path returns the same card set as mock (no new/removed identities)",
+    check: () => {
+      const a = devGetMockDataset("DLR", "dca");
+      const b = mockAttractionWaits.filter((m) => m.resortId === "DLR" && m.parkId === "dca");
+      return a.map((r) => r.id).join() === b.map((r) => r.id).join() ? null : "identity set changed";
+    },
+  },
+];
