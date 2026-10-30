@@ -51,6 +51,13 @@ export type AttractionWait = {
    */
   waitSource: "live" | "fallback";
   /**
+   * Optional date-/provider-aware seasonal display name (Phase 14.3, e.g.
+   * "Haunted Mansion Holiday"). PRESENTATION ONLY: `name` stays the canonical
+   * identity that planner/Lightning/sync matching uses, and this never
+   * affects status, wait time or closure handling. Absent → show `name`.
+   */
+  displayName?: string;
+  /**
    * Marks an attraction that was historically catalogued as Entertainment
    * (Phase 12 taxonomy move). Plans saved before the move may still carry
    * `type: "entertainment"`; the planner's effective-type resolver reads this
