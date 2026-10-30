@@ -25,6 +25,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { type AttractionWait, type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import { getWaitDataset, LIVE_ENABLED } from "../lib/liveWaitApi";
+import { applyVariantParkHours } from "../lib/attractionVariants";
 import { getWaitTextColor } from "../lib/waitBadge";
 import ResortClock from "../components/ResortClock";
 import ParkHoursLine from "../components/ParkHoursLine";
@@ -559,6 +560,9 @@ export default function TodayPage() {
   const showtimes = showtimesCurrent && showtimesCurrent.parkId === selectedPark ? showtimesCurrent : null;
   const parkHoursCurrent = parkHoursForDisplay(parkHoursRaw, displayNow);
   const parkHours = parkHoursCurrent && parkHoursCurrent.parkId === selectedPark ? parkHoursCurrent : null;
+  // Phase 14.3.1: variant display names revert once park hours confirm all sessions ended (display only).
+  const bestOptionsShown = applyVariantParkHours(bestOptions, parkHours, displayNow);
+  const longestWaitsShown = applyVariantParkHours(longestWaits, parkHours, displayNow);
   const nextShows = selectNextShows(showtimes, displayNow);
   const landByShow = useMemo(
     () => new Map(getEntertainmentForPark(selectedPark).map((p) => [p.name, p.land])),
@@ -740,7 +744,7 @@ export default function TodayPage() {
           {waitEmptyMessage(bestOptions.length) && (
             <div className="today-empty">{waitEmptyMessage(bestOptions.length)}</div>
           )}
-          {bestOptions.map((attraction, index) => {
+          {bestOptionsShown.map((attraction, index) => {
             const isTopPick = index === 0;
             // Color code wait time — thresholds centralized in waitBadge.ts
             const waitColor = getWaitTextColor(attraction.waitMins ?? 0);
@@ -804,7 +808,7 @@ export default function TodayPage() {
           {waitEmptyMessage(longestWaits.length) && (
             <div className="today-empty">{waitEmptyMessage(longestWaits.length)}</div>
           )}
-          {longestWaits.map((attraction) => (
+          {longestWaitsShown.map((attraction) => (
             <div key={attraction.id} className="option-item">
               <div style={{ flex: "1 1 0%", minWidth: 0 }}>
                 <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "var(--text-strong)", wordWrap: "break-word" }}>

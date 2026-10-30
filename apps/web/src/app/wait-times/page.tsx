@@ -35,6 +35,7 @@ import {
 } from "@disney-wait-planner/shared";
 import BackToTopButton from "../../components/BackToTopButton";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
+import { applyVariantParkHours } from "../../lib/attractionVariants";
 import { getWaitBadgeProps } from "../../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
 import {
@@ -916,13 +917,21 @@ export default function WaitTimesPage() {
     return [...new Set([...attractionLands, ...entertainmentLands])].sort();
   }, [attractions, parkEntertainment]);
 
+  // Phase 14.3.1: a variant display name (Monsters After Dark) reverts to the
+  // canonical name once the existing park-hours data confirms every session
+  // ended; status/wait are untouched and unknown hours never revert.
+  const displayAttractions = useMemo(
+    () => applyVariantParkHours(attractions, parkHours, displayNow),
+    [attractions, parkHours, displayNow],
+  );
+
   /**
    * Filter and sort attractions based on current settings.
    * Scoped strictly to selectedResort — no cross-resort data can appear.
    */
   const filteredAttractions = useMemo(() => {
     // attractions is already scoped to selectedResort+selectedPark by getWaitDataset
-    let results = attractions.slice();
+    let results = displayAttractions.slice();
 
     if (operatingOnly) {
       results = results.filter((a) => a.status === "OPERATING");
@@ -943,7 +952,7 @@ export default function WaitTimesPage() {
     });
 
     return results;
-  }, [attractions, operatingOnly, selectedLand, sortBy]);
+  }, [displayAttractions, operatingOnly, selectedLand, sortBy]);
 
   return (
     <>

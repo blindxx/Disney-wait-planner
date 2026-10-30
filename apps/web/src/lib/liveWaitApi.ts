@@ -33,6 +33,13 @@ import {
   normalizeAttractionName,
 } from "./plannedClosures";
 import { resolveAttractionDisplayNameAt } from "./seasonalAttractionOverlays";
+import {
+  buildVariantWaits,
+  findVariantByProviderId,
+  findVariantGroup,
+  selectVariantRow,
+  type AttractionVariantGroup,
+} from "./attractionVariants";
 
 // ============================================
 // CONFIG
@@ -589,6 +596,14 @@ function normalizeQueueTimesResponse(
   allRides.push(...(qt.rides ?? []));
 
   const multiStationIdentities = resortId === "WDW" ? MULTI_STATION_IDENTITIES_WDW : null;
+  const now = nowOverride ?? new Date();
+
+  // Phase 14.3.1: rows registered as attraction VARIANTS (attractionVariants.ts,
+  // keyed by Queue-Times id) are held apart here — per group, per variant, with
+  // only same-variant revisions freshness-deduped — and never enter the
+  // freshest-wins loop below, so it cannot pick one variant over another.
+  // Selection happens after the loop; unregistered rides are unaffected.
+  const variantRows = new Map<string, Map<string, QTRide>>();
 
   // Rides resolving to a multi-station identity are collected separately,
   // keyed first by canonical identity and then by stationIdentity() — the
@@ -605,6 +620,20 @@ function normalizeQueueTimesResponse(
 
   const liveByName = new Map<string, QTRide>();
   for (const ride of allRides) {
+    const registered = findVariantByProviderId(resortId, parkId, ride.id);
+    if (registered) {
+      let byVariant = variantRows.get(registered.group.canonicalId);
+      if (!byVariant) {
+        byVariant = new Map<string, QTRide>();
+        variantRows.set(registered.group.canonicalId, byVariant);
+      }
+      const existingVariantRow = byVariant.get(registered.variant.id);
+      if (!existingVariantRow || isFresher(ride, existingVariantRow)) {
+        byVariant.set(registered.variant.id, ride);
+      }
+      continue;
+    }
+
     const normName = normalizeAttractionName(ride.name);
     const key = aliasMap?.get(normName) ?? normName;
 
@@ -632,6 +661,30 @@ function normalizeQueueTimesResponse(
     liveByName.set(key, aggregateStationRecords(Array.from(stations.values())));
   }
 
+  // Phase 14.3.1: choose ONE variant row per registered attraction and place
+  // it where the canonical row would be, so name/status/wait/timestamp all
+  // come from that single record. No usable open variant → the regular row
+  // exactly as before (an unregistered same-name row, or nothing → mock fallback).
+  const variantMeta = new Map<string, { selectedVariantId?: string; variantWaits: ReturnType<typeof buildVariantWaits> }>();
+  for (const [canonicalId, byVariant] of variantRows) {
+    const group = findVariantGroup(canonicalId) as AttractionVariantGroup;
+    const mockRide = mockPark.find((m) => m.id === canonicalId);
+    if (!mockRide) continue;
+    const canonicalKey = normalizeAttractionName(mockRide.name);
+    const regularVariant = group.variants.find((v) => v.role === "regular")!;
+    if (!byVariant.has(regularVariant.id)) {
+      const unregisteredRegular = liveByName.get(canonicalKey);
+      if (unregisteredRegular) byVariant.set(regularVariant.id, unregisteredRegular);
+    }
+    const choice = selectVariantRow(group, byVariant, now);
+    const chosen = choice?.row ?? byVariant.get(regularVariant.id);
+    if (chosen) liveByName.set(canonicalKey, chosen);
+    variantMeta.set(canonicalId, {
+      selectedVariantId: choice?.variantId ?? (byVariant.has(regularVariant.id) ? regularVariant.id : undefined),
+      variantWaits: buildVariantWaits(group, mockRide.name, byVariant, now),
+    });
+  }
+
   // Dev-only: warn about live rides that have no mock counterpart.
   // Helps identify attractions we should add or rename in mock.ts.
   if (process.env.NODE_ENV !== "production") {
@@ -642,8 +695,6 @@ function normalizeQueueTimesResponse(
       }
     }
   }
-
-  const now = nowOverride ?? new Date();
 
   // Overlay live values onto mock rides; keep mock where no match exists.
   // Status priority:
@@ -720,14 +771,18 @@ function normalizeQueueTimesResponse(
   // Phase 14.3: seasonal DISPLAY name only. Reads the already-selected
   // (freshest) provider row's raw name; never alters status/wait/updatedAt/
   // waitSource or which row was selected, and `name` stays canonical.
-  return deduped.map((a) =>
-    withSeasonalDisplayName(
+  return deduped.map((a) => {
+    const named = withSeasonalDisplayName(
       a,
       resortId,
       liveByName.get(normalizeAttractionName(a.name))?.name,
       now,
-    ),
-  );
+    );
+    const meta = variantMeta.get(a.id);
+    return meta && meta.variantWaits.length > 0
+      ? { ...named, selectedVariantId: meta.selectedVariantId, variantWaits: meta.variantWaits }
+      : named;
+  });
 }
 
 /**
@@ -1705,3 +1760,126 @@ export const DEV_OVERLAY_FALLBACK_CASES: Array<{
     },
   },
 ];
+
+// Phase 14.3.1: attraction variant handling (attractionVariants.ts). Pure
+// normalization cases — each pins `now` and builds Queue-Times bodies with the
+// real provider ids (329 = Mission: BREAKOUT!, 5146 = Monsters After Dark).
+// Run via `runDevVariantNormalizationCases()` (returns failing descriptions).
+const DEV_VAR_NOW = new Date("2026-10-30T04:00:00Z");
+const devVarTs = (minsAgo: number) => new Date(DEV_VAR_NOW.getTime() - minsAgo * 60_000).toISOString();
+const DEV_BREAKOUT = "Guardians of the Galaxy - Mission: BREAKOUT!";
+const DEV_MONSTERS = "Guardians of the Galaxy - Monsters After Dark";
+const DEV_MONSTERS_DISPLAY = "Guardians of the Galaxy – Monsters After Dark";
+const devVarBody = (...rides: QTRide[]) => devOverlayBody("Avengers Campus", ...rides);
+const devVarCheck = (
+  expect: { displayName: string | undefined; status: AttractionWait["status"]; waitMins: number | null; updatedAt: string; selected?: string | undefined },
+) => (result: AttractionWait[]): string | null => {
+  const g = result.filter((a) => a.id === "dca-guardians");
+  if (g.length !== 1) return `expected exactly 1 Guardians card, got ${g.length}`;
+  const a = g[0];
+  if (a.name !== "Guardians of the Galaxy – Mission: BREAKOUT!") return `canonical name changed: ${a.name}`;
+  if (a.displayName !== expect.displayName) return `expected displayName ${expect.displayName}, got ${a.displayName}`;
+  if (a.status !== expect.status) return `expected status ${expect.status}, got ${a.status}`;
+  if (a.waitMins !== expect.waitMins) return `expected wait ${expect.waitMins}, got ${a.waitMins}`;
+  if (a.updatedAt !== expect.updatedAt) return `expected updatedAt ${expect.updatedAt}, got ${a.updatedAt}`;
+  if (expect.selected !== undefined && a.selectedVariantId !== expect.selected) return `expected selectedVariantId ${expect.selected}, got ${a.selectedVariantId}`;
+  return null;
+};
+
+export const DEV_VARIANT_NORMALIZATION_CASES: Array<{
+  description: string;
+  resortId: ResortId;
+  parkId: ParkId;
+  now: Date;
+  body: unknown;
+  check: (result: AttractionWait[]) => string | null;
+}> = [
+  {
+    description: "Variant: regular open, Monsters closed → regular card (canonical name, regular wait/timestamp)",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(2)), devQTRide(5146, DEV_MONSTERS, false, 0, devVarTs(1))),
+    check: devVarCheck({ displayName: undefined, status: "OPERATING", waitMins: 40, updatedAt: devVarTs(2), selected: "regular" }),
+  },
+  {
+    description: "Variant: regular closed, Monsters open → Monsters name + ITS wait/status/timestamp together; one card",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, false, 0, devVarTs(1)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(2))),
+    check: devVarCheck({ displayName: DEV_MONSTERS_DISPLAY, status: "OPERATING", waitMins: 25, updatedAt: devVarTs(2), selected: "monsters-after-dark" }),
+  },
+  {
+    description: "Variant: both open → regular wins even when Monsters row is fresher",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(10)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(1))),
+    check: devVarCheck({ displayName: undefined, status: "OPERATING", waitMins: 40, updatedAt: devVarTs(10), selected: "regular" }),
+  },
+  {
+    description: "Variant: both open, regular row stale (provider evidence) → Monsters",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(180)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(1))),
+    check: devVarCheck({ displayName: DEV_MONSTERS_DISPLAY, status: "OPERATING", waitMins: 25, updatedAt: devVarTs(1), selected: "monsters-after-dark" }),
+  },
+  {
+    description: "Variant: neither open → existing regular behavior (DOWN, regular timestamp, canonical name even if Monsters is fresher)",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, false, 0, devVarTs(30)), devQTRide(5146, DEV_MONSTERS, false, 0, devVarTs(1))),
+    check: devVarCheck({ displayName: undefined, status: "DOWN", waitMins: null, updatedAt: devVarTs(30), selected: "regular" }),
+  },
+  {
+    description: "Variant: Monsters row missing → exactly the pre-variant regular result",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(2))),
+    check: devVarCheck({ displayName: undefined, status: "OPERATING", waitMins: 40, updatedAt: devVarTs(2) }),
+  },
+  {
+    description: "Variant: regular row missing, Monsters closed → mock fallback (waitSource fallback), no overlay name",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(5146, DEV_MONSTERS, false, 0, devVarTs(1))),
+    check: (result) => {
+      const a = result.find((r) => r.id === "dca-guardians");
+      const mock = mockAttractionWaits.find((m) => m.id === "dca-guardians")!;
+      if (!a) return "card missing";
+      return a.waitSource === "fallback" && a.status === mock.status && a.waitMins === mock.waitMins && a.displayName === undefined ? null : "expected mock fallback";
+    },
+  },
+  {
+    description: "Variant: stale-only open Monsters + closed regular → existing fallback (regular DOWN), Monsters not trusted",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, false, 0, devVarTs(5)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(240))),
+    check: devVarCheck({ displayName: undefined, status: "DOWN", waitMins: null, updatedAt: devVarTs(5), selected: "regular" }),
+  },
+  {
+    description: "Variant: wait isolation — variantWaits carry each variant's OWN record (Monsters 25 vs regular 40)",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(2)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(1))),
+    check: (result) => {
+      const w = result.find((r) => r.id === "dca-guardians")?.variantWaits ?? [];
+      const reg = w.find((x) => x.variantId === "regular");
+      const alt = w.find((x) => x.variantId === "monsters-after-dark");
+      return reg?.waitMins === 40 && alt?.waitMins === 25 ? null : `variantWaits ${JSON.stringify(w)}`;
+    },
+  },
+  {
+    description: "Variant: duplicate revisions of the SAME variant id resolve to the freshest; different variants never cross-dedupe (land + top-level rides)",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: { lands: [{ id: 1, name: "Avengers Campus", rides: [devQTRide(329, DEV_BREAKOUT, true, 55, devVarTs(20)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(1))] }], rides: [devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(3))] },
+    check: devVarCheck({ displayName: undefined, status: "OPERATING", waitMins: 40, updatedAt: devVarTs(3), selected: "regular" }),
+  },
+  {
+    description: "Variant: a different park reusing ids is untouched (registry is park-scoped); other DCA rides unchanged",
+    resortId: "DLR", parkId: "disneyland", now: DEV_VAR_NOW,
+    body: devOverlayBody("Fantasyland", devQTRide(329, "Peter Pan's Flight", true, 30, devVarTs(1))),
+    check: (result) => result.some((a) => a.selectedVariantId || a.variantWaits) ? "variant fields leaked to a non-variant park" : null,
+  },
+  {
+    description: "Variant: unregistered attractions carry no variant fields",
+    resortId: "DLR", parkId: "dca", now: DEV_VAR_NOW,
+    body: devVarBody(devQTRide(329, DEV_BREAKOUT, true, 40, devVarTs(2)), devQTRide(5146, DEV_MONSTERS, true, 25, devVarTs(1))),
+    check: (result) => result.filter((a) => a.id !== "dca-guardians" && (a.selectedVariantId || a.variantWaits)).length === 0 ? null : "variant fields on a non-registered attraction",
+  },
+];
+
+export function runDevVariantNormalizationCases(): string[] {
+  return DEV_VARIANT_NORMALIZATION_CASES.filter((c) => {
+    try { return c.check(normalizeQueueTimesResponse(c.body, c.resortId, c.parkId, c.now)) !== null; } catch { return true; }
+  }).map((c) => c.description);
+}

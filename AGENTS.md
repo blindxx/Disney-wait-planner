@@ -269,6 +269,21 @@ compatibility with import/export, cloud sync restore, and profile
 duplication — those all depend on plan items continuing to resolve
 against the same canonical identities over time.
 
+## Attraction variants (Phase 14.3.1)
+
+`apps/web/src/lib/attractionVariants.ts` is the single registry (keyed by
+Queue-Times ride id) for one physical attraction published as several
+simultaneous provider rows (currently only Guardians: Mission BREAKOUT! 329 /
+Monsters After Dark 5146). Registered rows bypass the freshest-row dedupe in
+`liveWaitApi.ts` and one variant is selected (one open → it; both open →
+regular unless the regular row is stale/unusable; none → existing regular
+behavior). Park hours only revert the DISPLAY NAME (`applyVariantParkHours`),
+never status/wait. Planners get each variant's own record via
+`expandVariantWaitRows`; `lookupWait` never substitutes the regular wait for an
+alternate variant. Extend the registry rather than adding per-ride special cases.
+DEV checks: `runDevAttractionVariantCases()`, `runDevVariantNormalizationCases()`,
+`runDevVariantPlannerCases()`.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

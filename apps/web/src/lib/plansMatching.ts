@@ -21,6 +21,7 @@
  */
 
 import type { ResortId } from "@disney-wait-planner/shared";
+import { findAlternateVariantByPlannerName } from "./attractionVariants";
 
 // ---------------------------------------------------------------------------
 // Normalization helpers
@@ -424,6 +425,14 @@ export function lookupWait(
   const exact = waitMap.get(planKey);
   if (exact) return exact;
 
+  // Phase 14.3.1: an alternate attraction variant (e.g. Monsters After Dark)
+  // keeps resolving to the shared canonical identity for planner metadata via
+  // the alias maps, but its WAIT is its own: it matches only an entry the
+  // caller built from that variant's own provider record, and is never
+  // redirected to the regular variant's entry.
+  const variant = findAlternateVariantByPlannerName(normalizeKey, planKey);
+  if (variant) return waitMap.get(normalizeKey(variant.primaryName)) ?? null;
+
   // Stage 3: manual alias lookup.
   // Conservative fallback: if planKey starts with "the ", also check aliases
   // for the key with "the " stripped (e.g. "the barnstormer" → "barnstormer").
@@ -598,3 +607,34 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "ksr",                   resort: "WDW", expectedKey: "kilimanjaro safaris" },
   { input: "7dmt",                  resort: "WDW", expectedKey: "seven dwarfs mine train" },
 ];
+
+// ---------------------------------------------------------------------------
+// Phase 14.3.1 — attraction variant planner cases (run manually; returns failing labels)
+// ---------------------------------------------------------------------------
+
+const DEV_BREAKOUT_NAME = "Guardians of the Galaxy \u2013 Mission: BREAKOUT!";
+const DEV_MONSTERS_NAME = "Guardians of the Galaxy \u2013 Monsters After Dark";
+
+function devVariantWaitMap(withMonsters: boolean): Map<string, WaitEntry> {
+  const m = new Map<string, WaitEntry>();
+  m.set(normalizeKey(DEV_BREAKOUT_NAME), { status: "OPERATING", waitMins: 40, canonicalName: DEV_BREAKOUT_NAME });
+  if (withMonsters) m.set(normalizeKey(DEV_MONSTERS_NAME), { status: "OPERATING", waitMins: 25, canonicalName: DEV_MONSTERS_NAME });
+  return m;
+}
+
+export const DEV_VARIANT_PLANNER_CASES: Array<{ label: string; ok: () => boolean }> = [
+  { label: "regular BREAKOUT! (full name, shorthands) keeps its own wait", ok: () => ["Guardians of the Galaxy \u2013 Mission: BREAKOUT!", "guardians", "gotg", "Guardians Breakout"].every((n) => lookupWait(n, devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 40) },
+  { label: "Monsters (both spellings) uses ITS OWN wait when available", ok: () => ["Guardians of the Galaxy \u2013 Monsters After Dark", "Guardians Monsters After Dark", "guardians of the galaxy - monsters after dark (7pm)"].every((n) => lookupWait(n, devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 25) },
+  { label: "Monsters never substitutes regular's wait when its own data is unavailable (no badge)", ok: () => ["Guardians of the Galaxy \u2013 Monsters After Dark", "Guardians Monsters After Dark"].every((n) => lookupWait(n, devVariantWaitMap(false), ALIASES_DLR) === null) },
+  { label: "identity aliases unchanged: Monsters still resolves to the canonical Guardians key", ok: () => devResolvePlanAlias("Guardians Monsters After Dark", "DLR") === "guardians of the galaxy mission breakout" },
+  { label: "leading \"the\" on Monsters names: own wait when available, never regular's", ok: () => ["the Guardians of the Galaxy \u2013 Monsters After Dark", "The Guardians Monsters After Dark", "the guardians monsters after dark (7pm)"].every((n) => lookupWait(n, devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 25) },
+  { label: "leading \"the\" on Monsters names: unavailable (closed/stale/missing → no entry) → no badge", ok: () => ["the Guardians of the Galaxy \u2013 Monsters After Dark", "The Guardians Monsters After Dark"].every((n) => lookupWait(n, devVariantWaitMap(false), ALIASES_DLR) === null) },
+  { label: "leading \"the\" on regular names still resolves regular", ok: () => lookupWait("the guardians", devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 40 },
+  { label: "both variants resolve independently in the same map", ok: () => { const m = devVariantWaitMap(true); return lookupWait("Guardians", m, ALIASES_DLR)?.waitMins === 40 && lookupWait("Guardians Monsters After Dark", m, ALIASES_DLR)?.waitMins === 25; } },
+];
+
+export function runDevVariantPlannerCases(): string[] {
+  return DEV_VARIANT_PLANNER_CASES.filter((c) => {
+    try { return !c.ok(); } catch { return true; }
+  }).map((c) => c.label);
+}

@@ -29,7 +29,8 @@ import {
   type ResortId,
 } from "@disney-wait-planner/shared";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
-import { getPlannerItemMetadata } from "@/lib/plannerItemMetadata";
+import { expandVariantWaitRows, getVariantSuggestionNames } from "@/lib/attractionVariants";
+import { getPlannerItemMetadata, resolveMismatchAttractionPark } from "@/lib/plannerItemMetadata";
 import {
   resolveRefurbishmentLine,
   LEGACY_ATTRACTION_WARNING,
@@ -2577,7 +2578,7 @@ export default function LightningPage() {
     const source =
       LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
     const map = new Map<string, WaitEntry>();
-    for (const a of source) {
+    for (const a of expandVariantWaitRows(source)) {
       if (a.resortId !== selectedResort) continue;
       map.set(normalizeKey(a.name), {
         status: a.status,
@@ -2594,7 +2595,7 @@ export default function LightningPage() {
     const source =
       LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
     const map = new Map<string, string>();
-    for (const a of source) {
+    for (const a of expandVariantWaitRows(source)) {
       if (a.resortId !== selectedResort) continue;
       map.set(normalizeKey(a.name), PARK_LABELS[a.parkId] ?? a.parkId);
     }
@@ -2611,8 +2612,11 @@ export default function LightningPage() {
 
   // Canonical attraction names for autocomplete, scoped to selectedResort.
   const suggestions = useMemo(
-    () => Array.from(waitMap.values()).map((v) => v.canonicalName),
-    [waitMap]
+    () => Array.from(new Set([
+      ...Array.from(waitMap.values()).map((v) => v.canonicalName),
+      ...getVariantSuggestionNames(selectedResort),
+    ])),
+    [waitMap, selectedResort]
   );
 
   // Phase 8.3.2 — Safe display-day resolution using the known planner day model (BUG A fix).
@@ -2815,7 +2819,7 @@ export default function LightningPage() {
       LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
     const wMap = new Map<string, WaitEntry>();
     const pMap = new Map<string, string>();
-    for (const a of source) {
+    for (const a of expandVariantWaitRows(source)) {
       if (a.resortId !== mismatchResort) continue;
       wMap.set(normalizeKey(a.name), {
         status: a.status,
@@ -2834,8 +2838,7 @@ export default function LightningPage() {
     if (!resolvedDayPark || !rideName.trim()) return null;
     const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
     const waitEntry = lookupWait(rideName.trim(), mismatchWaitMap, aliases);
-    if (!waitEntry) return null;
-    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    const attractionPark = resolveMismatchAttractionPark(rideName.trim(), mismatchResort, waitEntry, mismatchParkIdMap);
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;
@@ -2847,8 +2850,7 @@ export default function LightningPage() {
     if (!resolvedDayPark || !editingName.trim()) return null;
     const aliases = mismatchResort === "DLR" ? ALIASES_DLR : ALIASES_WDW;
     const waitEntry = lookupWait(editingName.trim(), mismatchWaitMap, aliases);
-    if (!waitEntry) return null;
-    const attractionPark = mismatchParkIdMap.get(normalizeKey(waitEntry.canonicalName));
+    const attractionPark = resolveMismatchAttractionPark(editingName.trim(), mismatchResort, waitEntry, mismatchParkIdMap);
     if (!attractionPark || attractionPark === resolvedDayPark) return null;
     const attractionParkLabel = PARK_LABELS[attractionPark as ParkId] ?? attractionPark;
     const dayParkLabel = PARK_LABELS[resolvedDayPark as ParkId] ?? resolvedDayPark;

@@ -58,10 +58,31 @@ export type AttractionWait = {
    */
   displayName?: string;
   /**
+   * Phase 14.3.1 — present only for attractions registered in
+   * attractionVariants.ts (Queue-Times publishes several operating variants
+   * as separate rows). `selectedVariantId` names the variant whose row supplied
+   * this card's status/wait/updatedAt; `variantWaits` carries each variant's OWN
+   * provider record so planners never substitute one variant's wait for
+   * another. Absent for every other attraction.
+   */
+  selectedVariantId?: string;
+  variantWaits?: AttractionVariantWait[];
+  /**
    * Marks an attraction that was historically catalogued as Entertainment
    * (Phase 12 taxonomy move). Plans saved before the move may still carry
    * `type: "entertainment"`; the planner's effective-type resolver reads this
    * flag so those items resolve as Attractions. Catalog metadata only.
    */
   reclassifiedFromEntertainment?: true;
+};
+
+/** One variant's own provider status/wait (see AttractionWait.variantWaits). */
+export type AttractionVariantWait = {
+  variantId: string;
+  role: "regular" | "alternate";
+  /** Variant's planner-facing name (alternate) or the canonical name (regular). */
+  name: string;
+  status: "OPERATING" | "DOWN";
+  waitMins: number | null;
+  updatedAt: string;
 };

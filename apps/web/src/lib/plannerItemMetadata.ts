@@ -52,6 +52,9 @@
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import type { PlannerItemType } from "./plansTransfer";
+import { findAlternateVariantByPlannerName, expandVariantWaitRows } from "./attractionVariants";
+import { ALIASES_DLR, lookupWait, normalizeKey, stripAnnotations, type WaitEntry } from "./plansMatching";
+import { devNormalizeQueueTimesResponse } from "./liveWaitApi";
 import { getAttractionContext, isReclassifiedFromEntertainmentAttraction } from "./legacyAttractions";
 import { getDiningContext, inferPlannerItemType } from "./diningSuggestions";
 import { getEntertainmentContext } from "./entertainmentSuggestions";
@@ -266,6 +269,27 @@ export function getPlannerItemMetadata(
       // handled above), kept as a safety net for a future added type.
       return { type, resortId: resort };
   }
+}
+
+/**
+ * Park used by Lightning's add/edit park-mismatch warning. The live wait map's
+ * park wins when the name resolved there (unchanged behavior). An alternate
+ * attraction variant (e.g. Monsters After Dark) whose OWN wait entry is
+ * unavailable — closed, stale or missing provider row — still has a park
+ * identity, so it falls back to the canonical planner metadata instead of
+ * silently losing the warning. Wait lookup itself is unaffected (no wait →
+ * no badge). Non-variant names keep their existing behavior.
+ */
+export function resolveMismatchAttractionPark(
+  name: string,
+  resort: ResortId,
+  waitEntry: WaitEntry | null,
+  parkIdByKey: ReadonlyMap<string, string>,
+): string | undefined {
+  const live = waitEntry ? parkIdByKey.get(normalizeKey(waitEntry.canonicalName)) : undefined;
+  if (live) return live;
+  if (!findAlternateVariantByPlannerName(normalizeKey, stripAnnotations(name))) return undefined;
+  return getPlannerItemMetadata(name, "attraction", resort).parkId;
 }
 
 // ---------------------------------------------------------------------------
@@ -914,3 +938,70 @@ export const DEV_RESOLVE_PLANNER_ITEM_EFFECTIVE_TYPE_CASES: Array<{
     expected: "attraction",
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Phase 14.3.1 — Lightning mismatch park cases (run manually; returns failing labels)
+// ---------------------------------------------------------------------------
+
+const DEV_MM_NOW = new Date("2026-10-30T04:00:00Z");
+const devMmTs = (minsAgo: number) => new Date(DEV_MM_NOW.getTime() - minsAgo * 60_000).toISOString();
+const devMmRide = (id: number, name: string, open: boolean, wait: number, minsAgo: number) =>
+  ({ id, name, is_open: open, wait_time: wait, last_updated: devMmTs(minsAgo) });
+const BREAKOUT_QT = "Guardians of the Galaxy - Mission: BREAKOUT!";
+const MONSTERS_QT = "Guardians of the Galaxy - Monsters After Dark";
+
+/** Wait/park maps exactly as Lightning builds them (expanded variant rows). */
+function devMmMaps(rides: ReturnType<typeof devMmRide>[]) {
+  const data = expandVariantWaitRows(
+    devNormalizeQueueTimesResponse({ lands: [{ id: 1, name: "Avengers Campus", rides }] }, "DLR", "dca", DEV_MM_NOW),
+  );
+  const wait = new Map<string, WaitEntry>();
+  const park = new Map<string, string>();
+  for (const a of data) {
+    wait.set(normalizeKey(a.name), { status: a.status, waitMins: a.waitMins, canonicalName: a.name });
+    park.set(normalizeKey(a.name), a.parkId);
+  }
+  return { wait, park };
+}
+
+function devMmPark(name: string, rides: ReturnType<typeof devMmRide>[]): string | undefined {
+  const { wait, park } = devMmMaps(rides);
+  return resolveMismatchAttractionPark(name, "DLR", lookupWait(name, wait, ALIASES_DLR), park);
+}
+
+const DEV_MM_NAMES = ["Guardians of the Galaxy \u2013 Monsters After Dark", "Guardians Monsters After Dark"];
+
+export const DEV_MISMATCH_PARK_CASES: Array<{ label: string; ok: () => boolean }> = [
+  { label: "Monsters open (own wait) → dca", ok: () => DEV_MM_NAMES.every((n) => devMmPark(n, [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, true, 25, 1)]) === "dca") },
+  { label: "Monsters closed → still dca; wait lookup still null (no badge)", ok: () => {
+    const rides = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, false, 0, 1)];
+    return DEV_MM_NAMES.every((n) => devMmPark(n, rides) === "dca" && lookupWait(n, devMmMaps(rides).wait, ALIASES_DLR) === null);
+  } },
+  { label: "Monsters stale → still dca; no badge", ok: () => {
+    const rides = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, true, 25, 240)];
+    return DEV_MM_NAMES.every((n) => devMmPark(n, rides) === "dca" && lookupWait(n, devMmMaps(rides).wait, ALIASES_DLR) === null);
+  } },
+  { label: "Monsters row missing → still dca; no badge", ok: () => {
+    const rides = [devMmRide(329, BREAKOUT_QT, true, 40, 2)];
+    return DEV_MM_NAMES.every((n) => devMmPark(n, rides) === "dca" && lookupWait(n, devMmMaps(rides).wait, ALIASES_DLR) === null);
+  } },
+  { label: "all provider rows missing → still dca", ok: () => DEV_MM_NAMES.every((n) => devMmPark(n, []) === "dca") },
+  { label: "leading \"the\" Monsters name: open/closed/stale/missing → no regression, no badge when unavailable", ok: () => {
+    const n = "the Guardians Monsters After Dark";
+    const closed = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, false, 0, 1)];
+    const stale = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, true, 25, 240)];
+    const open = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, true, 25, 1)];
+    const missing = [devMmRide(329, BREAKOUT_QT, true, 40, 2)];
+    const w = (r: ReturnType<typeof devMmRide>[]) => lookupWait(n, devMmMaps(r).wait, ALIASES_DLR);
+    return w(open)?.waitMins === 25 && w(closed) === null && w(stale) === null && w(missing) === null && [open, closed, stale, missing].every((r) => devMmPark(n, r) === "dca");
+  } },
+  { label: "annotated plan text (time suffix) still resolves", ok: () => devMmPark("Guardians Monsters After Dark (7pm)", []) === "dca" },
+  { label: "regular BREAKOUT! unchanged (live park map)", ok: () => devMmPark("Guardians", [devMmRide(329, BREAKOUT_QT, true, 40, 2)]) === "dca" },
+  { label: "non-variant unmatched/custom name → no park (unchanged)", ok: () => devMmPark("My custom thing", []) === undefined && devMmPark("Space Mountain", []) === undefined },
+];
+
+export function runDevMismatchParkCases(): string[] {
+  return DEV_MISMATCH_PARK_CASES.filter((c) => {
+    try { return !c.ok(); } catch { return true; }
+  }).map((c) => c.label);
+}

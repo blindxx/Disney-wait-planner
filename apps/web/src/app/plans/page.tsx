@@ -89,6 +89,7 @@ import {
   LEGACY_ATTRACTION_WARNING,
 } from "@/lib/plannerWarnings";
 import { getWaitDatasetForResort, LIVE_ENABLED } from "@/lib/liveWaitApi";
+import { expandVariantWaitRows, getVariantSuggestionNames } from "@/lib/attractionVariants";
 import {
   normalizeKey,
   ALIASES_DLR,
@@ -1869,7 +1870,8 @@ export default function PlansPage() {
     const source =
       LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
     const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string }>();
-    for (const a of source) {
+    // Phase 14.3.1: one entry per attraction variant, each with its own provider wait.
+    for (const a of expandVariantWaitRows(source)) {
       if (a.resortId !== selectedResort) continue; // resort scope guard
       map.set(normalizeKey(a.name), {
         status: a.status,
@@ -1902,7 +1904,10 @@ export default function PlansPage() {
     });
     return [
       ...ent.boosted,
-      ...Array.from(waitMap.values()).map((v) => v.canonicalName),
+      ...Array.from(new Set([
+        ...Array.from(waitMap.values()).map((v) => v.canonicalName),
+        ...getVariantSuggestionNames(selectedResort),
+      ])),
       ...getDiningSuggestions(selectedResort),
       ...ent.neutral,
       ...getExperienceSuggestions(selectedResort),
