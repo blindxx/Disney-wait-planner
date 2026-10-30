@@ -69,8 +69,8 @@ import {
   getDiningSuggestions,
   isDiningName,
 } from "@/lib/diningSuggestions";
+import { partitionEntertainmentSuggestions } from "@/lib/seasonalEntertainment";
 import {
-  getEntertainmentSuggestions,
   getEntertainmentAvailabilityType,
   isEntertainmentName,
 } from "@/lib/entertainmentSuggestions";
@@ -1884,15 +1884,31 @@ export default function PlansPage() {
   // Dining names are scoped to the active resort, mirroring the attraction
   // waitMap scoping above — disambiguated with a location suffix only when
   // the same name exists at more than one location within that resort.
-  const suggestions = useMemo(
-    () => [
+  //
+  // Phase 14.2 — entertainment is ordered by confirmed seasonal relevance to
+  // the active day's own date + effective park (seasonalEntertainment.ts):
+  // boosted entries lead, confirmed out-of-season ones trail, nothing is
+  // removed. An undated day keeps the catalog order (today is never
+  // substituted); display-only, no planner data is read or written.
+  const suggestionDayDateRaw = ready ? dayMeta[activeDayId]?.date : null;
+  const suggestionDayDate =
+    suggestionDayDateRaw && isValidIsoCalendarDate(suggestionDayDateRaw) ? suggestionDayDateRaw : null;
+  const suggestionDayPark = ready ? resolveDayPark(activeDayId) : null;
+  const suggestions = useMemo(() => {
+    const ent = partitionEntertainmentSuggestions({
+      resort: selectedResort,
+      date: suggestionDayDate,
+      parkId: suggestionDayPark,
+    });
+    return [
+      ...ent.boosted,
       ...Array.from(waitMap.values()).map((v) => v.canonicalName),
       ...getDiningSuggestions(selectedResort),
-      ...getEntertainmentSuggestions(selectedResort),
+      ...ent.neutral,
       ...getExperienceSuggestions(selectedResort),
-    ],
-    [waitMap, selectedResort]
-  );
+      ...ent.demoted,
+    ];
+  }, [waitMap, selectedResort, suggestionDayDate, suggestionDayPark]);
 
   // Phase 8.0 — Items visible in the current day (display-only; storage unchanged).
   const displayedItems = useMemo(
