@@ -986,6 +986,15 @@ export const DEV_MISMATCH_PARK_CASES: Array<{ label: string; ok: () => boolean }
     return DEV_MM_NAMES.every((n) => devMmPark(n, rides) === "dca" && lookupWait(n, devMmMaps(rides).wait, ALIASES_DLR) === null);
   } },
   { label: "all provider rows missing → still dca", ok: () => DEV_MM_NAMES.every((n) => devMmPark(n, []) === "dca") },
+  { label: "leading \"the\" Monsters name: open/closed/stale/missing → no regression, no badge when unavailable", ok: () => {
+    const n = "the Guardians Monsters After Dark";
+    const closed = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, false, 0, 1)];
+    const stale = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, true, 25, 240)];
+    const open = [devMmRide(329, BREAKOUT_QT, true, 40, 2), devMmRide(5146, MONSTERS_QT, true, 25, 1)];
+    const missing = [devMmRide(329, BREAKOUT_QT, true, 40, 2)];
+    const w = (r: ReturnType<typeof devMmRide>[]) => lookupWait(n, devMmMaps(r).wait, ALIASES_DLR);
+    return w(open)?.waitMins === 25 && w(closed) === null && w(stale) === null && w(missing) === null && [open, closed, stale, missing].every((r) => devMmPark(n, r) === "dca");
+  } },
   { label: "annotated plan text (time suffix) still resolves", ok: () => devMmPark("Guardians Monsters After Dark (7pm)", []) === "dca" },
   { label: "regular BREAKOUT! unchanged (live park map)", ok: () => devMmPark("Guardians", [devMmRide(329, BREAKOUT_QT, true, 40, 2)]) === "dca" },
   { label: "non-variant unmatched/custom name → no park (unchanged)", ok: () => devMmPark("My custom thing", []) === undefined && devMmPark("Space Mountain", []) === undefined },

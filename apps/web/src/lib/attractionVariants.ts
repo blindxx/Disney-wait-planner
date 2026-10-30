@@ -105,10 +105,13 @@ export function findAlternateVariantByPlannerName(
   plannerName: string,
 ): { group: AttractionVariantGroup; variant: AttractionVariant; primaryName: string } | undefined {
   const key = normalize(plannerName);
+  // Same supported prefix handling as lookupWait's alias stage: a leading
+  // "the " is optional, so "the Guardians Monsters After Dark" is the variant too.
+  const bare = key.startsWith("the ") ? key.slice(4) : key;
   for (const group of ATTRACTION_VARIANT_GROUPS) {
     for (const variant of group.variants) {
       if (variant.role !== "alternate" || !variant.plannerNames) continue;
-      if (variant.plannerNames.some((n) => normalize(n) === key)) {
+      if (variant.plannerNames.some((n) => { const nk = normalize(n); return nk === key || nk === bare; })) {
         return { group, variant, primaryName: variant.plannerNames[0] };
       }
     }

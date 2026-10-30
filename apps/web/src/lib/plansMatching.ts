@@ -627,6 +627,9 @@ export const DEV_VARIANT_PLANNER_CASES: Array<{ label: string; ok: () => boolean
   { label: "Monsters (both spellings) uses ITS OWN wait when available", ok: () => ["Guardians of the Galaxy \u2013 Monsters After Dark", "Guardians Monsters After Dark", "guardians of the galaxy - monsters after dark (7pm)"].every((n) => lookupWait(n, devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 25) },
   { label: "Monsters never substitutes regular's wait when its own data is unavailable (no badge)", ok: () => ["Guardians of the Galaxy \u2013 Monsters After Dark", "Guardians Monsters After Dark"].every((n) => lookupWait(n, devVariantWaitMap(false), ALIASES_DLR) === null) },
   { label: "identity aliases unchanged: Monsters still resolves to the canonical Guardians key", ok: () => devResolvePlanAlias("Guardians Monsters After Dark", "DLR") === "guardians of the galaxy mission breakout" },
+  { label: "leading \"the\" on Monsters names: own wait when available, never regular's", ok: () => ["the Guardians of the Galaxy \u2013 Monsters After Dark", "The Guardians Monsters After Dark", "the guardians monsters after dark (7pm)"].every((n) => lookupWait(n, devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 25) },
+  { label: "leading \"the\" on Monsters names: unavailable (closed/stale/missing → no entry) → no badge", ok: () => ["the Guardians of the Galaxy \u2013 Monsters After Dark", "The Guardians Monsters After Dark"].every((n) => lookupWait(n, devVariantWaitMap(false), ALIASES_DLR) === null) },
+  { label: "leading \"the\" on regular names still resolves regular", ok: () => lookupWait("the guardians", devVariantWaitMap(true), ALIASES_DLR)?.waitMins === 40 },
   { label: "both variants resolve independently in the same map", ok: () => { const m = devVariantWaitMap(true); return lookupWait("Guardians", m, ALIASES_DLR)?.waitMins === 40 && lookupWait("Guardians Monsters After Dark", m, ALIASES_DLR)?.waitMins === 25; } },
 ];
 
