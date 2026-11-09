@@ -119,8 +119,8 @@ export const SEASONAL_ATTRACTION_OVERLAYS: SeasonalAttractionOverlay[] = [
   {
     id: "mk-jingle-cruise-2026", canonicalId: "mk-jungle-cruise", resort: "WDW", parkId: "mk",
     overlayName: "Jingle Cruise", seasonYear: 2026, startDate: "2026-11-03", endDate: "2027-01-04",
-    sourceUrl: "https://disneyworld.disney.go.com/attractions/magic-kingdom/jungle-cruise/", verifiedOn: "2026-11-09",
-    note: "Dates provided by the maintainer for this slice; consistent with press coverage (blogmickey.com 2026/10, 2026/11) of a Nov 3, 2026 return and Jan 4, 2027 last day (Jungle Cruise returns Jan 5). No Disney-hosted page stating the dates was retrieved. Queue-Times rows: Jungle Cruise 134, Jingle Cruise 17950.",
+    sourceUrl: "https://disneyworld.disney.go.com/attractions/magic-kingdom/jingle-cruise/", verifiedOn: "2026-11-09",
+    note: "Seasonal identity: Disney's official Jingle Cruise page (sourceUrl; regular page https://disneyworld.disney.go.com/attractions/magic-kingdom/jungle-cruise/) is the Disney-confirmed source for the Jingle Cruise seasonal name of Jungle Cruise. Dates: 2026-11-03 through 2027-01-04 are maintainer-provided and third-party-reported (blogmickey.com 2026/10, 2026/11); Disney is not claimed to explicitly confirm them. Queue-Times rows: Jungle Cruise 134, Jingle Cruise 17950.",
   },
   {
     id: "dca-guardians-monsters-after-dark-2026", canonicalId: "dca-guardians", resort: "DLR", parkId: "dca",
