@@ -391,7 +391,7 @@ export const PLANNED_CLOSURES = new Map<string, ClosureEntry>([
       parkId: "mk",
       land: "Tomorrowland",
       dateRange: "2026-07-06 - TBD",
-      reopeningLabel: "Reopening TBD",
+      reopeningLabel: "Expected late Spring 2027",
     },
   ],
   // ---- WDW: Hollywood Studios ----

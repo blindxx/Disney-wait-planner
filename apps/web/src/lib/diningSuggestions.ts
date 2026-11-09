@@ -118,6 +118,8 @@ export const DINING_PLACES: DiningPlace[] = [
   // it as a parallel same-name-at-both-resorts case like "Earl of
   // Sandwich" — that was bad catalog data, since removed.)
   { name: "Din Tai Fung", resort: "DLR", location: "Downtown Disney" },
+  // Catalog maintenance (C1) — Downtown Disney location; no parkId.
+  { name: "Gordon Ramsay at The Carnaby", resort: "DLR", location: "Downtown Disney" },
 
   // ---- Magic Kingdom — table service ----
   { name: "Be Our Guest Restaurant", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Fantasyland" },
@@ -265,6 +267,8 @@ export const DINING_PLACES: DiningPlace[] = [
   // catalog (both confirmed current, active signature dining).
   { name: "Yachtsman Steakhouse", resort: "WDW", location: "Disney's Yacht Club Resort" },
   { name: "The Cake Bake Shop Restaurant by Gwendolyn Rogers", resort: "WDW", location: "Disney's BoardWalk" },
+  // Catalog maintenance (C1) — resort-hotel location; no parkId.
+  { name: "The Turf Club Bar and Grill", resort: "WDW", location: "Disney's Saratoga Springs Resort & Spa" },
 ];
 
 const DINING_KEYS: Set<string> = new Set(
