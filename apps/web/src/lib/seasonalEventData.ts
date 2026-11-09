@@ -37,7 +37,8 @@ export type SeasonalEventCategory =
   | "christmas-party"
   | "halloween-season"
   | "christmas-season"
-  | "epcot-festival";
+  | "epcot-festival"
+  | "dlr-festival";
 
 /**
  * "continuous"   — runs every day of its start–end window.
@@ -99,6 +100,10 @@ export const SEASONAL_EVENTS: SeasonalEventDefinition[] = [
   { id: "mvmcp", name: "Mickey's Very Merry Christmas Party", resort: "WDW", parkIds: ["mk"], category: "christmas-party", format: "select-night", admission: "separate-ticket", officialUrl: `${WDW_EVENTS}/magic-kingdom/mickeys-very-merry-christmas-party/` },
   { id: "jollywood-nights", name: "Disney Jollywood Nights", resort: "WDW", parkIds: ["hs"], category: "christmas-party", format: "select-night", admission: "separate-ticket", officialUrl: `${WDW_EVENTS}/hollywood-studios/disney-jollywood-nights/` },
   { id: "holidays-dlr", name: "Holidays at the Disneyland Resort", resort: "DLR", parkIds: ["disneyland", "dca"], category: "christmas-season", format: "continuous", admission: "park-admission", officialUrl: `${DLR_EVENTS}/calendar/` },
+  // ── Disneyland Resort / DCA festivals ────────────────────────────────
+  { id: "plaza-de-la-familia", name: "Plaza de la Familia", resort: "DLR", parkIds: ["dca"], category: "dlr-festival", format: "continuous", admission: "park-admission", officialUrl: `${DLR_EVENTS}/disney-california-adventure/coco-plaza-familia/` },
+  { id: "lunar-new-year-dca", name: "Lunar New Year", resort: "DLR", parkIds: ["dca"], category: "dlr-festival", format: "continuous", admission: "park-admission", officialUrl: `${DLR_EVENTS}/lunar-new-year/` },
+  { id: "dca-food-and-wine", name: "Disney California Adventure Food & Wine Festival", resort: "DLR", parkIds: ["dca"], category: "dlr-festival", format: "continuous", admission: "park-admission", officialUrl: `${DLR_EVENTS}/disney-california-adventure/food-and-wine-festival/` },
   // ── EPCOT festivals ──────────────────────────────────────────────────
   { id: "epcot-festival-of-the-arts", name: "EPCOT International Festival of the Arts", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-festival-of-the-arts/` },
   { id: "epcot-flower-and-garden", name: "EPCOT International Flower & Garden Festival", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-flower-and-garden-festival/` },
@@ -134,6 +139,18 @@ export const SEASONAL_EVENT_SEASONS: SeasonalEventSeasonRecord[] = [
   {
     eventId: "halloween-time-dlr", seasonYear: 2026, startDate: "2026-08-21", endDate: "2026-10-31",
     sourceUrl: `${DPB}/dlr/disneyland-resort-2026-calendar-events-and-offers/`, sourcePublishedDate: "2025-12-02", verifiedOn: V,
+  },
+  {
+    eventId: "plaza-de-la-familia", seasonYear: 2026, startDate: "2026-08-21", endDate: "2026-11-02",
+    sourceUrl: `${DPB}/dlr/disneyland-resort-2026-calendar-events-and-offers/`, sourcePublishedDate: "2025-12-02", verifiedOn: "2026-11-09",
+  },
+  {
+    eventId: "lunar-new-year-dca", seasonYear: 2026, startDate: "2026-01-23", endDate: "2026-02-22",
+    sourceUrl: `${DPB}/dlr/disneyland-resort-2026-calendar-events-and-offers/`, sourcePublishedDate: "2025-12-02", verifiedOn: "2026-11-09",
+  },
+  {
+    eventId: "dca-food-and-wine", seasonYear: 2026, startDate: "2026-03-06", endDate: "2026-04-27",
+    sourceUrl: `${DPB}/dlr/disneyland-resort-2026-calendar-events-and-offers/`, sourcePublishedDate: "2025-12-02", verifiedOn: "2026-11-09",
   },
   {
     eventId: "mvmcp", seasonYear: 2026, startDate: "2026-11-08", endDate: "2026-12-22",
