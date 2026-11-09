@@ -146,11 +146,16 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
     attraction("888525b0-5a6f-4b8e-9f07-b6a32812b04d", "Bluey’s Best Day Ever! at Fantasyland Theatre"),
   ),
   mapped("Mickey & Friends Halloween Cavalcade", "disneyland", show("e1cb16d6-ac90-44e6-9711-6729650623a1", "Mickey and Friends Halloween Cavalcade")),
+  mapped("Shadows of Memory: A Skywalker Saga", "disneyland", show("fa0ef252-8002-4c39-934b-46c3231d206e", "Shadows of Memory: A Skywalker Saga")),
+  mapped("Tapestry of Happiness", "disneyland", show("34f7bd8a-ec8e-41ac-9d63-d94ffc54f1ef", "Tapestry of Happiness")),
+  mapped("Fire of the Rising Moons", "disneyland", show("e9ef1443-c735-43b6-81c6-45e53527cf93", "Fire of the Rising Moons")),
 
   // ---- Disney California Adventure ----
   mapped("World of Color", "dca", show("e46d8982-4991-4b9e-8e4a-b519d3ca6060", "World of Color – ONE")),
   unmapped("Frightfully Fun Parade", "dca", `${NOT_IN_PROVIDER}; replaced for 2026 by Madame Leota's Swinging Wake`),
   unmapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", NOT_IN_PROVIDER),
+  unmapped("Mickey's Happy Holidays", "dca", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  unmapped("Disney ¡Viva Navidad! Street Party", "dca", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   mapped(
     "Madame Leota's Swinging Wake – A Haunted Mansion Street Party", "dca",
     show("26468072-7cdf-4d3b-a5fb-b110d51b177f", "Madame Leota's Swinging Wake – A Haunted Mansion Street Party at Oogie Boogie Bash"),
@@ -167,9 +172,12 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Hocus Pocus Villain Spelltacular", "mk", show("6d74b3d9-f977-4c9b-8114-93969b51b105", "Hocus Pocus Villain Spelltacular")),
   unmapped("Minnie's Wonderful Christmastime Fireworks", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("Mickey's Most Merriest Celebration", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  mapped("Frozen Holiday Surprise", "mk", show("46a67154-8d90-427a-ad5c-700b41d90966", "Frozen Holiday Surprise")),
 
   // ---- EPCOT ----
   mapped("Luminous The Symphony of Us", "epcot", show("3dbf1ff2-eee0-44a9-8cd9-22bf920e81e9", "Luminous The Symphony of Us")),
+  unmapped("Candlelight Processional", "epcot", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  unmapped("JOYFUL! A Celebration of the Season", "epcot", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
 
   // ---- Hollywood Studios ----
   mapped("Fantasmic!", "hs", show("42328c39-76ab-4f03-b862-4206c8d9f7bb", "Fantasmic!")),
@@ -182,6 +190,11 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("The Little Mermaid – A Musical Adventure", "hs", show("a7763ca6-bca3-4e78-b75c-22886aa06bec", "The Little Mermaid – A Musical Adventure")),
   mapped("Disney Jr. Mickey Mouse Clubhouse Live!", "hs", show("1bbce25c-36eb-4d16-9216-4a1bbd46932b", "Disney Jr. Mickey Mouse Clubhouse Live!")),
   unmapped("Once Upon a Studio Theater", "hs", `${NOT_IN_PROVIDER}; no distinct provider entity (venue-hosted)`),
+  // Disney Jollywood Nights (party) shows: provider names carry an "at Disney Jollywood Nights" suffix (naming variant → name_drift warning only).
+  mapped("Disney Holidays in Hollywood", "hs", show("f13be6e2-40fd-46d2-895f-eef97bf65d3b", "Disney Holidays in Hollywood at Disney Jollywood Nights")),
+  mapped("What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along", "hs", show("50b2b97f-415d-447f-9198-cebf57755858", "What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along at Disney Jollywood Nights")),
+  mapped("Glisten!", "hs", show("078e80f0-8569-45c9-a324-a767ef46ea98", "Glisten! at Disney Jollywood Nights")),
+  mapped("Jingle Bell, Jingle BAM!", "hs", show("8890a911-f69e-462a-8731-8be2086c4b08", "Jingle Bell, Jingle BAM! at Disney Jollywood Nights")),
 
   // ---- Animal Kingdom ----
   mapped("Festival of the Lion King", "ak", show("3a4e0f49-f9ff-4481-a95b-d4952cdf6097", "Festival of the Lion King")),

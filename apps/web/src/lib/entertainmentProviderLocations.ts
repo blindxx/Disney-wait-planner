@@ -53,7 +53,6 @@ export const PROVIDER_ENTERTAINMENT_LOCATIONS: ProviderEntertainmentLocation[] =
   loc("disneyland", "78568c55-6dcb-4893-a14e-ba7ed9bddaff", "Fantasyland"), // Disneyland Band at "it's a small world" Promenade
   loc("disneyland", "cb84b53c-dbb5-483d-a717-00d9259c6484", "Frontierland"), // Disneyland Band at Frontierland
   loc("disneyland", "a6760f7b-3489-47df-9547-d70dd2d8cb76", MAIN_ST), // Disneyland Band at Main Street, U.S.A.
-  loc("disneyland", "e9ef1443-c735-43b6-81c6-45e53527cf93", GALAXYS_EDGE), // Fire of the Rising Moons
   loc("disneyland", "eeafc865-a4e0-4dc5-9cea-446108bf7d48", MAIN_ST), // Flag Retreat Ceremony
   loc("disneyland", "3220fd76-38e4-49a4-afa3-4842c07203fa", "New Orleans Square"), // Jambalaya Jazz
   loc("disneyland", "8b12916b-a384-4305-838a-c4b07affbb14", MAIN_ST), // Main Street Piano Player
@@ -61,7 +60,6 @@ export const PROVIDER_ENTERTAINMENT_LOCATIONS: ProviderEntertainmentLocation[] =
   loc("disneyland", "33cbbd09-6d93-40d7-b758-9d7b7d3fd2eb", "Fantasyland", "Royal Hall"), // Meet Disney Princesses at Royal Hall
   loc("disneyland", "5a107a57-9174-4f3f-9be7-625a5d5bb899", TOONTOWN, "Mickey’s House"), // Mickey's House and Meet Mickey Mouse
   loc("disneyland", "72340a8a-b6d2-474f-aca5-5ea7d2d52335", "Fantasyland", "Royal Theatre"), // Storytelling at Royal Theatre
-  loc("disneyland", "34f7bd8a-ec8e-41ac-9d63-d94ffc54f1ef", "Fantasyland"), // Tapestry of Happiness
   loc("disneyland", "fdf0e3b1-2eeb-42b4-9516-5d43463d021e", MAIN_ST), // The Dapper Dans
 
   // ---- Disney California Adventure ----

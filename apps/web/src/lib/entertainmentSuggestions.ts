@@ -157,6 +157,13 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // replacing Frightfully Fun Parade for the 2026 season. Confirmed at
   // Hollywood Land via official/press coverage.
   { name: "Madame Leota's Swinging Wake – A Haunted Mansion Street Party", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "seasonal", availabilityTheme: "halloween" },
+  // 2026 maintenance (Slice B): provider-verified Disneyland Park shows (SHOW entities in park children).
+  { name: "Shadows of Memory: A Skywalker Saga", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  { name: "Tapestry of Happiness", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
+  { name: "Fire of the Rising Moons", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
+  // Holiday-season DCA shows — not currently listed by the provider (unmapped; no inferred showtimes).
+  { name: "Mickey's Happy Holidays", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Buena Vista Street", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Disney ¡Viva Navidad! Street Party", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- Magic Kingdom ----
   // Hocus Pocus Villain Spelltacular and Mickey's Most Merriest Celebration
@@ -174,9 +181,12 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Hocus Pocus Villain Spelltacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Minnie's Wonderful Christmastime Fireworks", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Mickey's Most Merriest Celebration", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Frozen Holiday Surprise", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- EPCOT ----
   { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "regular" },
+  { name: "Candlelight Processional", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "JOYFUL! A Celebration of the Season", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal", availabilityTheme: "christmas" },
 
   // ---- Hollywood Studios ----
   { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
@@ -188,6 +198,11 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Disney Villains: Unfairly Ever After", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
   { name: "The Little Mermaid – A Musical Adventure", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
   { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Animation Courtyard", availabilityType: "regular" },
+  // Disney Jollywood Nights shows (provider names carry an "at Disney Jollywood Nights" suffix — naming variant, not a separate show; the party itself stays in seasonalEventData.ts).
+  { name: "Disney Holidays in Hollywood", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Echo Lake", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Glisten!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Jingle Bell, Jingle BAM!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Hollywood Boulevard", availabilityType: "seasonal", availabilityTheme: "christmas" },
   // ---- Hollywood Studios — The Magic of Disney Animation collection ----
   // The Magic of Disney Animation itself is an umbrella location, not an
   // individual plan-worthy entry. Of its individually plan-worthy pieces,
@@ -342,6 +357,7 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   // name and still land on the same canonical identity.
   "world of color happiness": "world of color",
   "world of color one": "world of color",
+  "world of color season of light": "world of color",
   "mickey and friends halloween cavalcade": "mickey friends halloween cavalcade",
   "halloween cavalcade": "mickey friends halloween cavalcade",
   "madame leota's swinging wake": "madame leotas swinging wake a haunted mansion street party",
@@ -350,6 +366,19 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "swinging wake": "madame leotas swinging wake a haunted mansion street party",
   "haunted mansion street party": "madame leotas swinging wake a haunted mansion street party",
   // Planner-wide common alias maintenance — acronyms.
+  // 2026 maintenance (Slice B) shorthand.
+  "joyful": "joyful a celebration of the season",
+  "candlelight": "candlelight processional",
+  "holidays in hollywood": "disney holidays in hollywood",
+  "whats this sing along": "whats this tim burtons the nightmare before christmas sing along",
+  "nightmare before christmas sing along": "whats this tim burtons the nightmare before christmas sing along",
+  "jingle bam": "jingle bell jingle bam",
+  "shadows of memory": "shadows of memory a skywalker saga",
+  "skywalker saga": "shadows of memory a skywalker saga",
+  "tapestry": "tapestry of happiness",
+  "happy holidays": "mickeys happy holidays",
+  "viva navidad": "disney viva navidad street party",
+  "viva navidad street party": "disney viva navidad street party",
   "woc": "world of color",               // World of Color (DCA)
   "folk": "festival of the lion king",   // Festival of the Lion King (AK) — "fotlk" already existed above
 };
@@ -637,6 +666,16 @@ export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
   { input: "woc",  resort: "DLR", expectedKey: "world of color" },
   { input: "WOC",  resort: "DLR", expectedKey: "world of color" }, // case-insensitive
   { input: "woc",  resort: "WDW", expectedKey: null },              // resort-scope: DLR-only
+  { input: "World of Color – Season of Light", resort: "DLR", expectedKey: "world of color" },
+  { input: "World of Color – ONE", resort: "DLR", expectedKey: "world of color" },
+  { input: "World of Color: Happiness!", resort: "DLR", expectedKey: "world of color" },
+  { input: "Disney ¡Viva Navidad! Street Party", resort: "DLR", expectedKey: "disney viva navidad street party" },
+  { input: "Glisten!", resort: "WDW", expectedKey: "glisten" },
+  { input: "Jingle Bell, Jingle BAM!", resort: "WDW", expectedKey: "jingle bell jingle bam" },
+  { input: "JOYFUL!", resort: "WDW", expectedKey: "joyful a celebration of the season" },
+  { input: "What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along", resort: "WDW", expectedKey: "whats this tim burtons the nightmare before christmas sing along" },
+  { input: "Tapestry of Happiness", resort: "DLR", expectedKey: "tapestry of happiness" },
+  { input: "Candlelight Processional", resort: "DLR", expectedKey: null },
   { input: "folk", resort: "WDW", expectedKey: "festival of the lion king" },
   { input: "folk", resort: "DLR", expectedKey: null },              // resort-scope: WDW-only
   // "fotlk" already existed — regression check it still resolves unchanged.
