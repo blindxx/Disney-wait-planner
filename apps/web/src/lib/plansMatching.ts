@@ -335,6 +335,10 @@ export const ALIASES_WDW: Record<string, string> = {
   // identity. ----
   "living with the land glimmering greenhouses": "living with the land",
 
+  // ---- Jungle Cruise (MK Adventureland) — "Jingle Cruise" holiday overlay
+  // name; same ride, same canonical identity (parity with liveWaitApi.ts). ----
+  "jingle cruise": "jungle cruise",
+
   // ---- Walt Disney World Railroad (MK Main Street, U.S.A.) — station-
   // qualified provider name parity with liveWaitApi.ts's ALIASES_WDW.
   // Queue-Times exposes each physical boarding station as its own ride
@@ -597,6 +601,8 @@ export const DEV_PLAN_ALIAS_CASES: Array<{
   { input: "Walt Disney's Carousel of Progress", resort: "WDW", expectedKey: "walt disneys carousel of progress" },
   // --- Living with the Land – Glimmering Greenhouses (EPCOT seasonal overlay name — parity with liveWaitApi.ts) ---
   { input: "Living with the Land – Glimmering Greenhouses", resort: "WDW", expectedKey: "living with the land" },
+  // --- Jingle Cruise (MK seasonal overlay name — parity with liveWaitApi.ts) ---
+  { input: "Jingle Cruise", resort: "WDW", expectedKey: "jungle cruise" },
   // --- Walt Disney World Railroad station-qualified names (MK — parity with liveWaitApi.ts's ALIASES_WDW) ---
   { input: "Walt Disney World Railroad - Main Street, U.S.A.", resort: "WDW", expectedKey: "walt disney world railroad" },
   { input: "Walt Disney World Railroad - Fantasyland",         resort: "WDW", expectedKey: "walt disney world railroad" },
