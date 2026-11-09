@@ -112,9 +112,15 @@ export const SEASONAL_ATTRACTION_OVERLAYS: SeasonalAttractionOverlay[] = [
   },
   {
     id: "epcot-glimmering-greenhouses-2026", canonicalId: "epcot-living-with-the-land", resort: "WDW", parkId: "epcot",
-    overlayName: "Living with the Land – Glimmering Greenhouses", seasonYear: 2026, startDate: null, endDate: null,
+    overlayName: "Living with the Land – Glimmering Greenhouses", seasonYear: 2026, startDate: "2026-11-27", endDate: "2026-12-30",
     sourceUrl: "https://disneyworld.disney.go.com/attractions/epcot/glimmering-greenhouses/", verifiedOn: V,
-    note: "No official ride-overlay dates found (festival is 2026-11-27–12-30, but the overlay appeared early in 2025); dates null so display follows Queue-Times.",
+    note: "Dates are the 2026 EPCOT International Festival of the Holidays window (2026-11-27–12-30), provided by the maintainer for this slice; the overlay appeared early in 2025, so outside this window display now reverts to canonical even if Queue-Times still sends the overlay name.",
+  },
+  {
+    id: "mk-jingle-cruise-2026", canonicalId: "mk-jungle-cruise", resort: "WDW", parkId: "mk",
+    overlayName: "Jingle Cruise", seasonYear: 2026, startDate: "2026-11-03", endDate: "2027-01-04",
+    sourceUrl: "https://disneyworld.disney.go.com/attractions/magic-kingdom/jingle-cruise/", verifiedOn: "2026-11-09",
+    note: "Seasonal identity: Disney's official Jingle Cruise page (sourceUrl; regular page https://disneyworld.disney.go.com/attractions/magic-kingdom/jungle-cruise/) is the Disney-confirmed source for the Jingle Cruise seasonal name of Jungle Cruise. Dates: 2026-11-03 through 2027-01-04 are maintainer-provided and third-party-reported (blogmickey.com 2026/10, 2026/11); Disney is not claimed to explicitly confirm them. Queue-Times rows: Jungle Cruise 134, Jingle Cruise 17950.",
   },
   {
     id: "dca-guardians-monsters-after-dark-2026", canonicalId: "dca-guardians", resort: "DLR", parkId: "dca",
@@ -240,6 +246,7 @@ const SW = "dl-its-a-small-world";
 const LUIGI = "dca-luigis";
 const GOTG = "dca-guardians";
 const LWTL = "epcot-living-with-the-land";
+const JC = "mk-jungle-cruise";
 const name = (canonicalId: string, today: string, selectedProviderName?: string) =>
   resolveAttractionDisplayName({ canonicalId, today, selectedProviderName });
 
@@ -247,7 +254,7 @@ export const DEV_SEASONAL_ATTRACTION_OVERLAY_CASES: DevSeasonalAttractionOverlay
   { label: "ids unique", ok: () => new Set(SEASONAL_ATTRACTION_OVERLAYS.map((o) => o.id)).size === SEASONAL_ATTRACTION_OVERLAYS.length },
   { label: "all records valid", ok: () => SEASONAL_ATTRACTION_OVERLAYS.every((o) => validateSeasonalAttractionOverlay(o).length === 0) },
   { label: "validator catches bad record", ok: () => validateSeasonalAttractionOverlay({ ...SEASONAL_ATTRACTION_OVERLAYS[0], startDate: "2026-11-02", endDate: "2026-11-01", sourceUrl: "x" }).length >= 2 },
-  { label: "every overlay targets an existing canonical attraction (one identity each)", ok: () => SEASONAL_ATTRACTION_OVERLAYS.every((o) => ["dl-haunted-mansion", "dl-its-a-small-world", "dca-luigis", "dca-maters", "dca-guardians", "epcot-living-with-the-land"].includes(o.canonicalId)) },
+  { label: "every overlay targets an existing canonical attraction (one identity each)", ok: () => SEASONAL_ATTRACTION_OVERLAYS.every((o) => ["dl-haunted-mansion", "dl-its-a-small-world", "dca-luigis", "dca-maters", "dca-guardians", "epcot-living-with-the-land", "mk-jungle-cruise"].includes(o.canonicalId)) },
   // Rule 1 + date boundaries (closed window: Luigi's Halloween 2026-08-21..2026-10-31)
   { label: "day before confirmed start → canonical", ok: () => name(LUIGI, "2026-08-20", "Luigi's Honkin' Haul-O-Ween") === null },
   { label: "confirmed start day → overlay (regardless of provider name)", ok: () => name(LUIGI, "2026-08-21", "Luigi's Rollickin' Roadsters") === "Luigi's Honkin' Haul-O-Ween" },
@@ -265,11 +272,15 @@ export const DEV_SEASONAL_ATTRACTION_OVERLAY_CASES: DevSeasonalAttractionOverlay
   // Cross-year (Luigi's Joy to the Whirl: start 2026-11-13, season year 2026, crosses into 2027)
   { label: "cross-year: December and January dates resolve in the 2026 season", ok: () => name(LUIGI, "2026-12-25", "Luigi's Joy to the Whirl") === "Luigi's Joy to the Whirl" && name(LUIGI, "2027-01-03", "Luigi's Joy to the Whirl") === "Luigi's Joy to the Whirl" },
   { label: "cross-year: synthetic closed window spans New Year", ok: () => { const o = { ...SEASONAL_ATTRACTION_OVERLAYS[1], startDate: "2026-11-13", endDate: "2027-01-06" }; return windowFor(o, "2026-12-31") === "inside" && windowFor(o, "2027-01-06") === "inside" && windowFor(o, "2027-01-07") === "outside"; } },
-  // Rule 4
-  { label: "no confirmed dates + provider overlay row → overlay", ok: () => name(LWTL, "2026-11-22", "Living with the Land – Glimmering Greenhouses") === "Living with the Land – Glimmering Greenhouses" },
-  { label: "no confirmed dates + hyphen spelling from provider → overlay", ok: () => name(LWTL, "2026-11-22", "Living with the Land - Glimmering Greenhouses") !== null },
-  { label: "no confirmed dates + canonical provider row → canonical", ok: () => name(LWTL, "2026-11-22", "Living with the Land") === null },
-  { label: "no confirmed dates + no provider evidence → canonical", ok: () => name(LWTL, "2026-11-22") === null },
+  // Glimmering Greenhouses (confirmed 2026-11-27..2026-12-30)
+  { label: "LWTL: day before start → canonical even if provider overlay", ok: () => name(LWTL, "2026-11-26", "Living with the Land – Glimmering Greenhouses") === null },
+  { label: "LWTL: start day → overlay", ok: () => name(LWTL, "2026-11-27", "Living with the Land") === "Living with the Land – Glimmering Greenhouses" },
+  { label: "LWTL: end day → overlay", ok: () => name(LWTL, "2026-12-30") === "Living with the Land – Glimmering Greenhouses" },
+  { label: "LWTL: day after end → canonical even with stale provider name", ok: () => name(LWTL, "2026-12-31", "Living with the Land - Glimmering Greenhouses") === null },
+  // Jingle Cruise (confirmed 2026-11-03..2027-01-04)
+  { label: "JC: day before start → canonical", ok: () => name(JC, "2026-11-02", "Jingle Cruise") === null },
+  { label: "JC: start day, end day → overlay (cross-year)", ok: () => name(JC, "2026-11-03", "Jungle Cruise") === "Jingle Cruise" && name(JC, "2027-01-04") === "Jingle Cruise" },
+  { label: "JC: day after end → canonical even with stale provider name", ok: () => name(JC, "2027-01-05", "Jingle Cruise") === null },
   // Provider switching with open start (Haunted Mansion Holiday, start 2026-08-21)
   { label: "HMH before start → canonical even if provider overlay", ok: () => name(HM, "2026-08-20", "Haunted Mansion Holiday") === null },
   { label: "HMH after start follows provider overlay and switch back", ok: () => name(HM, "2026-11-01", "Haunted Mansion Holiday") === "Haunted Mansion Holiday" && name(HM, "2026-11-01", "Haunted Mansion") === null },

@@ -385,6 +385,10 @@ const ALIASES_WDW = new Map<string, string>([
   // normalizeAttractionName() folds en/em dash to "-", covering both the
   // en-dash and hyphen forms Disney/Queue-Times may use.
   ["living with the land - glimmering greenhouses", "living with the land"],
+  // Jungle Cruise (MK, Adventureland) — Queue-Times publishes the holiday
+  // overlay "Jingle Cruise" as its own ride row (id 17950; regular row is 134).
+  // Same ride, same canonical identity; freshest-row selection picks one.
+  ["jingle cruise", "jungle cruise"],
 ]);
 
 /**
@@ -1662,15 +1666,43 @@ DEV_QUEUE_TIMES_DEDUPE_CASES.push(
     check: devOverlayCheck("dca-maters", { displayName: undefined, status: "OPERATING", waitMins: 15, updatedAt: DEV_OVERLAY_T1 }),
   },
   {
-    description: "Overlay: Living with the Land + Glimmering Greenhouses rows (undated overlay) → one card, name follows selected (freshest) row, wait from same row",
-    resortId: "WDW", parkId: "epcot", now: new Date(DEV_OVERLAY_T1),
+    description: "Overlay: Living with the Land + Glimmering Greenhouses rows inside confirmed window → one card, overlay name, wait from freshest row",
+    resortId: "WDW", parkId: "epcot", now: new Date("2026-12-01T12:05:00Z"),
     body: {
       lands: [{ id: 1, name: "World Nature", rides: [
-        devQTRide(156, "Living with the Land", true, 5, DEV_OVERLAY_T0),
-        devQTRide(17914, "Living with the Land – Glimmering Greenhouses", true, 12, DEV_OVERLAY_T1),
+        devQTRide(156, "Living with the Land", true, 5, "2026-12-01T12:00:00Z"),
+        devQTRide(17914, "Living with the Land – Glimmering Greenhouses", true, 12, "2026-12-01T12:05:00Z"),
       ] }],
     },
-    check: devOverlayCheck("epcot-living-with-the-land", { displayName: "Living with the Land – Glimmering Greenhouses", status: "OPERATING", waitMins: 12, updatedAt: DEV_OVERLAY_T1 }),
+    check: devOverlayCheck("epcot-living-with-the-land", { displayName: "Living with the Land – Glimmering Greenhouses", status: "OPERATING", waitMins: 12, updatedAt: "2026-12-01T12:05:00Z" }),
+  },
+  {
+    description: "Overlay: Glimmering Greenhouses row after confirmed end (2026-12-31) → canonical display, one card, live wait kept",
+    resortId: "WDW", parkId: "epcot", now: new Date("2026-12-31T18:00:00Z"),
+    body: devOverlayBody("World Nature", devQTRide(17914, "Living with the Land – Glimmering Greenhouses", true, 12, "2026-12-31T18:00:00Z")),
+    check: devOverlayCheck("epcot-living-with-the-land", { displayName: undefined, status: "OPERATING", waitMins: 12, updatedAt: "2026-12-31T18:00:00Z" }),
+  },
+  {
+    description: "Overlay: Jungle Cruise 134 + Jingle Cruise 17950 inside window → one MK card, overlay name, wait/status from freshest row",
+    resortId: "WDW", parkId: "mk", now: new Date("2026-11-20T12:05:00Z"),
+    body: devOverlayBody("Adventureland",
+      devQTRide(134, "Jungle Cruise", true, 5, "2026-11-20T12:00:00Z"),
+      devQTRide(17950, "Jingle Cruise", true, 25, "2026-11-20T12:05:00Z")),
+    check: devOverlayCheck("mk-jungle-cruise", { displayName: "Jingle Cruise", status: "OPERATING", waitMins: 25, updatedAt: "2026-11-20T12:05:00Z" }),
+  },
+  {
+    description: "Overlay: Jingle Cruise window, stale 17950 + fresher regular 134 → fresher row's wait kept, overlay name still shown",
+    resortId: "WDW", parkId: "mk", now: new Date("2026-11-20T12:05:00Z"),
+    body: devOverlayBody("Adventureland",
+      devQTRide(17950, "Jingle Cruise", true, 25, "2026-11-20T12:00:00Z"),
+      devQTRide(134, "Jungle Cruise", true, 10, "2026-11-20T12:05:00Z")),
+    check: devOverlayCheck("mk-jungle-cruise", { displayName: "Jingle Cruise", status: "OPERATING", waitMins: 10, updatedAt: "2026-11-20T12:05:00Z" }),
+  },
+  {
+    description: "Overlay: stale Jingle Cruise row after confirmed end (2027-01-05) → canonical display, one card",
+    resortId: "WDW", parkId: "mk", now: new Date("2027-01-05T18:00:00Z"),
+    body: devOverlayBody("Adventureland", devQTRide(17950, "Jingle Cruise", true, 25, "2027-01-05T18:00:00Z")),
+    check: devOverlayCheck("mk-jungle-cruise", { displayName: undefined, status: "OPERATING", waitMins: 25, updatedAt: "2027-01-05T18:00:00Z" }),
   },
   {
     description: "Overlay: Haunted Mansion Holiday provider row after its confirmed start (open end) → overlay (status/wait from the same row)",
