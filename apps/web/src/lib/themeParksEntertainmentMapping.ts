@@ -37,7 +37,11 @@
  *
  * Pure module (types-only import from themeParksApi.ts; no I/O) so the DEV
  * cases run offline. Provider snapshot verified 2026-09-30 against
- * `GET /v1/entity/{park}/children`.
+ * `GET /v1/entity/{park}/children`; re-audited for all six parks 2026-11-10
+ * (Phase 14.4B). Expected seasonal drift: provider drops an ended event's
+ * SHOW entities (the Halloween party/season refs read `entity_missing` after
+ * Oct 31). Those verified UUIDs are kept, not remapped or deleted — they are
+ * re-verified when the entities return.
  */
 
 import type { ParkId } from "@disney-wait-planner/shared";
@@ -139,7 +143,12 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   unmapped("A Christmas Fantasy Parade", "disneyland", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("Main Street Electrical Parade", "disneyland", NOT_IN_PROVIDER),
   unmapped("Royal Princess Cavalcade", "disneyland", NOT_IN_PROVIDER),
-  unmapped("Mickey's Mix Magic", "disneyland", NOT_IN_PROVIDER),
+  // Phase 14.4B: provider publishes this show as two SHOW records by presentation (verified 2026-11-10).
+  mapped(
+    "Mickey's Mix Magic", "disneyland",
+    show("d252d547-a3e4-4ae4-b6ea-e8e4b0849512", "Mickey's Mix Magic with Fireworks"),
+    show("3178251f-4570-4ebf-ae2f-fb28edc7534f", "Mickey's Mix Magic with Projection"),
+  ),
   mapped(
     "Bluey's Best Day Ever!", "disneyland",
     show("95a9cde3-ff1f-40a3-8276-2477ded688f8", "Bluey's Best Day Ever!"),
@@ -153,7 +162,8 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   // ---- Disney California Adventure ----
   mapped("World of Color", "dca", show("e46d8982-4991-4b9e-8e4a-b519d3ca6060", "World of Color – ONE")),
   unmapped("Frightfully Fun Parade", "dca", `${NOT_IN_PROVIDER}; replaced for 2026 by Madame Leota's Swinging Wake`),
-  unmapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", NOT_IN_PROVIDER),
+  // Phase 14.4B: provider lists a DCA-parented SHOW (distinct UUID from the Hollywood Studios one; verified 2026-11-10).
+  mapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", show("8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a", "Disney Jr. Mickey Mouse Clubhouse Live!")),
   unmapped("Mickey's Happy Holidays", "dca", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("Disney ¡Viva Navidad! Street Party", "dca", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   mapped(
@@ -167,11 +177,18 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Festival of Fantasy Parade", "mk", show("ee56b2f3-fd49-4a29-ae1a-2d321549a633", "Disney Festival of Fantasy Parade")),
   mapped("Disney Adventure Friends Cavalcade", "mk", show("f819079e-644e-4fce-bda3-26b899ac7027", "Disney Adventure Friends Cavalcade")),
   mapped("Mickey's Boo-To-You Halloween Parade", "mk", show("5c00cd7c-b207-4d9d-9c8c-a8d418fc5425", "Mickey’s Boo-To-You Halloween Parade at Mickey's Not-So-Scary Halloween Party")),
-  unmapped("Mickey's Once Upon a Christmastime Parade", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  // Phase 14.4B: Christmas parade is published as a standalone SHOW (performs on non-party dates too) plus a
+  // party-labelled SHOW. Both are the same DWP show; a verified performance today overrides seasonal hiding.
+  mapped(
+    "Mickey's Once Upon a Christmastime Parade", "mk",
+    show("1a6e4b4a-fdf4-4379-83e4-741c9f5c343e", "Mickey's Once Upon a Christmastime Parade"),
+    show("99baf196-9dfc-4b13-af77-025e87ac2a7d", "Mickey's Once Upon a Christmastime Parade at Mickey's Very Merry Christmas Party"),
+  ),
   mapped("Disney's Not-So-Spooky Spectacular", "mk", show("05ca3e51-580b-44ca-8046-7d3e57a6d248", "Disney’s Not-So-Spooky Spectacular at Mickey's Not-So-Scary Halloween Party")),
   mapped("Hocus Pocus Villain Spelltacular", "mk", show("6d74b3d9-f977-4c9b-8114-93969b51b105", "Hocus Pocus Villain Spelltacular")),
-  unmapped("Minnie's Wonderful Christmastime Fireworks", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
-  unmapped("Mickey's Most Merriest Celebration", "mk", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  // Phase 14.4B: Mickey's Very Merry Christmas Party SHOW records (provider names carry an "at Mickey's Very Merry Christmas Party" suffix).
+  mapped("Minnie's Wonderful Christmastime Fireworks", "mk", show("bb28947d-a747-44f0-ac71-1fa8188f4cee", "Minnie's Wonderful Christmastime Fireworks at Mickey's Very Merry Christmas Party")),
+  mapped("Mickey's Most Merriest Celebration", "mk", show("767b8357-ce52-4e09-810f-30ee81f8136c", "Mickey's Most Merriest Celebration at Mickey's Very Merry Christmas Party")),
   mapped("Frozen Holiday Surprise", "mk", show("46a67154-8d90-427a-ad5c-700b41d90966", "Frozen Holiday Surprise")),
 
   // ---- EPCOT ----
@@ -516,6 +533,60 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
   { const p = clone(); p.mk!.children.push(child("22222222-2222-4222-8222-222222222222", "Some Ride", "ATTRACTION", "mk"), child("33333333-3333-4333-8333-333333333333", "Some Cafe", "RESTAURANT", "mk"));
     const r = verifyEntertainmentMapping(p);
     check("provider-only: only unmapped SHOW entities (attractions/restaurants out of scope)", r.ok && r.providerOnly.mk!.length === 1); }
+
+  // ---- Phase 14.4B: audited 2026-11-10 mappings, preserved unmapped entries, provider-only preservation ----
+  {
+    const ids = (name: string, park: ParkId) => getThemeParksEntertainmentRefs(name, park).map((r) => r.entityId).join();
+    check("14.4B mapping: MK Christmas parade → standalone + party SHOW records (both, same DWP show)",
+      ids("Mickey's Once Upon a Christmastime Parade", "mk") === "1a6e4b4a-fdf4-4379-83e4-741c9f5c343e,99baf196-9dfc-4b13-af77-025e87ac2a7d");
+    check("14.4B mapping: Minnie's Wonderful Christmastime Fireworks → its provider SHOW",
+      ids("Minnie's Wonderful Christmastime Fireworks", "mk") === "bb28947d-a747-44f0-ac71-1fa8188f4cee");
+    check("14.4B mapping: Mickey's Most Merriest Celebration → its provider SHOW",
+      ids("Mickey's Most Merriest Celebration", "mk") === "767b8357-ce52-4e09-810f-30ee81f8136c");
+    check("14.4B mapping: Mickey's Mix Magic → fireworks + projection SHOW records",
+      ids("Mickey's Mix Magic", "disneyland") === "d252d547-a3e4-4ae4-b6ea-e8e4b0849512,3178251f-4570-4ebf-ae2f-fb28edc7534f");
+    check("14.4B mapping: DCA Clubhouse Live has its own DCA UUID, distinct from the Hollywood Studios one",
+      ids("Disney Jr. Mickey Mouse Clubhouse Live!", "dca") === "8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a" &&
+      ids("Disney Jr. Mickey Mouse Clubhouse Live!", "dca") !== ids("Disney Jr. Mickey Mouse Clubhouse Live!", "hs"));
+    const stillUnmapped: Array<[string, ParkId]> = [
+      ["Wondrous Journeys", "disneyland"], ["Paint the Night", "disneyland"], ["Magic Happens Parade", "disneyland"],
+      ["Main Street Electrical Parade", "disneyland"], ["Royal Princess Cavalcade", "disneyland"],
+      ["Believe... in Holiday Magic", "disneyland"], ["A Christmas Fantasy Parade", "disneyland"],
+      ["Frightfully Fun Parade", "dca"], ["Mickey's Happy Holidays", "dca"], ["Disney ¡Viva Navidad! Street Party", "dca"],
+      ["Candlelight Processional", "epcot"], ["JOYFUL! A Celebration of the Season", "epcot"],
+      ["Once Upon a Studio Theater", "hs"],
+    ];
+    check("14.4B preserved: genuinely unmapped entries stay unmapped with a reason (never invented)",
+      stillUnmapped.every(([n, p]) => { const m = getEntertainmentProviderMapping(n, p); return m?.disposition === "unmapped" && m.reason.trim() !== ""; }));
+    // Provider-only discoveries (event-exclusive character meets etc.) are never claimed by a DWP mapping.
+    const providerOnlyIds = [
+      "6d3b1129-b34c-4b44-bba2-0e1790fef705", // Meet Santa Jack and Sally (MVMCP)
+      "ae7db7da-a3d9-443b-b4a6-d3c4a2b66121", // Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights
+      "418c2111-36d4-4f07-86b2-8058014a263c", // Join Santa Claus (MVMCP)
+      "8b8cb0ec-10a3-41d9-b5cb-81ea8db14370", // Character Greetings (MVMCP)
+    ];
+    check("14.4B provider-only: event character-meet records are not claimed by any DWP mapping",
+      providerOnlyIds.every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
+    check("14.4B uuids: new mappings keep ids canonical and unique (structure clean)", validateEntertainmentMappingStructure().length === 0);
+    // Wrong-park drift for a new DCA mapping: the DCA Clubhouse entity appearing under HS is flagged, never remapped.
+    const p = JSON.parse(JSON.stringify(perfect)) as typeof perfect;
+    const dcaClubhouse = p.dca!.children.find((c) => c.entityId === "8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a")!;
+    p.dca!.children = p.dca!.children.filter((c) => c !== dcaClubhouse);
+    p.hs!.children.push({ ...dcaClubhouse, parentId: THEMEPARKS_PARKS.hs.entityId });
+    check("14.4B drift: DCA Clubhouse entity listed under HS → wrong_park, not adopted by the HS entry",
+      kinds(verifyEntertainmentMapping(p), "error").includes("wrong_park") && ids("Disney Jr. Mickey Mouse Clubhouse Live!", "hs") === "1bbce25c-36eb-4d16-9216-4a1bbd46932b");
+    // Seasonal drift: an ended event's entities vanish from provider children → entity_missing, mapping retained.
+    const q = JSON.parse(JSON.stringify(perfect)) as typeof perfect;
+    const party = getThemeParksEntertainmentRefs("Mickey's Most Merriest Celebration", "mk")[0];
+    q.mk!.children = q.mk!.children.filter((c) => c.entityId !== party.entityId);
+    const rq = verifyEntertainmentMapping(q);
+    check("14.4B drift: ended-event entity missing → entity_missing error, UUID kept (not deleted/remapped)",
+      kinds(rq, "error").includes("entity_missing") && ids("Mickey's Most Merriest Celebration", "mk") === party.entityId);
+    // Provider failure: no children for any park → every mapping unverified, nothing marked verified.
+    const none = verifyEntertainmentMapping({});
+    check("14.4B provider failure: no payloads → park_payload_missing for each mapped park, nothing verified",
+      !none.ok && none.verified.length === 0 && kinds(none, "error").filter((k) => k === "park_payload_missing").length === 6);
+  }
 
   return failures;
 }

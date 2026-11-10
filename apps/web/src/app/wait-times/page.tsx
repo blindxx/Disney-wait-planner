@@ -522,10 +522,11 @@ function EntertainmentCard({
   stale?: boolean;
   now: Date;
 }) {
-  // Unmapped / not-yet-loaded entries render no showtime line at all. Passed
-  // performances are omitted (re-evaluated at render); complete normalized data
-  // is untouched.
-  const display = showtime && showtime.status !== "unmapped" ? entryDisplayAt(showtime, now) : null;
+  // Not-yet-loaded entries render no showtime line. Unmapped entries (Phase
+  // 14.4B) show their truthful "Showtimes not tracked" message instead of a
+  // blank, distinct from "No showtimes posted". Passed performances are omitted
+  // (re-evaluated at render); complete normalized data is untouched.
+  const display = showtime ? entryDisplayAt(showtime, now) : null;
   const showtimeText = !display
     ? null
     : display.status === "upcoming"

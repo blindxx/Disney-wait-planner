@@ -18,10 +18,15 @@
  * Labels come only from the explicit mapping (entity-id membership) — there is
  * no runtime name matching.
  *
- * Not in the inventory: unmapped curated entries and curated entries none of
- * whose provider refs are in the live payload (dormant/seasonal — `/live`
- * omits them), and non-SHOW provider entities. Provider failure yields no
- * entries plus the typed `error`; nothing is fabricated.
+ * Phase 14.4B: EVERY active curated entry for the park is listed on a
+ * successful provider response, including unmapped entries (e.g. Wondrous
+ * Journeys → "Showtimes not tracked") and mapped entries whose refs are not in
+ * the live payload (dormant/seasonal — `/live` omits them → "Showtimes
+ * unavailable": unknown, never "none posted"). They carry no provider status,
+ * so "Operating only" excludes them; seasonal hiding stays a separate
+ * display-time rule (seasonalVisibility.ts). Not in the inventory: non-SHOW
+ * provider entities. Provider failure yields no entries plus the typed
+ * `error`; nothing is fabricated.
  *
  * Showtime semantics are reused, not re-implemented: performance-type
  * filtering, resort-local date, passed rule, completeness/uncertainty
@@ -168,8 +173,7 @@ export function buildParkAllEntertainment(
   };
 
   for (const e of curated.entries) {
-    if (e.status === "unmapped") continue; // never provider-checked
-    if (!e.provider.some((r) => r.present)) continue; // no live presence: dormant-only, or provider failure
+    if (!result.ok) continue; // provider failure: typed error, nothing fabricated (no per-entry placeholders)
     entries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e, ...hoursFor(e.provider.map((r) => r.entityId), e.provider) });
   }
 
@@ -449,8 +453,15 @@ export function runDevEntertainmentAllCases(): string[] {
     meta: { origin, fetchedAt, etag: null },
   });
   const byName = (r: ParkAllEntertainment, n: string) => r.entries.find((e) => e.name === n);
+  // Phase 14.4B: the inventory also lists curated entries with no live provider presence (unmapped/dormant).
+  // The pre-14.4B cases below assert the LIVE-backed part of the inventory, so they run through this view;
+  // the 14.4B block at the end exercises the full `buildParkAllEntertainment` output.
+  const buildLive = (...args: Parameters<typeof buildParkAllEntertainment>): ParkAllEntertainment => {
+    const r = buildParkAllEntertainment(...args);
+    return { ...r, entries: r.entries.filter((e) => e.source !== "curated" || e.showtime.provider.some((p) => p.present)) };
+  };
 
-  const base = buildParkAllEntertainment("hs", live([
+  const base = buildLive("hs", live([
     entry(FANTASMIC_HS, "Fantasmic! (provider name)", [st("2026-10-01T10:00:00-04:00"), st("2026-10-01T19:30:00-04:00"), st("2026-10-01T21:00:00-04:00")]),
     entry(PROVIDER_ONLY_A, "Provider Street Band", [st("2026-10-01T20:00:00-04:00")]),
     entry(PROVIDER_ONLY_B, "Meet a Character", [st("2026-10-01T09:00:00-04:00", "Operating", "2026-10-01T18:00:00-04:00")]),
@@ -464,15 +475,15 @@ export function runDevEntertainmentAllCases(): string[] {
   check("inventory: non-SHOW provider entities excluded", !byName(base, "Some Ride"));
   check("inventory: other-park SHOW excluded", !byName(base, "Other Park Show"));
   check("inventory: mapped ref never repeated as provider-only", base.entries.filter((e) => e.id.includes(FANTASMIC_HS)).length === 0);
-  check("inventory: dormant curated entries (not in live) excluded", base.entries.filter((e) => e.source === "curated").length === 1);
-  check("inventory: unmapped curated never listed", base.entries.every((e) => e.showtime.status !== "unmapped"));
+  check("live view: dormant curated entries (not in live) are not live-backed", base.entries.filter((e) => e.source === "curated").length === 1);
+  check("live view: unmapped curated entries are not live-backed", base.entries.every((e) => e.showtime.status !== "unmapped"));
   check("inventory: ids unique", new Set(base.entries.map((e) => e.id)).size === base.entries.length);
   {
-    const dup = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "A", []), entry(PROVIDER_ONLY_A, "A", [])]), NOW);
+    const dup = buildLive("hs", live([entry(PROVIDER_ONLY_A, "A", []), entry(PROVIDER_ONLY_A, "A", [])]), NOW);
     check("inventory: duplicate provider entity listed once", dup.entries.length === 1);
-    const failed = buildParkAllEntertainment("hs", { ok: false, error: { kind: "timeout", message: "t" } }, NOW);
+    const failed = buildLive("hs", { ok: false, error: { kind: "timeout", message: "t" } }, NOW);
     check("inventory: provider failure → no entries + typed error (nothing fabricated)", failed.entries.length === 0 && failed.error?.kind === "timeout");
-    const empty = buildParkAllEntertainment("hs", live([]), NOW);
+    const empty = buildLive("hs", live([]), NOW);
     check("inventory: valid-empty live → no entries, no error", empty.entries.length === 0 && empty.error === null);
   }
 
@@ -487,7 +498,7 @@ export function runDevEntertainmentAllCases(): string[] {
   {
     const DRUM_CORPS = "bc2c2ffe-3cf0-4e75-a408-bf5e86515c4c"; // hs → Toy Story Land (no venue)
     const MEET_ARIEL = "c113b1cf-7b6d-416a-8e21-bf8f387ecd77"; // hs → Animation Courtyard · Walt Disney Presents
-    const loc = buildParkAllEntertainment("hs", live([
+    const loc = buildLive("hs", live([
       entry(DRUM_CORPS, "Green Army Drum Corps", [st("2026-10-01T20:00:00-04:00")]),
       entry(MEET_ARIEL, "Meet Ariel", [st("2026-10-01T20:30:00-04:00")]),
       entry(PROVIDER_ONLY_A, "Not Listed", [st("2026-10-01T20:15:00-04:00")]),
@@ -503,7 +514,7 @@ export function runDevEntertainmentAllCases(): string[] {
     check("filter: verified provider-only land selectable", filterAllEntertainment(loc.entries, { land: "Toy Story Land" }).map((e) => e.id).join() === drum.id);
     check("filter: unknown locations stay visible under All Lands only", filterAllEntertainment(loc.entries, {}).includes(unlisted) && !filterAllEntertainment(loc.entries, { land: "Toy Story Land" }).includes(unlisted));
     // park-qualified: the same UUID in another park's payload resolves to nothing
-    const wrongPark = buildParkAllEntertainment("mk", { ...live([entry(DRUM_CORPS, "Green Army Drum Corps", [], { parkId: THEMEPARKS_PARKS.mk.entityId })]) }, NOW);
+    const wrongPark = buildLive("mk", { ...live([entry(DRUM_CORPS, "Green Army Drum Corps", [], { parkId: THEMEPARKS_PARKS.mk.entityId })]) }, NOW);
     check("locations: park-qualified uuid match (hs id in mk → unknown)", wrongPark.entries.length === 1 && wrongPark.entries[0].land === null);
     // curated entries never take their land from the provider-location table
     check("locations: curated land comes from the catalog", fant.land === "Sunset Boulevard");
@@ -513,15 +524,15 @@ export function runDevEntertainmentAllCases(): string[] {
   const meet = byName(base, "Meet a Character")!;
   check("types: 'Operating' hours are not performances (none posted, nothing fabricated)", meet.showtime.performances.length === 0 && meet.showtime.status === "none_posted");
   {
-    const r = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00", "Mystery Type")])]), NOW);
+    const r = buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00", "Mystery Type")])]), NOW);
     const e = r.entries[0].showtime;
     check("uncertainty: unrecognized type → incomplete, unavailable when nothing else", e.incomplete && e.status === "unavailable" && e.performances.length === 0);
-    const d = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00")], { droppedShowtimes: 1 })]), NOW).entries[0].showtime;
+    const d = buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00")], { droppedShowtimes: 1 })]), NOW).entries[0].showtime;
     check("uncertainty: dropped showtimes → incomplete but known time kept", d.incomplete && d.status === "upcoming" && d.performances.length === 1);
-    check("uncertainty: partial flag on upcoming incomplete view", allEntryViewAt(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00")], { droppedShowtimes: 1 })]), NOW).entries[0], NOW).partial);
-    const stale = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [])], "stale"), NOW);
+    check("uncertainty: partial flag on upcoming incomplete view", allEntryViewAt(buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00")], { droppedShowtimes: 1 })]), NOW).entries[0], NOW).partial);
+    const stale = buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [])], "stale"), NOW);
     check("uncertainty: stale-if-error flagged", stale.stale && stale.meta?.origin === "stale");
-    const prevDay = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00")])], "network", new Date("2026-09-30T19:00:00Z").getTime()), NOW);
+    const prevDay = buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T20:00:00-04:00")])], "network", new Date("2026-09-30T19:00:00Z").getTime()), NOW);
     check("uncertainty: payload fetched a previous day → incomplete", prevDay.entries[0].showtime.incomplete);
     const nextDay = allEntertainmentForDisplay(base, new Date("2026-10-02T12:00:00Z"));
     check("uncertainty: previous-day data degrades to unavailable (no entries)", !!nextDay && nextDay.entries.length === 0 && nextDay.error !== null);
@@ -539,7 +550,7 @@ export function runDevEntertainmentAllCases(): string[] {
     check("progression: start instant still counts until it passes", allEntryViewAt(fant, new Date("2026-10-01T23:30:00Z")).collapsedText === "7:30 PM • 9:00 PM");
     check("progression: advances after a time passes", allEntryViewAt(fant, new Date(later.getTime() + 60_000)).collapsedText === "9:00 PM");
     check("progression: all passed → message", allEntryViewAt(fant, new Date("2026-10-02T02:00:00Z")).collapsedText === SHOWTIME_STATUS_MESSAGES.all_passed);
-    const inProg = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T14:30:00-04:00", "Performance Time", "2026-10-01T15:30:00-04:00")])]), NOW).entries[0];
+    const inProg = buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T14:30:00-04:00", "Performance Time", "2026-10-01T15:30:00-04:00")])]), NOW).entries[0];
     check("progression: in-progress performance stays listed", allEntryViewAt(inProg, NOW).collapsedText === "2:30 PM");
   }
 
@@ -552,7 +563,7 @@ export function runDevEntertainmentAllCases(): string[] {
     let ex: ReadonlySet<string> = new Set();
     ex = toggleExpanded(ex, fant.id);
     check("expansion: toggle on", ex.has(fant.id));
-    const refreshed = buildParkAllEntertainment("hs", live([entry(FANTASMIC_HS, "x", [st("2026-10-01T10:00:00-04:00"), st("2026-10-01T19:30:00-04:00")])]), new Date(NOW.getTime() + 120_000));
+    const refreshed = buildLive("hs", live([entry(FANTASMIC_HS, "x", [st("2026-10-01T10:00:00-04:00"), st("2026-10-01T19:30:00-04:00")])]), new Date(NOW.getTime() + 120_000));
     check("expansion: persists across refreshed data (stable id)", ex.has(refreshed.entries[0].id));
     check("expansion: toggle off", !toggleExpanded(ex, fant.id).has(fant.id) && ex.has(fant.id));
   }
@@ -561,7 +572,7 @@ export function runDevEntertainmentAllCases(): string[] {
   {
     const sorted = sortAllEntertainment(base.entries, NOW).map((e) => e.name);
     check("sorting: by next showtime, then none-upcoming", sorted.join() === "Fantasmic!,Provider Street Band,Meet a Character");
-    const early = buildParkAllEntertainment("hs", live([
+    const early = buildLive("hs", live([
       entry(PROVIDER_ONLY_A, "Zed", [st("2026-10-01T16:00:00-04:00")]),
       entry(PROVIDER_ONLY_B, "Alpha", [st("2026-10-01T18:00:00-04:00")]),
       entry(FANTASMIC_HS, "x", [st("2026-10-01T10:00:00-04:00")]),
@@ -576,7 +587,7 @@ export function runDevEntertainmentAllCases(): string[] {
     check("filtering: land keeps matching entries only", filterAllEntertainment(base.entries, { land }).every((e) => e.land === land) && filterAllEntertainment(base.entries, { land }).length === 1);
     check("filtering: land excludes unknown-location provider-only entries", !filterAllEntertainment(base.entries, { land }).some((e) => e.source === "provider_only"));
     check("filtering: lands list = known lands only", allEntertainmentLands(base.entries).join() === land);
-    const closed = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "Closed One", [], { status: "CLOSED" }), entry(PROVIDER_ONLY_B, "Open One", [])]), NOW);
+    const closed = buildLive("hs", live([entry(PROVIDER_ONLY_A, "Closed One", [], { status: "CLOSED" }), entry(PROVIDER_ONLY_B, "Open One", [])]), NOW);
     check("filtering: operating-only keeps OPERATING only", filterAllEntertainment(closed.entries, { operatingOnly: true }).map((e) => e.name).join() === "Open One");
     check("filtering: no filters keeps all", filterAllEntertainment(base.entries, {}).length === base.entries.length);
   }
@@ -598,28 +609,28 @@ export function runDevEntertainmentAllCases(): string[] {
 
   // ---- attribution ----
   check("attribution: owed when inventory presented", allEntertainmentPresentsProviderData(base));
-  check("attribution: owed for a successful valid-empty response", allEntertainmentPresentsProviderData(buildParkAllEntertainment("hs", live([]), NOW)));
+  check("attribution: owed for a successful valid-empty response", allEntertainmentPresentsProviderData(buildLive("hs", live([]), NOW)));
   check("attribution: not owed on failed request / null / previous-day degrade",
-    !allEntertainmentPresentsProviderData(buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) &&
+    !allEntertainmentPresentsProviderData(buildLive("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) &&
     !allEntertainmentPresentsProviderData(null) &&
     !allEntertainmentPresentsProviderData(allEntertainmentForDisplay(base, new Date("2026-10-02T12:00:00Z"))) &&
     !allEntertainmentPresentsProviderData(resolveAllEntertainmentResponse("hs", null, NOW)));
 
   // ---- stale empty inventory ----
   {
-    const staleEmpty = buildParkAllEntertainment("hs", live([], "stale"), NOW);
+    const staleEmpty = buildLive("hs", live([], "stale"), NOW);
     const s = allEntertainmentEmptyState(staleEmpty);
     check("stale-empty: complete-empty shows empty message with stale warning", !!s && s.stale && s.message === INVENTORY_EMPTY_MESSAGE);
     const staleIncomplete = (() => {
       const r = live([], "stale") as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>;
-      return buildParkAllEntertainment("hs", { ...r, data: { ...r.data, droppedEntries: 1 } }, NOW);
+      return buildLive("hs", { ...r, data: { ...r.data, droppedEntries: 1 } }, NOW);
     })();
     const si = allEntertainmentEmptyState(staleIncomplete);
     check("stale-empty: incomplete-empty shows incomplete message with stale warning", !!si && si.stale && si.message === INVENTORY_INCOMPLETE_EMPTY_MESSAGE);
-    const fresh = allEntertainmentEmptyState(buildParkAllEntertainment("hs", live([]), NOW));
+    const fresh = allEntertainmentEmptyState(buildLive("hs", live([]), NOW));
     check("stale-empty: fresh empty has no stale warning", !!fresh && !fresh.stale && fresh.message === INVENTORY_EMPTY_MESSAGE);
     check("stale-empty: stale attribution still owed", allEntertainmentPresentsProviderData(staleEmpty) && allEntertainmentPresentsProviderData(staleIncomplete));
-    check("stale-empty: provider failure / null / populated → no empty state", allEntertainmentEmptyState(buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) === null && allEntertainmentEmptyState(null) === null && allEntertainmentEmptyState(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [])], "stale"), NOW)) === null);
+    check("stale-empty: provider failure / null / populated → no empty state", allEntertainmentEmptyState(buildLive("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW)) === null && allEntertainmentEmptyState(null) === null && allEntertainmentEmptyState(buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [])], "stale"), NOW)) === null);
   }
 
   // ---- incomplete inventory (droppedEntries) ----
@@ -628,15 +639,15 @@ export function runDevEntertainmentAllCases(): string[] {
       const r = live(entries) as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>;
       return { ...r, data: { ...r.data, droppedEntries } };
     };
-    const kept = buildParkAllEntertainment("hs", withDropped([entry(PROVIDER_ONLY_A, "Kept Show", [st("2026-10-01T20:00:00-04:00")])], 2), NOW);
+    const kept = buildLive("hs", withDropped([entry(PROVIDER_ONLY_A, "Kept Show", [st("2026-10-01T20:00:00-04:00")])], 2), NOW);
     check("incomplete: dropped entries flag the inventory", kept.inventoryIncomplete && allEntertainmentIsIncomplete(kept));
     check("incomplete: valid entries and their showtimes preserved (nothing fabricated)", kept.entries.length === 1 && kept.entries[0].showtime.performances.length === 1);
-    const emptyIncomplete = buildParkAllEntertainment("hs", withDropped([], 1), NOW);
+    const emptyIncomplete = buildLive("hs", withDropped([], 1), NOW);
     check("incomplete: empty + dropped is incomplete-empty (not valid-empty)", emptyIncomplete.entries.length === 0 && allEntertainmentIsIncomplete(emptyIncomplete));
-    const validEmpty = buildParkAllEntertainment("hs", live([]), NOW);
+    const validEmpty = buildLive("hs", live([]), NOW);
     check("incomplete: valid-empty is complete", !validEmpty.inventoryIncomplete && !allEntertainmentIsIncomplete(validEmpty));
     check("incomplete: clean payload with entries is complete", !base.inventoryIncomplete);
-    check("incomplete: failure is an error, not 'incomplete'", !buildParkAllEntertainment("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW).inventoryIncomplete);
+    check("incomplete: failure is an error, not 'incomplete'", !buildLive("hs", { ok: false, error: { kind: "network", message: "n" } }, NOW).inventoryIncomplete);
     check("incomplete: both incomplete states still owe attribution", allEntertainmentPresentsProviderData(emptyIncomplete) && allEntertainmentPresentsProviderData(kept));
     check("incomplete: older body without the field is treated as complete", !allEntertainmentIsIncomplete({ ...validEmpty, inventoryIncomplete: undefined } as unknown as ParkAllEntertainment));
   }
@@ -645,12 +656,12 @@ export function runDevEntertainmentAllCases(): string[] {
     const HOURS = "Operating hours: 9:00 AM–5:00 PM";
     const op = (a: string, b: string | null) => st(a, "Operating", b);
     const one = (shows: ThemeParksShowtime[], over: Partial<ThemeParksLive["entries"][number]> = {}, res = live([entry(PROVIDER_ONLY_A, "P", shows, over)]), at = NOW) => {
-      const e = buildParkAllEntertainment("hs", res, at).entries[0];
+      const e = buildLive("hs", res, at).entries[0];
       return { e, v: allEntryViewAt(e, at) };
     };
     const only = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]);
     check("hours: operating-only replaces 'No showtimes posted'", only.v.status === "none_posted" && only.v.collapsedText === null && only.v.hoursText === HOURS && only.e.showtime.performances.length === 0);
-    check("hours: operating-only keeps none_posted sort rank (sorting unchanged)", sortAllEntertainment(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "A Hours Only", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]), entry(PROVIDER_ONLY_B, "B Plain", [])]), NOW).entries, NOW).map((x) => x.name).join() === "A Hours Only,B Plain");
+    check("hours: operating-only keeps none_posted sort rank (sorting unchanged)", sortAllEntertainment(buildLive("hs", live([entry(PROVIDER_ONLY_A, "A Hours Only", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]), entry(PROVIDER_ONLY_B, "B Plain", [])]), NOW).entries, NOW).map((x) => x.name).join() === "A Hours Only,B Plain");
     const none = one([]);
     check("hours: none published → 'No showtimes posted' unchanged, no hours line", none.v.collapsedText === SHOWTIME_STATUS_MESSAGES.none_posted && none.v.hoursText === null);
     const mixed = one([st("2026-10-01T20:00:00-04:00"), op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")]);
@@ -661,7 +672,7 @@ export function runDevEntertainmentAllCases(): string[] {
     check("hours: all-passed message kept (only none_posted is replaced)", passed.collapsedText === SHOWTIME_STATUS_MESSAGES.all_passed && passed.hoursText === HOURS);
     const unavailable = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00"), st("2026-10-01T20:00:00-04:00", "Mystery Type")]);
     check("hours: unavailable message kept alongside hours", unavailable.v.status === "unavailable" && unavailable.v.collapsedText === SHOWTIME_STATUS_MESSAGES.unavailable && unavailable.v.hoursText === HOURS);
-    check("hours: curated entry uses its mapped refs", buildParkAllEntertainment("hs", live([entry(FANTASMIC_HS, "x", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW).entries[0].operatingHours?.[0].label === "9:00 AM–5:00 PM");
+    check("hours: curated entry uses its mapped refs", buildLive("hs", live([entry(FANTASMIC_HS, "x", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW).entries[0].operatingHours?.[0].label === "9:00 AM–5:00 PM");
 
     // invalid / incomplete intervals are never displayed or guessed
     check("hours: missing end dropped", one([op("2026-10-01T09:00:00-04:00", null)]).v.hoursText === null);
@@ -684,7 +695,7 @@ export function runDevEntertainmentAllCases(): string[] {
     check("hours: overnight span labelled next day", night.v.hoursText === "Operating hours: 9:00 PM–1:00 AM (next day)");
     const utcTrap = one([op("2026-10-02T02:00:00Z", "2026-10-02T03:30:00Z")]); // 10 PM–11:30 PM EDT Oct 1 (UTC says Oct 2)
     check("hours: resort-local date decides, not UTC", utcTrap.v.hoursText === "Operating hours: 10:00 PM–11:30 PM");
-    const dlr = buildParkAllEntertainment("disneyland", { ok: true, data: { entityId: "p", name: "p", timeZone: null, entries: [entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T08:00:00-07:00", "2026-10-01T22:00:00-07:00")], { parkId: THEMEPARKS_PARKS.disneyland.entityId })], droppedEntries: 0, droppedShowtimes: 0 }, meta: { origin: "network", fetchedAt: new Date("2026-10-01T20:00:00Z").getTime(), etag: null } }, new Date("2026-10-01T20:00:00Z"));
+    const dlr = buildLive("disneyland", { ok: true, data: { entityId: "p", name: "p", timeZone: null, entries: [entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T08:00:00-07:00", "2026-10-01T22:00:00-07:00")], { parkId: THEMEPARKS_PARKS.disneyland.entityId })], droppedEntries: 0, droppedShowtimes: 0 }, meta: { origin: "network", fetchedAt: new Date("2026-10-01T20:00:00Z").getTime(), etag: null } }, new Date("2026-10-01T20:00:00Z"));
     check("hours: DLR formatted in PDT", allEntryViewAt(dlr.entries[0], new Date("2026-10-01T20:00:00Z")).hoursText === "Operating hours: 8:00 AM–10:00 PM");
     // DST fall-back 2026-11-01 (WDW): 1:00 AM EDT → 1:00 AM EST repeats; 9 AM–5 PM EST is 8 elapsed hours
     const dstNow = new Date("2026-11-01T17:00:00Z");
@@ -695,12 +706,12 @@ export function runDevEntertainmentAllCases(): string[] {
 
     // stale / previous-day payloads
     const staleSame = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")], {}, live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])], "stale"));
-    check("hours: same-day stale-if-error still shows hours (page flags it stale)", staleSame.v.hoursText === HOURS && buildParkAllEntertainment("hs", live([], "stale"), NOW).stale);
+    check("hours: same-day stale-if-error still shows hours (page flags it stale)", staleSame.v.hoursText === HOURS && buildLive("hs", live([], "stale"), NOW).stale);
     const prev = one([op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")], {}, live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])], "network", new Date("2026-09-30T19:00:00Z").getTime()));
     check("hours: previous-day payload cannot vouch for today's hours", prev.v.hoursText === null);
-    const nextDay = allEntertainmentForDisplay(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW), new Date("2026-10-02T12:00:00Z"));
+    const nextDay = allEntertainmentForDisplay(buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])]), NOW), new Date("2026-10-02T12:00:00Z"));
     check("hours: resort-local rollover drops yesterday's hours with the entries", !!nextDay && nextDay.entries.length === 0);
-    check("hours: provider failure → no hours fabricated", buildParkAllEntertainment("hs", { ok: false, error: { kind: "timeout", message: "t" } }, NOW).entries.length === 0);
+    check("hours: provider failure → no hours fabricated", buildLive("hs", { ok: false, error: { kind: "timeout", message: "t" } }, NOW).entries.length === 0);
     check("hours: older body without the field renders no hours line", allEntryViewAt({ ...only.e, operatingHours: undefined }, NOW).hoursText === null);
 
     // curated API untouched
@@ -711,7 +722,7 @@ export function runDevEntertainmentAllCases(): string[] {
     const op = (a: string, b: string | null) => st(a, "Operating", b);
     const GOOD = op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00");
     const view = (shows: ThemeParksShowtime[], over: Partial<ThemeParksLive["entries"][number]> = {}) =>
-      allEntryViewAt(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", shows, over)]), NOW).entries[0], NOW);
+      allEntryViewAt(buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", shows, over)]), NOW).entries[0], NOW);
     const full = view([GOOD]);
     check("incomplete hours: complete data → no qualifier", full.hoursText === "Operating hours: 9:00 AM–5:00 PM" && !full.hoursIncomplete);
     const dropped = view([GOOD], { droppedShowtimes: 1 });
@@ -726,7 +737,7 @@ export function runDevEntertainmentAllCases(): string[] {
     check("incomplete hours: dropped with no valid interval → no hours fabricated", onlyDropped.hoursText === null && !onlyDropped.hoursIncomplete);
     const mixedDropped = view([st("2026-10-01T20:00:00-04:00"), GOOD], { droppedShowtimes: 1 });
     check("incomplete hours: mixed keeps performances first, qualified hours second", mixedDropped.collapsedText === "8:00 PM" && mixedDropped.partial && !!mixedDropped.hoursText?.endsWith("(may be incomplete)"));
-    const multi = buildParkAllEntertainment("disneyland", { ok: true, data: { entityId: "p", name: "p", timeZone: null, entries: [entry("0bd8e001-83f8-4c9e-9e14-df5a2d6400c3", "x", [op("2026-10-01T09:00:00-07:00", "2026-10-01T17:00:00-07:00")], { parkId: THEMEPARKS_PARKS.disneyland.entityId })], droppedEntries: 0, droppedShowtimes: 0 }, meta: { origin: "network", fetchedAt: new Date("2026-10-01T20:00:00Z").getTime(), etag: null } }, new Date("2026-10-01T20:00:00Z")).entries[0];
+    const multi = buildLive("disneyland", { ok: true, data: { entityId: "p", name: "p", timeZone: null, entries: [entry("0bd8e001-83f8-4c9e-9e14-df5a2d6400c3", "x", [op("2026-10-01T09:00:00-07:00", "2026-10-01T17:00:00-07:00")], { parkId: THEMEPARKS_PARKS.disneyland.entityId })], droppedEntries: 0, droppedShowtimes: 0 }, meta: { origin: "network", fetchedAt: new Date("2026-10-01T20:00:00Z").getTime(), etag: null } }, new Date("2026-10-01T20:00:00Z")).entries[0];
     check("incomplete hours: curated multi-ref with an absent ref → qualified", multi.operatingHoursIncomplete === true && allEntryViewAt(multi, new Date("2026-10-01T20:00:00Z")).hoursIncomplete);
   }
 
@@ -734,7 +745,7 @@ export function runDevEntertainmentAllCases(): string[] {
   {
     const H = [st("2026-10-01T09:00:00-04:00", "Operating", "2026-10-01T17:00:00-04:00")];
     const lay = (shows: ThemeParksShowtime[], expanded: boolean, stale: boolean) => {
-      const e = buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", shows)]), NOW).entries[0];
+      const e = buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", shows)]), NOW).entries[0];
       const v = allEntryViewAt(e, NOW);
       return { v, l: allEntryLayout(v, expanded, stale) };
     };
@@ -747,10 +758,52 @@ export function runDevEntertainmentAllCases(): string[] {
     check("layout: mixed not stale → no warning", lay([st("2026-10-01T20:00:00-04:00"), ...H], false, false).l.staleScope === null);
     const none = lay([], false, true);
     check("layout: none posted without hours keeps message container + stale", none.l.showShowtimes && none.l.showtimesStale && !none.l.hoursStale);
-    const done = allEntryLayout(allEntryViewAt(buildParkAllEntertainment("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T10:00:00-04:00"), ...H])]), NOW).entries[0], NOW), true, false);
+    const done = allEntryLayout(allEntryViewAt(buildLive("hs", live([entry(PROVIDER_ONLY_A, "P", [st("2026-10-01T10:00:00-04:00"), ...H])]), NOW).entries[0], NOW), true, false);
     check("layout: expanded schedule shows full list", done.showFull && done.showShowtimes);
   }
   check("copy: partial note constant reused", PARTIAL_SHOWTIMES_NOTE === "More showtimes may be unavailable");
+
+  // ---- Phase 14.4B: curated entries are always listed (unmapped / dormant included) ----
+  {
+    const MK_UUID = THEMEPARKS_PARKS.mk.entityId;
+    const hsPlaces = ENTERTAINMENT_PLACES.filter((p) => p.parkId === "hs");
+    const full = buildParkAllEntertainment("hs", live([
+      entry(FANTASMIC_HS, "Fantasmic!", [st("2026-10-01T19:30:00-04:00"), st("2026-10-01T21:00:00-04:00")]),
+      entry(PROVIDER_ONLY_A, "Provider Street Band", [st("2026-10-01T20:00:00-04:00")]),
+    ]), NOW);
+    const cur = full.entries.filter((e) => e.source === "curated");
+    check("14.4B inventory: every active curated HS entry is listed exactly once", cur.length === hsPlaces.length && new Set(cur.map((e) => e.name)).size === hsPlaces.length && hsPlaces.every((p) => cur.some((e) => e.name === p.name)));
+    check("14.4B inventory: ids unique and provider-only still listed beside curated", new Set(full.entries.map((e) => e.id)).size === full.entries.length && full.entries.some((e) => e.source === "provider_only" && e.name === "Provider Street Band"));
+    const studio = byName(full, "Once Upon a Studio Theater")!;
+    check("14.4B unmapped: listed with status 'unmapped' and a truthful non-blank message", !!studio && studio.source === "curated" && studio.showtime.status === "unmapped" && allEntryViewAt(studio, NOW).collapsedText === "Showtimes not tracked");
+    check("14.4B unmapped: 'not tracked' is distinct from 'none posted' and 'unavailable'", studio.showtime.message !== SHOWTIME_STATUS_MESSAGES.none_posted && studio.showtime.message !== SHOWTIME_STATUS_MESSAGES.unavailable);
+    const glisten = byName(full, "Glisten!")!;
+    check("14.4B dormant (mapped, absent from live): 'Showtimes unavailable' — unknown, never 'No showtimes posted'", glisten.showtime.status === "unavailable" && glisten.showtime.performances.length === 0 && allEntryViewAt(glisten, NOW).collapsedText === "Showtimes unavailable");
+    check("14.4B no fabricated status: unmapped/dormant have no provider status", allEntryProviderStatus(studio) === null && allEntryProviderStatus(glisten) === null);
+    const f = byName(full, "Fantasmic!")!;
+    check("14.4B live-backed curated entry unchanged (upcoming times from provider)", allEntryViewAt(f, NOW).status === "upcoming" && allEntryViewAt(f, NOW).collapsedText === "7:30 PM • 9:00 PM");
+    check("14.4B filters: Operating-only excludes unmapped/dormant entries", filterAllEntertainment(full.entries, { operatingOnly: true }).map((e) => e.name).sort().join() === ["Fantasmic!", "Provider Street Band"].sort().join());
+    check("14.4B filters: land filter keeps an unmapped curated entry under its catalog land", filterAllEntertainment(full.entries, { land: "Animation Courtyard" }).some((e) => e.name === "Once Upon a Studio Theater") && allEntertainmentLands(full.entries).includes("Animation Courtyard"));
+    const sorted = sortAllEntertainment(full.entries, NOW).map((e) => e.name);
+    check("14.4B sorting: upcoming first, then unknown (unavailable) before unmapped", sorted[0] === "Fantasmic!" && sorted.indexOf("Glisten!") < sorted.indexOf("Once Upon a Studio Theater"));
+    check("14.4B empty states: valid-empty live still lists curated entries, none with fabricated times", (() => {
+      const e = buildParkAllEntertainment("hs", live([]), NOW);
+      return e.error === null && e.entries.length === hsPlaces.length && e.entries.every((x) => x.showtime.performances.length === 0 && (x.showtime.status === "unavailable" || x.showtime.status === "unmapped"));
+    })());
+    const failed = buildParkAllEntertainment("hs", { ok: false, error: { kind: "timeout", message: "t" } }, NOW);
+    check("14.4B provider failure: no entries, typed error, nothing fabricated", failed.entries.length === 0 && failed.error?.kind === "timeout");
+    const wj = byName(buildParkAllEntertainment("disneyland", live([]), NOW), "Wondrous Journeys");
+    check("14.4B Wondrous Journeys (unmapped, absent from provider) is listed with catalog identity + land", !!wj && wj.id === "curated:disneyland:Wondrous Journeys" && wj.source === "curated" && wj.land === "Main Street, U.S.A." && wj.showtime.status === "unmapped");
+    const CHRISTMAS_STANDALONE = "1a6e4b4a-fdf4-4379-83e4-741c9f5c343e";
+    const CHRISTMAS_PARTY = "99baf196-9dfc-4b13-af77-025e87ac2a7d";
+    const mk = buildParkAllEntertainment("mk", live([
+      entry(CHRISTMAS_STANDALONE, "Mickey's Once Upon a Christmastime Parade", [st("2026-10-01T14:00:00-04:00")], { parkId: MK_UUID }),
+      entry(CHRISTMAS_PARTY, "Mickey's Once Upon a Christmastime Parade at Mickey's Very Merry Christmas Party", [], { parkId: MK_UUID, status: "CLOSED" }),
+    ]), NOW);
+    const parades = mk.entries.filter((e) => e.name === "Mickey's Once Upon a Christmastime Parade");
+    check("14.4B dedupe: two provider records for one DWP show → one curated entry, neither repeated as provider-only", parades.length === 1 && parades[0].source === "curated" && !mk.entries.some((e) => e.source === "provider_only" && (e.id.includes(CHRISTMAS_STANDALONE) || e.id.includes(CHRISTMAS_PARTY))));
+    check("14.4B dedupe: merged entry carries the standalone performance (verified time)", parades[0].showtime.performances.map((p) => p.localTime).join() === "2:00 PM" && parades[0].showtime.provider.length === 2);
+  }
 
   return failures;
 }

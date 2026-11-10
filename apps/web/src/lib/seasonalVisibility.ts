@@ -13,7 +13,14 @@
  *
  * Provider evidence override: if the showtimes API has performances today for a
  * show our registry marks off-season, the show remains visible — confirmed
- * current performances establish visibility.
+ * current performances establish visibility (including Christmas parades on
+ * non-party dates, and performances that have already passed today). This
+ * needs the show to be explicitly mapped to its provider entity
+ * (themeParksEntertainmentMapping.ts); an unmapped show can never be
+ * evidenced. Registry-confirmed party dates are visible all day regardless of
+ * provider data. Unknown data (no/unavailable showtimes) is never evidence
+ * either way: it neither overrides the registry nor is treated as "zero
+ * performances" in any message (see SHOWTIME_STATUS_MESSAGES).
  *
  * My Plans / Lightning Lane are unaffected: those pages never call this module
  * and seasonal items remain selectable year-round (dates optional).
@@ -30,7 +37,10 @@ import { SHOWTIME_STATUS_MESSAGES } from "./entertainmentShowtimes";
 import { getSeasonalEntertainmentRank } from "./seasonalEntertainment";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
-import type { AllEntertainmentEntry } from "./entertainmentAll";
+import { buildParkAllEntertainment, type AllEntertainmentEntry } from "./entertainmentAll";
+import { normalizeParkEntertainmentShowtimes } from "./entertainmentShowtimes";
+import { THEMEPARKS_PARKS } from "./themeParksProviders";
+import type { ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 
 // ============================================
 // WAITS & SHOWS VISIBILITY
@@ -178,6 +188,24 @@ function oos(name: string, resort: ResortId, today: string, parkId: ParkId, show
   if (!place) throw new Error(`no place: ${name}`);
   return isEntertainmentConfirmedOutOfSeason(place, resort, today, showtimes, NOW);
 }
+
+// Phase 14.4B helpers: synthetic provider payloads for MK (offline).
+const MK_UUID = THEMEPARKS_PARKS.mk.entityId;
+const XMAS_PARADE = "1a6e4b4a-fdf4-4379-83e4-741c9f5c343e";
+const XMAS_PARADE_PARTY = "99baf196-9dfc-4b13-af77-025e87ac2a7d";
+const MINNIE_FW = "bb28947d-a747-44f0-ac71-1fa8188f4cee";
+const MERRIEST = "767b8357-ce52-4e09-810f-30ee81f8136c";
+const perf = (startTime: string, type: string | null = "Performance Time", endTime: string | null = null): ThemeParksShowtime => ({ type, startTime, endTime });
+const mkEntry = (entityId: string, name: string, showtimes: ThemeParksShowtime[], over: Partial<ThemeParksLive["entries"][number]> = {}): ThemeParksLive["entries"][number] => ({
+  entityId, name, entityType: "SHOW", parkId: MK_UUID, externalId: null, status: "OPERATING", lastUpdated: null, showtimes, droppedShowtimes: 0, ...over,
+});
+const mkLive = (entries: ThemeParksLive["entries"], at: Date): ThemeParksResult<ThemeParksLive> => ({
+  ok: true,
+  data: { entityId: MK_UUID, name: "MK", timeZone: null, entries, droppedEntries: 0, droppedShowtimes: 0 },
+  meta: { origin: "network", fetchedAt: at.getTime(), etag: null },
+});
+const mkShowtimes = (entries: ThemeParksLive["entries"], at: Date) => normalizeParkEntertainmentShowtimes("mk", mkLive(entries, at), at);
+const mkAll = (entries: ThemeParksLive["entries"], at: Date) => buildParkAllEntertainment("mk", mkLive(entries, at), at);
 
 export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   // ── WDW: Halloween party shows ended Oct 31 ──────────────────────────────
@@ -458,6 +486,57 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
       e.showtime.provider.length === 0 &&
       e.showtime.incomplete === true;
   } },
+  // ── Phase 14.4B: verified-performance override + party-date visibility ────
+  { label: "14.4B: MK Christmas parade performing today (non-party Nov 10) overrides hiding — Waits & Shows path", ok: () => {
+    const entries = mkShowtimes([mkEntry(XMAS_PARADE, "Mickey's Once Upon a Christmastime Parade", [perf("2026-11-10T14:00:00-05:00")])], NOW).entries;
+    return oos("Mickey's Once Upon a Christmastime Parade", "WDW", TODAY_WDW, "mk") === true &&
+      oos("Mickey's Once Upon a Christmastime Parade", "WDW", TODAY_WDW, "mk", entries) === false;
+  } },
+  { label: "14.4B: same parade performing today overrides hiding — All Entertainment path", ok: () => {
+    const all = mkAll([mkEntry(XMAS_PARADE, "Mickey's Once Upon a Christmastime Parade", [perf("2026-11-10T14:00:00-05:00")])], NOW);
+    const e = all.entries.find((x) => x.name === "Mickey's Once Upon a Christmastime Parade")!;
+    return e.showtime.performances.length === 1 && !isAllEntryConfirmedOutOfSeason(e, "mk", "WDW", TODAY_WDW, NOW);
+  } },
+  { label: "14.4B: override survives after the performance has passed (still performed today)", ok: () => {
+    const late = new Date("2026-11-11T02:00:00Z"); // 9:00 PM EST Nov 10
+    const entries = mkShowtimes([mkEntry(XMAS_PARADE, "Mickey's Once Upon a Christmastime Parade", [perf("2026-11-10T14:00:00-05:00")])], late).entries;
+    return oos("Mickey's Once Upon a Christmastime Parade", "WDW", TODAY_WDW, "mk", entries) === false;
+  } },
+  { label: "14.4B: party-only Christmas shows present but with no performance on a non-party date stay hidden", ok: () => {
+    const all = mkAll([
+      mkEntry(XMAS_PARADE, "Mickey's Once Upon a Christmastime Parade", [], { status: "CLOSED" }),
+      mkEntry(XMAS_PARADE_PARTY, "Mickey's Once Upon a Christmastime Parade at Mickey's Very Merry Christmas Party", [], { status: "CLOSED" }),
+      mkEntry(MINNIE_FW, "Minnie's Wonderful Christmastime Fireworks at Mickey's Very Merry Christmas Party", [], { status: "CLOSED" }),
+      mkEntry(MERRIEST, "Mickey's Most Merriest Celebration at Mickey's Very Merry Christmas Party", [], { status: "CLOSED" }),
+    ], NOW);
+    return ["Mickey's Once Upon a Christmastime Parade", "Minnie's Wonderful Christmastime Fireworks", "Mickey's Most Merriest Celebration"]
+      .every((n) => { const e = all.entries.find((x) => x.name === n)!; return !!e && isAllEntryConfirmedOutOfSeason(e, "mk", "WDW", TODAY_WDW, NOW); });
+  } },
+  { label: "14.4B: confirmed party date (Nov 8) keeps party shows visible all day, even with no provider data at all", ok: () => {
+    const now = new Date("2026-11-08T17:00:00Z");
+    const names = ["Mickey's Once Upon a Christmastime Parade", "Minnie's Wonderful Christmastime Fireworks", "Mickey's Most Merriest Celebration"];
+    const noData = mkAll([], now);
+    const closed = mkAll([mkEntry(MERRIEST, "Mickey's Most Merriest Celebration at Mickey's Very Merry Christmas Party", [], { status: "CLOSED" })], now);
+    return [noData, closed].every((all) => names.every((n) => { const e = all.entries.find((x) => x.name === n)!; return !!e && !isAllEntryConfirmedOutOfSeason(e, "mk", "WDW", "2026-11-08", now); }));
+  } },
+  { label: "14.4B: unknown data is not evidence — failed/unavailable showtimes neither override nor fabricate performances", ok: () => {
+    const failed: ThemeParksResult<ThemeParksLive> = { ok: false, error: { kind: "timeout", message: "t" } };
+    const entries = normalizeParkEntertainmentShowtimes("mk", failed, NOW).entries;
+    const e = entries.find((x) => x.dwpName === "Mickey's Once Upon a Christmastime Parade")!;
+    return e.performances.length === 0 && e.status === "unavailable" && e.message === "Showtimes unavailable" &&
+      oos("Mickey's Once Upon a Christmastime Parade", "WDW", TODAY_WDW, "mk", entries) === true;
+  } },
+  { label: "14.4B: incomplete (one ref absent) but known performance still overrides", ok: () => {
+    const entries = mkShowtimes([mkEntry(XMAS_PARADE_PARTY, "Mickey's Once Upon a Christmastime Parade at Mickey's Very Merry Christmas Party", [perf("2026-11-10T20:00:00-05:00", "Special Ticketed Event")])], NOW).entries;
+    const e = entries.find((x) => x.dwpName === "Mickey's Once Upon a Christmastime Parade")!;
+    return e.incomplete && e.performances.length === 1 && oos("Mickey's Once Upon a Christmastime Parade", "WDW", TODAY_WDW, "mk", entries) === false;
+  } },
+  { label: "14.4B: provider 'Operating' hours are not performances and never override hiding", ok: () => {
+    const entries = mkShowtimes([mkEntry(XMAS_PARADE, "Mickey's Once Upon a Christmastime Parade", [perf("2026-11-10T09:00:00-05:00", "Operating", "2026-11-10T18:00:00-05:00")])], NOW).entries;
+    return oos("Mickey's Once Upon a Christmastime Parade", "WDW", TODAY_WDW, "mk", entries) === true;
+  } },
+  { label: "14.4B: Mickey's Mix Magic (limited, DLR) and DCA Clubhouse are never hidden", ok: () =>
+    !oos("Mickey's Mix Magic", "DLR", TODAY_DLR, "disneyland") && !oos("Disney Jr. Mickey Mouse Clubhouse Live!", "DLR", TODAY_DLR, "dca") },
 ];
 
 export function runDevSeasonalVisibilityCases(): string[] {
