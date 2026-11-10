@@ -34,7 +34,7 @@ import {
   type EntertainmentPlace,
 } from "./entertainmentSuggestions";
 import { SHOWTIME_STATUS_MESSAGES } from "./entertainmentShowtimes";
-import { getSeasonalEntertainmentRank } from "./seasonalEntertainment";
+import { getSeasonalEntertainmentRank, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
 import { buildParkAllEntertainment, type AllEntertainmentEntry } from "./entertainmentAll";
@@ -93,8 +93,14 @@ export function isEntertainmentConfirmedOutOfSeason(
  * Whether a live All Entertainment entry is confirmed out-of-season for
  * the current resort-local date, applying the same provider-evidence override.
  *
+ * Provider-only entries (Phase 14.4B) are hidden ONLY when they carry an
+ * explicit park+UUID party association (`SEASONAL_PROVIDER_ONLY_EVENTS`) and
+ * today is a confirmed non-party date; verified same-day performances OR
+ * verified operating hours (the schedule of a meet) keep them visible. Every
+ * unlisted provider-only record is unclassified and never hidden.
+ *
  * Returns false for:
- *   - provider_only entries (never hidden — DWP catalog is not the source of truth)
+ *   - unclassified provider_only entries (no explicit event association)
  *   - entries with no matching catalog place (name not in DWP catalog)
  *   - entries for which the showtime has at least one performance today
  *   - entries whose seasonal rank is not "off-season" (neutral, unknown, in-season)
@@ -106,6 +112,16 @@ export function isAllEntryConfirmedOutOfSeason(
   today: string,
   instant?: Date,
 ): boolean {
+  if (entry.source === "provider_only") {
+    const PREFIX = "provider:";
+    if (!entry.id.startsWith(PREFIX)) return false;
+    const rank = getSeasonalProviderEntertainmentRank(parkId, entry.id.slice(PREFIX.length), {
+      resort, date: today, parkId, instant: instant ?? new Date(),
+    });
+    if (rank !== "off-season") return false;
+    // Provider evidence: a verified performance, or verified operating hours, today.
+    return entry.showtime.performances.length === 0 && (entry.operatingHours?.length ?? 0) === 0;
+  }
   if (entry.source !== "curated") return false;
   const place = getEntertainmentForPark(parkId).find((p) => p.name === entry.name);
   if (!place) return false;
@@ -116,6 +132,24 @@ export function isAllEntryConfirmedOutOfSeason(
     [{ dwpName: entry.name, performances: entry.showtime.performances }],
     instant,
   );
+}
+
+/**
+ * All Entertainment list after the seasonal rule: toggle OFF hides confirmed
+ * out-of-season entries (curated and explicitly-classified provider-only),
+ * toggle ON reveals them. Pure, so the page and DEV cases share one rule.
+ */
+export function applyAllEntertainmentSeasonalVisibility(
+  entries: AllEntertainmentEntry[],
+  parkId: ParkId,
+  resort: ResortId,
+  today: string,
+  showOutOfSeason: boolean,
+  instant?: Date,
+): AllEntertainmentEntry[] {
+  return showOutOfSeason
+    ? entries
+    : entries.filter((e) => !isAllEntryConfirmedOutOfSeason(e, parkId, resort, today, instant));
 }
 
 // ============================================
@@ -206,6 +240,23 @@ const mkLive = (entries: ThemeParksLive["entries"], at: Date): ThemeParksResult<
 });
 const mkShowtimes = (entries: ThemeParksLive["entries"], at: Date) => normalizeParkEntertainmentShowtimes("mk", mkLive(entries, at), at);
 const mkAll = (entries: ThemeParksLive["entries"], at: Date) => buildParkAllEntertainment("mk", mkLive(entries, at), at);
+
+const HS_UUID = THEMEPARKS_PARKS.hs.entityId;
+const SANTA_JACK_SALLY = "6d3b1129-b34c-4b44-bba2-0e1790fef705";
+const JOIN_SANTA = "418c2111-36d4-4f07-86b2-8058014a263c";
+const MVMCP_GREETINGS = "8b8cb0ec-10a3-41d9-b5cb-81ea8db14370";
+const JN_STITCH = "ae7db7da-a3d9-443b-b4a6-d3c4a2b66121";
+const JN_PIXAR_DISCO = "71da34dd-a27e-4db5-aef3-f880ef939f98";
+const DRUM_CORPS = "bc2c2ffe-3cf0-4e75-a408-bf5e86515c4c"; // ordinary HS provider-only (unclassified)
+const hsAll = (entries: ThemeParksLive["entries"], at: Date) => buildParkAllEntertainment("hs", {
+  ok: true,
+  data: { entityId: HS_UUID, name: "HS", timeZone: null, entries, droppedEntries: 0, droppedShowtimes: 0 },
+  meta: { origin: "network", fetchedAt: at.getTime(), etag: null },
+}, at);
+const hsEntry = (entityId: string, name: string, showtimes: ThemeParksShowtime[] = [], status = "CLOSED") => mkEntry(entityId, name, showtimes, { parkId: HS_UUID, status });
+const byId = (all: { entries: AllEntertainmentEntry[] }, id: string) => all.entries.find((e) => e.id === `provider:${id}`)!;
+const hiddenP = (all: { entries: AllEntertainmentEntry[] }, id: string, park: ParkId, date: string, at: Date) =>
+  isAllEntryConfirmedOutOfSeason(byId(all, id), park, "WDW", date, at);
 
 export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   // ── WDW: Halloween party shows ended Oct 31 ──────────────────────────────
@@ -316,9 +367,8 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     !oos("Fantasmic!", "WDW", TODAY_WDW, "hs") &&
     !oos("Luminous The Symphony of Us", "WDW", TODAY_WDW, "epcot") },
 
-  { label: "Unassociated seasonal: Frozen Holiday Surprise and Frightfully Fun Parade always visible", ok: () =>
-    !oos("Frozen Holiday Surprise", "WDW", TODAY_WDW, "mk") &&
-    !oos("Frightfully Fun Parade", "DLR", TODAY_DLR, "dca") },
+  { label: "Unassociated seasonal: Frozen Holiday Surprise always visible", ok: () =>
+    !oos("Frozen Holiday Surprise", "WDW", TODAY_WDW, "mk") },
 
   // ── Provider evidence override ────────────────────────────────────────────
   { label: "Provider performances today override off-season registry (DLR holidays pre-season)", ok: () => {
@@ -405,7 +455,7 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     return !isAllEntryConfirmedOutOfSeason(entry, "disneyland", "DLR", TODAY_DLR, NOW);
   } },
 
-  { label: "isAllEntryConfirmedOutOfSeason: provider_only entry is never hidden", ok: () => {
+  { label: "isAllEntryConfirmedOutOfSeason: unclassified provider_only entry is never hidden", ok: () => {
     const entry: AllEntertainmentEntry = {
       id: "provider_only:mk:some-provider-show",
       source: "provider_only",
@@ -537,6 +587,74 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   } },
   { label: "14.4B: Mickey's Mix Magic (limited, DLR) and DCA Clubhouse are never hidden", ok: () =>
     !oos("Mickey's Mix Magic", "DLR", TODAY_DLR, "disneyland") && !oos("Disney Jr. Mickey Mouse Clubhouse Live!", "DLR", TODAY_DLR, "dca") },
+
+  // ── Phase 14.4B: provider-only party entertainment ────────────────────────
+  { label: "14.4B provider-only: MVMCP + Jollywood party records hidden on non-party Nov 10 (default OFF)", ok: () => {
+    const mk = mkAll([mkEntry(SANTA_JACK_SALLY, "Meet Santa Jack and Sally at Mickey’s Very Merry Christmas Party", [], { status: "CLOSED" }), mkEntry(JOIN_SANTA, "Join Santa Claus at Mickey's Very Merry Christmas Party", [], { status: "CLOSED" }), mkEntry(MVMCP_GREETINGS, "Character Greetings at Mickey's Very Merry Christmas Party", [], { status: "CLOSED" })], NOW);
+    const hs = hsAll([hsEntry(JN_STITCH, "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights"), hsEntry(JN_PIXAR_DISCO, "Pixar Disco at Disney Jollywood Nights")], NOW);
+    return [SANTA_JACK_SALLY, JOIN_SANTA, MVMCP_GREETINGS].every((id) => byId(mk, id).source === "provider_only" && hiddenP(mk, id, "mk", TODAY_WDW, NOW)) &&
+      [JN_STITCH, JN_PIXAR_DISCO].every((id) => byId(hs, id).source === "provider_only" && hiddenP(hs, id, "hs", TODAY_WDW, NOW));
+  } },
+  { label: "14.4B provider-only: toggle ON reveals them; OFF hides only the classified ones (ordinary provider-only kept)", ok: () => {
+    const hs = hsAll([hsEntry(JN_STITCH, "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights"), hsEntry(JN_PIXAR_DISCO, "Pixar Disco at Disney Jollywood Nights"), hsEntry(DRUM_CORPS, "Green Army Drum Corps", [], "OPERATING")], NOW);
+    const off = applyAllEntertainmentSeasonalVisibility(hs.entries, "hs", "WDW", TODAY_WDW, false, NOW);
+    const on = applyAllEntertainmentSeasonalVisibility(hs.entries, "hs", "WDW", TODAY_WDW, true, NOW);
+    const names = (l: AllEntertainmentEntry[]) => l.filter((e) => e.source === "provider_only").map((e) => e.id.slice(9)).sort().join();
+    return names(off) === DRUM_CORPS && names(on) === [DRUM_CORPS, JN_PIXAR_DISCO, JN_STITCH].sort().join() && on.length === hs.entries.length;
+  } },
+  { label: "14.4B provider-only: confirmed party dates (Nov 8 MVMCP, Nov 7 Jollywood) visible all day with no provider data", ok: () => {
+    const n8 = new Date("2026-11-08T17:00:00Z"); const n7 = new Date("2026-11-07T17:00:00Z");
+    const mk = mkAll([mkEntry(SANTA_JACK_SALLY, "Meet Santa Jack and Sally", [], { status: "CLOSED" })], n8);
+    const hs = hsAll([hsEntry(JN_PIXAR_DISCO, "Pixar Disco at Disney Jollywood Nights")], n7);
+    return !hiddenP(mk, SANTA_JACK_SALLY, "mk", "2026-11-08", n8) && !hiddenP(hs, JN_PIXAR_DISCO, "hs", "2026-11-07", n7);
+  } },
+  { label: "14.4B provider-only: verified same-day performance overrides hiding on a non-party date", ok: () => {
+    const hs = hsAll([hsEntry(JN_PIXAR_DISCO, "Pixar Disco at Disney Jollywood Nights", [perf("2026-11-10T21:00:00-05:00")], "OPERATING")], NOW);
+    return byId(hs, JN_PIXAR_DISCO).showtime.performances.length === 1 && !hiddenP(hs, JN_PIXAR_DISCO, "hs", TODAY_WDW, NOW);
+  } },
+  { label: "14.4B provider-only: verified operating hours today (a meet's schedule) also keep it visible", ok: () => {
+    const mk = mkAll([mkEntry(SANTA_JACK_SALLY, "Meet Santa Jack and Sally", [perf("2026-11-10T10:00:00-05:00", "Operating", "2026-11-10T17:00:00-05:00")], { status: "OPERATING" })], NOW);
+    const e = byId(mk, SANTA_JACK_SALLY);
+    return e.showtime.performances.length === 0 && (e.operatingHours?.length ?? 0) === 1 && !hiddenP(mk, SANTA_JACK_SALLY, "mk", TODAY_WDW, NOW);
+  } },
+  { label: "14.4B provider-only: unclassified records are never hidden — no name or character inference", ok: () => {
+    const hs = hsAll([
+      hsEntry(DRUM_CORPS, "Green Army Drum Corps"),
+      hsEntry("11111111-1111-4111-8111-111111111111", "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights"), // look-alike name, different uuid
+      hsEntry("22222222-2222-4222-8222-222222222222", "Meet Santa Jack and Sally"),
+    ], NOW);
+    return hs.entries.filter((e) => e.source === "provider_only").length === 3 &&
+      hs.entries.filter((e) => e.source === "provider_only").every((e) => !isAllEntryConfirmedOutOfSeason(e, "hs", "WDW", TODAY_WDW, NOW));
+  } },
+  { label: "14.4B provider-only: classification is park-qualified (MK uuid in an HS inventory is not hidden)", ok: () => {
+    const hs = hsAll([hsEntry(SANTA_JACK_SALLY, "Meet Santa Jack and Sally")], NOW);
+    return !isAllEntryConfirmedOutOfSeason(byId(hs, SANTA_JACK_SALLY), "hs", "WDW", TODAY_WDW, NOW);
+  } },
+  { label: "14.4B provider-only: unknown seasons stay visible (unannounced 2027 party season)", ok: () => {
+    const n = new Date("2027-11-20T17:00:00Z");
+    const mk = mkAll([mkEntry(SANTA_JACK_SALLY, "Meet Santa Jack and Sally", [], { status: "CLOSED" })], n);
+    return !hiddenP(mk, SANTA_JACK_SALLY, "mk", "2027-11-20", n);
+  } },
+  // ── Phase 14.4B: Frightfully Fun Parade ───────────────────────────────────
+  { label: "14.4B Frightfully Fun Parade: hidden by default throughout 2026 incl. OBB party date Oct 31", ok: () => {
+    const place = getEntertainmentForPark("dca").find((p) => p.name === "Frightfully Fun Parade")!;
+    const early = new Date("2026-10-29T17:00:00Z");
+    return isEntertainmentConfirmedOutOfSeason(place, "DLR", "2026-10-31", undefined, early) &&
+      oos("Frightfully Fun Parade", "DLR", TODAY_DLR, "dca") &&
+      isEntertainmentConfirmedOutOfSeason(place, "DLR", "2026-12-15", undefined, NOW);
+  } },
+  { label: "14.4B Frightfully Fun Parade: existing toggle lists it (OFF hides, ON reveals) in 2026", ok: () => {
+    const early = new Date("2026-10-29T17:00:00Z");
+    return getOffSeasonCuratedEntertainment("dca", "2026-10-31", new Set(), early).some((p) => p.name === "Frightfully Fun Parade") &&
+      getOffSeasonCuratedEntertainment("dca", TODAY_DLR, new Set(), NOW).some((p) => p.name === "Frightfully Fun Parade");
+  } },
+  { label: "14.4B Frightfully Fun Parade: future seasons are unknown, not cancelled (2027 visible)", ok: () => {
+    const place = getEntertainmentForPark("dca").find((p) => p.name === "Frightfully Fun Parade")!;
+    const n = new Date("2027-10-31T17:00:00Z");
+    return !isEntertainmentConfirmedOutOfSeason(place, "DLR", "2027-10-31", undefined, n) && !isEntertainmentConfirmedOutOfSeason(place, "DLR", "2028-10-31", undefined, n);
+  } },
+  { label: "14.4B Frightfully Fun Parade: verified performances today still override (never fabricate absence)", ok: () =>
+    !oos("Frightfully Fun Parade", "DLR", TODAY_DLR, "dca", [{ dwpName: "Frightfully Fun Parade", performances: [{}] }]) },
 ];
 
 export function runDevSeasonalVisibilityCases(): string[] {

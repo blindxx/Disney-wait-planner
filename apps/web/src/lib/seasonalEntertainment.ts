@@ -46,6 +46,7 @@ import {
   resolveEntertainmentKey,
 } from "./entertainmentSuggestions";
 import { normalizeKey } from "./plansMatching";
+import { resolveDwpEntertainmentFromThemeParksId } from "./themeParksEntertainmentMapping";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import {
   getSeasonalEvent,
@@ -59,6 +60,16 @@ export type SeasonalEntertainmentAssociation = {
   /** `SEASONAL_EVENTS` id from seasonalEventData.ts. */
   eventId: string;
   kind: "party" | "season";
+  /**
+   * Phase 14.4B: event season years (the year the season BEGINS, as in
+   * `SEASONAL_EVENT_SEASONS`) in which the show is CONFIRMED NOT presented at
+   * this event, even on the event's own nights. Reads as confirmed off-season
+   * for dates in those seasons only; every other season stays unknown (never
+   * "permanently cancelled"). Past dates remain historical (no reordering).
+   */
+  absentSeasonYears?: number[];
+  /** Maintainer note: what confirmed the absence (no URL is recorded unless one was verified). */
+  absenceEvidence?: string;
 };
 
 /**
@@ -97,9 +108,14 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   // EPCOT International Festival of the Holidays (WDW, EPCOT) — park-admission season.
   "Candlelight Processional": [{ eventId: "epcot-festival-of-the-holidays", kind: "season" }],
   "JOYFUL! A Celebration of the Season": [{ eventId: "epcot-festival-of-the-holidays", kind: "season" }],
-  // Frightfully Fun Parade (DLR, DCA): 2026 OBB status unconfirmed (replaced by
-  // Madame Leota's Swinging Wake for 2026 season); general Halloween Time
-  // eligibility also unconfirmed — deliberately not mapped; remains neutral.
+  // Frightfully Fun Parade (DLR, DCA): Oogie Boogie Bash entertainment. Official
+  // 2026 evidence confirms it did NOT return for the 2026 season (replaced by
+  // Madame Leota's Swinging Wake), so it reads as confirmed off-season for every
+  // 2026 date incl. OBB nights. 2027+ has no absence record → unknown/neutral.
+  "Frightfully Fun Parade": [{
+    eventId: "oogie-boogie-bash", kind: "party", absentSeasonYears: [2026],
+    absenceEvidence: "Official 2026 Oogie Boogie Bash entertainment confirms the parade did not return (replaced by Madame Leota's Swinging Wake); maintainer-confirmed 2026-11-10, no source URL recorded.",
+  }],
   // Frozen Holiday Surprise (WDW, MK): whether party-exclusive or regular holiday
   // hours not confirmed from registry data — deliberately not mapped; remains neutral.
 };
@@ -160,7 +176,24 @@ export function getSeasonalEntertainmentRank(
   if (!associations) return "neutral";
   // The show itself must be presented in the day's park.
   if (parkId && place.parkId !== parkId) return "neutral";
+  return rankForAssociations(associations, resort, parkId, date, instant);
+}
 
+/** Season year (start year) of the event season that covers `date`: a still-running prior-year (cross-year) season, else the date's own year. */
+function seasonYearOnDate(event: SeasonalEventDefinition, date: string, instant: Date): number {
+  const year = Number(date.slice(0, 4));
+  const prior = getSeasonalEventSeason(event.id, year - 1);
+  if (prior && getSeasonalEventDateState(event, prior, date, instant) === "scheduled") return year - 1;
+  return year;
+}
+
+function rankForAssociations(
+  associations: SeasonalEntertainmentAssociation[],
+  resort: ResortId,
+  parkId: ParkId | null | undefined,
+  date: string,
+  instant: Date,
+): SeasonalEntertainmentRank {
   let best: SeasonalEntertainmentRank = "neutral";
   let sawConfirmedOff = false;
   for (const a of associations) {
@@ -168,7 +201,9 @@ export function getSeasonalEntertainmentRank(
     if (!event || event.resort !== resort) continue;
     if (parkId && !event.parkIds.includes(parkId)) continue;
     const state = eventStateOnDate(event, date, instant);
-    if (state === "scheduled") {
+    if (a.absentSeasonYears?.includes(seasonYearOnDate(event, date, instant)) && state !== "past" && state !== "invalid") {
+      sawConfirmedOff = true; // confirmed absent this season, even on event nights
+    } else if (state === "scheduled") {
       const r: SeasonalEntertainmentRank = a.kind === "party" ? "party-night" : "season";
       if (best === "neutral" || r === "party-night") best = r;
     } else if (state === "not_scheduled") {
@@ -177,6 +212,65 @@ export function getSeasonalEntertainmentRank(
   }
   if (best !== "neutral") return best;
   return sawConfirmedOff ? "off-season" : "neutral";
+}
+
+/**
+ * Phase 14.4B: explicit, per-record event associations for PROVIDER-ONLY
+ * party entertainment (SHOW entities with no DWP catalog entry — e.g.
+ * event-exclusive character meets and party dance parties). Keyed by park +
+ * provider entity UUID (lowercase), never by name or character identity.
+ *
+ * Each row was individually verified against ThemeParks.wiki park children
+ * (2026-11-10): the PROVIDER'S OWN record name states the party, and the
+ * record is parented to that park. Unlisted provider records stay
+ * unclassified (never hidden). Event ids/dates come from the maintained
+ * registry (seasonalEventData.ts) — no date table here. Provider ids drift;
+ * `runDevSeasonalEntertainmentCases` checks structure, and an entity that
+ * vanishes simply stops appearing.
+ */
+export type SeasonalProviderEntertainmentAssociation = {
+  parkId: ParkId;
+  entityId: string;
+  /** Provider's display name when verified — informational only. */
+  providerName: string;
+  associations: SeasonalEntertainmentAssociation[];
+};
+
+const partyOnly = (parkId: ParkId, entityId: string, providerName: string, eventId: string): SeasonalProviderEntertainmentAssociation =>
+  ({ parkId, entityId, providerName, associations: [{ eventId, kind: "party" }] });
+
+export const SEASONAL_PROVIDER_ONLY_EVENTS: SeasonalProviderEntertainmentAssociation[] = [
+  // Mickey's Very Merry Christmas Party (WDW, Magic Kingdom)
+  partyOnly("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "Meet Santa Jack and Sally at Mickey’s Very Merry Christmas Party", "mvmcp"),
+  partyOnly("mk", "418c2111-36d4-4f07-86b2-8058014a263c", "Join Santa Claus at Mickey's Very Merry Christmas Party", "mvmcp"),
+  partyOnly("mk", "8b8cb0ec-10a3-41d9-b5cb-81ea8db14370", "Character Greetings at Mickey's Very Merry Christmas Party", "mvmcp"),
+  // Disney Jollywood Nights (WDW, Hollywood Studios)
+  partyOnly("hs", "ae7db7da-a3d9-443b-b4a6-d3c4a2b66121", "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", "jollywood-nights"),
+  partyOnly("hs", "dc332105-e524-4dca-9a47-df672f8472fd", "Character Greetings at Disney Jollywood Nights", "jollywood-nights"),
+  partyOnly("hs", "74b46a33-ec93-4222-a3d5-d8372b1498e9", "Grand Avenue Dance Party at Disney Jollywood Nights", "jollywood-nights"),
+  partyOnly("hs", "71da34dd-a27e-4db5-aef3-f880ef939f98", "Pixar Disco at Disney Jollywood Nights", "jollywood-nights"),
+];
+
+const PROVIDER_EVENTS_BY_KEY: Map<string, SeasonalProviderEntertainmentAssociation> = new Map(
+  SEASONAL_PROVIDER_ONLY_EVENTS.map((r) => [`${r.parkId}:${r.entityId}`, r]),
+);
+
+/**
+ * Seasonal rank of one provider-only record (park-qualified, exact UUID, any
+ * case). Unlisted records, undated/past dates and unknown seasons are
+ * "neutral" — only a confirmed non-party date reads "off-season".
+ */
+export function getSeasonalProviderEntertainmentRank(
+  parkId: ParkId,
+  entityId: string,
+  ctx: SeasonalSuggestionContext,
+): SeasonalEntertainmentRank {
+  const row = PROVIDER_EVENTS_BY_KEY.get(`${parkId}:${entityId.toLowerCase()}`);
+  if (!row) return "neutral";
+  const { resort, date } = ctx;
+  if (!date || !isValidIsoCalendarDate(date)) return "neutral";
+  if (ctx.parkId && ctx.parkId !== parkId) return "neutral";
+  return rankForAssociations(row.associations, resort, parkId, date, ctx.instant ?? new Date());
 }
 
 /**
@@ -221,6 +315,8 @@ const SCREAMS = "Halloween Screams";
 const BELIEVE = "Believe... in Holiday Magic";
 const rank = (name: string, resort: ResortId, date: string | null | undefined, parkId?: ParkId | null) =>
   getSeasonalEntertainmentRank(name, { resort, date, parkId, instant: NOW });
+const prank = (parkId: ParkId, entityId: string, resort: ResortId, date: string | null | undefined) =>
+  getSeasonalProviderEntertainmentRank(parkId, entityId, { resort, date, parkId, instant: NOW });
 const part = (resort: ResortId, date: string | null | undefined, parkId?: ParkId | null) =>
   partitionEntertainmentSuggestions({ resort, date, parkId, instant: NOW });
 const sameAsCatalog = (resort: ResortId, date: string | null | undefined, parkId?: ParkId | null) => {
@@ -244,7 +340,7 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "MNSSHP window but non-party night (Oct 30): party show demoted, not hidden", ok: () => rank(HOCUS, "WDW", "2026-10-30", "mk") === "off-season" && part("WDW", "2026-10-30", "mk").demoted.includes(HOCUS) },
   { label: "MVMCP night (Nov 8): Christmas party show boosted; Halloween party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-08", "mk") === "party-night" && rank(HOCUS, "WDW", "2026-11-08", "mk") === "off-season" },
   { label: "MVMCP non-party night (Nov 10, in window): Christmas party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-10", "mk") === "off-season" },
-  { label: "Halloween tag alone does not imply a party (unmapped seasonal stays neutral)", ok: () => rank("Frightfully Fun Parade", "DLR", "2026-10-31", "dca") === "neutral" },
+  { label: "a seasonal tag alone does not imply a party (unassociated Frozen Holiday Surprise stays neutral)", ok: () => rank("Frozen Holiday Surprise", "WDW", "2026-11-08", "mk") === "neutral" },
   { label: "party nights sort before general seasonal in boosted", ok: () => { const b = part("DLR", "2026-10-31", "dca").boosted; return b[0] === LEOTA; } },
   // Regular seasonal events (continuous windows)
   { label: "Halloween Time window (Oct 31, Disneyland): season boost", ok: () => rank(SCREAMS, "DLR", "2026-10-31", "disneyland") === "season" },
@@ -289,6 +385,46 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "Phase 14.4A: DLR holiday DCA shows demoted Nov 10 (starts Nov 13), boosted Nov 20", ok: () =>
     rank("Mickey's Happy Holidays", "DLR", "2026-11-10", "dca") === "off-season" &&
     rank("Disney ¡Viva Navidad! Street Party", "DLR", "2026-11-20", "dca") === "season" },
+  // Phase 14.4B: Frightfully Fun Parade — confirmed absent from the 2026 Oogie Boogie Bash season
+  { label: "14.4B: Frightfully Fun Parade is confirmed off-season on an OBB night (Oct 31, DCA) — absent for 2026", ok: () => rank("Frightfully Fun Parade", "DLR", "2026-10-31", "dca") === "off-season" },
+  { label: "14.4B: Frightfully Fun Parade off-season throughout 2026 (today, Nov, Dec) incl. unresolved park", ok: () =>
+    ["2026-10-29", "2026-10-31", "2026-11-20", "2026-12-31"].every((d) => rank("Frightfully Fun Parade", "DLR", d, "dca") === "off-season") &&
+    rank("Frightfully Fun Parade", "DLR", "2026-10-31", null) === "off-season" },
+  { label: "14.4B: Frightfully Fun Parade absence is DCA-park-bound (Disneyland day neutral) and DLR-resort-bound (WDW neutral)", ok: () =>
+    rank("Frightfully Fun Parade", "DLR", "2026-10-31", "disneyland") === "neutral" && rank("Frightfully Fun Parade", "WDW", "2026-10-31", "mk") === "neutral" },
+  { label: "14.4B: Frightfully Fun Parade future seasons stay unknown/neutral — not permanently cancelled", ok: () =>
+    ["2027-10-30", "2027-10-31", "2028-10-31"].every((d) => rank("Frightfully Fun Parade", "DLR", d, "dca") === "neutral") },
+  { label: "14.4B: Frightfully Fun Parade past 2026 dates are historical (no reordering)", ok: () => rank("Frightfully Fun Parade", "DLR", "2026-10-20", "dca") === "neutral" },
+  { label: "14.4B: Frightfully Fun Parade demoted, never removed — still suggestible/resolvable for old plans", ok: () => {
+    const p = part("DLR", "2026-10-31", "dca");
+    return p.demoted.includes("Frightfully Fun Parade") && !p.boosted.includes("Frightfully Fun Parade") &&
+      getEntertainmentSuggestions("DLR").includes("Frightfully Fun Parade") && resolveEntertainmentKey("Frightfully Fun Parade", "DLR") !== null;
+  } },
+  { label: "14.4B: absence records are explicit, evidenced and attached to a registry event season that exists", ok: () =>
+    Object.entries(SEASONAL_ENTERTAINMENT_EVENTS).every(([, assocs]) => assocs.every((a) =>
+      !a.absentSeasonYears || (!!a.absenceEvidence && a.absentSeasonYears.every((y) => !!getSeasonalEventSeason(a.eventId, y))))) },
+  // Phase 14.4B: provider-only party associations
+  { label: "14.4B: provider-only table is structurally sound (canonical unique uuids, park ∈ event parks, party → select-night, not claimed by a curated mapping)", ok: () => {
+    const ids = SEASONAL_PROVIDER_ONLY_EVENTS.map((r) => r.entityId);
+    return new Set(ids).size === ids.length && SEASONAL_PROVIDER_ONLY_EVENTS.length > 0 &&
+      SEASONAL_PROVIDER_ONLY_EVENTS.every((r) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(r.entityId) &&
+        resolveDwpEntertainmentFromThemeParksId(r.entityId) === null &&
+        r.associations.every((a) => { const e = getSeasonalEvent(a.eventId); return !!e && e.parkIds.includes(r.parkId) && (a.kind !== "party" || e.format === "select-night"); }));
+  } },
+  { label: "14.4B: provider-only MVMCP record: party-night Nov 8, off-season on non-party Nov 10", ok: () =>
+    prank("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "WDW", "2026-11-08") === "party-night" &&
+    prank("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "WDW", "2026-11-10") === "off-season" },
+  { label: "14.4B: provider-only Jollywood record: party-night Nov 7 / Jan 3 2027, off-season Nov 10, neutral after season (Jan 6 2027)", ok: () => {
+    const id = "71da34dd-a27e-4db5-aef3-f880ef939f98"; // Pixar Disco
+    return prank("hs", id, "WDW", "2026-11-07") === "party-night" && prank("hs", id, "WDW", "2027-01-03") === "party-night" &&
+      prank("hs", id, "WDW", "2026-11-10") === "off-season" && prank("hs", id, "WDW", "2027-01-06") === "neutral";
+  } },
+  { label: "14.4B: provider-only lookup is park-qualified, case-insensitive, exact-id (unlisted/other-park/undated → neutral)", ok: () =>
+    prank("mk", "6D3B1129-B34C-4B44-BBA2-0E1790FEF705", "WDW", "2026-11-10") === "off-season" &&
+    prank("hs", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "WDW", "2026-11-10") === "neutral" &&
+    prank("mk", "00000000-0000-4000-8000-000000000000", "WDW", "2026-11-10") === "neutral" &&
+    prank("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "WDW", null) === "neutral" &&
+    getSeasonalProviderEntertainmentRank("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", { resort: "WDW", date: "2026-11-10", parkId: "hs", instant: NOW }) === "neutral" },
 ];
 
 export function runDevSeasonalEntertainmentCases(): string[] {
