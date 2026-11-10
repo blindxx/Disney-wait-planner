@@ -69,6 +69,8 @@ import {
   type EntertainmentShowtimeEntry,
   type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
+import { getResortLocalDate } from "../../lib/resortTime";
+import { isEntertainmentConfirmedOutOfSeason } from "../../lib/seasonalVisibility";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -902,10 +904,20 @@ export default function WaitTimesPage() {
   );
 
   /** Entertainment visible under the shared land filter (drives the section + its jump link). */
-  const visibleEntertainment = useMemo(
-    () => parkEntertainment.filter((p) => !selectedLand || p.land === selectedLand),
-    [parkEntertainment, selectedLand],
-  );
+  const visibleEntertainment = useMemo(() => {
+    const today = getResortLocalDate(selectedResort, displayNow);
+    return parkEntertainment.filter(
+      (p) =>
+        (!selectedLand || p.land === selectedLand) &&
+        !isEntertainmentConfirmedOutOfSeason(
+          p,
+          selectedResort,
+          today,
+          showtimes?.entries,
+          displayNow,
+        ),
+    );
+  }, [parkEntertainment, selectedLand, selectedResort, displayNow, showtimes]);
 
   // ThemeParks.wiki attribution is owed whenever its data is presented: a
   // successful response and at least one visible entry the provider was asked about.

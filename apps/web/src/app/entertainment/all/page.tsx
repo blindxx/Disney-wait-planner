@@ -46,6 +46,8 @@ import {
 import { PARTIAL_SHOWTIMES_NOTE } from "../../../lib/entertainmentShowtimes";
 import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
+import { getResortLocalDate } from "../../../lib/resortTime";
+import { getOffSeasonCuratedEntertainment, isAllEntryConfirmedOutOfSeason, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
 
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {
   DLR: ["disneyland", "dca"],
@@ -209,6 +211,7 @@ export default function AllEntertainmentPage() {
   const [selectedPark, setSelectedPark] = useState<ParkId>("disneyland");
   const [ready, setReady] = useState(false);
   const [operatingOnly, setOperatingOnly] = useState(false);
+  const [showOutOfSeason, setShowOutOfSeason] = useState(false);
   const [selectedLand, setSelectedLand] = useState("");
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const selectedResort = PARK_TO_RESORT[selectedPark] as ResortId;
@@ -297,13 +300,44 @@ export default function AllEntertainmentPage() {
   const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
   const inventoryPresented = allEntertainmentPresentsProviderData(all);
 
-  const lands = useMemo(() => allEntertainmentLands(all?.entries ?? []), [all]);
+  // When "Show out-of-season entertainment" is ON, synthesize entries for curated
+  // shows that are confirmed out-of-season and not already in the live inventory.
+  const offSeasonEntries = useMemo<AllEntertainmentEntry[]>(() => {
+    if (!showOutOfSeason) return [];
+    const today = getResortLocalDate(selectedResort, displayNow);
+    const existingIds = new Set((all?.entries ?? []).map((e) => e.id));
+    return getOffSeasonCuratedEntertainment(selectedPark, today, existingIds, displayNow).map((place) =>
+      makeOffSeasonEntry(place, selectedPark),
+    );
+  }, [showOutOfSeason, selectedPark, selectedResort, displayNow, all]);
+
+  // Include lands from synthesized off-season entries so the land filter works for them too.
+  const lands = useMemo(
+    () => allEntertainmentLands([...(all?.entries ?? []), ...offSeasonEntries]),
+    [all, offSeasonEntries],
+  );
   // A land that no longer exists in the refreshed inventory must not silently hide everything.
   const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
-  const visible = useMemo(
-    () => sortAllEntertainment(filterAllEntertainment(all?.entries ?? [], { land: effectiveLand, operatingOnly }), displayNow),
-    [all, effectiveLand, operatingOnly, displayNow],
-  );
+
+  const visible = useMemo(() => {
+    const today = getResortLocalDate(selectedResort, displayNow);
+    const sourceEntries = all?.entries ?? [];
+    // When toggle is OFF, hide confirmed out-of-season curated entries even if
+    // they are present in the provider inventory. Toggle ON restores them.
+    const seasonalBase = showOutOfSeason
+      ? sourceEntries
+      : sourceEntries.filter(
+          (e) => !isAllEntryConfirmedOutOfSeason(e, selectedPark, selectedResort, today, displayNow),
+        );
+    const base = filterAllEntertainment(seasonalBase, { land: effectiveLand, operatingOnly });
+    // Synthesized off-season entries have no provider status so they never satisfy
+    // "Operating only"; exclude them when that filter is active.
+    const extra =
+      showOutOfSeason && !operatingOnly
+        ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
+        : [];
+    return sortAllEntertainment([...base, ...extra], displayNow);
+  }, [all, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort]);
 
   return (
     <>
@@ -385,6 +419,15 @@ export default function AllEntertainmentPage() {
             />
             Operating only
           </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "var(--text)", minHeight: "32px" }}>
+            <input
+              type="checkbox"
+              checked={showOutOfSeason}
+              onChange={(e) => setShowOutOfSeason(e.target.checked)}
+              style={{ width: "18px", height: "18px", cursor: "pointer" }}
+            />
+            Show out-of-season entertainment
+          </label>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
             <select value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
@@ -405,7 +448,7 @@ export default function AllEntertainmentPage() {
             <div className="all-empty">Loading entertainment&hellip;</div>
           ) : all.error ? (
             <div className="all-empty">Entertainment is unavailable right now. Try again shortly.</div>
-          ) : all.entries.length === 0 ? (
+          ) : all.entries.length === 0 && visible.length === 0 ? (
             <div className="all-empty">
               {allEntertainmentEmptyState(all)?.message}
               {all.stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
