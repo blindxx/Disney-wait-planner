@@ -63,7 +63,7 @@ import {
   RIDE_TO_PARK_DLR,
   RIDE_TO_PARK_WDW,
 } from "@/lib/crossDayChecks";
-import { getWaitBadgeProps } from "@/lib/waitBadge";
+import { getWaitBadgeProps, getFallbackStatusLabel } from "@/lib/waitBadge";
 import {
   inferPlannerItemType,
   getDiningSuggestions,
@@ -1869,7 +1869,7 @@ export default function PlansPage() {
   const waitMap = useMemo(() => {
     const source =
       LIVE_ENABLED && liveAttractions.length > 0 ? liveAttractions : mockAttractionWaits;
-    const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string }>();
+    const map = new Map<string, { status: string; waitMins: number | null; canonicalName: string; waitSource: "live" | "fallback" }>();
     // Phase 14.3.1: one entry per attraction variant, each with its own provider wait.
     for (const a of expandVariantWaitRows(source)) {
       if (a.resortId !== selectedResort) continue; // resort scope guard
@@ -1877,6 +1877,7 @@ export default function PlansPage() {
         status: a.status,
         waitMins: a.waitMins,
         canonicalName: a.name,
+        waitSource: a.waitSource,
       });
     }
     return map;
@@ -7127,6 +7128,15 @@ export default function PlansPage() {
                           );
                         })()}
                       </div>
+                      {(() => {
+                        // Provenance caption for a fallback-only DOWN/CLOSED badge
+                        // (waitSource, never inferred); live rows show nothing.
+                        const w = lookupWait(item.name, waitMap, selectedResort === "DLR" ? ALIASES_DLR : ALIASES_WDW);
+                        const label = w ? getFallbackStatusLabel({ status: w.status, waitSource: w.waitSource }) : null;
+                        return label ? (
+                          <div style={{ fontSize: "11px", lineHeight: 1.3, color: "var(--text-faint)", marginTop: "2px" }}>{label}</div>
+                        ) : null;
+                      })()}
                       {(() => {
                         // Single shared-metadata read per card: canonical
                         // name/location/lifecycle from getPlannerItemMetadata(),
