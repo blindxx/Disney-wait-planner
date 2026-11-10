@@ -223,6 +223,18 @@ export const DEV_SEASONAL_EVENT_CASES: DevSeasonalEventCase[] = [
   { label: "resort-local today: DLR 2026-10-30 05:00Z is still Oct 29", ok: () => stateOf("oogie-boogie-bash", 2026, "2026-10-29", new Date("2026-10-30T05:00:00Z")) === "scheduled" },
   { label: "select-night with unknown nights → unknown", ok: () => getSeasonalEventDateState(getSeasonalEvent("mvmcp")!, { eventId: "mvmcp", seasonYear: 2027, startDate: null, endDate: null, sourceUrl: "https://x", verifiedOn: "2026-10-29" }, "2027-11-20", NOW) === "unknown" },
   { label: "invalid date → invalid", ok: () => stateOf("mvmcp", 2026, "2026-02-30") === "invalid" },
+  // Phase 14.4B registry additions
+  { label: "14.4B: holidays-wdw is a continuous park-admission resort-wide season, Nov 13 2026 – Jan 6 2027 (cross-year, one season)", ok: () => {
+    const e = getSeasonalEvent("holidays-wdw")!; const s = seasonOf("holidays-wdw", 2026);
+    return e.format === "continuous" && e.admission === "park-admission" && e.parkIds.length === 4 && s.startDate === "2026-11-13" && s.endDate === "2027-01-06" && !getSeasonalEventSeason("holidays-wdw", 2027);
+  } },
+  { label: "14.4B: holidays-wdw states — Nov 12 not scheduled, Nov 13 / Jan 6 scheduled, Jan 7 not scheduled", ok: () =>
+    stateOf("holidays-wdw", 2026, "2026-11-12") === "not_scheduled" && stateOf("holidays-wdw", 2026, "2026-11-13") === "scheduled" && stateOf("holidays-wdw", 2026, "2027-01-06") === "scheduled" && stateOf("holidays-wdw", 2026, "2027-01-07") === "not_scheduled" },
+  { label: "14.4B: Eat to the Beat is its own event, narrower than the Food & Wine festival (ends Nov 16 vs Nov 21)", ok: () => {
+    const c = seasonOf("epcot-eat-to-the-beat", 2026); const f = seasonOf("epcot-food-and-wine", 2026);
+    return c.startDate === f.startDate && c.endDate === "2026-11-16" && f.endDate === "2026-11-21" &&
+      stateOf("epcot-eat-to-the-beat", 2026, "2026-11-18") === "not_scheduled" && stateOf("epcot-food-and-wine", 2026, "2026-11-18") === "scheduled";
+  } },
   { label: "validator catches bad record", ok: () => validateSeasonalEventSeason({ eventId: "mvmcp", seasonYear: 2025, startDate: "2026-11-08", endDate: "2026-11-07", eventNights: ["2026-11-09", "2026-11-08"], sourceUrl: "http://x", verifiedOn: "nope" }).length >= 5 },
 ];
 

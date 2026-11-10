@@ -18,7 +18,9 @@
  *   all_passed   known performances today, all passed  → "No more showtimes today"
  *   none_posted  provider answered; none known today   → "No showtimes posted"
  *   unavailable  provider failed / no usable data      → "Showtimes unavailable"
- *   unmapped     intentionally unmapped; never provider-checked (no message)
+ *   unmapped     intentionally unmapped; never provider-checked → "Showtimes not tracked"
+ *                (Phase 14.4B: a truthful label, never blank, and distinct from
+ *                "No showtimes posted" — which claims the provider answered empty)
  * `stale` (park-level) marks stale-if-error data (provider refresh failed,
  * last good payload served) so it stays distinguishable from current data; it
  * does not change the status. Provider `lastUpdated` is retained as
@@ -71,13 +73,13 @@ export type EntertainmentShowtimeStatus =
   | "unavailable"
   | "unmapped";
 
-/** Consumer-facing copy for non-upcoming states (unmapped intentionally has none). */
+/** Consumer-facing copy for non-upcoming states. */
 export const SHOWTIME_STATUS_MESSAGES: Record<EntertainmentShowtimeStatus, string | null> = {
   upcoming: null,
   all_passed: "No more showtimes today",
   none_posted: "No showtimes posted",
   unavailable: "Showtimes unavailable",
-  unmapped: null,
+  unmapped: "Showtimes not tracked",
 };
 
 /** Compact note shown beside known upcoming times when the schedule is incomplete (not exhaustive). */
@@ -325,7 +327,7 @@ export function entryFromMapping(
 ): EntertainmentShowtimeEntry {
   const base = { dwpName: m.dwpName, parkId: m.parkId };
   if (m.disposition === "unmapped") {
-    return { ...base, status: "unmapped", performances: [], message: null, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: m.reason };
+    return { ...base, status: "unmapped", performances: [], message: SHOWTIME_STATUS_MESSAGES.unmapped, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: m.reason };
   }
   if (!live) {
     return { ...base, status: "unavailable", performances: [], message: SHOWTIME_STATUS_MESSAGES.unavailable, incomplete: true, unrecognizedTypes: [], provider: [] };
@@ -382,7 +384,7 @@ export function normalizeParkEntertainmentShowtimes(
     const m = getEntertainmentProviderMapping(place.name, parkId);
     if (!m) {
       // Mapping completeness is enforced elsewhere; absent disposition is not provider-checked either.
-      entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: null, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: "No provider disposition" });
+      entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: SHOWTIME_STATUS_MESSAGES.unmapped, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: "No provider disposition" });
       continue;
     }
     entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent));
@@ -740,14 +742,15 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const mappedE = find(r, "Happily Ever After");
     check("failure: mapped → unavailable", mappedE.status === "unavailable" && mappedE.message === "Showtimes unavailable" && mappedE.performances.length === 0);
     check("failure: error surfaced, not stale", r.error?.kind === "timeout" && !r.stale && r.meta === null);
-    const u = find(r, "Mickey's Once Upon a Christmastime Parade");
-    check("failure: unmapped is not 'unavailable'", u.status === "unmapped" && u.message === null && !!u.unmappedReason);
+    // Phase 14.4B: MK is fully mapped now; Wondrous Journeys (Disneyland) is the preserved unmapped example.
+    const u = find(normalizeParkEntertainmentShowtimes("disneyland", err, NOW), "Wondrous Journeys");
+    check("failure: unmapped is not 'unavailable' (truthful 'not tracked', never blank)", u.status === "unmapped" && u.message === "Showtimes not tracked" && !!u.unmappedReason);
   }
   // Unmapped entries on a success payload are not checked as empty
   {
     const r = normalizeParkEntertainmentShowtimes("mk", live([entry(HAPPILY, [])]), NOW);
-    const u = find(r, "Mickey's Once Upon a Christmastime Parade");
-    check("success: unmapped is not none_posted", u.status === "unmapped" && u.provider.length === 0);
+    const u = find(normalizeParkEntertainmentShowtimes("disneyland", live([]), NOW), "Wondrous Journeys");
+    check("success: unmapped is not none_posted ('not tracked' ≠ 'No showtimes posted')", u.status === "unmapped" && u.provider.length === 0 && u.message !== SHOWTIME_STATUS_MESSAGES.none_posted);
     check("only active curated entries for the park", r.entries.every((e) => e.parkId === "mk") && r.entries.length === ENTERTAINMENT_PLACES.filter((p) => p.parkId === "mk").length);
   }
   // Stale-if-error stays distinguishable and keeps data
@@ -777,7 +780,7 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
     const failed = resolveShowtimesResponse("mk", null, NOW);
     check("page: failed/non-2xx request → unavailable for mapped (no retained showtimes)",
       find(failed, "Happily Ever After").status === "unavailable" && find(failed, "Happily Ever After").performances.length === 0 &&
-      find(failed, "Mickey's Once Upon a Christmastime Parade").status === "unmapped" && failed.error !== null && !failed.stale);
+      find(resolveShowtimesResponse("disneyland", null, NOW), "Wondrous Journeys").status === "unmapped" && failed.error !== null && !failed.stale);
     check("page: success response passes through", resolveShowtimesResponse("mk", good, NOW) === good);
     check("page: body for another park → unavailable", find(resolveShowtimesResponse("epcot", good, NOW), "Luminous The Symphony of Us").status === "unavailable");
     check("page: malformed body → unavailable", resolveShowtimesResponse("mk", { parkId: "mk" }, NOW).error !== null && resolveShowtimesResponse("mk", "x", NOW).error !== null);

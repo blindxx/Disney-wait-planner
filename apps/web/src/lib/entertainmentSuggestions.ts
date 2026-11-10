@@ -164,6 +164,9 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // Holiday-season DCA shows — not currently listed by the provider (unmapped; no inferred showtimes).
   { name: "Mickey's Happy Holidays", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Buena Vista Street", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Disney ¡Viva Navidad! Street Party", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Phase 14.4B: Plaza de la Familia festival stage show (Aug 21–Nov 2, 2026; park admission). A discrete scheduled
+  // performance with a verified provider SHOW record, so it meets the Entertainment rule; no festival theme value exists.
+  { name: "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal" },
 
   // ---- Magic Kingdom ----
   // Hocus Pocus Villain Spelltacular and Mickey's Most Merriest Celebration
