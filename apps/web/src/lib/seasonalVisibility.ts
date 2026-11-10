@@ -220,11 +220,15 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     return !isEntertainmentConfirmedOutOfSeason(place, "WDW", d, undefined, now);
   } },
 
-  { label: "Cross-year: Jollywood Jan 6 2027 (after season ended Jan 5) is hidden", ok: () => {
+  { label: "Cross-year: Jollywood Jan 6 2027 (prior season ended Jan 5, no 2027 record) is neutral/visible", ok: () => {
+    // eventStateOnDate returns "past" for the 2026 record (ended Jan 5); there is no 2027 record.
+    // getSeasonalEntertainmentRank only acts on "scheduled"/"not_scheduled" — "past" leaves
+    // sawConfirmedOff=false → "neutral". An ended season cannot confirm off-season without
+    // a same-year "not_scheduled" record for the query date's own year.
     const d = "2027-01-06";
     const now = new Date("2027-01-06T17:00:00Z");
     const place = getEntertainmentForPark("hs").find((p) => p.name === "Glisten!")!;
-    return isEntertainmentConfirmedOutOfSeason(place, "WDW", d, undefined, now);
+    return !isEntertainmentConfirmedOutOfSeason(place, "WDW", d, undefined, now);
   } },
 
   // ── Cross-year: DLR Holidays ends Jan 6, 2027 ────────────────────────────
@@ -277,9 +281,10 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   // ── All Entertainment toggle: getOffSeasonCuratedEntertainment ───────────
   { label: "getOffSeasonCuratedEntertainment returns hidden MK shows on Nov 10", ok: () => {
     const names = getOffSeasonCuratedEntertainment("mk", TODAY_WDW, new Set(), NOW).map((p) => p.name);
+    // MK shows only — "Disney Holidays in Hollywood" is a HS show and must not appear here.
     return names.includes("Hocus Pocus Villain Spelltacular") &&
       names.includes("Mickey's Once Upon a Christmastime Parade") &&
-      names.includes("Disney Holidays in Hollywood");
+      !names.includes("Disney Holidays in Hollywood");
   } },
 
   { label: "getOffSeasonCuratedEntertainment excludes regular shows and unassociated seasonal", ok: () => {
