@@ -84,6 +84,24 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   // Holidays at the Disneyland Resort — general park-admission season.
   "Believe... in Holiday Magic": [{ eventId: "holidays-dlr", kind: "season" }],
   "A Christmas Fantasy Parade": [{ eventId: "holidays-dlr", kind: "season" }],
+  // Phase 14.4A — DLR Holidays DCA shows (park-admission season, confirmed).
+  "Mickey's Happy Holidays": [{ eventId: "holidays-dlr", kind: "season" }],
+  "Disney ¡Viva Navidad! Street Party": [{ eventId: "holidays-dlr", kind: "season" }],
+  // Disney Jollywood Nights (WDW, Hollywood Studios) — party-only.
+  // Show names confirmed from Disney Parks Blog / provider; the party suffix
+  // ("at Disney Jollywood Nights") is a naming variant — same show.
+  "Disney Holidays in Hollywood": [{ eventId: "jollywood-nights", kind: "party" }],
+  "What's This? Tim Burton's The Nightmare Before Christmas Sing-Along": [{ eventId: "jollywood-nights", kind: "party" }],
+  "Glisten!": [{ eventId: "jollywood-nights", kind: "party" }],
+  "Jingle Bell, Jingle BAM!": [{ eventId: "jollywood-nights", kind: "party" }],
+  // EPCOT International Festival of the Holidays (WDW, EPCOT) — park-admission season.
+  "Candlelight Processional": [{ eventId: "epcot-festival-of-the-holidays", kind: "season" }],
+  "JOYFUL! A Celebration of the Season": [{ eventId: "epcot-festival-of-the-holidays", kind: "season" }],
+  // Frightfully Fun Parade (DLR, DCA): 2026 OBB status unconfirmed (replaced by
+  // Madame Leota's Swinging Wake for 2026 season); general Halloween Time
+  // eligibility also unconfirmed — deliberately not mapped; remains neutral.
+  // Frozen Holiday Surprise (WDW, MK): whether party-exclusive or regular holiday
+  // hours not confirmed from registry data — deliberately not mapped; remains neutral.
 };
 
 /** "party-night" / "season" boost; "off-season" demotes; "neutral" is unchanged. */
@@ -250,6 +268,27 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "partition is an exact permutation of the catalog suggestions (never hides)", ok: () => (["WDW", "DLR"] as ResortId[]).every((r) => ["2026-10-31", "2026-11-08", "2026-11-20", "2027-11-20", null].every((d) => { const p = part(r, d, null); return [...p.boosted, ...p.neutral, ...p.demoted].sort().join("|") === getEntertainmentSuggestions(r).slice().sort().join("|"); })) },
   { label: "every canonical entertainment name stays suggestible on a party night", ok: () => { const all = new Set(ENTERTAINMENT_PLACES.filter((p) => p.resort === "WDW").map((p) => p.name)); const p = part("WDW", "2026-11-08", "mk"); const got = new Set([...p.boosted, ...p.neutral, ...p.demoted]); return [...all].every((n) => got.has(n)); } },
   { label: "disambiguated names (Fantasmic! — location) still rank neutral without error", ok: () => rank("Fantasmic! — Hollywood Studios", "WDW", "2026-11-08", "hs") === "neutral" },
+  // Phase 14.4A: new Jollywood Nights associations
+  { label: "Phase 14.4A: Jollywood Nights party associations cover all four HS shows", ok: () =>
+    ["Disney Holidays in Hollywood", "What's This? Tim Burton's The Nightmare Before Christmas Sing-Along", "Glisten!", "Jingle Bell, Jingle BAM!"]
+      .every((n) => SEASONAL_ENTERTAINMENT_EVENTS[n]?.[0]?.eventId === "jollywood-nights" && SEASONAL_ENTERTAINMENT_EVENTS[n][0].kind === "party") },
+  { label: "Phase 14.4A: Jollywood Nights show demoted on Nov 10 (non-party night, Nov 7 was last)", ok: () => rank("Glisten!", "WDW", "2026-11-10", "hs") === "off-season" },
+  { label: "Phase 14.4A: Jollywood Nights show boosted on party night Nov 7", ok: () => rank("Disney Holidays in Hollywood", "WDW", "2026-11-07", "hs") === "party-night" },
+  // Phase 14.4A: EPCOT festival of the holidays associations
+  { label: "Phase 14.4A: EPCOT holiday shows are season associations", ok: () =>
+    SEASONAL_ENTERTAINMENT_EVENTS["Candlelight Processional"]?.[0]?.kind === "season" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Candlelight Processional"][0].eventId === "epcot-festival-of-the-holidays" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["JOYFUL! A Celebration of the Season"]?.[0]?.eventId === "epcot-festival-of-the-holidays" },
+  { label: "Phase 14.4A: Candlelight Processional demoted Nov 10 (festival starts Nov 27), boosted Dec 1", ok: () =>
+    rank("Candlelight Processional", "WDW", "2026-11-10", "epcot") === "off-season" &&
+    rank("Candlelight Processional", "WDW", "2026-12-01", "epcot") === "season" },
+  // Phase 14.4A: DLR holiday DCA shows
+  { label: "Phase 14.4A: DLR holiday DCA shows are season associations (holidays-dlr)", ok: () =>
+    SEASONAL_ENTERTAINMENT_EVENTS["Mickey's Happy Holidays"]?.[0]?.eventId === "holidays-dlr" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Disney ¡Viva Navidad! Street Party"]?.[0]?.eventId === "holidays-dlr" },
+  { label: "Phase 14.4A: DLR holiday DCA shows demoted Nov 10 (starts Nov 13), boosted Nov 20", ok: () =>
+    rank("Mickey's Happy Holidays", "DLR", "2026-11-10", "dca") === "off-season" &&
+    rank("Disney ¡Viva Navidad! Street Party", "DLR", "2026-11-20", "dca") === "season" },
 ];
 
 export function runDevSeasonalEntertainmentCases(): string[] {
