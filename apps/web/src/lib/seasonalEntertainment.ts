@@ -70,6 +70,14 @@ export type SeasonalEntertainmentAssociation = {
   absentSeasonYears?: number[];
   /** Maintainer note: what confirmed the absence (no URL is recorded unless one was verified). */
   absenceEvidence?: string;
+  /**
+   * Verified limitation worth keeping with the association (e.g. the show runs
+   * only "on select days" of its parent event). Informational: the association
+   * only ever decides hiding OUTSIDE the event's dates; inside them the entry
+   * is simply not hidden and shows its provider status/times truthfully — it is
+   * never assumed to perform every event day.
+   */
+  note?: string;
 };
 
 /**
@@ -116,8 +124,14 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
     eventId: "oogie-boogie-bash", kind: "party", absentSeasonYears: [2026],
     absenceEvidence: "Official 2026 Oogie Boogie Bash entertainment confirms the parade did not return (replaced by Madame Leota's Swinging Wake); maintainer-confirmed 2026-11-10, no source URL recorded.",
   }],
-  // Frozen Holiday Surprise (WDW, MK): whether party-exclusive or regular holiday
-  // hours not confirmed from registry data — deliberately not mapped; remains neutral.
+  // Frozen Holiday Surprise (WDW, MK): Phase 14.4B — Disney Parks Blog presents it as a
+  // regular Magic Kingdom holiday offering (not MVMCP-exclusive), so it belongs to the
+  // park-admission Holidays at Walt Disney World season, not a party.
+  // It also plays at Mickey's Very Merry Christmas Party (DPB lists it in the party lineup), so a party
+  // night keeps it visible even before the park-admission season opens.
+  "Frozen Holiday Surprise": [{ eventId: "holidays-wdw", kind: "season" }, { eventId: "mvmcp", kind: "party" }],
+  // Phase 14.4B: Plaza de la Familia festival stage show (DCA, Aug 21–Nov 2 2026, park admission).
+  "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!": [{ eventId: "plaza-de-la-familia", kind: "season" }],
 };
 
 /** "party-night" / "season" boost; "off-season" demotes; "neutral" is unchanged. */
@@ -216,17 +230,18 @@ function rankForAssociations(
 
 /**
  * Phase 14.4B: explicit, per-record event associations for PROVIDER-ONLY
- * party entertainment (SHOW entities with no DWP catalog entry — e.g.
- * event-exclusive character meets and party dance parties). Keyed by park +
- * provider entity UUID (lowercase), never by name or character identity.
+ * seasonal entertainment (SHOW entities with no DWP catalog entry): ticketed
+ * party records (kind "party"), and festival / park-admission holiday
+ * records (kind "season"). Keyed by park + provider entity UUID (lowercase),
+ * never by name or character identity.
  *
  * Each row was individually verified against ThemeParks.wiki park children
- * (2026-11-10): the PROVIDER'S OWN record name states the party, and the
- * record is parented to that park. Unlisted provider records stay
- * unclassified (never hidden). Event ids/dates come from the maintained
- * registry (seasonalEventData.ts) — no date table here. Provider ids drift;
- * `runDevSeasonalEntertainmentCases` checks structure, and an entity that
- * vanishes simply stops appearing.
+ * (2026-11-10) — the record is parented to that park and its own name or an
+ * official Disney source ties it to the event (see `note`). Unlisted provider
+ * records stay unclassified (never hidden). Event ids/dates come from the
+ * maintained registry (seasonalEventData.ts) — no date table here. Provider
+ * ids drift; `runDevSeasonalEntertainmentCases` checks structure, and an
+ * entity that vanishes simply stops appearing.
  */
 export type SeasonalProviderEntertainmentAssociation = {
   parkId: ParkId;
@@ -238,6 +253,8 @@ export type SeasonalProviderEntertainmentAssociation = {
 
 const partyOnly = (parkId: ParkId, entityId: string, providerName: string, eventId: string): SeasonalProviderEntertainmentAssociation =>
   ({ parkId, entityId, providerName, associations: [{ eventId, kind: "party" }] });
+const seasonOnly = (parkId: ParkId, entityId: string, providerName: string, eventId: string, note?: string): SeasonalProviderEntertainmentAssociation =>
+  ({ parkId, entityId, providerName, associations: [{ eventId, kind: "season", ...(note ? { note } : {}) }] });
 
 export const SEASONAL_PROVIDER_ONLY_EVENTS: SeasonalProviderEntertainmentAssociation[] = [
   // Mickey's Very Merry Christmas Party (WDW, Magic Kingdom)
@@ -249,6 +266,18 @@ export const SEASONAL_PROVIDER_ONLY_EVENTS: SeasonalProviderEntertainmentAssocia
   partyOnly("hs", "dc332105-e524-4dca-9a47-df672f8472fd", "Character Greetings at Disney Jollywood Nights", "jollywood-nights"),
   partyOnly("hs", "74b46a33-ec93-4222-a3d5-d8372b1498e9", "Grand Avenue Dance Party at Disney Jollywood Nights", "jollywood-nights"),
   partyOnly("hs", "71da34dd-a27e-4db5-aef3-f880ef939f98", "Pixar Disco at Disney Jollywood Nights", "jollywood-nights"),
+  // EPCOT festivals (park admission). Concert names carry the festival in the provider record.
+  seasonOnly("epcot", "0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival", "epcot-flower-and-garden",
+    "Parent-festival window only; day-level schedule not verified (sources disagree between nightly and weekends) — never assumed to perform every festival day."),
+  seasonOnly("epcot", "d6bb186c-382f-4ae6-bc76-fde8f141ed69", "Eat to the Beat Concert Series Presented by Enterprise® at EPCOT International Food & Wine Festival", "epcot-eat-to-the-beat",
+    "Concert series ends Nov 16, 2026 — five days before the festival (Nov 21): modelled as its own registry event, not the parent festival."),
+  // DCA festivals / holidays (park admission).
+  seasonOnly("dca", "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "Cookin' with the Jammin’ Chefs", "dca-food-and-wine",
+    "Disneyland press release: daily festival entertainment (Mar 6–Apr 27, 2026)."),
+  seasonOnly("dca", "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", "Confection Purrfection with the SuperKitties", "dca-food-and-wine",
+    "Disneyland press release: runs only \"on select days\" of the festival — hidden outside the festival, never assumed to perform every festival day."),
+  seasonOnly("dca", "e9c263c4-80dc-4431-bfc9-581a0ff1f578", "Holiday Toy Drummers", "holidays-dlr",
+    "Official Disneyland listing: returns for Holidays at the Disneyland Resort (Nov 13, 2026; one official page says Nov 18, the registry season start is used)."),
 ];
 
 const PROVIDER_EVENTS_BY_KEY: Map<string, SeasonalProviderEntertainmentAssociation> = new Map(
@@ -340,7 +369,8 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "MNSSHP window but non-party night (Oct 30): party show demoted, not hidden", ok: () => rank(HOCUS, "WDW", "2026-10-30", "mk") === "off-season" && part("WDW", "2026-10-30", "mk").demoted.includes(HOCUS) },
   { label: "MVMCP night (Nov 8): Christmas party show boosted; Halloween party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-08", "mk") === "party-night" && rank(HOCUS, "WDW", "2026-11-08", "mk") === "off-season" },
   { label: "MVMCP non-party night (Nov 10, in window): Christmas party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-10", "mk") === "off-season" },
-  { label: "a seasonal tag alone does not imply a party (unassociated Frozen Holiday Surprise stays neutral)", ok: () => rank("Frozen Holiday Surprise", "WDW", "2026-11-08", "mk") === "neutral" },
+  { label: "a seasonal tag alone does not imply a party (every seasonal catalog entry needs an explicit association)", ok: () =>
+    ENTERTAINMENT_PLACES.filter((p) => p.availabilityType === "seasonal").every((p) => !!SEASONAL_ENTERTAINMENT_EVENTS[p.name]) },
   { label: "party nights sort before general seasonal in boosted", ok: () => { const b = part("DLR", "2026-10-31", "dca").boosted; return b[0] === LEOTA; } },
   // Regular seasonal events (continuous windows)
   { label: "Halloween Time window (Oct 31, Disneyland): season boost", ok: () => rank(SCREAMS, "DLR", "2026-10-31", "disneyland") === "season" },
@@ -425,6 +455,47 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
     prank("mk", "00000000-0000-4000-8000-000000000000", "WDW", "2026-11-10") === "neutral" &&
     prank("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "WDW", null) === "neutral" &&
     getSeasonalProviderEntertainmentRank("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", { resort: "WDW", date: "2026-11-10", parkId: "hs", instant: NOW }) === "neutral" },
+  // Phase 14.4B: seasonal coverage corrections
+  { label: "14.4B: Frozen Holiday Surprise is a regular WDW holiday offering (season) AND plays MVMCP nights (party)", ok: () => {
+    const a = SEASONAL_ENTERTAINMENT_EVENTS["Frozen Holiday Surprise"];
+    return a?.some((x) => x.eventId === "holidays-wdw" && x.kind === "season") && a?.some((x) => x.eventId === "mvmcp" && x.kind === "party");
+  } },
+  { label: "14.4B: Frozen Holiday Surprise dates — off-season before Nov 13 (non-party), party-night on MVMCP nights, season Nov 21 / Jan 6 2027, unknown after / next year", ok: () =>
+    rank("Frozen Holiday Surprise", "WDW", "2026-11-10", "mk") === "off-season" &&
+    rank("Frozen Holiday Surprise", "WDW", "2026-11-08", "mk") === "party-night" &&
+    rank("Frozen Holiday Surprise", "WDW", "2026-11-21", "mk") === "season" &&
+    rank("Frozen Holiday Surprise", "WDW", "2027-01-06", "mk") === "season" &&
+    rank("Frozen Holiday Surprise", "WDW", "2027-01-07", "mk") === "neutral" &&
+    rank("Frozen Holiday Surprise", "WDW", "2027-11-20", "mk") === "neutral" &&
+    rank("Frozen Holiday Surprise", "WDW", "2026-11-21", "epcot") === "neutral" },
+  { label: "14.4B: Plaza de la Familia Storytellers — season through Nov 2 2026, off-season after, unknown 2027", ok: () => {
+    const n = "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!";
+    return rank(n, "DLR", "2026-10-29", "dca") === "season" && rank(n, "DLR", "2026-11-03", "dca") === "off-season" &&
+      rank(n, "DLR", "2026-11-03", "disneyland") === "neutral" && rank(n, "DLR", "2027-09-01", "dca") === "neutral";
+  } },
+  { label: "14.4B: provider-only festival rows are 'season' kind with a continuous park-admission event in the row's park", ok: () => {
+    const seasonRows = SEASONAL_PROVIDER_ONLY_EVENTS.filter((r) => r.associations.every((a) => a.kind === "season"));
+    return seasonRows.length >= 5 && seasonRows.every((r) => r.associations.every((a) => { const e = getSeasonalEvent(a.eventId)!; return e.format === "continuous" && e.parkIds.includes(r.parkId); }));
+  } },
+  { label: "14.4B: Garden Rocks follows the parent Flower & Garden window only (2027 in-window season, outside off-season, unannounced 2028 neutral)", ok: () => {
+    const id = "0e35a7a2-c2cd-451b-88e2-afc9d370e69e";
+    return prank("epcot", id, "WDW", "2026-11-10") === "off-season" && prank("epcot", id, "WDW", "2027-04-01") === "season" &&
+      prank("epcot", id, "WDW", "2027-06-15") === "off-season" && prank("epcot", id, "WDW", "2028-04-01") === "neutral";
+  } },
+  { label: "14.4B: Eat to the Beat is season through Nov 16 but off-season Nov 17–21 even though the festival is still running (date-specific limit)", ok: () => {
+    const id = "d6bb186c-382f-4ae6-bc76-fde8f141ed69";
+    return prank("epcot", id, "WDW", "2026-11-12") === "season" && prank("epcot", id, "WDW", "2026-11-16") === "season" &&
+      prank("epcot", id, "WDW", "2026-11-17") === "off-season" && prank("epcot", id, "WDW", "2026-11-21") === "off-season" && prank("epcot", id, "WDW", "2027-09-15") === "neutral";
+  } },
+  { label: "14.4B: DCA Food & Wine acts off-season in Nov 2026, unknown in 2027; Toy Drummers season Nov 13 – Jan 6, unknown after", ok: () => {
+    const chefs = "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", kitties = "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", drummers = "e9c263c4-80dc-4431-bfc9-581a0ff1f578";
+    return prank("dca", chefs, "DLR", "2026-11-10") === "off-season" && prank("dca", kitties, "DLR", "2026-11-10") === "off-season" && prank("dca", chefs, "DLR", "2027-03-15") === "neutral" &&
+      prank("dca", drummers, "DLR", "2026-11-12") === "off-season" && prank("dca", drummers, "DLR", "2026-11-13") === "season" && prank("dca", drummers, "DLR", "2027-01-06") === "season" && prank("dca", drummers, "DLR", "2027-01-07") === "neutral";
+  } },
+  { label: "14.4B: select-days limitation is recorded on the association (Confection Purrfection) — not modelled as every day", ok: () =>
+    !!SEASONAL_PROVIDER_ONLY_EVENTS.find((r) => r.entityId === "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa")?.associations[0].note?.includes("select days") },
+  { label: "14.4B: registry events referenced by provider rows have a season record for the audited year (2026) or an announced one", ok: () =>
+    SEASONAL_PROVIDER_ONLY_EVENTS.every((r) => r.associations.every((a) => !!getSeasonalEventSeason(a.eventId, 2026) || !!getSeasonalEventSeason(a.eventId, 2027))) },
 ];
 
 export function runDevSeasonalEntertainmentCases(): string[] {

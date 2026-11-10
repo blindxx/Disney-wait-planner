@@ -109,6 +109,11 @@ export const SEASONAL_EVENTS: SeasonalEventDefinition[] = [
   { id: "epcot-flower-and-garden", name: "EPCOT International Flower & Garden Festival", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-flower-and-garden-festival/` },
   { id: "epcot-food-and-wine", name: "EPCOT International Food & Wine Festival", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-food-and-wine-festival/` },
   { id: "epcot-festival-of-the-holidays", name: "EPCOT International Festival of the Holidays", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/holiday-festival/` },
+  // ── Phase 14.4B additions ────────────────────────────────────────────
+  // Resort-wide park-admission holiday season (decor + regular holiday entertainment such as Frozen Holiday Surprise).
+  { id: "holidays-wdw", name: "Holidays at Walt Disney World Resort", resort: "WDW", parkIds: ["mk", "epcot", "hs", "ak"], category: "christmas-season", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/` },
+  // The Eat to the Beat concert run is NARROWER than its parent festival (see the 2026 season note).
+  { id: "epcot-eat-to-the-beat", name: "EPCOT Eat to the Beat Concert Series", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-food-and-wine-festival/` },
 ];
 
 const V = "2026-10-29";
@@ -190,6 +195,16 @@ export const SEASONAL_EVENT_SEASONS: SeasonalEventSeasonRecord[] = [
   {
     eventId: "epcot-festival-of-the-holidays", seasonYear: 2026, startDate: "2026-11-27", endDate: "2026-12-30",
     sourceUrl: `${DPB}/wdw/epcot-festival-of-the-holidays-dates-details/`, sourcePublishedDate: "2026-06-24", verifiedOn: V,
+  },
+  {
+    eventId: "holidays-wdw", seasonYear: 2026, startDate: "2026-11-13", endDate: "2027-01-06",
+    sourceUrl: `${DPB}/wdw/holidays-at-disney-world-christmas-lights-deals-and-more/`, sourcePublishedDate: "2026-10-06", verifiedOn: "2026-11-10",
+    note: "Disney Parks Blog: \"From November 13 through January 6, 2027, get ready to deck the halls\"; presents Frozen Holiday Surprise as a regular Magic Kingdom offering (not party-only). Cross-year season. Individual show dates within it are not published.",
+  },
+  {
+    eventId: "epcot-eat-to-the-beat", seasonYear: 2026, startDate: "2026-08-27", endDate: "2026-11-16",
+    sourceUrl: `${DPB}/wdw/eat-to-the-beat-lineup-full-concert-schedule/`, verifiedOn: "2026-11-10",
+    note: "Disney Parks Blog: concert series runs nightly Aug 27–Nov 16, five days before the festival ends (Nov 21). Venue: America Gardens Theatre.",
   },
   // ── 2027 season (confirmed early; announced 2026-09-10) ─────────────
   {

@@ -94,8 +94,9 @@ export function isEntertainmentConfirmedOutOfSeason(
  * the current resort-local date, applying the same provider-evidence override.
  *
  * Provider-only entries (Phase 14.4B) are hidden ONLY when they carry an
- * explicit park+UUID party association (`SEASONAL_PROVIDER_ONLY_EVENTS`) and
- * today is a confirmed non-party date; verified same-day performances OR
+ * explicit park+UUID party/festival/season association
+ * (`SEASONAL_PROVIDER_ONLY_EVENTS`) and today is confirmed outside the event
+ * (a non-party night, or outside the festival/season window); verified same-day performances OR
  * verified operating hours (the schedule of a meet) keep them visible. Every
  * unlisted provider-only record is unclassified and never hidden.
  *
@@ -258,6 +259,23 @@ const byId = (all: { entries: AllEntertainmentEntry[] }, id: string) => all.entr
 const hiddenP = (all: { entries: AllEntertainmentEntry[] }, id: string, park: ParkId, date: string, at: Date) =>
   isAllEntryConfirmedOutOfSeason(byId(all, id), park, "WDW", date, at);
 
+const GARDEN_ROCKS = "0e35a7a2-c2cd-451b-88e2-afc9d370e69e";
+const EAT_TO_THE_BEAT = "d6bb186c-382f-4ae6-bc76-fde8f141ed69";
+const JAMMIN_CHEFS = "4b7f57a0-c841-43d1-8abb-d13a3b7f2597";
+const SUPERKITTIES = "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa";
+const TOY_DRUMMERS = "e9c263c4-80dc-4431-bfc9-581a0ff1f578";
+const STORYTELLERS = "0ee981af-9e3b-4c36-80a2-a7f00fa4841f";
+const FROZEN = "46a67154-8d90-427a-ad5c-700b41d90966";
+const provAll = (parkId: ParkId, entries: ThemeParksLive["entries"], at: Date) => buildParkAllEntertainment(parkId, {
+  ok: true,
+  data: { entityId: THEMEPARKS_PARKS[parkId].entityId, name: parkId, timeZone: null, entries, droppedEntries: 0, droppedShowtimes: 0 },
+  meta: { origin: "network", fetchedAt: at.getTime(), etag: null },
+}, at);
+const pe = (parkId: ParkId, entityId: string, name: string, showtimes: ThemeParksShowtime[] = [], status = "CLOSED") =>
+  mkEntry(entityId, name, showtimes, { parkId: THEMEPARKS_PARKS[parkId].entityId, status });
+const hiddenIn = (all: { entries: AllEntertainmentEntry[] }, entryId: string, park: ParkId, resort: ResortId, date: string, at: Date) =>
+  isAllEntryConfirmedOutOfSeason(all.entries.find((e) => e.id === entryId)!, park, resort, date, at);
+
 export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   // ── WDW: Halloween party shows ended Oct 31 ──────────────────────────────
   { label: "MNSSHP party shows hidden Nov 10 (season ended Oct 31)", ok: () =>
@@ -367,8 +385,11 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     !oos("Fantasmic!", "WDW", TODAY_WDW, "hs") &&
     !oos("Luminous The Symphony of Us", "WDW", TODAY_WDW, "epcot") },
 
-  { label: "Unassociated seasonal: Frozen Holiday Surprise always visible", ok: () =>
-    !oos("Frozen Holiday Surprise", "WDW", TODAY_WDW, "mk") },
+  { label: "Seasonal with unknown season dates stays visible (Frozen Holiday Surprise, unannounced 2027 holidays)", ok: () => {
+    const place = getEntertainmentForPark("mk").find((p) => p.name === "Frozen Holiday Surprise")!;
+    const n = new Date("2027-11-20T17:00:00Z");
+    return !isEntertainmentConfirmedOutOfSeason(place, "WDW", "2027-11-20", undefined, n);
+  } },
 
   // ── Provider evidence override ────────────────────────────────────────────
   { label: "Provider performances today override off-season registry (DLR holidays pre-season)", ok: () => {
@@ -401,8 +422,7 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   { label: "getOffSeasonCuratedEntertainment excludes regular shows and unassociated seasonal", ok: () => {
     const names = getOffSeasonCuratedEntertainment("mk", TODAY_WDW, new Set(), NOW).map((p) => p.name);
     return !names.includes("Happily Ever After") &&
-      !names.includes("Festival of Fantasy Parade") &&
-      !names.includes("Frozen Holiday Surprise");
+      !names.includes("Festival of Fantasy Parade");
   } },
 
   { label: "getOffSeasonCuratedEntertainment excludes entries already in live inventory", ok: () => {
@@ -499,7 +519,7 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   } },
 
   { label: "isAllEntryConfirmedOutOfSeason: curated entry with unknown dates is never hidden", ok: () => {
-    // Frozen Holiday Surprise is in catalog but has no season association → "unknown" → never hidden
+    // Frozen Holiday Surprise's holiday season is only confirmed for 2026; in 2027 the dates are unknown → never hidden
     const place = getEntertainmentForPark("mk").find((p) => p.name === "Frozen Holiday Surprise")!;
     if (!place) return true; // not in catalog → pass (not an error case for this function)
     const entry: AllEntertainmentEntry = {
@@ -519,7 +539,7 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
         provider: [],
       },
     };
-    return !isAllEntryConfirmedOutOfSeason(entry, "mk", "WDW", TODAY_WDW, NOW);
+    return !isAllEntryConfirmedOutOfSeason(entry, "mk", "WDW", "2027-11-20", new Date("2027-11-20T17:00:00Z"));
   } },
 
   // ── makeOffSeasonEntry shape ──────────────────────────────────────────────
@@ -655,6 +675,79 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   } },
   { label: "14.4B Frightfully Fun Parade: verified performances today still override (never fabricate absence)", ok: () =>
     !oos("Frightfully Fun Parade", "DLR", TODAY_DLR, "dca", [{ dwpName: "Frightfully Fun Parade", performances: [{}] }]) },
+
+  // ── Phase 14.4B: festivals / holiday seasons (provider-only + curated) ────
+  { label: "14.4B festivals: default OFF hides out-of-season festival acts (Garden Rocks, Jammin' Chefs, SuperKitties, Toy Drummers on Nov 10)", ok: () => {
+    const epcot = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival")], NOW);
+    const dca = provAll("dca", [pe("dca", JAMMIN_CHEFS, "Cookin' with the Jammin’ Chefs"), pe("dca", SUPERKITTIES, "Confection Purrfection with the SuperKitties"), pe("dca", TOY_DRUMMERS, "Holiday Toy Drummers")], NOW);
+    return byId(epcot, GARDEN_ROCKS).source === "provider_only" && hiddenP(epcot, GARDEN_ROCKS, "epcot", TODAY_WDW, NOW) &&
+      [JAMMIN_CHEFS, SUPERKITTIES, TOY_DRUMMERS].every((id) => isAllEntryConfirmedOutOfSeason(byId(dca, id), "dca", "DLR", TODAY_DLR, NOW));
+  } },
+  { label: "14.4B festivals: toggle ON reveals them (and OFF keeps unclassified provider-only shows)", ok: () => {
+    const epcot = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks"), pe("epcot", "11111111-1111-4111-8111-111111111111", "Some Street Band", [], "OPERATING")], NOW);
+    const off = applyAllEntertainmentSeasonalVisibility(epcot.entries, "epcot", "WDW", TODAY_WDW, false, NOW).filter((e) => e.source === "provider_only").map((e) => e.name);
+    const on = applyAllEntertainmentSeasonalVisibility(epcot.entries, "epcot", "WDW", TODAY_WDW, true, NOW).filter((e) => e.source === "provider_only").map((e) => e.name);
+    return off.join() === "Some Street Band" && on.sort().join() === ["Garden Rocks", "Some Street Band"].sort().join();
+  } },
+  { label: "14.4B festivals: Eat to the Beat visible Nov 10 (in its Aug 27–Nov 16 run), hidden Nov 18 although Food & Wine runs to Nov 21", ok: () => {
+    const n10 = NOW; const n18 = new Date("2026-11-18T17:00:00Z");
+    const a = provAll("epcot", [pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat Concert Series")], n10);
+    const b = provAll("epcot", [pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat Concert Series")], n18);
+    return !hiddenP(a, EAT_TO_THE_BEAT, "epcot", "2026-11-10", n10) && hiddenP(b, EAT_TO_THE_BEAT, "epcot", "2026-11-18", n18);
+  } },
+  { label: "14.4B festivals: verified same-day performance overrides general seasonal hiding (Eat to the Beat Nov 18, Garden Rocks Nov 10)", ok: () => {
+    const n18 = new Date("2026-11-18T17:00:00Z");
+    const a = provAll("epcot", [pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat", [perf("2026-11-18T18:00:00-05:00")], "OPERATING")], n18);
+    const b = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks", [perf("2026-11-10T18:00:00-05:00", "Operating", "2026-11-10T21:00:00-05:00")], "OPERATING")], NOW);
+    return !hiddenP(a, EAT_TO_THE_BEAT, "epcot", "2026-11-18", n18) && !hiddenP(b, GARDEN_ROCKS, "epcot", TODAY_WDW, NOW);
+  } },
+  { label: "14.4B festivals: in-window festival act is visible but never assumed to perform (no fabricated times — select-days Confection Purrfection)", ok: () => {
+    const early = new Date("2026-03-10T17:00:00Z"); // festival Mar 6–Apr 27, 2026 in progress
+    const all = provAll("dca", [pe("dca", SUPERKITTIES, "Confection Purrfection with the SuperKitties")], early);
+    const e = byId(all, SUPERKITTIES);
+    return !hiddenP(all, SUPERKITTIES, "dca", "2026-03-10", early) === true && e.showtime.performances.length === 0 && e.showtime.status !== "upcoming";
+  } },
+  { label: "14.4B festivals: unknown dates stay visible (2027 Food & Wine unannounced; 2028 Flower & Garden unannounced); announced 2027 window shows Garden Rocks", ok: () => {
+    const n = new Date("2027-04-01T17:00:00Z");
+    const f = provAll("dca", [pe("dca", JAMMIN_CHEFS, "Cookin' with the Jammin’ Chefs")], n);
+    const g = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks")], n);
+    const g28 = new Date("2028-04-01T17:00:00Z");
+    const h = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks")], g28);
+    return !isAllEntryConfirmedOutOfSeason(byId(f, JAMMIN_CHEFS), "dca", "DLR", "2027-04-01", n) &&
+      !isAllEntryConfirmedOutOfSeason(byId(g, GARDEN_ROCKS), "epcot", "WDW", "2027-04-01", n) &&
+      !isAllEntryConfirmedOutOfSeason(byId(h, GARDEN_ROCKS), "epcot", "WDW", "2028-04-01", g28);
+  } },
+  { label: "14.4B festivals: park-qualified — a DCA festival uuid in an EPCOT inventory is unclassified (not hidden)", ok: () => {
+    const e = provAll("epcot", [pe("epcot", JAMMIN_CHEFS, "Cookin' with the Jammin’ Chefs")], NOW);
+    return !isAllEntryConfirmedOutOfSeason(byId(e, JAMMIN_CHEFS), "epcot", "WDW", TODAY_WDW, NOW);
+  } },
+  { label: "14.4B Plaza de la Familia (curated, mapped): one entry (no provider-only duplicate), hidden Nov 10 after Nov 2, visible Oct 20, performance overrides", ok: () => {
+    const entry = (st: ThemeParksShowtime[] = []) => pe("dca", STORYTELLERS, "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", st);
+    const all = provAll("dca", [entry()], NOW);
+    const matches = all.entries.filter((e) => e.name.startsWith("The Storytellers of Plaza de la Familia"));
+    const id = "curated:dca:The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!";
+    const early = new Date("2026-10-20T17:00:00Z");
+    const onNov10 = provAll("dca", [entry([perf("2026-11-10T14:00:00-08:00")])], NOW);
+    return matches.length === 1 && matches[0].source === "curated" && !all.entries.some((e) => e.id === `provider:${STORYTELLERS}`) &&
+      hiddenIn(all, id, "dca", "DLR", TODAY_DLR, NOW) && !hiddenIn(provAll("dca", [entry()], early), id, "dca", "DLR", "2026-10-20", early) &&
+      !hiddenIn(onNov10, id, "dca", "DLR", TODAY_DLR, NOW);
+  } },
+  { label: "14.4B Frozen Holiday Surprise: hidden Nov 10 without evidence, visible with today's performance, party night Nov 9 visible, season Nov 20 visible, unknown 2027 visible", ok: () => {
+    const f = (st: ThemeParksShowtime[], at: Date) => mkAll([mkEntry(FROZEN, "Frozen Holiday Surprise", st, { status: st.length ? "OPERATING" : "CLOSED" })], at);
+    const id = "curated:mk:Frozen Holiday Surprise";
+    const at = (d: string) => new Date(`${d}T17:00:00Z`);
+    return hiddenIn(f([], NOW), id, "mk", "WDW", TODAY_WDW, NOW) &&
+      !hiddenIn(f([perf("2026-11-10T20:15:00-05:00", "Special Ticketed Event")], NOW), id, "mk", "WDW", TODAY_WDW, NOW) &&
+      !hiddenIn(f([], at("2026-11-09")), id, "mk", "WDW", "2026-11-09", at("2026-11-09")) &&
+      !hiddenIn(f([], at("2026-11-20")), id, "mk", "WDW", "2026-11-20", at("2026-11-20")) &&
+      !hiddenIn(f([], at("2027-11-20")), id, "mk", "WDW", "2027-11-20", at("2027-11-20"));
+  } },
+  { label: "14.4B toggle for curated festival entries: OFF hides Storytellers, ON reveals; every seasonal catalog entry has an association", ok: () => {
+    const all = provAll("dca", [pe("dca", STORYTELLERS, "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!")], NOW);
+    const off = applyAllEntertainmentSeasonalVisibility(all.entries, "dca", "DLR", TODAY_DLR, false, NOW).some((e) => e.name.startsWith("The Storytellers"));
+    const on = applyAllEntertainmentSeasonalVisibility(all.entries, "dca", "DLR", TODAY_DLR, true, NOW).some((e) => e.name.startsWith("The Storytellers"));
+    return !off && on;
+  } },
 ];
 
 export function runDevSeasonalVisibilityCases(): string[] {

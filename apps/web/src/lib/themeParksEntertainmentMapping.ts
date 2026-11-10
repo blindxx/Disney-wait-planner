@@ -161,6 +161,8 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
 
   // ---- Disney California Adventure ----
   mapped("World of Color", "dca", show("e46d8982-4991-4b9e-8e4a-b519d3ca6060", "World of Color – ONE")),
+  // Phase 14.4B: provider SHOW parented to DCA (verified 2026-11-10); Plaza de la Familia festival show.
+  mapped("The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", "dca", show("0ee981af-9e3b-4c36-80a2-a7f00fa4841f", "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!")),
   unmapped("Frightfully Fun Parade", "dca", `${NOT_IN_PROVIDER}; replaced for 2026 by Madame Leota's Swinging Wake`),
   // Phase 14.4B: provider lists a DCA-parented SHOW (distinct UUID from the Hollywood Studios one; verified 2026-11-10).
   mapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", show("8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a", "Disney Jr. Mickey Mouse Clubhouse Live!")),
@@ -568,6 +570,15 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
     check("14.4B provider-only: event character-meet records are not claimed by any DWP mapping",
       providerOnlyIds.every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
     check("14.4B uuids: new mappings keep ids canonical and unique (structure clean)", validateEntertainmentMappingStructure().length === 0);
+    check("14.4B mapping: Plaza de la Familia Storytellers show → its DCA SHOW record (curated, no longer provider-only)",
+      ids("The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", "dca") === "0ee981af-9e3b-4c36-80a2-a7f00fa4841f" &&
+      resolveDwpEntertainmentFromThemeParksId("0ee981af-9e3b-4c36-80a2-a7f00fa4841f")?.parkId === "dca" &&
+      ENTERTAINMENT_PLACES.some((p) => p.parkId === "dca" && p.name.startsWith("The Storytellers of Plaza de la Familia")));
+    check("14.4B scope: festival concert acts and the Holiday Toy Drummers stay provider-only (not curated, not mapped)",
+      ["0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "d6bb186c-382f-4ae6-bc76-fde8f141ed69", "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", "e9c263c4-80dc-4431-bfc9-581a0ff1f578"]
+        .every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
+    check("14.4B scope: Mulan's procession / Hurry Home / Disney on Broadway are not catalogued without verified provider identity",
+      !ENTERTAINMENT_PLACES.some((p) => /mulan|hurry home|disney on broadway/i.test(p.name)));
     // Wrong-park drift for a new DCA mapping: the DCA Clubhouse entity appearing under HS is flagged, never remapped.
     const p = JSON.parse(JSON.stringify(perfect)) as typeof perfect;
     const dcaClubhouse = p.dca!.children.find((c) => c.entityId === "8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a")!;
