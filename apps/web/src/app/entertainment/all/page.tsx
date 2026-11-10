@@ -317,9 +317,12 @@ export default function AllEntertainmentPage() {
 
   const visible = useMemo(() => {
     const base = filterAllEntertainment(all?.entries ?? [], { land: effectiveLand, operatingOnly });
-    const extra = showOutOfSeason
-      ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
-      : [];
+    // Synthesized off-season entries have no provider status so they never satisfy
+    // "Operating only"; exclude them when that filter is active.
+    const extra =
+      showOutOfSeason && !operatingOnly
+        ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
+        : [];
     return sortAllEntertainment([...base, ...extra], displayNow);
   }, [all, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries]);
 
@@ -432,7 +435,7 @@ export default function AllEntertainmentPage() {
             <div className="all-empty">Loading entertainment&hellip;</div>
           ) : all.error ? (
             <div className="all-empty">Entertainment is unavailable right now. Try again shortly.</div>
-          ) : all.entries.length === 0 ? (
+          ) : all.entries.length === 0 && visible.length === 0 ? (
             <div className="all-empty">
               {allEntertainmentEmptyState(all)?.message}
               {all.stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
