@@ -409,6 +409,8 @@ export type WaitEntry = {
   status: string;
   waitMins: number | null;
   canonicalName: string;
+  /** Provenance from AttractionWait.waitSource; optional so other builders need not supply it. */
+  waitSource?: "live" | "fallback";
 };
 
 /**

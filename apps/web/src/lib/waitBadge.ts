@@ -7,6 +7,10 @@
  *  getWaitBadgeProps — full badge (colored background + label)
  *                       used by: wait-times/page.tsx, plans/page.tsx
  *
+ *  getFallbackStatusLabel — provenance caption for a DOWN/CLOSED badge whose
+ *                       status came from DWP mock/fallback data (waitSource)
+ *                       used by: wait-times, plans, lightning
+ *
  *  getWaitTextColor  — text-only color for a large wait number on white bg
  *                       used by: page.tsx (Today / home)
  *
@@ -20,7 +24,7 @@
  *   CLOSED → gray    ("Closed")
  */
 
-import type { WaitStatus } from "@disney-wait-planner/shared";
+import { mockAttractionWaits, type WaitStatus } from "@disney-wait-planner/shared";
 
 // Allow callers that have status typed as `string` (e.g. waitMap in plans/page.tsx)
 // without losing the precise union when callers already have WaitStatus.
@@ -89,4 +93,46 @@ export function getWaitTextColor(waitMins: number): string {
   if (waitMins < 30) return TEXT_COLOR.green;
   if (waitMins < 60) return TEXT_COLOR.yellow;
   return TEXT_COLOR.red;
+}
+
+// ---------------------------------------------------------------------------
+// Fallback status provenance
+// ---------------------------------------------------------------------------
+
+export const FALLBACK_STATUS_LABEL = "Fallback status \u00b7 not live";
+
+/**
+ * Provenance caption for a DOWN/CLOSED badge. Returns FALLBACK_STATUS_LABEL
+ * only when the explicit `waitSource` field says the row is DWP mock/fallback
+ * data (never inferred from status/waitMins/timestamps); live rows, rows with
+ * missing provenance, and OPERATING rows return null. OPERATING fallback rows
+ * keep their existing numeric "Fallback wait" caption (Wait Times page).
+ * Display-only: no effect on status resolution or closure enforcement.
+ */
+export function getFallbackStatusLabel(args: {
+  status: StatusInput;
+  waitSource?: "live" | "fallback" | string | null;
+}): string | null {
+  return args.waitSource === "fallback" && (args.status === "DOWN" || args.status === "CLOSED")
+    ? FALLBACK_STATUS_LABEL
+    : null;
+}
+
+/**
+ * DEV checks (run manually from Node; returns failing labels, [] = all pass).
+ */
+export function runDevFallbackStatusLabelCases(): string[] {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  check("fallback CLOSED null wait → status label", getFallbackStatusLabel({ status: "CLOSED", waitSource: "fallback" }) === FALLBACK_STATUS_LABEL);
+  check("fallback DOWN null wait → status label", getFallbackStatusLabel({ status: "DOWN", waitSource: "fallback" }) === FALLBACK_STATUS_LABEL);
+  check("fallback OPERATING (numeric or null wait) → no status label", getFallbackStatusLabel({ status: "OPERATING", waitSource: "fallback" }) === null);
+  check("live CLOSED → no label", getFallbackStatusLabel({ status: "CLOSED", waitSource: "live" }) === null);
+  check("live DOWN → no label", getFallbackStatusLabel({ status: "DOWN", waitSource: "live" }) === null);
+  check("live OPERATING → no label", getFallbackStatusLabel({ status: "OPERATING", waitSource: "live" }) === null);
+  check("missing provenance is never treated as fallback", getFallbackStatusLabel({ status: "DOWN" }) === null && getFallbackStatusLabel({ status: "CLOSED", waitSource: null }) === null);
+  const mockClosed = mockAttractionWaits.find((m) => m.status === "CLOSED" && m.waitMins === null);
+  check("real mock CLOSED/null-wait row (waitSource fallback) → status label", !!mockClosed && getFallbackStatusLabel({ status: mockClosed.status, waitSource: mockClosed.waitSource }) === FALLBACK_STATUS_LABEL);
+  check("badge unchanged by provenance (CLOSED → Closed, DOWN → Down)", getWaitBadgeProps({ status: "CLOSED", waitMins: null })?.label === "Closed" && getWaitBadgeProps({ status: "DOWN", waitMins: null })?.label === "Down");
+  return failures;
 }

@@ -36,7 +36,7 @@ import {
 import BackToTopButton from "../../components/BackToTopButton";
 import { getWaitDataset, LIVE_ENABLED } from "../../lib/liveWaitApi";
 import { applyVariantParkHours } from "../../lib/attractionVariants";
-import { getWaitBadgeProps } from "../../lib/waitBadge";
+import { getWaitBadgeProps, getFallbackStatusLabel, FALLBACK_STATUS_LABEL } from "../../lib/waitBadge";
 import { getSettingsDefaults, SETTINGS_RESORT_KEY, SETTINGS_PARK_KEY } from "../../lib/settingsDefaults";
 import {
   bootstrapProfiles,
@@ -472,7 +472,18 @@ function AttractionCard({ attraction }: { attraction: AttractionWait }) {
           live match — never inferred from status/waitMins/timestamp, only
           from the explicit waitSource provenance field (see liveWaitApi.ts).
         */}
-        {attraction.waitSource === "fallback" && attraction.waitMins != null && (
+        {getFallbackStatusLabel({ status: attraction.status, waitSource: attraction.waitSource }) ? (
+          <div
+            style={{
+              fontSize: "11px",
+              lineHeight: "1.3",
+              color: "var(--text-faint)",
+              marginTop: "2px",
+            }}
+          >
+            {FALLBACK_STATUS_LABEL}
+          </div>
+        ) : attraction.waitSource === "fallback" && attraction.waitMins != null && (
           <div
             style={{
               fontSize: "11px",

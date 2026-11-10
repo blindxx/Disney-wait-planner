@@ -90,7 +90,7 @@ import {
   lookupWait,
   type WaitEntry,
 } from "@/lib/plansMatching";
-import { getWaitBadgeProps } from "@/lib/waitBadge";
+import { getWaitBadgeProps, getFallbackStatusLabel } from "@/lib/waitBadge";
 import { AttractionSuggestInput } from "@/components/AttractionSuggestInput";
 
 // ===== RESORT CONSTANTS =====
@@ -2584,6 +2584,7 @@ export default function LightningPage() {
         status: a.status,
         waitMins: a.waitMins,
         canonicalName: a.name,
+        waitSource: a.waitSource,
       });
     }
     return map;
@@ -3845,6 +3846,11 @@ function ReservationCard({
                   }}
                 >
                   {parkLabel}
+                </div>
+              )}
+              {getFallbackStatusLabel({ status: waitEntry.status, waitSource: waitEntry.waitSource }) && (
+                <div style={{ fontSize: "0.7rem", color: "var(--text-faint)", lineHeight: 1.3, marginTop: "0.1rem" }}>
+                  {getFallbackStatusLabel({ status: waitEntry.status, waitSource: waitEntry.waitSource })}
                 </div>
               )}
             </>
