@@ -71,6 +71,15 @@ import {
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
 import { isEntertainmentConfirmedOutOfSeason } from "../../lib/seasonalVisibility";
+import {
+  EVENT_MEETS_UNAVAILABLE_MESSAGE,
+  describeEventMeet,
+  eventMeetsForDisplay,
+  eventMeetsSectionState,
+  resolveEventMeetsResponse,
+  type EventMeetEntry,
+  type ParkEventMeets,
+} from "../../lib/eventExclusiveMeets";
 
 // PLANNED_CLOSURES is the single source of truth for refurbishment data.
 // Imported from @/lib/plannedClosures — no local duplication.
@@ -583,6 +592,32 @@ function EntertainmentCard({
 }
 
 /**
+ * EventMeetCard — Phase 14.4C party-exclusive meet. Status, wait (only a
+ * verified live Queue-Times wait) and schedule/hours are separate lines;
+ * "Closed" before the party starts is normal.
+ */
+function EventMeetCard({ meet, stale, now }: { meet: EventMeetEntry; stale: boolean; now: Date }) {
+  const v = describeEventMeet(meet, now);
+  const line = { fontSize: "13px", lineHeight: "1.3", marginTop: "4px" } as const;
+  return (
+    <div className="entertainment-card">
+      <div style={{ fontWeight: 600, fontSize: "15px", lineHeight: "1.3", color: "var(--text-strong)" }}>{meet.name}</div>
+      {(v.statusText || v.waitText || v.waitNote) && (
+        <div style={{ ...line, color: v.waitText ? "var(--text)" : "var(--text-faint)" }}>
+          {[v.statusText, v.waitText ?? v.waitNote].filter(Boolean).join(" • ")}
+        </div>
+      )}
+      {v.scheduleText && (
+        <div style={{ ...line, color: "var(--text)" }}>
+          {v.scheduleText}
+          {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * SkeletonCard — placeholder shown while switching parks.
  * Uses .wait-card class so skeletons match the responsive grid.
  */
@@ -845,6 +880,33 @@ export default function WaitTimesPage() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [ready, selectedPark]);
+  // Phase 14.4C — event-exclusive character meets (confirmed party dates only;
+  // the server contacts providers only on such dates). Same lifecycle as
+  // showtimes: latest-request-wins, park-change cancel, visibility refresh +
+  // guarded 120 s poll. A failed request keeps nothing (section hidden).
+  const [eventMeetsRaw, setEventMeets] = useState<ParkEventMeets | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let latestRequest = 0;
+    const load = () => {
+      const token = ++latestRequest;
+      fetch(`/api/entertainment/event-meets?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null)
+        .then((body) => { if (!cancelled && token === latestRequest) setEventMeets(resolveEventMeetsResponse(selectedPark, body)); });
+    };
+    setEventMeets(null);
+    load();
+    const onVisible = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    const id = setInterval(() => { if (document.visibilityState === "visible") load(); }, 120_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [ready, selectedPark]);
   // Phase 12.4 — normalized park hours for the selected park (server-side
   // ThemeParks schedule boundary, independent of the showtimes/Queue-Times
   // requests). Same lifecycle as showtimes: latest-request-wins, park-change
@@ -922,7 +984,12 @@ export default function WaitTimesPage() {
 
   // ThemeParks.wiki attribution is owed whenever its data is presented: a
   // successful response and at least one visible entry the provider was asked about.
+  // Phase 14.4C: party meets are hidden under a land filter (their land is not
+  // in the curated catalog), and never shown from another park/day.
+  const eventMeets = !selectedLand ? eventMeetsForDisplay(eventMeetsRaw, selectedPark, displayNow) : null;
+  const eventMeetsState = eventMeetsSectionState(eventMeets);
   const showtimesPresented =
+    eventMeetsState === "list" ||
     !!showtimes &&
     !showtimes.error &&
     showtimes.entries.some(
@@ -1255,6 +1322,33 @@ export default function WaitTimesPage() {
                   })
                 : "\u2014"}
             </div>
+          </div>
+        )}
+
+        {/* ---- Party character meets (Phase 14.4C): confirmed party dates only ---- */}
+        {eventMeetsState !== "hidden" && eventMeets && (
+          <div style={{ marginTop: "20px" }}>
+            <h2
+              id="party-meets"
+              className="wait-section"
+              style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}
+            >
+              Party Character Meets
+            </h2>
+            {eventMeetsState === "unavailable" ? (
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", marginBottom: "10px" }}>
+                {EVENT_MEETS_UNAVAILABLE_MESSAGE}
+              </p>
+            ) : (<>
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
+                Meets available only at tonight&apos;s ticketed party. Listed all day; most open at party start.
+              </p>
+              <div className="entertainment-grid">
+                {eventMeets.entries.map((m) => (
+                  <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
+                ))}
+              </div>
+            </>)}
           </div>
         )}
 
