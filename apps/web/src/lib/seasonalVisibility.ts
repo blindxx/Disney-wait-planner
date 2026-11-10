@@ -76,6 +76,39 @@ export function isEntertainmentConfirmedOutOfSeason(
 }
 
 // ============================================
+// ALL ENTERTAINMENT ENTRY VISIBILITY
+// ============================================
+
+/**
+ * Whether a live All Entertainment entry is confirmed out-of-season for
+ * the current resort-local date, applying the same provider-evidence override.
+ *
+ * Returns false for:
+ *   - provider_only entries (never hidden — DWP catalog is not the source of truth)
+ *   - entries with no matching catalog place (name not in DWP catalog)
+ *   - entries for which the showtime has at least one performance today
+ *   - entries whose seasonal rank is not "off-season" (neutral, unknown, in-season)
+ */
+export function isAllEntryConfirmedOutOfSeason(
+  entry: AllEntertainmentEntry,
+  parkId: ParkId,
+  resort: ResortId,
+  today: string,
+  instant?: Date,
+): boolean {
+  if (entry.source !== "curated") return false;
+  const place = getEntertainmentForPark(parkId).find((p) => p.name === entry.name);
+  if (!place) return false;
+  return isEntertainmentConfirmedOutOfSeason(
+    place,
+    resort,
+    today,
+    [{ dwpName: entry.name, performances: entry.showtime.performances }],
+    instant,
+  );
+}
+
+// ============================================
 // ALL ENTERTAINMENT TOGGLE
 // ============================================
 
@@ -309,6 +342,106 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   { label: "getOffSeasonCuratedEntertainment for DCA returns hidden DLR holiday shows", ok: () => {
     const names = getOffSeasonCuratedEntertainment("dca", TODAY_DLR, new Set(), NOW).map((p) => p.name);
     return names.includes("Mickey's Happy Holidays") && names.includes("Disney ¡Viva Navidad! Street Party");
+  } },
+
+  // ── isAllEntryConfirmedOutOfSeason ────────────────────────────────────────
+  { label: "isAllEntryConfirmedOutOfSeason: provider-present curated off-season entry is hidden (toggle OFF)", ok: () => {
+    const entry: AllEntertainmentEntry = makeOffSeasonEntry(
+      getEntertainmentForPark("mk").find((p) => p.name === "Hocus Pocus Villain Spelltacular")!,
+      "mk",
+    );
+    // Override id/source as if it came from live inventory (source is already "curated")
+    return isAllEntryConfirmedOutOfSeason(entry, "mk", "WDW", TODAY_WDW, NOW);
+  } },
+
+  { label: "isAllEntryConfirmedOutOfSeason: curated off-season entry with live performances is NOT hidden", ok: () => {
+    // Simulate provider-present entry with an active performance
+    const place = getEntertainmentForPark("disneyland").find((p) => p.name === "Believe... in Holiday Magic")!;
+    const entry: AllEntertainmentEntry = {
+      id: `curated:disneyland:${place.name}`,
+      source: "curated",
+      name: place.name,
+      land: place.land ?? null,
+      venue: null,
+      showtime: {
+        dwpName: place.name,
+        parkId: "disneyland",
+        status: "upcoming",
+        performances: [{ startTime: "2026-11-10T22:00:00Z", endTime: null, localTime: "2:00 PM", type: null, passed: false }],
+        message: null,
+        incomplete: false,
+        unrecognizedTypes: [],
+        provider: [],
+      },
+    };
+    return !isAllEntryConfirmedOutOfSeason(entry, "disneyland", "DLR", TODAY_DLR, NOW);
+  } },
+
+  { label: "isAllEntryConfirmedOutOfSeason: provider_only entry is never hidden", ok: () => {
+    const entry: AllEntertainmentEntry = {
+      id: "provider_only:mk:some-provider-show",
+      source: "provider_only",
+      name: "Some Provider-Only Show",
+      land: null,
+      venue: null,
+      showtime: {
+        dwpName: "Some Provider-Only Show",
+        parkId: "mk",
+        status: "unavailable",
+        performances: [],
+        message: null,
+        incomplete: false,
+        unrecognizedTypes: [],
+        provider: [],
+      },
+    };
+    return !isAllEntryConfirmedOutOfSeason(entry, "mk", "WDW", TODAY_WDW, NOW);
+  } },
+
+  { label: "isAllEntryConfirmedOutOfSeason: neutral/regular curated entry is never hidden", ok: () => {
+    const place = getEntertainmentForPark("mk").find((p) => p.name === "Happily Ever After")!;
+    const entry: AllEntertainmentEntry = {
+      id: `curated:mk:${place.name}`,
+      source: "curated",
+      name: place.name,
+      land: place.land ?? null,
+      venue: null,
+      showtime: {
+        dwpName: place.name,
+        parkId: "mk",
+        status: "unavailable",
+        performances: [],
+        message: null,
+        incomplete: false,
+        unrecognizedTypes: [],
+        provider: [],
+      },
+    };
+    return !isAllEntryConfirmedOutOfSeason(entry, "mk", "WDW", TODAY_WDW, NOW);
+  } },
+
+  { label: "isAllEntryConfirmedOutOfSeason: curated entry with unknown dates is never hidden", ok: () => {
+    // Frozen Holiday Surprise is in catalog but has no season association → "unknown" → never hidden
+    const place = getEntertainmentForPark("mk").find((p) => p.name === "Frozen Holiday Surprise")!;
+    if (!place) return true; // not in catalog → pass (not an error case for this function)
+    const entry: AllEntertainmentEntry = {
+      id: `curated:mk:${place.name}`,
+      source: "curated",
+      name: place.name,
+      land: place.land ?? null,
+      venue: null,
+      showtime: {
+        dwpName: place.name,
+        parkId: "mk",
+        status: "unavailable",
+        performances: [],
+        message: null,
+        incomplete: false,
+        unrecognizedTypes: [],
+        provider: [],
+      },
+    };
+    return !isAllEntryConfirmedOutOfSeason(entry, "mk", "WDW", TODAY_WDW, NOW);
   } },
 
   // ── makeOffSeasonEntry shape ──────────────────────────────────────────────

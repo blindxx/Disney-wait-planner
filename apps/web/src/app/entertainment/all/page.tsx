@@ -47,7 +47,7 @@ import { PARTIAL_SHOWTIMES_NOTE } from "../../../lib/entertainmentShowtimes";
 import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
-import { getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
+import { getOffSeasonCuratedEntertainment, isAllEntryConfirmedOutOfSeason, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
 
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {
   DLR: ["disneyland", "dca"],
@@ -320,7 +320,16 @@ export default function AllEntertainmentPage() {
   const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
 
   const visible = useMemo(() => {
-    const base = filterAllEntertainment(all?.entries ?? [], { land: effectiveLand, operatingOnly });
+    const today = getResortLocalDate(selectedResort, displayNow);
+    const sourceEntries = all?.entries ?? [];
+    // When toggle is OFF, hide confirmed out-of-season curated entries even if
+    // they are present in the provider inventory. Toggle ON restores them.
+    const seasonalBase = showOutOfSeason
+      ? sourceEntries
+      : sourceEntries.filter(
+          (e) => !isAllEntryConfirmedOutOfSeason(e, selectedPark, selectedResort, today, displayNow),
+        );
+    const base = filterAllEntertainment(seasonalBase, { land: effectiveLand, operatingOnly });
     // Synthesized off-season entries have no provider status so they never satisfy
     // "Operating only"; exclude them when that filter is active.
     const extra =
@@ -328,7 +337,7 @@ export default function AllEntertainmentPage() {
         ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
         : [];
     return sortAllEntertainment([...base, ...extra], displayNow);
-  }, [all, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries]);
+  }, [all, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort]);
 
   return (
     <>
