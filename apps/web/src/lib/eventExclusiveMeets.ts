@@ -42,6 +42,7 @@
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { buildParkAllEntertainment, allEntryViewAt, type AllEntertainmentEntry } from "./entertainmentAll";
+import { PARTIAL_SHOWTIMES_NOTE } from "./entertainmentShowtimes";
 import { QUEUE_TIMES_PARK_MAP } from "./liveWaitApi";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
@@ -261,7 +262,9 @@ export function describeEventMeet(entry: EventMeetEntry, now: Date = new Date())
   const statusFromWait = entry.wait.state === "closed" ? "Closed" : entry.wait.state === "live" ? "Operating" : null;
   const s = entry.status?.toUpperCase();
   const statusFromProvider = s === "OPERATING" ? "Operating" : s === "CLOSED" ? "Closed" : null;
-  const scheduleParts = [view.collapsedText, view.hoursText].filter((t): t is string => !!t);
+  // Upcoming-only times from an incomplete schedule keep the standard qualifier (never look complete).
+  const timesText = view.collapsedText && view.partial ? `${view.collapsedText} (${PARTIAL_SHOWTIMES_NOTE})` : view.collapsedText;
+  const scheduleParts = [timesText, view.hoursText].filter((t): t is string => !!t);
   return {
     statusText: statusFromWait ?? statusFromProvider,
     waitText: entry.wait.state === "live" ? `Wait: ${entry.wait.minutes} min` : null,
@@ -386,6 +389,12 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
     const r = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [{ type: "Operating", startTime: "2026-11-12T19:00:00-05:00", endTime: "2026-11-12T23:00:00-05:00" }])), null);
     const v = describeEventMeet(r.entries.find((e) => e.entityId === JS_ID)!, MVMCP_MORNING);
     return !!v.scheduleText && /Operating hours:/.test(v.scheduleText) && v.waitText === null;
+  } },
+  { label: "partial schedule (dropped showtime record alongside a valid performance) keeps the incomplete qualifier", ok: () => {
+    const entries = mkEntries("CLOSED", [{ type: "Performance Time", startTime: "2026-11-12T19:00:00-05:00", endTime: null }]).map((e) => (e.entityId === JS_ID ? { ...e, droppedShowtimes: 1 } : e));
+    const r = build(MVMCP_MORNING, tpOk(MK, entries), null);
+    const v = describeEventMeet(r.entries.find((e) => e.entityId === JS_ID)!, MVMCP_MORNING);
+    return !!v.scheduleText && v.scheduleText.includes("7:00 PM") && v.scheduleText.includes(PARTIAL_SHOWTIMES_NOTE);
   } },
   // Provider failures / missing / stale
   { label: "ThemeParks failure on a party date: nothing listed, typed error → 'unavailable' (distinct from absence)", ok: () => {
