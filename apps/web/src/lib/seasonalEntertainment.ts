@@ -91,7 +91,7 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   // Show names confirmed from Disney Parks Blog / provider; the party suffix
   // ("at Disney Jollywood Nights") is a naming variant — same show.
   "Disney Holidays in Hollywood": [{ eventId: "jollywood-nights", kind: "party" }],
-  "What's This? Tim Burton's The Nightmare Before Christmas Sing-Along": [{ eventId: "jollywood-nights", kind: "party" }],
+  "What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along": [{ eventId: "jollywood-nights", kind: "party" }],
   "Glisten!": [{ eventId: "jollywood-nights", kind: "party" }],
   "Jingle Bell, Jingle BAM!": [{ eventId: "jollywood-nights", kind: "party" }],
   // EPCOT International Festival of the Holidays (WDW, EPCOT) — park-admission season.
@@ -270,7 +270,7 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "disambiguated names (Fantasmic! — location) still rank neutral without error", ok: () => rank("Fantasmic! — Hollywood Studios", "WDW", "2026-11-08", "hs") === "neutral" },
   // Phase 14.4A: new Jollywood Nights associations
   { label: "Phase 14.4A: Jollywood Nights party associations cover all four HS shows", ok: () =>
-    ["Disney Holidays in Hollywood", "What's This? Tim Burton's The Nightmare Before Christmas Sing-Along", "Glisten!", "Jingle Bell, Jingle BAM!"]
+    ["Disney Holidays in Hollywood", "What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along", "Glisten!", "Jingle Bell, Jingle BAM!"]
       .every((n) => SEASONAL_ENTERTAINMENT_EVENTS[n]?.[0]?.eventId === "jollywood-nights" && SEASONAL_ENTERTAINMENT_EVENTS[n][0].kind === "party") },
   { label: "Phase 14.4A: Jollywood Nights show demoted on Nov 10 (non-party night, Nov 7 was last)", ok: () => rank("Glisten!", "WDW", "2026-11-10", "hs") === "off-season" },
   { label: "Phase 14.4A: Jollywood Nights show boosted on party night Nov 7", ok: () => rank("Disney Holidays in Hollywood", "WDW", "2026-11-07", "hs") === "party-night" },

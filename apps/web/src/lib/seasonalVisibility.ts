@@ -169,7 +169,7 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   // ── WDW: Jollywood Nights (HS) — started Nov 7; Nov 10 not a party night ─
   { label: "Jollywood Nights shows hidden Nov 10 (non-party night)", ok: () =>
     oos("Disney Holidays in Hollywood", "WDW", TODAY_WDW, "hs") &&
-    oos("What's This? Tim Burton's The Nightmare Before Christmas Sing-Along", "WDW", TODAY_WDW, "hs") &&
+    oos("What’s This? Tim Burton’s The Nightmare Before Christmas Sing-Along", "WDW", TODAY_WDW, "hs") &&
     oos("Glisten!", "WDW", TODAY_WDW, "hs") &&
     oos("Jingle Bell, Jingle BAM!", "WDW", TODAY_WDW, "hs") },
 
