@@ -300,10 +300,6 @@ export default function AllEntertainmentPage() {
   const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
   const inventoryPresented = allEntertainmentPresentsProviderData(all);
 
-  const lands = useMemo(() => allEntertainmentLands(all?.entries ?? []), [all]);
-  // A land that no longer exists in the refreshed inventory must not silently hide everything.
-  const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
-
   // When "Show out-of-season entertainment" is ON, synthesize entries for curated
   // shows that are confirmed out-of-season and not already in the live inventory.
   const offSeasonEntries = useMemo<AllEntertainmentEntry[]>(() => {
@@ -314,6 +310,14 @@ export default function AllEntertainmentPage() {
       makeOffSeasonEntry(place, selectedPark),
     );
   }, [showOutOfSeason, selectedPark, selectedResort, displayNow, all]);
+
+  // Include lands from synthesized off-season entries so the land filter works for them too.
+  const lands = useMemo(
+    () => allEntertainmentLands([...(all?.entries ?? []), ...offSeasonEntries]),
+    [all, offSeasonEntries],
+  );
+  // A land that no longer exists in the refreshed inventory must not silently hide everything.
+  const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
 
   const visible = useMemo(() => {
     const base = filterAllEntertainment(all?.entries ?? [], { land: effectiveLand, operatingOnly });
