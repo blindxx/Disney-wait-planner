@@ -100,6 +100,7 @@ const RESPONSIVE_CSS = `
   .all-event-select, .all-land-select { width: 200px; max-width: 100%; min-width: 0; text-overflow: ellipsis; padding-right: 32px !important; }
   .all-event-info { max-width: 500px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
   .all-reset-btn { margin-left: auto; padding: 4px 10px; min-height: 32px; border: 1px solid var(--border); border-radius: 6px; background-color: var(--surface); color: var(--text); font-size: 13px; cursor: pointer; }
+  .all-reset-btn.all-reset-inline { margin-left: 0; }
   @media (max-width: 520px) {
     .all-reset-btn { margin-left: 0; }
     .all-select-field { flex: 1 1 100%; }
@@ -511,7 +512,7 @@ export default function AllEntertainmentPage() {
             </select>
           </div>
           {canReset && (
-            <button type="button" className="all-reset-btn" onClick={resetFilters}>Reset filters</button>
+            <button type="button" className={effectiveEvent ? "all-reset-btn all-reset-inline" : "all-reset-btn"} onClick={resetFilters}>Reset filters</button>
           )}
         </div>
 
