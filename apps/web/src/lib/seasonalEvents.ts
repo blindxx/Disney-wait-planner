@@ -175,6 +175,15 @@ export function validateSeasonalEvent(
     if (PARK_TO_RESORT[p] !== event.resort) problems.push(`park ${p} not in resort ${event.resort}`);
   }
   if (!/^https:\/\//.test(event.officialUrl)) problems.push("officialUrl must be https");
+  if (event.parentEventId !== undefined) {
+    const parent = getSeasonalEvent(event.parentEventId);
+    if (!parent) problems.push(`unknown parentEventId "${event.parentEventId}"`);
+    else {
+      if (parent.parentEventId !== undefined) problems.push("parent must be a top-level event");
+      if (parent.resort !== event.resort) problems.push("parent in a different resort");
+      if (!event.parkIds.every((p) => parent.parkIds.includes(p))) problems.push("parent does not host every park of the child");
+    }
+  }
   return problems;
 }
 
@@ -234,6 +243,12 @@ export const DEV_SEASONAL_EVENT_CASES: DevSeasonalEventCase[] = [
     const c = seasonOf("epcot-eat-to-the-beat", 2026); const f = seasonOf("epcot-food-and-wine", 2026);
     return c.startDate === f.startDate && c.endDate === "2026-11-16" && f.endDate === "2026-11-21" &&
       stateOf("epcot-eat-to-the-beat", 2026, "2026-11-18") === "not_scheduled" && stateOf("epcot-food-and-wine", 2026, "2026-11-18") === "scheduled";
+  } },
+  { label: "14.4D: Eat to the Beat is a child of Food & Wine; validator rejects bad parents", ok: () => {
+    const c = getSeasonalEvent("epcot-eat-to-the-beat")!;
+    return c.parentEventId === "epcot-food-and-wine" && validateSeasonalEvent(c).length === 0 &&
+      validateSeasonalEvent({ ...c, parentEventId: "nope" }).length === 1 &&
+      validateSeasonalEvent({ ...c, parentEventId: "mnsshp" }).length >= 1;
   } },
   { label: "validator catches bad record", ok: () => validateSeasonalEventSeason({ eventId: "mvmcp", seasonYear: 2025, startDate: "2026-11-08", endDate: "2026-11-07", eventNights: ["2026-11-09", "2026-11-08"], sourceUrl: "http://x", verifiedOn: "nope" }).length >= 5 },
 ];
