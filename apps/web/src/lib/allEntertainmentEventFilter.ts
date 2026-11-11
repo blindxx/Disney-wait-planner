@@ -89,6 +89,22 @@ export function showOperatingOnlyToggle(eventValue: string): boolean {
   return eventValue === ALL_ENTERTAINMENT_EVENT_ALL;
 }
 
+/** The page's resettable filter selections (park/resort are deliberately NOT part of it). */
+export type AllEntertainmentFilterState = { event: string; land: string; operatingOnly: boolean; showOutOfSeason: boolean };
+
+export const DEFAULT_ALL_ENTERTAINMENT_FILTERS: Readonly<AllEntertainmentFilterState> = { event: ALL_ENTERTAINMENT_EVENT_ALL, land: "", operatingOnly: false, showOutOfSeason: false };
+
+/** Fresh default selections for "Reset filters" (a new object each call; never touches park/resort or provider data). */
+export function resetAllEntertainmentFilters(): AllEntertainmentFilterState {
+  return { ...DEFAULT_ALL_ENTERTAINMENT_FILTERS };
+}
+
+/** "Reset filters" is shown only when some selection differs from its default (hidden checkbox states count). */
+export function showResetFilters(state: AllEntertainmentFilterState): boolean {
+  const d = DEFAULT_ALL_ENTERTAINMENT_FILTERS;
+  return state.event !== d.event || state.land !== d.land || state.operatingOnly !== d.operatingOnly || state.showOutOfSeason !== d.showOutOfSeason;
+}
+
 /**
  * Land/operating options effectively applied: in event browsing mode the
  * checkbox states are ignored (full associated catalog); the land filter stays.
@@ -329,6 +345,26 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     const allMode = filterAllEntertainment(pool, effectiveEventBrowseFilters("", { operatingOnly: true }));
     return eventMode.length === pool.length && pool.length > 1 && allMode.length === 0;
   } },
+  { label: "14.4D reset: default state hides the Reset button", ok: () => !showResetFilters(resetAllEntertainmentFilters()) && !showResetFilters({ ...DEFAULT_ALL_ENTERTAINMENT_FILTERS }) },
+  { label: "14.4D reset: each active filter (event, land, operating only, out-of-season) shows the button, hidden checkbox states included", ok: () => {
+    const d = DEFAULT_ALL_ENTERTAINMENT_FILTERS;
+    return showResetFilters({ ...d, event: "mvmcp" }) && showResetFilters({ ...d, land: "Fantasyland" }) && showResetFilters({ ...d, operatingOnly: true }) &&
+      showResetFilters({ ...d, showOutOfSeason: true }) && showResetFilters({ event: "mvmcp", land: "", operatingOnly: true, showOutOfSeason: true });
+  } },
+  { label: "14.4D reset: combined filters return to defaults; result is a fresh object and defaults are not mutated", ok: () => {
+    const active: AllEntertainmentFilterState = { event: "mvmcp", land: "Fantasyland", operatingOnly: true, showOutOfSeason: true };
+    const r = resetAllEntertainmentFilters(); r.land = "mutated";
+    return showResetFilters(active) && !showResetFilters(resetAllEntertainmentFilters()) && DEFAULT_ALL_ENTERTAINMENT_FILTERS.land === "" &&
+      JSON.stringify(resetAllEntertainmentFilters()) === JSON.stringify({ event: "", land: "", operatingOnly: false, showOutOfSeason: false });
+  } },
+  { label: "14.4D reset from event-browsing mode restores default visibility (checkboxes shown, full live list, no event pool)", ok: () => {
+    const reset = resetAllEntertainmentFilters();
+    const live = [mkCur("mk", "Happily Ever After")];
+    return showOutOfSeasonToggle(reset.event) && showOperatingOnlyToggle(reset.event) && getAllEntertainmentEventEntries(live, "mk", reset.event, NOW) === live &&
+      !showOutOfSeasonToggle("mvmcp") && resolveEventSelection("mk", reset.event, NOW) === "";
+  } },
+  { label: "14.4D reset state carries no park/resort or provider fields (park switch and refetch effects are untouched)", ok: () =>
+    Object.keys(resetAllEntertainmentFilters()).sort().join() === "event,land,operatingOnly,showOutOfSeason" },
   { label: "14.4D info card carries one concise availability disclaimer (no performance promise)", ok: () => EVENT_INFO_NOTE === "Entertainment shown is associated with this event. Individual performance dates and times may vary." },
   { label: "14.4D parent grouping: Garden Rocks → Flower & Garden, Eat to the Beat → Food & Wine (via registry parentEventId)", ok: () =>
     getAllEntryEventIds(mkProv("epcot", GARDEN_ROCKS, "g"), "epcot").join() === "epcot-flower-and-garden" &&

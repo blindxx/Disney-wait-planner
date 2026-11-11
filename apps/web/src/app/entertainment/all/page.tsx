@@ -12,7 +12,7 @@ Same lifecycle as the Waits & Shows showtimes/park-hours requests:
   never collapse an expanded card.
 */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import ResortClock from "../../../components/ResortClock";
@@ -51,6 +51,8 @@ import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainme
 import {
   describeAllEntertainmentEvent,
   EVENT_INFO_NOTE,
+  resetAllEntertainmentFilters,
+  showResetFilters,
   EVENT_NIGHTS_PREVIEW,
   EVENT_NO_ENTERTAINMENT_MESSAGE,
   getAllEntertainmentEventEntries,
@@ -97,7 +99,9 @@ const RESPONSIVE_CSS = `
   .all-select-field > label { flex: 0 0 44px; font-size: 13px; color: var(--text-muted); }
   .all-event-select, .all-land-select { width: 200px; max-width: 100%; min-width: 0; text-overflow: ellipsis; padding-right: 32px !important; }
   .all-event-info { max-width: 500px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
+  .all-reset-btn { margin-left: auto; padding: 4px 10px; min-height: 32px; border: 1px solid var(--border); border-radius: 6px; background-color: var(--surface); color: var(--text); font-size: 13px; cursor: pointer; }
   @media (max-width: 520px) {
+    .all-reset-btn { margin-left: 0; }
     .all-select-field { flex: 1 1 100%; }
     .all-event-select, .all-land-select { flex: 1 1 0%; width: auto; }
   }
@@ -235,6 +239,7 @@ export default function AllEntertainmentPage() {
   const [selectedLand, setSelectedLand] = useState("");
   const [selectedEvent, setSelectedEvent] = useState("");
   const [nightsExpanded, setNightsExpanded] = useState(false);
+  const eventSelectRef = useRef<HTMLSelectElement>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const selectedResort = PARK_TO_RESORT[selectedPark] as ResortId;
 
@@ -357,6 +362,18 @@ export default function AllEntertainmentPage() {
   // A land that no longer exists in the refreshed inventory must not silently hide everything.
   const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
 
+  const canReset = showResetFilters({ event: effectiveEvent, land: effectiveLand, operatingOnly, showOutOfSeason });
+  // One interaction: only filter selections change (park/resort stay), so no provider effect re-runs.
+  function resetFilters() {
+    const d = resetAllEntertainmentFilters();
+    setSelectedEvent(d.event);
+    setSelectedLand(d.land);
+    setOperatingOnly(d.operatingOnly);
+    setShowOutOfSeason(d.showOutOfSeason);
+    setNightsExpanded(false);
+    eventSelectRef.current?.focus(); // the button unmounts; keep keyboard focus in the filter bar
+  }
+
   const visible = useMemo(() => {
     if (eventPool) {
       return sortAllEntertainment(filterAllEntertainment(eventPool, effectiveEventBrowseFilters(effectiveEvent, { land: effectiveLand, operatingOnly })), displayNow);
@@ -472,6 +489,7 @@ export default function AllEntertainmentPage() {
             <label htmlFor="all-ent-event">Event:</label>
             <select
               id="all-ent-event"
+              ref={eventSelectRef}
               className="all-event-select"
               value={effectiveEvent}
               title={eventOptions.find((o) => o.value === effectiveEvent)?.label}
@@ -492,6 +510,9 @@ export default function AllEntertainmentPage() {
               ))}
             </select>
           </div>
+          {canReset && (
+            <button type="button" className="all-reset-btn" onClick={resetFilters}>Reset filters</button>
+          )}
         </div>
 
         {eventInfo && (
