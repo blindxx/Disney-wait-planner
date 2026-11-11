@@ -1205,13 +1205,17 @@ export default function WaitTimesPage() {
           </label>
 
           {/* Land Filter */}
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0, maxWidth: "100%" }}>
             <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
             <select
               value={selectedLand}
               onChange={(e) => setSelectedLand(e.target.value)}
               style={{
-                padding: "6px 10px",
+                width: "200px",
+                maxWidth: "100%",
+                minWidth: 0,
+                textOverflow: "ellipsis",
+                padding: "6px 32px 6px 10px",
                 borderRadius: "6px",
                 border: "1px solid var(--border)",
                 backgroundColor: "var(--surface)",
