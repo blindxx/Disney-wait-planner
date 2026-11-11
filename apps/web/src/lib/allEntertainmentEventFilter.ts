@@ -39,8 +39,7 @@ import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainme
 /** Filter value meaning "no event filter" (the default). */
 export const ALL_ENTERTAINMENT_EVENT_ALL = "";
 export const EVENT_NO_ENTERTAINMENT_MESSAGE = "No entertainment currently tracked for this event.";
-export const EVENT_DATES_NOTE = "Event dates are event-wide; individual shows may not perform on every date.";
-export const EVENT_BROWSE_NOTE = "Showing this event's full associated catalog, including shows not performing today. Showtimes are today's verified times, not a promise of event performances.";
+export const EVENT_INFO_NOTE = "Entertainment shown is associated with this event. Individual performance dates and times may vary.";
 
 /**
  * Short dropdown labels keyed by registry event id (presentation only — ids,
@@ -330,7 +329,7 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     const allMode = filterAllEntertainment(pool, effectiveEventBrowseFilters("", { operatingOnly: true }));
     return eventMode.length === pool.length && pool.length > 1 && allMode.length === 0;
   } },
-  { label: "14.4D browse note says showtimes are today's verified times, not a promise of event performances", ok: () => /today's verified times, not a promise of event performances/.test(EVENT_BROWSE_NOTE) },
+  { label: "14.4D info card carries one concise availability disclaimer (no performance promise)", ok: () => EVENT_INFO_NOTE === "Entertainment shown is associated with this event. Individual performance dates and times may vary." },
   { label: "14.4D parent grouping: Garden Rocks → Flower & Garden, Eat to the Beat → Food & Wine (via registry parentEventId)", ok: () =>
     getAllEntryEventIds(mkProv("epcot", GARDEN_ROCKS, "g"), "epcot").join() === "epcot-flower-and-garden" &&
     getAllEntryEventIds(mkProv("epcot", EAT_TO_THE_BEAT, "e"), "epcot").join() === "epcot-food-and-wine" },

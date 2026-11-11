@@ -50,8 +50,7 @@ import { getResortLocalDate } from "../../../lib/resortTime";
 import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
 import {
   describeAllEntertainmentEvent,
-  EVENT_BROWSE_NOTE,
-  EVENT_DATES_NOTE,
+  EVENT_INFO_NOTE,
   EVENT_NIGHTS_PREVIEW,
   EVENT_NO_ENTERTAINMENT_MESSAGE,
   getAllEntertainmentEventEntries,
@@ -97,7 +96,7 @@ const RESPONSIVE_CSS = `
   .all-select-field { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
   .all-select-field > label { flex: 0 0 44px; font-size: 13px; color: var(--text-muted); }
   .all-event-select, .all-land-select { width: 200px; max-width: 100%; min-width: 0; text-overflow: ellipsis; padding-right: 32px !important; }
-  .all-event-info { max-width: 650px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
+  .all-event-info { max-width: 500px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
   @media (max-width: 520px) {
     .all-select-field { flex: 1 1 100%; }
     .all-event-select, .all-land-select { flex: 1 1 0%; width: auto; }
@@ -520,8 +519,7 @@ export default function AllEntertainmentPage() {
               </div>
             )}
             {eventInfo.offerings.map((o) => <div key={o}>{o}</div>)}
-            {eventInfo.seasonLabel && <div style={{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>{EVENT_DATES_NOTE}</div>}
-            <div style={{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>{EVENT_BROWSE_NOTE}</div>
+            <div style={{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>{EVENT_INFO_NOTE}</div>
           </section>
         )}
 
