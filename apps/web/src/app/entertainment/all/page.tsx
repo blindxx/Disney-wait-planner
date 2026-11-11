@@ -96,11 +96,12 @@ const RESPONSIVE_CSS = `
   .all-toggle { background: none; border: none; padding: 4px 0; margin-top: 2px; font-size: 12px; color: var(--status-info); cursor: pointer; }
   .all-select-field { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
   .all-select-field > label { flex: 0 0 44px; font-size: 13px; color: var(--text-muted); }
-  .all-filter-select { width: 260px; max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+  .all-event-select { width: 250px; max-width: 100%; min-width: 0; text-overflow: ellipsis; padding-right: 32px !important; }
+  .all-land-select { max-width: 100%; min-width: 0; }
   .all-event-info { max-width: 650px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
   @media (max-width: 520px) {
     .all-select-field { flex: 1 1 100%; }
-    .all-filter-select { flex: 1 1 0%; width: auto; }
+    .all-event-select, .all-land-select { flex: 1 1 0%; width: auto; }
   }
   @media (min-width: 768px) {
     .all-page { padding: 20px; }
@@ -473,7 +474,7 @@ export default function AllEntertainmentPage() {
             <label htmlFor="all-ent-event">Event:</label>
             <select
               id="all-ent-event"
-              className="all-filter-select"
+              className="all-event-select"
               value={effectiveEvent}
               title={eventOptions.find((o) => o.value === effectiveEvent)?.label}
               onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); }}
@@ -486,7 +487,7 @@ export default function AllEntertainmentPage() {
           </div>
           <div className="all-select-field">
             <label htmlFor="all-ent-land">Land:</label>
-            <select id="all-ent-land" className="all-filter-select" value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
+            <select id="all-ent-land" className="all-land-select" value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
               <option value="">All Lands</option>
               {lands.map((land) => (
                 <option key={land} value={land}>{land}</option>
