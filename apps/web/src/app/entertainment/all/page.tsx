@@ -12,7 +12,7 @@ Same lifecycle as the Waits & Shows showtimes/park-hours requests:
   never collapse an expanded card.
 */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import ResortClock from "../../../components/ResortClock";
@@ -48,6 +48,20 @@ import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
 import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
+import {
+  describeAllEntertainmentEvent,
+  EVENT_INFO_NOTE,
+  resetAllEntertainmentFilters,
+  showResetFilters,
+  EVENT_NIGHTS_PREVIEW,
+  EVENT_NO_ENTERTAINMENT_MESSAGE,
+  getAllEntertainmentEventEntries,
+  getAllEntertainmentEventOptions,
+  effectiveEventBrowseFilters,
+  resolveEventSelection,
+  showOperatingOnlyToggle,
+  showOutOfSeasonToggle,
+} from "../../../lib/allEntertainmentEventFilter";
 
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {
   DLR: ["disneyland", "dca"],
@@ -81,6 +95,17 @@ const RESPONSIVE_CSS = `
   .entertainment-card:last-child { border-bottom: none; }
   .all-empty { padding: 48px 20px; text-align: center; color: var(--text-muted); font-size: 15px; background-color: var(--surface); }
   .all-toggle { background: none; border: none; padding: 4px 0; margin-top: 2px; font-size: 12px; color: var(--status-info); cursor: pointer; }
+  .all-select-field { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+  .all-select-field > label { flex: 0 0 44px; font-size: 13px; color: var(--text-muted); }
+  .all-event-select, .all-land-select { width: 200px; max-width: 100%; min-width: 0; text-overflow: ellipsis; padding-right: 32px !important; }
+  .all-event-info { max-width: 500px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
+  .all-reset-btn { margin-left: auto; padding: 4px 10px; min-height: 32px; border: 1px solid var(--border); border-radius: 6px; background-color: var(--surface); color: var(--text); font-size: 13px; cursor: pointer; }
+  .all-reset-btn.all-reset-inline { margin-left: 0; }
+  @media (max-width: 520px) {
+    .all-reset-btn { margin-left: 0; }
+    .all-select-field { flex: 1 1 100%; }
+    .all-event-select, .all-land-select { flex: 1 1 0%; width: auto; }
+  }
   @media (min-width: 768px) {
     .all-page { padding: 20px; }
     .resort-tab { flex: 0 1 auto; padding: 8px 16px; }
@@ -213,6 +238,9 @@ export default function AllEntertainmentPage() {
   const [operatingOnly, setOperatingOnly] = useState(false);
   const [showOutOfSeason, setShowOutOfSeason] = useState(false);
   const [selectedLand, setSelectedLand] = useState("");
+  const [selectedEvent, setSelectedEvent] = useState("");
+  const [nightsExpanded, setNightsExpanded] = useState(false);
+  const eventSelectRef = useRef<HTMLSelectElement>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const selectedResort = PARK_TO_RESORT[selectedPark] as ResortId;
 
@@ -230,6 +258,8 @@ export default function AllEntertainmentPage() {
   function selectPark(parkId: ParkId) {
     setSelectedPark(parkId);
     setSelectedLand("");
+    setSelectedEvent("");
+    setNightsExpanded(false);
     setExpanded(new Set());
   }
 
@@ -311,16 +341,44 @@ export default function AllEntertainmentPage() {
     );
   }, [showOutOfSeason, selectedPark, selectedResort, displayNow, all]);
 
+  const today = getResortLocalDate(selectedResort, displayNow);
+  // Event options are static per park (registry + associations + confirmed current/upcoming dates); selecting never fetches.
+  const eventOptions = useMemo(() => getAllEntertainmentEventOptions(selectedPark, displayNow), [selectedPark, today]); // eslint-disable-line react-hooks/exhaustive-deps
+  const effectiveEvent = resolveEventSelection(selectedPark, selectedEvent, displayNow);
+  const eventInfo = useMemo(
+    () => describeAllEntertainmentEvent(selectedPark, effectiveEvent, displayNow),
+    [selectedPark, effectiveEvent, today], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+  // Specific event: catalog browsing of everything associated (live + synthesized curated), ignoring seasonal hiding.
+  const eventPool = useMemo<AllEntertainmentEntry[] | null>(
+    () => (effectiveEvent ? getAllEntertainmentEventEntries(all?.entries ?? [], selectedPark, effectiveEvent, displayNow) : null),
+    [all, selectedPark, effectiveEvent, today], // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
   // Include lands from synthesized off-season entries so the land filter works for them too.
   const lands = useMemo(
-    () => allEntertainmentLands([...(all?.entries ?? []), ...offSeasonEntries]),
-    [all, offSeasonEntries],
+    () => allEntertainmentLands(eventPool ?? [...(all?.entries ?? []), ...offSeasonEntries]),
+    [all, offSeasonEntries, eventPool],
   );
   // A land that no longer exists in the refreshed inventory must not silently hide everything.
   const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
 
+  const canReset = showResetFilters({ event: effectiveEvent, land: effectiveLand, operatingOnly, showOutOfSeason });
+  // One interaction: only filter selections change (park/resort stay), so no provider effect re-runs.
+  function resetFilters() {
+    const d = resetAllEntertainmentFilters();
+    setSelectedEvent(d.event);
+    setSelectedLand(d.land);
+    setOperatingOnly(d.operatingOnly);
+    setShowOutOfSeason(d.showOutOfSeason);
+    setNightsExpanded(false);
+    eventSelectRef.current?.focus(); // the button unmounts; keep keyboard focus in the filter bar
+  }
+
   const visible = useMemo(() => {
-    const today = getResortLocalDate(selectedResort, displayNow);
+    if (eventPool) {
+      return sortAllEntertainment(filterAllEntertainment(eventPool, effectiveEventBrowseFilters(effectiveEvent, { land: effectiveLand, operatingOnly })), displayNow);
+    }
     const sourceEntries = all?.entries ?? [];
     // When toggle is OFF, hide confirmed out-of-season entries (curated, and explicitly party-classified provider-only) even if
     // they are present in the provider inventory. Toggle ON restores them.
@@ -333,7 +391,7 @@ export default function AllEntertainmentPage() {
         ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
         : [];
     return sortAllEntertainment([...base, ...extra], displayNow);
-  }, [all, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort]);
+  }, [all, eventPool, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort, today]);
 
   return (
     <>
@@ -406,6 +464,7 @@ export default function AllEntertainmentPage() {
             borderRadius: "8px",
           }}
         >
+          {showOperatingOnlyToggle(effectiveEvent) && (
           <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "var(--text)", minHeight: "32px" }}>
             <input
               type="checkbox"
@@ -415,6 +474,8 @@ export default function AllEntertainmentPage() {
             />
             Operating only
           </label>
+          )}
+          {showOutOfSeasonToggle(effectiveEvent) && (
           <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "var(--text)", minHeight: "32px" }}>
             <input
               type="checkbox"
@@ -424,16 +485,65 @@ export default function AllEntertainmentPage() {
             />
             Show out-of-season entertainment
           </label>
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
-            <select value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
+          )}
+          <div className="all-select-field">
+            <label htmlFor="all-ent-event">Event:</label>
+            <select
+              id="all-ent-event"
+              ref={eventSelectRef}
+              className="all-event-select"
+              value={effectiveEvent}
+              title={eventOptions.find((o) => o.value === effectiveEvent)?.label}
+              onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); }}
+              style={selectStyle}
+            >
+              {eventOptions.map((o) => (
+                <option key={o.value} value={o.value} title={o.label}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="all-select-field">
+            <label htmlFor="all-ent-land">Land:</label>
+            <select id="all-ent-land" className="all-land-select" value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
               <option value="">All Lands</option>
               {lands.map((land) => (
                 <option key={land} value={land}>{land}</option>
               ))}
             </select>
           </div>
+          {canReset && (
+            <button type="button" className={effectiveEvent ? "all-reset-btn all-reset-inline" : "all-reset-btn"} onClick={resetFilters}>Reset filters</button>
+          )}
         </div>
+
+        {eventInfo && (
+          <section className="all-event-info" aria-label={`${eventInfo.name} event information`}>
+            <div style={{ fontWeight: 600, color: "var(--text-strong)" }}>{eventInfo.name}</div>
+            <div style={{ color: "var(--text-muted)" }}>
+              {[eventInfo.admission, eventInfo.seasonLabel, eventInfo.statusLabel].filter(Boolean).join(" · ")}
+            </div>
+            {eventInfo.unannouncedText && <div>{eventInfo.unannouncedText}</div>}
+            {eventInfo.rangeText && (
+              <div>{eventInfo.nights ? "Event window: " : "Dates: "}{eventInfo.rangeText}</div>
+            )}
+            {eventInfo.nights && eventInfo.nights.length > 0 && (
+              <div>
+                <span>Select nights{eventInfo.nights.length > 1 ? ` (${eventInfo.nights.length} remaining)` : ""}: </span>
+                <span id="all-ent-event-nights">
+                  {(nightsExpanded ? eventInfo.nights : eventInfo.nights.slice(0, EVENT_NIGHTS_PREVIEW)).join(", ")}
+                  {!nightsExpanded && eventInfo.nights.length > EVENT_NIGHTS_PREVIEW && "…"}
+                </span>
+                {eventInfo.nights.length > EVENT_NIGHTS_PREVIEW && (
+                  <button type="button" className="all-toggle" style={{ marginLeft: "6px" }} onClick={() => setNightsExpanded((v) => !v)} aria-expanded={nightsExpanded} aria-controls="all-ent-event-nights">
+                    {nightsExpanded ? "Show fewer" : `Show all ${eventInfo.nights.length}`}
+                  </button>
+                )}
+              </div>
+            )}
+            {eventInfo.offerings.map((o) => <div key={o}>{o}</div>)}
+            <div style={{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>{EVENT_INFO_NOTE}</div>
+          </section>
+        )}
 
         <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
           Explore today&apos;s entertainment and showtimes throughout the park.
@@ -444,7 +554,9 @@ export default function AllEntertainmentPage() {
             <div className="all-empty">Loading entertainment&hellip;</div>
           ) : all.error ? (
             <div className="all-empty">Entertainment is unavailable right now. Try again shortly.</div>
-          ) : all.entries.length === 0 && visible.length === 0 ? (
+          ) : eventPool && eventPool.length === 0 ? (
+            <div className="all-empty">{EVENT_NO_ENTERTAINMENT_MESSAGE}</div>
+          ) : all.entries.length === 0 && visible.length === 0 && !eventPool ? (
             <div className="all-empty">
               {allEntertainmentEmptyState(all)?.message}
               {all.stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
@@ -465,7 +577,7 @@ export default function AllEntertainmentPage() {
           )}
         </div>
 
-        {all && !all.error && all.entries.length > 0 && (
+        {all && !all.error && (all.entries.length > 0 || (eventPool?.length ?? 0) > 0) && (
           <div style={{ marginTop: "10px", fontSize: "13px", color: "var(--text-faint)" }}>
             Showing {visible.length} entertainment {visible.length === 1 ? "experience" : "experiences"}
           </div>

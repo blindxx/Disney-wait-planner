@@ -66,6 +66,13 @@ export type SeasonalEventDefinition = {
   admission: SeasonalEventAdmission;
   /** Official Disney event information / ticket page. */
   officialUrl: string;
+  /**
+   * Phase 14.4D: set when this event is a narrower offering of a parent event
+   * (e.g. Eat to the Beat inside Food & Wine). Browsing surfaces group it under
+   * the parent; it keeps its own season record (and association semantics), so
+   * its narrower window stays authoritative. Parent must share resort and a park.
+   */
+  parentEventId?: string;
 };
 
 export type SeasonalEventSeasonRecord = {
@@ -113,7 +120,7 @@ export const SEASONAL_EVENTS: SeasonalEventDefinition[] = [
   // Resort-wide park-admission holiday season (decor + regular holiday entertainment such as Frozen Holiday Surprise).
   { id: "holidays-wdw", name: "Holidays at Walt Disney World Resort", resort: "WDW", parkIds: ["mk", "epcot", "hs", "ak"], category: "christmas-season", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/` },
   // The Eat to the Beat concert run is NARROWER than its parent festival (see the 2026 season note).
-  { id: "epcot-eat-to-the-beat", name: "EPCOT Eat to the Beat Concert Series", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-food-and-wine-festival/` },
+  { id: "epcot-eat-to-the-beat", name: "EPCOT Eat to the Beat Concert Series", resort: "WDW", parkIds: ["epcot"], category: "epcot-festival", format: "continuous", admission: "park-admission", officialUrl: `${WDW_EVENTS}/epcot/epcot-international-food-and-wine-festival/`, parentEventId: "epcot-food-and-wine" },
 ];
 
 const V = "2026-10-29";
