@@ -309,6 +309,11 @@ export function eventMeetsSectionState(data: ParkEventMeets | null): "hidden" | 
   return data.entries.length > 0 ? "list" : "hidden";
 }
 
+/** Whether the displayed list shows any Queue-Times-derived data (a live wait or Queue-Times open/closed status) — attribution is owed. */
+export function eventMeetsPresentQueueTimes(data: ParkEventMeets | null): boolean {
+  return eventMeetsSectionState(data) === "list" && !!data && data.entries.some((e) => e.wait.state === "live" || e.wait.state === "closed");
+}
+
 /** Browser-side: fetched body → state; failure/wrong shape degrades to hidden (nothing retained or fabricated). */
 export function resolveEventMeetsResponse(parkId: ParkId, body: unknown): ParkEventMeets | null {
   const d = body as Partial<ParkEventMeets> | null;
@@ -464,6 +469,12 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
     const okRow = build(MVMCP_EVENING, undefined, { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 15, name: JS_NAME.replace("’", "'").toUpperCase() }, MVMCP_EVENING)]) }).entries.find((x) => x.entityId === JS_ID)!;
     const bad = build(MVMCP_EVENING, undefined, { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 15, name: "Meet Santa Jack and Sally" }, MVMCP_EVENING)]) }).entries.find((x) => x.entityId === JS_ID)!;
     return okRow.wait.state === "live" && bad.wait.state === "unavailable";
+  } },
+  { label: "attribution: Queue-Times credited only when a displayed meet carries Queue-Times data (live/closed), not for no-record, failed or stale waits", ok: () => {
+    const live = build(MVMCP_EVENING, undefined, { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 10 }, MVMCP_EVENING)]) });
+    const closed = build(MVMCP_MORNING);
+    const failed = build(MVMCP_MORNING, undefined, { ok: false });
+    return eventMeetsPresentQueueTimes(live) && eventMeetsPresentQueueTimes(closed) && !eventMeetsPresentQueueTimes(failed) && !eventMeetsPresentQueueTimes(build(NON_PARTY)) && !eventMeetsPresentQueueTimes(null);
   } },
   // Provider failures / missing / stale
   { label: "ThemeParks failure on a party date: nothing listed, typed error → 'unavailable' (distinct from absence)", ok: () => {

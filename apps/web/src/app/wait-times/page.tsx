@@ -75,6 +75,7 @@ import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
   eventMeetsForDisplay,
+  eventMeetsPresentQueueTimes,
   eventMeetsSectionState,
   resolveEventMeetsResponse,
   type EventMeetEntry,
@@ -988,6 +989,8 @@ export default function WaitTimesPage() {
   // in the curated catalog), and never shown from another park/day.
   const eventMeets = !selectedLand ? eventMeetsForDisplay(eventMeetsRaw, selectedPark, displayNow) : null;
   const eventMeetsState = eventMeetsSectionState(eventMeets);
+  // Queue-Times attribution is owed whenever its data is displayed, including meet waits/status shown while LIVE_ENABLED is off.
+  const queueTimesPresented = LIVE_ENABLED || eventMeetsPresentQueueTimes(eventMeets);
   const showtimesPresented =
     eventMeetsState === "list" ||
     !!showtimes &&
@@ -1531,7 +1534,7 @@ export default function WaitTimesPage() {
       </div>
 
       {/* Attribution — Queue-Times (live data enabled) and ThemeParks.wiki (showtimes and/or park hours presented) */}
-      {(LIVE_ENABLED || showtimesPresented || parkHoursPresented) && (
+      {(queueTimesPresented || showtimesPresented || parkHoursPresented) && (
         <div
           style={{
             marginTop: "16px",
@@ -1542,7 +1545,7 @@ export default function WaitTimesPage() {
             color: "var(--text-faint)",
           }}
         >
-          {LIVE_ENABLED && (
+          {queueTimesPresented && (
             <>
               Wait times powered by{" "}
               <a
@@ -1555,7 +1558,7 @@ export default function WaitTimesPage() {
               </a>
             </>
           )}
-          {LIVE_ENABLED && (showtimesPresented || parkHoursPresented) && " • "}
+          {queueTimesPresented && (showtimesPresented || parkHoursPresented) && " • "}
           {(showtimesPresented || parkHoursPresented) && (
             <>
               {parkHoursPresented && showtimesPresented ? "Park hours and showtimes" : parkHoursPresented ? "Park hours" : "Showtimes"} powered by{" "}
