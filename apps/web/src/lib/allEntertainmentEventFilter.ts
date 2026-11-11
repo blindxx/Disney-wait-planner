@@ -40,7 +40,35 @@ import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainme
 export const ALL_ENTERTAINMENT_EVENT_ALL = "";
 export const EVENT_NO_ENTERTAINMENT_MESSAGE = "No entertainment currently tracked for this event.";
 export const EVENT_DATES_NOTE = "Event dates are event-wide; individual shows may not perform on every date.";
-export const EVENT_BROWSE_NOTE = "Includes shows not performing today. Times shown are today's confirmed performances only.";
+export const EVENT_BROWSE_NOTE = "Showing this event's full associated catalog, including shows not performing today. Showtimes are today's verified times, not a promise of event performances.";
+
+/**
+ * Short dropdown labels keyed by registry event id (presentation only — ids,
+ * dates, associations and the full official names stay in the registry and the
+ * information card). Every registry event must have an entry (DEV-checked).
+ */
+export const EVENT_SHORT_LABELS: Record<string, string> = {
+  "mnsshp": "Not-So-Scary Halloween Party",
+  "mvmcp": "Very Merry Christmas Party",
+  "jollywood-nights": "Jollywood Nights",
+  "oogie-boogie-bash": "Oogie Boogie Bash",
+  "halloween-time-dlr": "Halloween Time",
+  "holidays-dlr": "DLR Holidays",
+  "holidays-wdw": "WDW Holidays",
+  "plaza-de-la-familia": "Plaza de la Familia",
+  "lunar-new-year-dca": "Lunar New Year",
+  "dca-food-and-wine": "DCA Food & Wine",
+  "epcot-festival-of-the-arts": "Festival of the Arts",
+  "epcot-flower-and-garden": "Flower & Garden",
+  "epcot-food-and-wine": "Food & Wine",
+  "epcot-festival-of-the-holidays": "Festival of the Holidays",
+  "epcot-eat-to-the-beat": "Eat to the Beat",
+};
+
+/** Short label for an event id (full registry name if an id is ever missing from the map). */
+export function eventShortLabel(eventId: string): string {
+  return EVENT_SHORT_LABELS[eventId] ?? getSeasonalEvent(eventId)?.name ?? eventId;
+}
 /** Night lists longer than this collapse behind a toggle. */
 export const EVENT_NIGHTS_PREVIEW = 6;
 
@@ -55,6 +83,20 @@ function rootEventId(eventId: string): string {
 /** Whether the out-of-season checkbox applies (only in the default "All Entertainment" view). */
 export function showOutOfSeasonToggle(eventValue: string): boolean {
   return eventValue === ALL_ENTERTAINMENT_EVENT_ALL;
+}
+
+/** Whether the "Operating only" checkbox applies (only in the default "All Entertainment" view). */
+export function showOperatingOnlyToggle(eventValue: string): boolean {
+  return eventValue === ALL_ENTERTAINMENT_EVENT_ALL;
+}
+
+/**
+ * Land/operating options effectively applied: in event browsing mode the
+ * checkbox states are ignored (full associated catalog); the land filter stays.
+ * The page keeps the checkbox state itself, so it is restored on return to All.
+ */
+export function effectiveEventBrowseFilters(eventValue: string, opts: { land?: string; operatingOnly?: boolean }): { land?: string; operatingOnly?: boolean } {
+  return showOperatingOnlyToggle(eventValue) ? opts : { land: opts.land, operatingOnly: false };
 }
 
 /**
@@ -122,7 +164,7 @@ export function getAllEntertainmentEventOptions(parkId: ParkId, instant: Date = 
   const events = SEASONAL_EVENTS
     .filter((e) => !e.parentEventId && e.parkIds.includes(parkId))
     .filter((e) => associated.has(e.id) || !!getApplicableEventSeason(e, instant))
-    .map((e) => ({ value: e.id, label: e.name }));
+    .map((e) => ({ value: e.id, label: eventShortLabel(e.id) }));
   return [{ value: ALL_ENTERTAINMENT_EVENT_ALL, label: "All Entertainment" }, ...events];
 }
 
@@ -264,8 +306,31 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     vals("epcot").includes("epcot-flower-and-garden") && !vals("dca").includes("lunar-new-year-dca") && !vals("dca").includes("halloween-time-dlr") },
   { label: "14.4D options: a historical season alone never qualifies (Jul 2027: Arts/Holidays-at-AK gone, associated events stay)", ok: () =>
     !vals("epcot", LATER).includes("epcot-festival-of-the-arts") && !vals("ak", LATER).includes("holidays-wdw") && vals("mk", LATER).includes("mnsshp") && sameSet(vals("ak", LATER), [""]) },
-  { label: "14.4D options: every option is a top-level registry event hosting the park, labelled by registry name", ok: () =>
-    ALL_PARKS.every((p) => getAllEntertainmentEventOptions(p, NOW).slice(1).every((o) => { const e = getSeasonalEvent(o.value); return !!e && !e.parentEventId && e.parkIds.includes(p) && e.name === o.label; })) },
+  { label: "14.4D options: every option is a top-level registry event hosting the park, labelled by its short label", ok: () =>
+    ALL_PARKS.every((p) => getAllEntertainmentEventOptions(p, NOW).slice(1).every((o) => { const e = getSeasonalEvent(o.value); return !!e && !e.parentEventId && e.parkIds.includes(p) && eventShortLabel(e.id) === o.label; })) },
+  { label: "14.4D short labels: requested mapping, every registry event covered, no stale keys, all shorter than official names", ok: () =>
+    EVENT_SHORT_LABELS["mnsshp"] === "Not-So-Scary Halloween Party" && EVENT_SHORT_LABELS["mvmcp"] === "Very Merry Christmas Party" &&
+    EVENT_SHORT_LABELS["jollywood-nights"] === "Jollywood Nights" && EVENT_SHORT_LABELS["epcot-festival-of-the-arts"] === "Festival of the Arts" &&
+    EVENT_SHORT_LABELS["epcot-flower-and-garden"] === "Flower & Garden" && EVENT_SHORT_LABELS["epcot-food-and-wine"] === "Food & Wine" &&
+    EVENT_SHORT_LABELS["epcot-festival-of-the-holidays"] === "Festival of the Holidays" && EVENT_SHORT_LABELS["holidays-wdw"] === "WDW Holidays" &&
+    EVENT_SHORT_LABELS["oogie-boogie-bash"] === "Oogie Boogie Bash" && EVENT_SHORT_LABELS["plaza-de-la-familia"] === "Plaza de la Familia" &&
+    EVENT_SHORT_LABELS["lunar-new-year-dca"] === "Lunar New Year" &&
+    SEASONAL_EVENTS.every((e) => !!EVENT_SHORT_LABELS[e.id] && EVENT_SHORT_LABELS[e.id].length <= e.name.length) &&
+    Object.keys(EVENT_SHORT_LABELS).every((id) => !!getSeasonalEvent(id)) },
+  { label: "14.4D info card keeps the full official event name (not the short label)", ok: () =>
+    info("mk", "mnsshp").name === "Mickey's Not-So-Scary Halloween Party" && info("epcot", "epcot-food-and-wine").name === "EPCOT International Food & Wine Festival" },
+  { label: "14.4D checkbox semantics: both checkboxes only in All mode; event mode ignores their state, keeps land; default unchanged", ok: () =>
+    showOperatingOnlyToggle("") && showOutOfSeasonToggle("") && !showOperatingOnlyToggle("mvmcp") && !showOutOfSeasonToggle("mvmcp") &&
+    effectiveEventBrowseFilters("mvmcp", { land: "Fantasyland", operatingOnly: true }).operatingOnly === false &&
+    effectiveEventBrowseFilters("mvmcp", { land: "Fantasyland", operatingOnly: true }).land === "Fantasyland" &&
+    effectiveEventBrowseFilters("", { land: "X", operatingOnly: true }).operatingOnly === true },
+  { label: "14.4D event mode with operating-only checked still shows the full associated catalog; returning to All restores the filter", ok: () => {
+    const pool = getAllEntertainmentEventEntries([mkCur("mk", "Frozen Holiday Surprise")], "mk", "mvmcp", NOW);
+    const eventMode = filterAllEntertainment(pool, effectiveEventBrowseFilters("mvmcp", { operatingOnly: true }));
+    const allMode = filterAllEntertainment(pool, effectiveEventBrowseFilters("", { operatingOnly: true }));
+    return eventMode.length === pool.length && pool.length > 1 && allMode.length === 0;
+  } },
+  { label: "14.4D browse note says showtimes are today's verified times, not a promise of event performances", ok: () => /today's verified times, not a promise of event performances/.test(EVENT_BROWSE_NOTE) },
   { label: "14.4D parent grouping: Garden Rocks → Flower & Garden, Eat to the Beat → Food & Wine (via registry parentEventId)", ok: () =>
     getAllEntryEventIds(mkProv("epcot", GARDEN_ROCKS, "g"), "epcot").join() === "epcot-flower-and-garden" &&
     getAllEntryEventIds(mkProv("epcot", EAT_TO_THE_BEAT, "e"), "epcot").join() === "epcot-food-and-wine" },

@@ -56,7 +56,9 @@ import {
   EVENT_NO_ENTERTAINMENT_MESSAGE,
   getAllEntertainmentEventEntries,
   getAllEntertainmentEventOptions,
+  effectiveEventBrowseFilters,
   resolveEventSelection,
+  showOperatingOnlyToggle,
   showOutOfSeasonToggle,
 } from "../../../lib/allEntertainmentEventFilter";
 
@@ -92,12 +94,13 @@ const RESPONSIVE_CSS = `
   .entertainment-card:last-child { border-bottom: none; }
   .all-empty { padding: 48px 20px; text-align: center; color: var(--text-muted); font-size: 15px; background-color: var(--surface); }
   .all-toggle { background: none; border: none; padding: 4px 0; margin-top: 2px; font-size: 12px; color: var(--status-info); cursor: pointer; }
-  .all-event-field { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
-  .all-event-select { width: 280px; max-width: 100%; min-width: 0; text-overflow: ellipsis; }
-  .all-event-info { margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); }
+  .all-select-field { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
+  .all-select-field > label { flex: 0 0 44px; font-size: 13px; color: var(--text-muted); }
+  .all-filter-select { width: 260px; max-width: 100%; min-width: 0; text-overflow: ellipsis; }
+  .all-event-info { max-width: 650px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background-color: var(--surface); font-size: 13px; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; }
   @media (max-width: 520px) {
-    .all-event-field { flex: 1 1 100%; }
-    .all-event-select { flex: 1 1 auto; width: auto; }
+    .all-select-field { flex: 1 1 100%; }
+    .all-filter-select { flex: 1 1 0%; width: auto; }
   }
   @media (min-width: 768px) {
     .all-page { padding: 20px; }
@@ -357,7 +360,7 @@ export default function AllEntertainmentPage() {
 
   const visible = useMemo(() => {
     if (eventPool) {
-      return sortAllEntertainment(filterAllEntertainment(eventPool, { land: effectiveLand, operatingOnly }), displayNow);
+      return sortAllEntertainment(filterAllEntertainment(eventPool, effectiveEventBrowseFilters(effectiveEvent, { land: effectiveLand, operatingOnly })), displayNow);
     }
     const sourceEntries = all?.entries ?? [];
     // When toggle is OFF, hide confirmed out-of-season entries (curated, and explicitly party-classified provider-only) even if
@@ -444,6 +447,7 @@ export default function AllEntertainmentPage() {
             borderRadius: "8px",
           }}
         >
+          {showOperatingOnlyToggle(effectiveEvent) && (
           <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "var(--text)", minHeight: "32px" }}>
             <input
               type="checkbox"
@@ -453,6 +457,7 @@ export default function AllEntertainmentPage() {
             />
             Operating only
           </label>
+          )}
           {showOutOfSeasonToggle(effectiveEvent) && (
           <label style={{ display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "14px", color: "var(--text)", minHeight: "32px" }}>
             <input
@@ -464,11 +469,11 @@ export default function AllEntertainmentPage() {
             Show out-of-season entertainment
           </label>
           )}
-          <div className="all-event-field">
-            <label htmlFor="all-ent-event" style={{ fontSize: "13px", color: "var(--text-muted)" }}>Event:</label>
+          <div className="all-select-field">
+            <label htmlFor="all-ent-event">Event:</label>
             <select
               id="all-ent-event"
-              className="all-event-select"
+              className="all-filter-select"
               value={effectiveEvent}
               title={eventOptions.find((o) => o.value === effectiveEvent)?.label}
               onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); }}
@@ -479,9 +484,9 @@ export default function AllEntertainmentPage() {
               ))}
             </select>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
-            <select value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
+          <div className="all-select-field">
+            <label htmlFor="all-ent-land">Land:</label>
+            <select id="all-ent-land" className="all-filter-select" value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
               <option value="">All Lands</option>
               {lands.map((land) => (
                 <option key={land} value={land}>{land}</option>
@@ -516,6 +521,7 @@ export default function AllEntertainmentPage() {
             )}
             {eventInfo.offerings.map((o) => <div key={o}>{o}</div>)}
             {eventInfo.seasonLabel && <div style={{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>{EVENT_DATES_NOTE}</div>}
+            <div style={{ color: "var(--text-faint)", fontSize: "12px", marginTop: "2px" }}>{EVENT_BROWSE_NOTE}</div>
           </section>
         )}
 
@@ -551,9 +557,6 @@ export default function AllEntertainmentPage() {
           )}
         </div>
 
-        {eventPool && eventPool.length > 0 && (
-          <div role="note" style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-faint)" }}>{EVENT_BROWSE_NOTE}</div>
-        )}
         {all && !all.error && (all.entries.length > 0 || (eventPool?.length ?? 0) > 0) && (
           <div style={{ marginTop: "10px", fontSize: "13px", color: "var(--text-faint)" }}>
             Showing {visible.length} entertainment {visible.length === 1 ? "experience" : "experiences"}
