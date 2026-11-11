@@ -47,7 +47,7 @@ export const EVENT_INFO_NOTE = "Entertainment shown is associated with this even
  * information card). Every registry event must have an entry (DEV-checked).
  */
 export const EVENT_SHORT_LABELS: Record<string, string> = {
-  "mnsshp": "Not-So-Scary Halloween Party",
+  "mnsshp": "Not-So-Scary Party",
   "mvmcp": "Very Merry Christmas Party",
   "jollywood-nights": "Jollywood Nights",
   "oogie-boogie-bash": "Oogie Boogie Bash",
@@ -308,7 +308,7 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
   { label: "14.4D options: every option is a top-level registry event hosting the park, labelled by its short label", ok: () =>
     ALL_PARKS.every((p) => getAllEntertainmentEventOptions(p, NOW).slice(1).every((o) => { const e = getSeasonalEvent(o.value); return !!e && !e.parentEventId && e.parkIds.includes(p) && eventShortLabel(e.id) === o.label; })) },
   { label: "14.4D short labels: requested mapping, every registry event covered, no stale keys, all shorter than official names", ok: () =>
-    EVENT_SHORT_LABELS["mnsshp"] === "Not-So-Scary Halloween Party" && EVENT_SHORT_LABELS["mvmcp"] === "Very Merry Christmas Party" &&
+    EVENT_SHORT_LABELS["mnsshp"] === "Not-So-Scary Party" && EVENT_SHORT_LABELS["mvmcp"] === "Very Merry Christmas Party" &&
     EVENT_SHORT_LABELS["jollywood-nights"] === "Jollywood Nights" && EVENT_SHORT_LABELS["epcot-festival-of-the-arts"] === "Festival of the Arts" &&
     EVENT_SHORT_LABELS["epcot-flower-and-garden"] === "Flower & Garden" && EVENT_SHORT_LABELS["epcot-food-and-wine"] === "Food & Wine" &&
     EVENT_SHORT_LABELS["epcot-festival-of-the-holidays"] === "Festival of the Holidays" && EVENT_SHORT_LABELS["holidays-wdw"] === "WDW Holidays" &&
