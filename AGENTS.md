@@ -284,6 +284,22 @@ alternate variant. Extend the registry rather than adding per-ride special cases
 DEV checks: `runDevAttractionVariantCases()`, `runDevVariantNormalizationCases()`,
 `runDevVariantPlannerCases()`.
 
+## Event-exclusive character meets (Phase 14.4C)
+
+`apps/web/src/lib/eventExclusiveMeets.ts` lists verified, individually
+identifiable stationary meets exclusive to a separately ticketed party
+(explicit park + exact ThemeParks UUID, optional exact Queue-Times ride id).
+Visibility reuses the party associations in `SEASONAL_PROVIDER_ONLY_EVENTS`
+(`getSeasonalProviderEntertainmentRank` === "party-night"): shown the whole
+resort-local day on confirmed party dates only, never required to be
+OPERATING. ThemeParks verifies presence and supplies hours/performances;
+Queue-Times supplies a wait only for the registered id (never substituted from
+ordinary meets). Provider failure is "unavailable", distinct from absence.
+Umbrella "Character Greetings" records and ordinary/roaming meets are never
+registered. Providers are only called on confirmed party dates
+(`/api/entertainment/event-meets`). DEV checks:
+`runDevEventExclusiveMeetCases()`, `runDevEventExclusiveMeetsServiceCases()`.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

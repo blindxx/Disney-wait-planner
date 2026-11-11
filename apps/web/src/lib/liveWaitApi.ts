@@ -73,7 +73,7 @@ const CACHE_TTL_MS = 60_000;
  * Maps app (resortId, parkId) pairs to Queue-Times.com park IDs.
  * IDs verified from https://queue-times.com/parks.json on 2026-02-16.
  */
-const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
+export const QUEUE_TIMES_PARK_MAP: Partial<Record<string, number>> = {
   "DLR:disneyland": 16, // Queue-Times: Disneyland
   "DLR:dca": 17,        // Queue-Times: Disney California Adventure
   "WDW:mk": 6,          // Queue-Times: Disney Magic Kingdom
