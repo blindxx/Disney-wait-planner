@@ -34,10 +34,16 @@ import {
   type EntertainmentPlace,
 } from "./entertainmentSuggestions";
 import { SHOWTIME_STATUS_MESSAGES } from "./entertainmentShowtimes";
-import { getSeasonalEntertainmentRank, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
+import {
+  getSeasonalEntertainmentRank,
+  getSeasonalProviderEntertainmentRank,
+  SEASONAL_ENTERTAINMENT_EVENTS,
+  SEASONAL_PROVIDER_ONLY_EVENTS,
+} from "./seasonalEntertainment";
+import { SEASONAL_EVENTS } from "./seasonalEventData";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
-import { buildParkAllEntertainment, type AllEntertainmentEntry } from "./entertainmentAll";
+import { buildParkAllEntertainment, filterAllEntertainment, type AllEntertainmentEntry } from "./entertainmentAll";
 import { normalizeParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 import type { ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
@@ -205,6 +211,83 @@ export function makeOffSeasonEntry(
       provider: [],
     },
   };
+}
+
+// ============================================
+// ALL ENTERTAINMENT SEASONAL/EVENT FILTER (Phase 14.4D)
+// ============================================
+
+/** Filter value meaning "no event filter" (the default). */
+export const ALL_ENTERTAINMENT_EVENT_ALL = "";
+/** Filter value for entries with no event association at this park. */
+export const ALL_ENTERTAINMENT_EVENT_REGULAR = "regular";
+
+export type AllEntertainmentEventOption = { value: string; label: string };
+
+const PROVIDER_ID_PREFIX = "provider:";
+
+/**
+ * Registry event ids an All Entertainment entry is associated with at `parkId`,
+ * read only from the maintained associations (curated: SEASONAL_ENTERTAINMENT_
+ * EVENTS by canonical name; provider-only: SEASONAL_PROVIDER_ONLY_EVENTS by
+ * park + exact UUID). No name guessing. Events must list the park. Deduped.
+ */
+export function getAllEntryEventIds(entry: AllEntertainmentEntry, parkId: ParkId): string[] {
+  let associations: { eventId: string }[] = [];
+  if (entry.source === "provider_only") {
+    if (entry.id.startsWith(PROVIDER_ID_PREFIX)) {
+      const uuid = entry.id.slice(PROVIDER_ID_PREFIX.length).toLowerCase();
+      associations = SEASONAL_PROVIDER_ONLY_EVENTS.find((r) => r.parkId === parkId && r.entityId.toLowerCase() === uuid)?.associations ?? [];
+    }
+  } else if (entry.source === "curated") {
+    associations = SEASONAL_ENTERTAINMENT_EVENTS[entry.name] ?? [];
+  }
+  const parkEvents = new Set(SEASONAL_EVENTS.filter((e) => e.parkIds.includes(parkId)).map((e) => e.id));
+  return [...new Set(associations.map((a) => a.eventId).filter((id) => parkEvents.has(id)))];
+}
+
+/**
+ * Filter options for a park: "All Entertainment", "Regular", then every
+ * registry event that has at least one curated (catalog place in this park) or
+ * provider-only association here — independent of today's season, so
+ * off-season offerings stay selectable. Registry order; static per park, so it
+ * never depends on (or triggers) provider data.
+ */
+export function getAllEntertainmentEventOptions(parkId: ParkId): AllEntertainmentEventOption[] {
+  const used = new Set<string>();
+  for (const place of getEntertainmentForPark(parkId)) {
+    for (const a of SEASONAL_ENTERTAINMENT_EVENTS[place.name] ?? []) used.add(a.eventId);
+  }
+  for (const r of SEASONAL_PROVIDER_ONLY_EVENTS) {
+    if (r.parkId === parkId) for (const a of r.associations) used.add(a.eventId);
+  }
+  const events = SEASONAL_EVENTS
+    .filter((e) => e.parkIds.includes(parkId) && used.has(e.id))
+    .map((e) => ({ value: e.id, label: e.name }));
+  return [
+    { value: ALL_ENTERTAINMENT_EVENT_ALL, label: "All Entertainment" },
+    { value: ALL_ENTERTAINMENT_EVENT_REGULAR, label: "Regular" },
+    ...events,
+  ];
+}
+
+/**
+ * Event filter over an already-built list (pure; never fetches). A value that
+ * is not an option for the park (stale selection) behaves as "All". Entries are
+ * kept at most once, so multi-associated shows never duplicate.
+ */
+export function filterAllEntertainmentByEvent(
+  entries: AllEntertainmentEntry[],
+  parkId: ParkId,
+  eventValue: string,
+): AllEntertainmentEntry[] {
+  if (eventValue === ALL_ENTERTAINMENT_EVENT_ALL || !getAllEntertainmentEventOptions(parkId).some((o) => o.value === eventValue)) {
+    return entries;
+  }
+  return entries.filter((e) => {
+    const ids = getAllEntryEventIds(e, parkId);
+    return eventValue === ALL_ENTERTAINMENT_EVENT_REGULAR ? ids.length === 0 : ids.includes(eventValue);
+  });
 }
 
 // ============================================
@@ -752,6 +835,86 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
 
 export function runDevSeasonalVisibilityCases(): string[] {
   return DEV_SEASONAL_VISIBILITY_CASES.filter((c) => {
+    try { return !c.ok(); } catch { return true; }
+  }).map((c) => c.label);
+}
+
+// ── Phase 14.4D: park-reactive event filter ──────────────────────────────
+const optVals = (p: ParkId) => getAllEntertainmentEventOptions(p).map((o) => o.value);
+const sameSet = (a: string[], b: string[]) => a.length === b.length && b.every((x) => a.includes(x));
+const curE = (parkId: ParkId, name: string): AllEntertainmentEntry => makeOffSeasonEntry({ name } as EntertainmentPlace, parkId);
+const provE = (parkId: ParkId, uuid: string, name: string): AllEntertainmentEntry => ({ ...curE(parkId, name), id: `provider:${uuid}`, source: "provider_only" });
+const names = (es: AllEntertainmentEntry[]) => es.map((e) => e.name);
+
+export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevSeasonalVisibilityCase[] = [
+  { label: "14.4D options: every park starts with All Entertainment then Regular", ok: () =>
+    (["disneyland", "dca", "mk", "epcot", "hs", "ak"] as ParkId[]).every((p) => {
+      const o = getAllEntertainmentEventOptions(p);
+      return o[0].value === "" && o[0].label === "All Entertainment" && o[1].value === "regular" && o[1].label === "Regular";
+    }) },
+  { label: "14.4D options: MK = MNSSHP, MVMCP, Holidays at WDW", ok: () => sameSet(optVals("mk"), ["", "regular", "mnsshp", "mvmcp", "holidays-wdw"]) },
+  { label: "14.4D options: EPCOT festivals (Holidays, Flower & Garden, Eat to the Beat)", ok: () => sameSet(optVals("epcot"), ["", "regular", "epcot-festival-of-the-holidays", "epcot-flower-and-garden", "epcot-eat-to-the-beat"]) },
+  { label: "14.4D options: HS = Jollywood Nights only; AK has none; Disneyland = DLR seasons", ok: () =>
+    sameSet(optVals("hs"), ["", "regular", "jollywood-nights"]) && sameSet(optVals("ak"), ["", "regular"]) && sameSet(optVals("disneyland"), ["", "regular", "halloween-time-dlr", "holidays-dlr"]) },
+  { label: "14.4D options: DCA = OBB, Holidays, Plaza de la Familia, DCA Food & Wine", ok: () =>
+    sameSet(optVals("dca"), ["", "regular", "oogie-boogie-bash", "holidays-dlr", "plaza-de-la-familia", "dca-food-and-wine"]) },
+  { label: "14.4D options: only registry events listing the park; labels are registry names", ok: () =>
+    (["disneyland", "dca", "mk", "epcot", "hs", "ak"] as ParkId[]).every((p) =>
+      getAllEntertainmentEventOptions(p).slice(2).every((o) => {
+        const ev = SEASONAL_EVENTS.find((e) => e.id === o.value);
+        return !!ev && ev.parkIds.includes(p) && ev.name === o.label;
+      })) },
+  { label: "14.4D park switch: a stale selection from another park behaves as All (no hiding)", ok: () => {
+    const es = [curE("hs", "Glisten!"), provE("hs", DRUM_CORPS, "Drum Corps")];
+    return filterAllEntertainmentByEvent(es, "hs", "mnsshp").length === 2;
+  } },
+  { label: "14.4D default '' leaves list identical (same order/identity)", ok: () => {
+    const es = [curE("mk", "Frozen Holiday Surprise"), curE("mk", "Happily Ever After")];
+    const out = filterAllEntertainmentByEvent(es, "mk", "");
+    return out.length === 2 && out[0] === es[0] && out[1] === es[1];
+  } },
+  { label: "14.4D curated event filter: MNSSHP selects only its shows; Regular excludes associated", ok: () => {
+    const es = [curE("mk", "Hocus Pocus Villain Spelltacular"), curE("mk", "Mickey's Boo-To-You Halloween Parade"), curE("mk", "Happily Ever After")];
+    return sameSet(names(filterAllEntertainmentByEvent(es, "mk", "mnsshp")), ["Hocus Pocus Villain Spelltacular", "Mickey's Boo-To-You Halloween Parade"]) &&
+      sameSet(names(filterAllEntertainmentByEvent(es, "mk", "regular")), ["Happily Ever After"]);
+  } },
+  { label: "14.4D provider-only event filter: HS Jollywood UUID, MK MVMCP UUID, unlisted is Regular", ok: () => {
+    const hs = [provE("hs", JN_STITCH, "Meet Stitch"), provE("hs", DRUM_CORPS, "Drum Corps")];
+    const mk = [provE("mk", SANTA_JACK_SALLY, "Santa Jack and Sally")];
+    return sameSet(names(filterAllEntertainmentByEvent(hs, "hs", "jollywood-nights")), ["Meet Stitch"]) &&
+      sameSet(names(filterAllEntertainmentByEvent(hs, "hs", "regular")), ["Drum Corps"]) &&
+      filterAllEntertainmentByEvent(mk, "mk", "mvmcp").length === 1 && filterAllEntertainmentByEvent(mk, "mk", "regular").length === 0;
+  } },
+  { label: "14.4D provider association is park-qualified (same UUID in another park is Regular)", ok: () =>
+    getAllEntryEventIds(provE("mk", JN_STITCH, "x"), "mk").length === 0 && getAllEntryEventIds(provE("hs", JN_STITCH, "x"), "hs").join() === "jollywood-nights" },
+  { label: "14.4D multi-associated Frozen Holiday Surprise appears once under each of Holidays and MVMCP, never Regular", ok: () => {
+    const es = [curE("mk", "Frozen Holiday Surprise"), curE("mk", "Happily Ever After")];
+    return filterAllEntertainmentByEvent(es, "mk", "holidays-wdw").length === 1 &&
+      filterAllEntertainmentByEvent(es, "mk", "mvmcp").length === 1 &&
+      filterAllEntertainmentByEvent(es, "mk", "regular").length === 1 &&
+      getAllEntryEventIds(es[0], "mk").length === 2;
+  } },
+  { label: "14.4D off-season OFF hides confirmed out-of-season before event filter; ON reveals incl. synthesized", ok: () => {
+    // Nov 10 2026: MNSSHP ended (confirmed off-season).
+    const synth = getOffSeasonCuratedEntertainment("mk", TODAY_WDW, new Set(), NOW).map((p) => makeOffSeasonEntry(p, "mk"));
+    const off = filterAllEntertainmentByEvent(applyAllEntertainmentSeasonalVisibility(synth, "mk", "WDW", TODAY_WDW, false, NOW), "mk", "mnsshp");
+    const on = filterAllEntertainmentByEvent(applyAllEntertainmentSeasonalVisibility(synth, "mk", "WDW", TODAY_WDW, true, NOW), "mk", "mnsshp");
+    return synth.length > 0 && off.length === 0 && on.length === 3 && on.every((e) => e.id.startsWith("curated:mk:"));
+  } },
+  { label: "14.4D event filter keeps relative order and combines with land + operating-only", ok: () => {
+    const a = { ...curE("mk", "Frozen Holiday Surprise"), land: "Fantasyland" };
+    const b = { ...curE("mk", "Mickey's Most Merriest Celebration"), land: "Main Street, U.S.A." };
+    const c = { ...curE("mk", "Happily Ever After"), land: "Fantasyland" };
+    const lan = filterAllEntertainment([a, b, c], { land: "Fantasyland" });
+    const both = filterAllEntertainmentByEvent(lan, "mk", "mvmcp");
+    const none = filterAllEntertainmentByEvent(filterAllEntertainment([a, b, c], { operatingOnly: true }), "mk", "mvmcp");
+    return both.length === 1 && both[0] === a && none.length === 0 &&
+      names(filterAllEntertainmentByEvent([a, b, c], "mk", "mvmcp")).join("|") === `${a.name}|${b.name}`;
+  } },
+];
+
+export function runDevAllEntertainmentEventFilterCases(): string[] {
+  return DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES.filter((c) => {
     try { return !c.ok(); } catch { return true; }
   }).map((c) => c.label);
 }

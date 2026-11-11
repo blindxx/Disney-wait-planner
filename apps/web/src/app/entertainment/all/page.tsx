@@ -47,7 +47,7 @@ import { PARTIAL_SHOWTIMES_NOTE } from "../../../lib/entertainmentShowtimes";
 import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
-import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
+import { applyAllEntertainmentSeasonalVisibility, filterAllEntertainmentByEvent, getAllEntertainmentEventOptions, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
 
 const RESORT_PARKS: Record<ResortId, ParkId[]> = {
   DLR: ["disneyland", "dca"],
@@ -213,6 +213,7 @@ export default function AllEntertainmentPage() {
   const [operatingOnly, setOperatingOnly] = useState(false);
   const [showOutOfSeason, setShowOutOfSeason] = useState(false);
   const [selectedLand, setSelectedLand] = useState("");
+  const [selectedEvent, setSelectedEvent] = useState("");
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const selectedResort = PARK_TO_RESORT[selectedPark] as ResortId;
 
@@ -230,6 +231,7 @@ export default function AllEntertainmentPage() {
   function selectPark(parkId: ParkId) {
     setSelectedPark(parkId);
     setSelectedLand("");
+    setSelectedEvent("");
     setExpanded(new Set());
   }
 
@@ -318,6 +320,9 @@ export default function AllEntertainmentPage() {
   );
   // A land that no longer exists in the refreshed inventory must not silently hide everything.
   const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
+  // Event options are static per park (registry + curated/provider-only associations); selecting never fetches.
+  const eventOptions = useMemo(() => getAllEntertainmentEventOptions(selectedPark), [selectedPark]);
+  const effectiveEvent = eventOptions.some((o) => o.value === selectedEvent) ? selectedEvent : "";
 
   const visible = useMemo(() => {
     const today = getResortLocalDate(selectedResort, displayNow);
@@ -325,15 +330,15 @@ export default function AllEntertainmentPage() {
     // When toggle is OFF, hide confirmed out-of-season entries (curated, and explicitly party-classified provider-only) even if
     // they are present in the provider inventory. Toggle ON restores them.
     const seasonalBase = applyAllEntertainmentSeasonalVisibility(sourceEntries, selectedPark, selectedResort, today, showOutOfSeason, displayNow);
-    const base = filterAllEntertainment(seasonalBase, { land: effectiveLand, operatingOnly });
+    const base = filterAllEntertainmentByEvent(filterAllEntertainment(seasonalBase, { land: effectiveLand, operatingOnly }), selectedPark, effectiveEvent);
     // Synthesized off-season entries have no provider status so they never satisfy
     // "Operating only"; exclude them when that filter is active.
     const extra =
       showOutOfSeason && !operatingOnly
-        ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
+        ? filterAllEntertainmentByEvent(offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand), selectedPark, effectiveEvent)
         : [];
     return sortAllEntertainment([...base, ...extra], displayNow);
-  }, [all, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort]);
+  }, [all, effectiveLand, effectiveEvent, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort]);
 
   return (
     <>
@@ -424,6 +429,14 @@ export default function AllEntertainmentPage() {
             />
             Show out-of-season entertainment
           </label>
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0, maxWidth: "100%" }}>
+            <label htmlFor="all-ent-event" style={{ fontSize: "13px", color: "var(--text-muted)" }}>Event:</label>
+            <select id="all-ent-event" value={effectiveEvent} onChange={(e) => setSelectedEvent(e.target.value)} style={{ ...selectStyle, minWidth: 0, maxWidth: "100%" }}>
+              {eventOptions.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
             <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>Land:</span>
             <select value={effectiveLand} onChange={(e) => setSelectedLand(e.target.value)} style={selectStyle}>
