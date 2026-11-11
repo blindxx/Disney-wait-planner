@@ -26,7 +26,8 @@
  *
  * Provider semantics
  *   - ThemeParks.wiki verifies identity/presence (a record must be present in
- *     the park's successful live payload) and supplies performances/operating
+ *     the park's successful live payload under its registered UUID, park and
+ *     expected name — `meetNameMatches`; a changed name omits that meet) and supplies performances/operating
  *     hours. Its wait value is never used or invented.
  *   - Queue-Times supplies the actual wait ONLY for the verified event-specific
  *     ride id (exact id, expected name, same park payload, fresh). No ordinary
@@ -172,7 +173,28 @@ function qtRidesById(body: unknown): Map<number, QtRide> | null {
   return map;
 }
 
-const normName = (s: string) => s.replace(/[‘’]/g, "'").replace(/\s+/g, " ").trim().toLowerCase();
+/**
+ * Identity-guard normalization: tolerant of harmless formatting only —
+ * case, Unicode form/diacritics, apostrophes/quotes (dropped, so "Mickey\u2019s" ≡
+ * "Mickeys"), "&" ≡ "and", other punctuation, and whitespace. Words are never
+ * dropped, reordered or matched by substring, so any real change (a different
+ * character, location or event) still differs.
+ */
+export function normalizeMeetIdentityName(s: string): string {
+  return s
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201a\u201b\u2032`\u00b4'"\u201c\u201d]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** True when `providerName` still names the registered encounter (strict equality after normalization). */
+export function meetNameMatches(expected: string, providerName: string): boolean {
+  const e = normalizeMeetIdentityName(expected);
+  return e.length > 0 && e === normalizeMeetIdentityName(providerName);
+}
 
 function waitFor(meet: EventExclusiveMeet, qt: QueueTimesFetch | null, instant: Date): EventMeetWait {
   if (!meet.queueTimes) return { state: "unavailable", reason: "no_queue_times_record" };
@@ -181,7 +203,7 @@ function waitFor(meet: EventExclusiveMeet, qt: QueueTimesFetch | null, instant: 
   if (!rides) return { state: "unavailable", reason: "queue_times_failed" };
   const row = rides.get(meet.queueTimes.rideId);
   if (!row) return { state: "unavailable", reason: "no_queue_times_record" };
-  if (normName(row.name) !== normName(meet.queueTimes.name)) return { state: "unavailable", reason: "identity_mismatch" };
+  if (!meetNameMatches(meet.queueTimes.name, row.name)) return { state: "unavailable", reason: "identity_mismatch" };
   const updatedMs = Date.parse(row.last_updated);
   if (!Number.isFinite(updatedMs) || instant.getTime() - updatedMs > QUEUE_TIMES_FRESH_MS) return { state: "unavailable", reason: "stale" };
   return row.is_open
@@ -221,6 +243,10 @@ export function buildParkEventMeets(
     const schedule = all.entries.find((e) => e.id === `provider:${meet.entityId}`);
     if (!schedule) continue; // absent from the park's live payload → not verified, never fabricated
     const live = tp.data.entries.find((e) => e.entityId.toLowerCase() === meet.entityId);
+    // Identity guard: the live record's current name must still be the registered
+    // encounter. A renamed/repurposed record is omitted (never substituted); the
+    // other meets are unaffected.
+    if (!meetNameMatches(meet.providerName, schedule.name)) continue;
     seen.add(meet.entityId);
     entries.push({
       id: `event-meet:${parkId}:${meet.entityId}`,
@@ -395,6 +421,49 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
     const r = build(MVMCP_MORNING, tpOk(MK, entries), null);
     const v = describeEventMeet(r.entries.find((e) => e.entityId === JS_ID)!, MVMCP_MORNING);
     return !!v.scheduleText && v.scheduleText.includes("7:00 PM") && v.scheduleText.includes(PARTIAL_SHOWTIMES_NOTE);
+  } },
+  // Provider identity guard (name)
+  { label: "identity: exact registered names verify", ok: () => EVENT_EXCLUSIVE_MEETS.every((m) => meetNameMatches(m.providerName, m.providerName)) },
+  { label: "identity: harmless variations pass (curly/straight/missing apostrophes, case, whitespace, punctuation, '&'/'and')", ok: () =>
+    meetNameMatches("Join Santa Claus at Mickey's Very Merry Christmas Party", "Join Santa Claus at Mickey’s Very Merry Christmas Party") &&
+    meetNameMatches("Meet Santa Jack and Sally at Mickey’s Very Merry Christmas Party", "Meet Santa Jack and Sally at Mickey's Very Merry Christmas Party") &&
+    meetNameMatches("Join Santa Claus at Mickey's Very Merry Christmas Party", "  JOIN  Santa Claus   at Mickeys Very Merry Christmas Party ") &&
+    meetNameMatches("Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights!") &&
+    meetNameMatches("Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", "Meet Stitch at Celebrity-Spotlight, at Disney Jollywood Nights") &&
+    meetNameMatches("Rock & Roll", "Rock and Roll") && meetNameMatches("Café Meet", "Cafe Meet") },
+  { label: "identity: meaningful changes are rejected (different character, event, venue, extra/missing words, substring, empty)", ok: () => {
+    const exp = "Meet Santa Jack and Sally at Mickey’s Very Merry Christmas Party";
+    return !meetNameMatches(exp, "Meet Santa Claus at Mickey’s Very Merry Christmas Party") &&
+      !meetNameMatches(exp, "Meet Halloween Jack and Sally at Mickey’s Not-So-Scary Halloween Party") &&
+      !meetNameMatches(exp, "Meet Santa Jack and Sally") &&
+      !meetNameMatches(exp, `${exp} Encore`) &&
+      !meetNameMatches(exp, "Character Greetings at Mickey's Very Merry Christmas Party") &&
+      !meetNameMatches(exp, "Meet Mickey at Town Square Theater") &&
+      !meetNameMatches(exp, "") && !meetNameMatches("", "") &&
+      !meetNameMatches("Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", "Meet Olaf at Celebrity Spotlight");
+  } },
+  { label: "identity: renamed provider record is omitted (UUID/park/party date alone are not enough)", ok: () => {
+    const r = build(MVMCP_MORNING, tpOk(MK, mkEntries().map((e) => (e.entityId === JS_ID ? { ...e, name: "Meet Mickey at Town Square Theater" } : e))));
+    return !r.entries.some((e) => e.entityId === JS_ID) && !r.entries.some((e) => /Town Square/.test(e.name));
+  } },
+  { label: "identity: mixed valid/invalid — only the mismatched meet is omitted, the valid one keeps wait/status", ok: () => {
+    const r = build(MVMCP_EVENING, tpOk(MK, mkEntries("OPERATING").map((e) => (e.entityId === SANTA_ID ? { ...e, name: "Meet Goofy at Hall of Fame" } : e))),
+      { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 20 }, MVMCP_EVENING)]) });
+    const js = r.entries.find((e) => e.entityId === JS_ID);
+    return r.entries.length === 1 && !!js && js.wait.state === "live" && r.partyDate && r.error === null;
+  } },
+  { label: "identity: harmless live-name variation still lists, showing the provider's current name", ok: () => {
+    const r = build(MVMCP_MORNING, tpOk(MK, mkEntries().map((e) => (e.entityId === SANTA_ID ? { ...e, name: "Join Santa Claus at Mickeys Very Merry Christmas Party" } : e))));
+    return r.entries.some((e) => e.entityId === SANTA_ID && e.name === "Join Santa Claus at Mickeys Very Merry Christmas Party");
+  } },
+  { label: "identity: all meets mismatched → hidden section (not 'unavailable'); non-party dates unaffected", ok: () => {
+    const r = build(MVMCP_MORNING, tpOk(MK, mkEntries().map((e) => ({ ...e, name: "Something Else" }))));
+    return r.entries.length === 0 && r.error === null && eventMeetsSectionState(r) === "hidden" && !build(NON_PARTY).partyDate;
+  } },
+  { label: "identity: Queue-Times name guard uses the same tolerance (apostrophe variant OK, other ride rejected)", ok: () => {
+    const okRow = build(MVMCP_EVENING, undefined, { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 15, name: JS_NAME.replace("’", "'").toUpperCase() }, MVMCP_EVENING)]) }).entries.find((x) => x.entityId === JS_ID)!;
+    const bad = build(MVMCP_EVENING, undefined, { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 15, name: "Meet Santa Jack and Sally" }, MVMCP_EVENING)]) }).entries.find((x) => x.entityId === JS_ID)!;
+    return okRow.wait.state === "live" && bad.wait.state === "unavailable";
   } },
   // Provider failures / missing / stale
   { label: "ThemeParks failure on a party date: nothing listed, typed error → 'unavailable' (distinct from absence)", ok: () => {
