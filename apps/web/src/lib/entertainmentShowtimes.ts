@@ -367,7 +367,11 @@ export function scanDayActivity(resort: ResortId, localDate: string, raw: ThemeP
       out.uncertain = true; // unusable interval that began yesterday: cannot rule out that it spans midnight
       continue;
     }
-    if (startDate > localDate) out.forwardHorizon = true;
+    // A later-day record only proves the feed extends past today if it is usable:
+    // an Operating record must pass the same validity checks as the shared hours
+    // normalizer (valid later end, ≤ 24 h). Performances need only a valid start.
+    const usable = !isOperating || (validEnd && endMs - startMs <= MAX_OPERATING_INTERVAL_MS);
+    if (startDate > localDate && usable) out.forwardHorizon = true;
   }
   return out;
 }
@@ -908,6 +912,10 @@ export function runDevPerformanceDayEvidenceCases(): string[] {
   check("zero day: complete current feed extending past today, nothing today → confirmed", zero(mk([entry(HAPPILY, [TOMORROW])])) && mk([entry(HAPPILY, [TOMORROW])]).status === "none_posted");
   check("empty showtimes array alone is NEVER evidence", !zero(mk([entry(HAPPILY, [])])) && mk([entry(HAPPILY, [])]).status === "none_posted");
   check("only past-day records (no forward horizon) are not evidence", !zero(mk([entry(HAPPILY, [st("2026-09-30T21:00:00-04:00")])])));
+  check("future Operating record with missing/zero-length/reversed/over-24h end gives no horizon (unusable)", [
+    op("2026-10-02T09:00:00-04:00", null), op("2026-10-02T09:00:00-04:00", "2026-10-02T09:00:00-04:00"),
+    op("2026-10-02T17:00:00-04:00", "2026-10-02T09:00:00-04:00"), op("2026-10-02T09:00:00-04:00", "2026-10-03T09:00:01-04:00"),
+  ].every((o) => !zero(mk([entry(HAPPILY, [o])]))) && zero(mk([entry(HAPPILY, [op("2026-10-02T09:00:00-04:00", "2026-10-02T17:00:00-04:00")])])));
   check("only unrecognized future records give no horizon", !zero(mk([entry(HAPPILY, [st("2026-10-02T21:00:00-04:00", "Mystery Type")])])));
   check("provider failure → not confirmed", !zero(normalizeParkEntertainmentShowtimes("mk", { ok: false, error: { kind: "timeout", message: "t" } }, NOW).entries.find((e) => e.dwpName === "Happily Ever After")!));
   check("mapped ref absent from an ok payload → not confirmed", !zero(mk([entry("00000000-0000-4000-8000-000000000000", [TOMORROW])])));
