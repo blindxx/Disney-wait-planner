@@ -50,7 +50,7 @@
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
 import { PARK_TO_RESORT } from "./parkMetadata";
-import { formatResortLocalTime, getResortLocalDate } from "./resortTime";
+import { addDaysToLocalDate, formatResortLocalTime, getResortLocalDate } from "./resortTime";
 import type {
   ThemeParksError,
   ThemeParksLive,
@@ -143,6 +143,14 @@ export interface EntertainmentShowtimeEntry {
   provider: EntertainmentShowtimeProviderRef[];
   /** Reason, for unmapped entries (from the mapping). */
   unmappedReason?: string;
+  /**
+   * Phase 14.4.1: true ONLY when complete, current, date-specific provider
+   * evidence confirms the entry has no performance and no operating hours on
+   * `localDate` (see `scanDayActivity` / `entryFromMapping` for the exact
+   * conditions). Absent/false means "not confirmed" — never "performs today",
+   * and never a reason to hide. Older bodies lacking the field are unconfirmed.
+   */
+  confirmedNoActivityToday?: boolean;
 }
 
 export interface EntertainmentShowtimeMeta {
@@ -307,7 +315,9 @@ export function scanOperatingIntervals(
     }
   }
   const intervals = merged.map((m) => {
-    const nextDay = getResortLocalDate(resort, new Date(m.e)) !== localDate;
+    // An end exactly at resort-local midnight closes today ("…–12:00 AM"); the
+    // last included instant (end − 1 ms) decides, so only a later end is "next day".
+    const nextDay = getResortLocalDate(resort, new Date(m.e - 1)) !== localDate;
     return {
       startTime: m.startTime,
       endTime: m.endTime,
@@ -317,6 +327,51 @@ export function scanOperatingIntervals(
   return { intervals, rejected };
 }
 
+export interface DayActivityScan {
+  /** A performance or operating interval overlaps `localDate` (including one that began the previous resort-local day and runs past midnight). */
+  activeToday: boolean;
+  /** A record that could matter for today cannot be interpreted (unparseable start, unrecognized/untyped type near today, unusable operating interval): today's emptiness is unproven. */
+  uncertain: boolean;
+  /** A valid performance/operating record exists on a LATER resort-local day: the feed demonstrably extends past today, so an empty today is a gap in a populated forward schedule. */
+  forwardHorizon: boolean;
+}
+
+/**
+ * Phase 14.4.1 — date-specific activity scan over ONE provider ref's showtimes.
+ * Pure. Same resort-local-date rule as performances/hours (instants converted,
+ * never the string's date part), but overlap-aware: a record belongs to today if
+ * its resort-local start date ≤ today ≤ its last-instant date, so a late-night
+ * record spanning midnight counts for both days. An empty array proves nothing
+ * on its own: callers must also require `forwardHorizon` and `!uncertain`.
+ */
+export function scanDayActivity(resort: ResortId, localDate: string, raw: ThemeParksShowtime[]): DayActivityScan {
+  const yesterday = addDaysToLocalDate(localDate, -1);
+  const out: DayActivityScan = { activeToday: false, uncertain: false, forwardHorizon: false };
+  for (const s of raw) {
+    const startMs = toMs(s.startTime);
+    if (!Number.isFinite(startMs)) { out.uncertain = true; continue; }
+    const startDate = getResortLocalDate(resort, new Date(startMs));
+    const endMs = s.endTime ? toMs(s.endTime) : NaN;
+    const validEnd = Number.isFinite(endMs) && endMs > startMs;
+    const endDate = validEnd ? getResortLocalDate(resort, new Date(endMs - 1)) : startDate;
+    const overlaps = startDate <= localDate && localDate <= endDate;
+    const isPerformance = s.type !== null && PERFORMANCE_SHOWTIME_TYPES.includes(s.type);
+    const isOperating = s.type !== null && NON_PERFORMANCE_SHOWTIME_TYPES.includes(s.type);
+    if (!isPerformance && !isOperating) {
+      // Unrecognized/untyped: uncertainty only when it could be today's (today, yesterday-spanning, or unbounded).
+      if (overlaps || startDate === localDate || startDate === yesterday) out.uncertain = true;
+      continue;
+    }
+    if (overlaps) { out.activeToday = true; continue; }
+    if (isOperating && startDate === yesterday && (!validEnd || endMs - startMs > MAX_OPERATING_INTERVAL_MS)) {
+      out.uncertain = true; // unusable interval that began yesterday: cannot rule out that it spans midnight
+      continue;
+    }
+    if (startDate > localDate) out.forwardHorizon = true;
+  }
+  return out;
+}
+
 export function entryFromMapping(
   m: EntertainmentProviderMapping,
   live: ThemeParksLive | null,
@@ -324,6 +379,8 @@ export function entryFromMapping(
   localDate: string,
   nowMs: number,
   payloadCurrent: boolean,
+  /** Stale-if-error payload (provider refresh failed): never evidence of inactivity. */
+  payloadStale = false,
 ): EntertainmentShowtimeEntry {
   const base = { dwpName: m.dwpName, parkId: m.parkId };
   if (m.disposition === "unmapped") {
@@ -337,11 +394,15 @@ export function entryFromMapping(
   const raw: ThemeParksShowtime[] = [];
   let anyAbsent = false;
   let anyDropped = false;
+  let anyProviderOperating = false;
+  const scans: DayActivityScan[] = [];
   for (const ref of m.provider) {
     const e = byId.get(ref.entityId.toLowerCase());
     if (!e) anyAbsent = true;
     if (e && e.droppedShowtimes > 0) anyDropped = true;
+    if (e?.status?.toUpperCase() === "OPERATING") anyProviderOperating = true;
     const showtimes = e?.showtimes ?? [];
+    if (e) scans.push(scanDayActivity(resort, localDate, showtimes));
     provider.push({
       entityId: ref.entityId,
       present: !!e,
@@ -357,7 +418,16 @@ export function entryFromMapping(
   const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
   const incomplete = anyAbsent || anyDropped || !payloadCurrent || unrecognizedTypes.length > 0;
   const status = statusForPerformances(performances, incomplete);
-  return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider };
+  // Phase 14.4.1 zero-activity evidence (all must hold): a current, non-stale
+  // payload for today; every mapped ref present with nothing dropped; every ref's
+  // records interpretable and none overlapping today (performance OR operating);
+  // every ref's feed extends past today; and no ref reports OPERATING (a provider
+  // that says it is operating while publishing no times is ambiguous).
+  const confirmedNoActivityToday =
+    payloadCurrent && !payloadStale && !incomplete && !anyProviderOperating &&
+    m.provider.length > 0 && scans.length === m.provider.length &&
+    scans.every((s) => !s.activeToday && !s.uncertain && s.forwardHorizon);
+  return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider, confirmedNoActivityToday };
 }
 
 /**
@@ -387,7 +457,7 @@ export function normalizeParkEntertainmentShowtimes(
       entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: SHOWTIME_STATUS_MESSAGES.unmapped, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: "No provider disposition" });
       continue;
     }
-    entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent));
+    entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent, result.ok && result.meta.origin === "stale"));
   }
   return {
     parkId,
@@ -799,5 +869,102 @@ export async function runDevEntertainmentShowtimeCases(): Promise<string[]> {
       entryDisplayAt(ended, new Date("2026-10-01T19:30:00Z")).remaining.length === 1 && entryDisplayAt(ended, new Date("2026-10-01T19:30:00.001Z")).remaining.length === 0);
     check("page: no data → null (loading)", showtimesForDisplay(null, NOW) === null);
   }
+  return failures;
+}
+
+// ============================================
+// DEV CASES — Phase 14.4.1 performance-day evidence
+// ============================================
+
+/**
+ * `confirmedNoActivityToday` is the ONLY signal that may hide an entry for not
+ * performing today. Run manually from Node: `runDevPerformanceDayEvidenceCases()` → [] = all pass.
+ */
+export function runDevPerformanceDayEvidenceCases(): string[] {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+
+  const HAPPILY = "22b78ed9-a692-47cb-b6a4-6d1224ff67e3";
+  const FANTASMIC_DLR = "8c36ff0b-3a32-4d7b-9388-0516c19277db";
+  const BLUEY_SHOW = "95a9cde3-ff1f-40a3-8276-2477ded688f8";
+  const BLUEY_ATTR = "888525b0-5a6f-4b8e-9f07-b6a32812b04d";
+  const NOW = new Date("2026-10-01T19:00:00Z"); // 3:00 PM EDT Oct 1; 12:00 PM PDT
+
+  const st = (startTime: string, type: string | null = "Performance Time", endTime: string | null = null): ThemeParksShowtime => ({ type, startTime, endTime });
+  const op = (a: string, b: string | null) => st(a, "Operating", b);
+  const entry = (entityId: string, showtimes: ThemeParksShowtime[], status = "CLOSED", droppedShowtimes = 0) =>
+    ({ entityId, name: "x", entityType: "SHOW", parkId: null, externalId: null, status, lastUpdated: null, showtimes, droppedShowtimes });
+  const live = (entries: ReturnType<typeof entry>[], over: { fetchedAt?: number; origin?: "network" | "stale" } = {}): ThemeParksResult<ThemeParksLive> => ({
+    ok: true,
+    data: { entityId: "p", name: "p", timeZone: null, entries, droppedEntries: 0, droppedShowtimes: 0 },
+    meta: { origin: over.origin ?? "network", fetchedAt: over.fetchedAt ?? NOW.getTime(), etag: null, ...(over.origin === "stale" ? { staleReason: { kind: "http" as const, message: "503", httpStatus: 503 } } : {}) },
+  });
+  const mk = (entries: ReturnType<typeof entry>[], over = {}, at = NOW) =>
+    normalizeParkEntertainmentShowtimes("mk", live(entries, over), at).entries.find((e) => e.dwpName === "Happily Ever After")!;
+  const TOMORROW = st("2026-10-02T21:00:00-04:00"); // forward-horizon record (feed extends past today)
+  const zero = (e: EntertainmentShowtimeEntry) => e.confirmedNoActivityToday === true;
+
+  // Complete zero-performance day vs missing / partial / failed data
+  check("zero day: complete current feed extending past today, nothing today → confirmed", zero(mk([entry(HAPPILY, [TOMORROW])])) && mk([entry(HAPPILY, [TOMORROW])]).status === "none_posted");
+  check("empty showtimes array alone is NEVER evidence", !zero(mk([entry(HAPPILY, [])])) && mk([entry(HAPPILY, [])]).status === "none_posted");
+  check("only past-day records (no forward horizon) are not evidence", !zero(mk([entry(HAPPILY, [st("2026-09-30T21:00:00-04:00")])])));
+  check("only unrecognized future records give no horizon", !zero(mk([entry(HAPPILY, [st("2026-10-02T21:00:00-04:00", "Mystery Type")])])));
+  check("provider failure → not confirmed", !zero(normalizeParkEntertainmentShowtimes("mk", { ok: false, error: { kind: "timeout", message: "t" } }, NOW).entries.find((e) => e.dwpName === "Happily Ever After")!));
+  check("mapped ref absent from an ok payload → not confirmed", !zero(mk([entry("00000000-0000-4000-8000-000000000000", [TOMORROW])])));
+  check("dropped (malformed) showtime records → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW], "CLOSED", 1)])));
+  check("unrecognized/untyped record today → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T20:00:00-04:00", "Mystery Type")])])) && !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T20:00:00-04:00", null)])])));
+  check("unrecognized record that began yesterday (could span into today) → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-09-30T23:00:00-04:00", "Mystery Type")])])));
+  check("unrecognized record on a later day does not block", zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-03T21:00:00-04:00", "Mystery Type")])])));
+  check("unparseable start → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, st("garbage")])])));
+  check("stale-if-error payload (same day) → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW])], { origin: "stale" })) && mk([entry(HAPPILY, [TOMORROW])], { origin: "stale" }).status === "none_posted");
+  check("payload fetched on a previous resort-local day → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW])], { fetchedAt: new Date("2026-09-30T19:00:00Z").getTime() })));
+  check("provider status OPERATING with no times today → ambiguous, not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW], "OPERATING")])));
+  check("unmapped entry → never confirmed", !zero(normalizeParkEntertainmentShowtimes("disneyland", live([]), NOW).entries.find((e) => e.dwpName === "Wondrous Journeys")!));
+
+  // Verified performances / operating hours keep it unconfirmed
+  check("verified upcoming performance today → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T21:00:00-04:00")])])));
+  check("verified passed performance today → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T10:00:00-04:00")])])));
+  check("verified operating hours today (no performances) → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, op("2026-10-01T09:00:00-04:00", "2026-10-01T17:00:00-04:00")])])));
+  check("operating record today with unusable end is still activity, never inactivity", !zero(mk([entry(HAPPILY, [TOMORROW, op("2026-10-01T09:00:00-04:00", null)])])));
+  check("operating hours on another day only → confirmed zero today", zero(mk([entry(HAPPILY, [op("2026-10-02T09:00:00-04:00", "2026-10-02T17:00:00-04:00")])])));
+
+  // Resort-local midnight and cross-midnight schedules
+  check("23:59 local today counts as today", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T23:59:00-04:00")])])));
+  check("00:00 local tomorrow is tomorrow (forward horizon), not today", zero(mk([entry(HAPPILY, [st("2026-10-02T00:00:00-04:00")])])));
+  check("00:00 local today counts as today", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T00:00:00-04:00")])])));
+  check("UTC-date trap: 03:30Z Oct 2 is 11:30 PM EDT Oct 1 → today", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-02T03:30:00Z")])])));
+  check("UTC-date trap: 03:30Z Oct 1 is 11:30 PM EDT Sep 30 → not today", zero(mk([entry(HAPPILY, [TOMORROW, st("2026-10-01T03:30:00Z")])])));
+  check("cross-midnight operating interval from yesterday running into today → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, op("2026-09-30T22:00:00-04:00", "2026-10-01T02:00:00-04:00")])])));
+  check("cross-midnight performance from yesterday running into today → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, st("2026-09-30T23:30:00-04:00", "Performance Time", "2026-10-01T00:30:00-04:00")])])));
+  check("yesterday interval ending exactly at local midnight does not reach today", zero(mk([entry(HAPPILY, [TOMORROW, op("2026-09-30T18:00:00-04:00", "2026-10-01T00:00:00-04:00")])])));
+  check("yesterday operating record with unusable end can't be ruled out → not confirmed", !zero(mk([entry(HAPPILY, [TOMORROW, op("2026-09-30T18:00:00-04:00", null)])])));
+  check("interval starting late today and ending after midnight counts for today", !zero(mk([entry(HAPPILY, [TOMORROW, op("2026-10-01T23:00:00-04:00", "2026-10-02T01:00:00-04:00")])])));
+  check("a rollover at 12:30 AM judges the NEW local day (evening show on the new date still counts)", (() => {
+    const at = new Date("2026-10-02T04:30:00Z"); // 12:30 AM EDT Oct 2
+    return !zero(mk([entry(HAPPILY, [st("2026-10-03T21:00:00-04:00"), st("2026-10-02T21:00:00-04:00")])], { fetchedAt: at.getTime() }, at)) &&
+      zero(mk([entry(HAPPILY, [st("2026-10-03T21:00:00-04:00")])], { fetchedAt: at.getTime() }, at));
+  })());
+  check("DLR uses Pacific midnight: 20:00 PDT today is today, tomorrow's forward record is not", (() => {
+    const at = NOW; const f = (s: ThemeParksShowtime[]) => normalizeParkEntertainmentShowtimes("disneyland", live([entry(FANTASMIC_DLR, s)]), at).entries.find((e) => e.dwpName === "Fantasmic!")!;
+    return zero(f([st("2026-10-02T20:00:00-07:00")])) && !zero(f([st("2026-10-02T20:00:00-07:00"), st("2026-10-02T03:00:00Z")]));
+  })());
+
+  // Multi-ref entries need every ref complete and forward-populated
+  {
+    const f = (a: ThemeParksShowtime[], b: ThemeParksShowtime[]) =>
+      normalizeParkEntertainmentShowtimes("disneyland", live([entry(BLUEY_SHOW, a), entry(BLUEY_ATTR, b)]), NOW).entries.find((e) => e.dwpName === "Bluey's Best Day Ever!")!;
+    const later = st("2026-10-02T11:00:00-07:00");
+    check("multi-ref: every ref extends past today and none active → confirmed", zero(f([later], [later])));
+    check("multi-ref: one ref with no forward record → not confirmed", !zero(f([later], [])));
+    check("multi-ref: activity on any ref today → not confirmed", !zero(f([later], [later, st("2026-10-01T15:00:00-07:00")])));
+    check("multi-ref: one ref absent → not confirmed", !zero(normalizeParkEntertainmentShowtimes("disneyland", live([entry(BLUEY_SHOW, [later])]), NOW).entries.find((e) => e.dwpName === "Bluey's Best Day Ever!")!));
+  }
+
+  // No regressions to existing statuses/messages
+  check("status/message of a confirmed-zero entry is unchanged ('No showtimes posted')", mk([entry(HAPPILY, [TOMORROW])]).message === "No showtimes posted" && mk([entry(HAPPILY, [TOMORROW])]).performances.length === 0);
+  check("operating-hours label: end exactly at local midnight is '…–12:00 AM' without '(next day)'; later end keeps it", (() => {
+    const r = (a: string, b: string) => collectOperatingIntervals("WDW", "2026-10-01", [op(a, b)])[0]?.label;
+    return r("2026-10-01T18:00:00-04:00", "2026-10-02T00:00:00-04:00") === "6:00 PM–12:00 AM" && r("2026-10-01T18:00:00-04:00", "2026-10-02T01:00:00-04:00") === "6:00 PM–1:00 AM (next day)";
+  })());
   return failures;
 }

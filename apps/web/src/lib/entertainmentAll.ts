@@ -199,6 +199,7 @@ export function buildParkAllEntertainment(
         localDate,
         nowMs,
         payloadCurrent,
+        curated.stale,
       );
       const location = getProviderEntertainmentLocation(parkId, key);
       entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime, ...hoursFor([le.entityId], showtime.provider) });

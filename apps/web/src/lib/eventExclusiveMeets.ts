@@ -48,6 +48,7 @@ import { QUEUE_TIMES_PARK_MAP } from "./liveWaitApi";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
 import { SEASONAL_PROVIDER_ONLY_EVENTS, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
+import { isAllEntryConfirmedInactiveToday } from "./seasonalVisibility";
 import type { ThemeParksError, ThemeParksLive, ThemeParksResult } from "./themeParksApi";
 
 // ============================================
@@ -266,7 +267,7 @@ export function buildParkEventMeets(
 // ============================================
 
 export interface EventMeetView {
-  /** "Closed" / "Operating" / null (unknown). Closed before the party starts is normal. */
+  /** "Closed" / "Operating" from the verified Queue-Times row only; null otherwise (never from generic ThemeParks status). */
   statusText: string | null;
   /** "Wait: 25 min" only for a verified live Queue-Times wait; null otherwise. */
   waitText: string | null;
@@ -285,14 +286,17 @@ const WAIT_NOTES: Record<Extract<EventMeetWait, { state: "unavailable" }>["reaso
 
 export function describeEventMeet(entry: EventMeetEntry, now: Date = new Date()): EventMeetView {
   const view = allEntryViewAt(entry.schedule, now);
+  // Phase 14.4.1: status text comes ONLY from the verified event-specific
+  // Queue-Times row. Generic ThemeParks OPERATING/CLOSED (`entry.status`) is
+  // never shown as current availability — party meets use the same schedule
+  // convention as regular Entertainment (performance times and/or operating
+  // hours, else the none-posted/unavailable message).
   const statusFromWait = entry.wait.state === "closed" ? "Closed" : entry.wait.state === "live" ? "Operating" : null;
-  const s = entry.status?.toUpperCase();
-  const statusFromProvider = s === "OPERATING" ? "Operating" : s === "CLOSED" ? "Closed" : null;
   // Upcoming-only times from an incomplete schedule keep the standard qualifier (never look complete).
   const timesText = view.collapsedText && view.partial ? `${view.collapsedText} (${PARTIAL_SHOWTIMES_NOTE})` : view.collapsedText;
   const scheduleParts = [timesText, view.hoursText].filter((t): t is string => !!t);
   return {
-    statusText: statusFromWait ?? statusFromProvider,
+    statusText: statusFromWait,
     waitText: entry.wait.state === "live" ? `Wait: ${entry.wait.minutes} min` : null,
     waitNote: entry.wait.state === "unavailable" ? WAIT_NOTES[entry.wait.reason] : null,
     scheduleText: scheduleParts.length > 0 ? scheduleParts.join(" • ") : null,
@@ -534,6 +538,54 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
     const all = buildParkAllEntertainment("mk", tpOk(MK, mkEntries()), MVMCP_MORNING);
     return all.entries.filter((e) => e.id === `provider:${JS_ID}`).length === 1 && all.entries.some((e) => e.source === "curated");
   } },
+
+  // Phase 14.4.1: same schedule conventions as regular Entertainment
+  ...((): DevEventMeetCase[] => {
+    const HOURS_6_TO_MIDNIGHT = { type: "Operating", startTime: "2026-11-12T18:00:00-05:00", endTime: "2026-11-13T00:00:00-05:00" };
+    const PERF_7 = { type: "Performance Time", startTime: "2026-11-12T19:00:00-05:00", endTime: null };
+    const js = (r: ParkEventMeets) => r.entries.find((e) => e.entityId === JS_ID)!;
+    const santa = (r: ParkEventMeets) => r.entries.find((e) => e.entityId === SANTA_ID)!;
+    return [
+      { label: "14.4.1 meet hours use the shared format, midnight end without '(next day)': 'Operating hours: 6:00 PM–12:00 AM'", ok: () => {
+        const r = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [HOURS_6_TO_MIDNIGHT])), null);
+        return describeEventMeet(js(r), MVMCP_MORNING).scheduleText === "Operating hours: 6:00 PM–12:00 AM";
+      } },
+      { label: "14.4.1 meet with performances AND hours: times first, hours second, separate from the wait", ok: () => {
+        const r = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [PERF_7, HOURS_6_TO_MIDNIGHT])), null);
+        const v = describeEventMeet(js(r), MVMCP_MORNING);
+        return v.scheduleText === "7:00 PM • Operating hours: 6:00 PM–12:00 AM" && v.waitText === null && js(r).schedule.showtime.performances.length === 1;
+      } },
+      { label: "14.4.1 hours alone are never presented as a performance", ok: () => {
+        const r = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [HOURS_6_TO_MIDNIGHT])), null);
+        return js(r).schedule.showtime.performances.length === 0 && !describeEventMeet(js(r), MVMCP_MORNING).scheduleText!.startsWith("6:00");
+      } },
+      { label: "14.4.1 no verified schedule: 'No showtimes posted', meet still listed; never hidden for absent showtimes", ok: () => {
+        const r = build(MVMCP_MORNING, undefined, null);
+        return r.entries.length === 2 && describeEventMeet(santa(r), MVMCP_MORNING).scheduleText === "No showtimes posted";
+      } },
+      { label: "14.4.1 generic ThemeParks OPERATING/CLOSED is never shown as availability (no Queue-Times row)", ok: () =>
+        (["OPERATING", "CLOSED"] as const).every((st) => {
+          const r = build(MVMCP_EVENING, tpOk(MK, mkEntries(st)), null);
+          return r.entries.every((e) => describeEventMeet(e, MVMCP_EVENING).statusText === null);
+        }) },
+      { label: "14.4.1 verified Queue-Times wait stays separate from hours; no invented wait without a row", ok: () => {
+        const r = build(MVMCP_EVENING, tpOk(MK, mkEntries("OPERATING", [HOURS_6_TO_MIDNIGHT])), { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 25 }, MVMCP_EVENING)]) });
+        const v = describeEventMeet(js(r), MVMCP_EVENING);
+        const vs = describeEventMeet(santa(r), MVMCP_EVENING);
+        return v.waitText === "Wait: 25 min" && v.scheduleText === "Operating hours: 6:00 PM–12:00 AM" && vs.waitText === null && vs.waitNote === null;
+      } },
+      { label: "14.4.1 meets are not performance-day filtered: confirmed-zero evidence on a party night never hides them (section state, listing, All Entertainment rule)", ok: () => {
+        const later = { type: "Performance Time", startTime: "2026-11-13T19:00:00-05:00", endTime: null };
+        const r = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [later])), null);
+        const e = js(r);
+        return e.schedule.showtime.confirmedNoActivityToday === true && r.entries.some((x) => x.entityId === JS_ID) && eventMeetsSectionState(r) === "list" &&
+          !isAllEntryConfirmedInactiveToday(e.schedule, "mk", "WDW", r.localDate, MVMCP_MORNING) &&
+          describeEventMeet(e, MVMCP_MORNING).scheduleText === "No showtimes posted";
+      } },
+      { label: "14.4.1 provider failure / stale handling unchanged: failure → unavailable section; stale payload flagged", ok: () =>
+        eventMeetsSectionState(buildParkEventMeets("mk", { ok: false, error: { kind: "network", message: "n" } }, null, MVMCP_MORNING)) === "unavailable" },
+    ];
+  })(),
 ];
 
 export function runDevEventExclusiveMeetCases(): string[] {

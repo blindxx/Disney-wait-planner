@@ -70,7 +70,7 @@ import {
   type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
-import { isEntertainmentConfirmedOutOfSeason } from "../../lib/seasonalVisibility";
+import { isEntertainmentHiddenToday } from "../../lib/seasonalVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
@@ -973,7 +973,7 @@ export default function WaitTimesPage() {
     return parkEntertainment.filter(
       (p) =>
         (!selectedLand || p.land === selectedLand) &&
-        !isEntertainmentConfirmedOutOfSeason(
+        !isEntertainmentHiddenToday(
           p,
           selectedResort,
           today,
