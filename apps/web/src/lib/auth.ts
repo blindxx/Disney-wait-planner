@@ -16,6 +16,7 @@ import { type NextAuthOptions } from "next-auth";
 import EmailProvider from "next-auth/providers/email";
 import PostgresAdapter from "@auth/pg-adapter";
 import { getPool } from "./db";
+import { parseSmtpServer } from "./smtpConfig.mjs";
 
 export const authOptions: NextAuthOptions = {
   // @auth/pg-adapter is compatible with both next-auth v4 and auth.js v5
@@ -25,7 +26,10 @@ export const authOptions: NextAuthOptions = {
 
   providers: [
     EmailProvider({
-      server: process.env.EMAIL_SERVER,
+      // Structured SMTP options (same result as nodemailer's own URL parse) so
+      // nodemailer never calls the deprecated url.parse() (Node DEP0169).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      server: parseSmtpServer(process.env.EMAIL_SERVER) as any,
       from: process.env.EMAIL_FROM,
     }),
   ],
