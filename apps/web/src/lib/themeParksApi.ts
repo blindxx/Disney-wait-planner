@@ -14,6 +14,8 @@
  *   getChildren(id)              GET /entity/{id}/children  (identity discovery)
  *   getLive(id)                  GET /entity/{id}/live      (status + showtimes)
  *   getSchedule(id, {year,month}?) GET /entity/{id}/schedule[/{y}/{m}]
+ *   getHistoryDaily(id, {from,to}) GET /entity/{id}/history/daily (Phase 14.4.2;
+ *                                anonymous, separately rate-limited — see below)
  *   verifyProviderIdentity()     discovery vs. configured WDW/DLR ids
  *   verifyEntertainmentMapping() DWP Entertainment → provider UUID audit
  *                                (themeParksEntertainmentMapping.ts)
@@ -30,10 +32,25 @@
  *   destinations/entity/children  fresh 6h,  stale-if-error up to 7d
  *   schedule             fresh 15m, stale-if-error up to 6h
  *   live                 fresh 60s, stale-if-error up to 10m
- * A stale hit is only served when the refresh failed, and is flagged
- * (`meta.origin === "stale"`, `meta.staleReason`, `meta.fetchedAt`) — never
- * silent. Expired entries revalidate with `If-None-Match` (ETag); a 304 just
- * extends freshness. Concurrent identical requests share one in-flight fetch.
+ *   history              fresh 1h,  stale-if-error up to 24h (Phase 14.4.2)
+ * History is a daily CHANGE LOG, not a calendar. Phase 14.4.2 access tiers
+ * (history requests ONLY; live/schedule/children never carry credentials):
+ *   authenticated  `x-api-key: $THEMEPARKS_API_KEY` (server env only): ≤ 30
+ *                  calendar days, provider pool 600/hour
+ *   anonymous      no key (missing/blank/rejected key): ≤ 7 days, pool 60/hour
+ * Verified against the provider: a request beyond the caller's tier window is
+ * HTTP 403 `{error:{type:"HISTORY_WINDOW_EXCEEDED"}}` (never a truncated 200),
+ * and a bad key is silently treated as anonymous (so a 30-day ask with a bad key
+ * is that same 403). A 401, or a 403 while a key was sent, marks the key
+ * rejected for KEY_REJECT_COOLDOWN_MS (the client then sends no key and reports
+ * the anonymous tier) — callers retry with the 7-day window. The key never
+ * appears in URLs, errors, logs, cache keys or returned data.
+ * Budget (per tier, never assumed globally enforced): a conservative local
+ * per-instance rolling-hour cap PLUS the provider's own `RateLimit-History-*`
+ * headers, which every response refreshes — near exhaustion the client stops
+ * calling until the reported reset, whichever instance spent the quota.
+ * Each history 429 keeps its own Retry-After backoff per tier (a history 429
+ * never blocks live/schedule calls, and vice versa).
  * 429 (and 503) honor `Retry-After` (seconds or HTTP-date, default 60s, cap
  * 1h) with a client-wide backoff: no network calls until it elapses.
  */
@@ -63,7 +80,11 @@ export type ThemeParksErrorKind =
   | "not_found"
   | "http"
   | "invalid_payload"
-  | "invalid_request";
+  | "invalid_request"
+  /** Phase 14.4.2 history: 401, or 403 other than a window violation (credential not accepted). */
+  | "unauthorized"
+  /** Phase 14.4.2 history: requested window exceeds the caller's tier (HISTORY_WINDOW_EXCEEDED). */
+  | "history_window";
 
 export interface ThemeParksError {
   kind: ThemeParksErrorKind;
@@ -198,6 +219,42 @@ export interface ThemeParksSchedule {
   /** Per-park schedules for a destination request (empty for a park request). */
   parks: ThemeParksParkSchedule[];
   droppedEntries: number;
+}
+
+export interface ThemeParksHistoryDay {
+  /** Resort-local calendar date (YYYY-MM-DD). */
+  date: string;
+  /** Provider-counted shows that day; null when not supplied. */
+  showCount: number | null;
+  /** Minutes the entity was OPERATING that day; null when not supplied. */
+  operatingMinutes: number | null;
+  /** Park-open minutes the entity was scheduled against (`inParkHours.scheduledMinutes`); null when not supplied. */
+  scheduledMinutes: number | null;
+}
+
+export interface ThemeParksHistoryEntity {
+  entityId: string;
+  /** ATTRACTION | SHOW | RESTAURANT | PARK | ... (provider value). */
+  entityType: string;
+  /** `coverage.firstRecordedAt` (YYYY-MM-DD) when supplied. */
+  firstRecordedAt: string | null;
+  /** Valid day rows only. A missing date is NOT evidence of anything (change log). */
+  days: ThemeParksHistoryDay[];
+  /** Malformed/duplicate day rows discarded for this entity (non-zero → unreliable). */
+  droppedDays: number;
+}
+
+export interface ThemeParksHistoryDaily {
+  entityId: string;
+  timeZone: string | null;
+  /** Window the provider says it answered (resort-local dates). */
+  from: string;
+  to: string;
+  entities: ThemeParksHistoryEntity[];
+  /** Provider reports a continuation (`next`): the window is NOT complete. */
+  hasMore: boolean;
+  /** Malformed entity records discarded during validation. */
+  droppedEntities: number;
 }
 
 export interface ThemeParksIdentityReport {
@@ -521,6 +578,58 @@ function releaseBody(res: Response): void {
   }
 }
 
+/**
+ * Phase 14.4.2 — `/entity/{id}/history/daily` validator. Unknown/unused fields
+ * (standby stats, changes, firstOperatingAt, …) are dropped. Never fabricates:
+ * a malformed day row is discarded and counted (`droppedDays`), a malformed
+ * entity is discarded and counted, and a non-empty `entities` list that yields
+ * nothing valid is schema drift (null → invalid_payload).
+ */
+export function normalizeHistoryDaily(body: unknown): ThemeParksHistoryDaily | null {
+  if (!isObj(body) || !Array.isArray(body.entities) || !isObj(body.range)) return null;
+  const entityId = asId(body.id);
+  const from = str(body.range.from);
+  const to = str(body.range.to);
+  if (!entityId || !from || !to || !isValidIsoCalendarDate(from) || !isValidIsoCalendarDate(to) || to < from) return null;
+  const nonNegNum = (v: unknown): number | null | typeof INVALID =>
+    v === undefined || v === null ? null : typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : INVALID;
+  const entities: ThemeParksHistoryEntity[] = [];
+  let droppedEntities = 0;
+  for (const e of body.entities) {
+    if (!isObj(e)) { droppedEntities++; continue; }
+    const id = asId(e.id);
+    const entityType = str(e.entityType);
+    if (!id || !entityType || !Array.isArray(e.days)) { droppedEntities++; continue; }
+    const first = isObj(e.coverage) ? str(e.coverage.firstRecordedAt) : null;
+    const days: ThemeParksHistoryDay[] = [];
+    const seen = new Set<string>();
+    let droppedDays = 0;
+    for (const d of e.days) {
+      const date = isObj(d) ? str(d.date) : null;
+      if (!isObj(d) || !date || !isValidIsoCalendarDate(date) || date < from || date > to) { droppedDays++; continue; }
+      const showCount = nonNegNum(d.showCount);
+      const operatingMinutes = nonNegNum(d.operatingMinutes);
+      const scheduledMinutes = isObj(d.inParkHours) ? nonNegNum(d.inParkHours.scheduledMinutes) : null;
+      if (showCount === INVALID || operatingMinutes === INVALID || scheduledMinutes === INVALID || seen.has(date)) {
+        droppedDays++; // duplicate dates are ambiguous: the earlier row stays, the entity is flagged
+        continue;
+      }
+      seen.add(date);
+      days.push({ date, showCount, operatingMinutes, scheduledMinutes });
+    }
+    entities.push({
+      entityId: id,
+      entityType,
+      firstRecordedAt: first && isValidIsoCalendarDate(first) ? first : null,
+      days: days.sort((a, b) => a.date.localeCompare(b.date)),
+      droppedDays,
+    });
+  }
+  if (body.entities.length > 0 && entities.length === 0) return null;
+  const hasMore = body.next !== undefined && body.next !== null && body.next !== false && body.next !== "";
+  return { entityId, timeZone: str(body.timezone), from, to, entities, hasMore, droppedEntities };
+}
+
 /** True when both endpoints parse and the end instant precedes the start instant (equal is fine). */
 function endsBeforeStart(start: string, end: string | null): boolean {
   return end !== null && Date.parse(end) < Date.parse(start);
@@ -550,12 +659,30 @@ const TTL = {
   static: { fresh: 6 * 3_600_000, maxStale: 7 * 86_400_000 },
   schedule: { fresh: 15 * 60_000, maxStale: 6 * 3_600_000 },
   live: { fresh: 60_000, maxStale: 10 * 60_000 },
+  history: { fresh: 3_600_000, maxStale: 24 * 3_600_000 },
 } as const;
+
+export type HistoryTier = "authenticated" | "anonymous";
+/** Provider windows per tier (calendar days, inclusive of today). */
+export const HISTORY_MAX_DAYS: Record<HistoryTier, number> = { authenticated: 30, anonymous: 7 };
+/** Provider pools: authenticated 600/hour, anonymous 60/hour. Local per-instance caps stay well below. */
+export const HISTORY_MAX_CALLS_PER_HOUR = 50; // anonymous (kept name: provider pool is 60)
+export const HISTORY_MAX_CALLS_PER_HOUR_AUTH = 300; // authenticated (provider pool is 600)
+const HISTORY_LOCAL_CAP: Record<HistoryTier, number> = { anonymous: HISTORY_MAX_CALLS_PER_HOUR, authenticated: HISTORY_MAX_CALLS_PER_HOUR_AUTH };
+/** Stop calling once the provider reports ≤ this share of the pool left (until its reported reset). */
+export const HISTORY_QUOTA_RESERVE_SHARE = 0.05;
+/** After a rejected key, send no key (anonymous tier) for this long before trying it again. */
+export const KEY_REJECT_COOLDOWN_MS = 3_600_000;
 
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_CACHE_ENTRIES = 64;
 
 export interface ThemeParksClientOptions {
+  /**
+   * History API key. `undefined` (default) → read THEMEPARKS_API_KEY from the
+   * server environment at request time; `null`/blank → force anonymous.
+   */
+  apiKey?: string | null;
   fetchImpl?: typeof fetch;
   now?: () => number;
   timeoutMs?: number;
@@ -579,8 +706,36 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
 
   const cache = new Map<string, CacheEntry>();
   const inflight = new Map<string, Promise<ThemeParksResult<unknown>>>();
-  let blockedUntil = 0;
-  let blockedError: ThemeParksError | null = null;
+  // Client-wide Retry-After backoff, tracked per rate-limit pool: history has its
+  // own provider limit, so a history 429 must never block live/schedule calls
+  // (and a live 429 must not suppress history's own accounting).
+  const blocks = {
+    main: { until: 0, error: null as ThemeParksError | null },
+    // History pools are per tier: the authenticated and anonymous quotas are independent.
+    history: {
+      authenticated: { until: 0, error: null as ThemeParksError | null },
+      anonymous: { until: 0, error: null as ThemeParksError | null },
+    },
+  };
+  const historyAttempts: Record<HistoryTier, number[]> = { authenticated: [], anonymous: [] };
+  let keyRejectedUntil = 0;
+
+  /** Trimmed key from options/env, or null. Read per request; never stored in cache keys, errors or data. */
+  function readApiKey(): string | null {
+    const raw = opts.apiKey !== undefined ? opts.apiKey : process.env.THEMEPARKS_API_KEY;
+    const k = typeof raw === "string" ? raw.trim() : "";
+    return k.length > 0 && !/[\r\n]/.test(k) ? k : null;
+  }
+  /** Defense in depth: a transport error message must never carry the credential. */
+  function redactKey(message: string): string {
+    const k = readApiKey();
+    return k ? message.split(k).join("[redacted]") : message;
+  }
+  /** Current history access: the key tier unless the key was recently rejected. */
+  function historyAccess(): { tier: HistoryTier; maxDays: number } {
+    const tier: HistoryTier = readApiKey() !== null && now() >= keyRejectedUntil ? "authenticated" : "anonymous";
+    return { tier, maxDays: HISTORY_MAX_DAYS[tier] };
+  }
 
   function remember(key: string, entry: CacheEntry) {
     cache.delete(key);
@@ -630,6 +785,26 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     }
   }
 
+  /**
+   * Refresh the history pool from the provider's own headers after every
+   * response, so the budget reflects what ALL instances have spent (the local cap
+   * alone cannot see that). Near exhaustion → stop until the reported reset.
+   */
+  function learnHistoryQuota(res: Response, block: { until: number; error: ThemeParksError | null }, t: number) {
+    const num = (h: string) => { const v = Number(res.headers.get(h)); return res.headers.get(h) !== null && Number.isFinite(v) ? v : null; };
+    const limit = num("ratelimit-history-limit");
+    const remaining = num("ratelimit-history-remaining");
+    const reset = num("ratelimit-history-reset");
+    if (limit === null || remaining === null || limit <= 0) return;
+    if (remaining <= Math.ceil(limit * HISTORY_QUOTA_RESERVE_SHARE)) {
+      const waitMs = Math.min(3_600_000, Math.max(1_000, (reset ?? 3600) * 1000));
+      if (t + waitMs > block.until) {
+        block.until = t + waitMs;
+        block.error = { kind: "rate_limited", message: "ThemeParks history quota nearly exhausted", retryAfterMs: waitMs };
+      }
+    }
+  }
+
   async function networkOnce(
     key: string,
     path: string,
@@ -639,8 +814,24 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
   ): Promise<ThemeParksResult<unknown>> {
     const cached = cache.get(key);
     const t0 = now();
-    if (t0 < blockedUntil && blockedError) {
-      return fail({ ...blockedError, retryAfterMs: blockedUntil - t0 }, cached, cls);
+    const hist = cls === "history" ? historyAccess() : null;
+    const tier: HistoryTier | null = hist ? hist.tier : null;
+    const block = tier ? blocks.history[tier] : blocks.main;
+    if (t0 < block.until && block.error) {
+      return fail({ ...block.error, retryAfterMs: block.until - t0 }, cached, cls);
+    }
+    if (tier) {
+      // Local per-instance cap (rolling hour). Not the global limit: the provider
+      // pool is shared by every instance, which `RateLimit-History-*` tracks below.
+      const attempts = (historyAttempts[tier] = historyAttempts[tier].filter((t) => t0 - t < 3_600_000));
+      if (attempts.length >= HISTORY_LOCAL_CAP[tier]) {
+        return fail(
+          { kind: "rate_limited", message: "ThemeParks history call budget exhausted", retryAfterMs: attempts[0] + 3_600_000 - t0 },
+          cached,
+          cls,
+        );
+      }
+      attempts.push(t0);
     }
 
     const headers: Record<string, string> = {
@@ -648,6 +839,8 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       "User-Agent": "DisneyWaitPlanner/1.0 (+https://dwpapp.com)",
     };
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
+    // Credentials go ONLY on history requests, and only in this header.
+    if (tier === "authenticated") headers["x-api-key"] = readApiKey() ?? "";
 
     // Rejects on abort so a stalled fetch/body settles even if the underlying
     // stream ignores the signal.
@@ -675,13 +868,39 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       return fail(
         wasAborted
           ? timeoutError()
-          : { kind: "network", message: e instanceof Error ? e.message : "network failure" },
+          : { kind: "network", message: redactKey(e instanceof Error ? e.message : "network failure") },
         cached,
         cls,
       );
     }
 
     const t1 = now();
+    if (tier) {
+      learnHistoryQuota(res, block, t1);
+      if (res.status === 401 || res.status === 403) {
+        // Only an allow-listed error type is read from the body; no provider text is surfaced.
+        let windowViolation = false;
+        if (res.status === 403) {
+          try {
+            const b: unknown = await Promise.race([res.json(), aborted]);
+            windowViolation = isObj(b) && isObj(b.error) && b.error.type === "HISTORY_WINDOW_EXCEEDED";
+          } catch {
+            releaseBody(res);
+          }
+        } else {
+          releaseBody(res);
+        }
+        // A key was sent and refused/ignored (window error with a key means the tier did not apply): cool it down.
+        if (tier === "authenticated") keyRejectedUntil = t1 + KEY_REJECT_COOLDOWN_MS;
+        return fail(
+          windowViolation
+            ? { kind: "history_window", message: "ThemeParks history window exceeds this access tier", httpStatus: res.status }
+            : { kind: "unauthorized", message: "ThemeParks history credential not accepted", httpStatus: res.status },
+          cached,
+          cls,
+        );
+      }
+    }
     // Single cleanup point: every non-2xx path below (304 revalidation, 429/503,
     // 404, generic HTTP) is status-only and never reads the body.
     if (res.status === 304 || !res.ok) releaseBody(res);
@@ -701,12 +920,12 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       // Client-wide backoff is monotonic: concurrent responses may arrive in any
       // order, and a later shorter Retry-After must never shorten an active
       // longer deadline (the error travels with the deadline that wins).
-      if (t1 + retryAfterMs > blockedUntil) {
-        blockedUntil = t1 + retryAfterMs;
-        blockedError = error;
+      if (t1 + retryAfterMs > block.until) {
+        block.until = t1 + retryAfterMs;
+        block.error = error;
       }
-      const effective = blockedError ?? error;
-      return fail({ ...effective, retryAfterMs: Math.max(0, blockedUntil - t1) }, cached, cls);
+      const effective = block.error ?? error;
+      return fail({ ...effective, retryAfterMs: Math.max(0, block.until - t1) }, cached, cls);
     }
     if (res.status === 404) {
       return fail({ kind: "not_found", message: "ThemeParks entity not found", httpStatus: 404 }, cached, cls);
@@ -815,6 +1034,38 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       return request(`/entity/${entityId}/schedule${suffix}`, "schedule", forEntity(entityId, normalize));
     },
 
+    /**
+     * Phase 14.4.2: park-level daily history for [from, to] (resort-local
+     * YYYY-MM-DD, ≤ the current tier's days inclusive). One request covers every child entity —
+     * never call this per entity. See header for cache/budget behavior.
+     */
+    /** Phase 14.4.2: current history tier ("authenticated" 30 d / "anonymous" 7 d); never exposes the key. */
+    historyAccess,
+
+    getHistoryDaily(
+      requestedId: string,
+      range: { from: string; to: string },
+    ): Promise<ThemeParksResult<ThemeParksHistoryDaily>> {
+      const bad = badId(requestedId);
+      if (bad) return Promise.resolve({ ok: false, error: bad });
+      const { from, to } = range;
+      const spanDays = isValidIsoCalendarDate(from) && isValidIsoCalendarDate(to)
+        ? (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000 + 1
+        : NaN;
+      // Never ask beyond the CURRENT tier's window (the provider answers that with a 403).
+      const maxDays = historyAccess().maxDays;
+      if (!(spanDays >= 1 && spanDays <= maxDays)) {
+        return Promise.resolve({ ok: false, error: { kind: "invalid_request", message: `history range must be 1–${maxDays} valid dates` } });
+      }
+      const entityId = requestedId.toLowerCase();
+      // The answered window must be the requested one (a stale/other-window body is never cached under this key).
+      const normalize = forEntity(entityId, (body: unknown) => {
+        const h = normalizeHistoryDaily(body);
+        return h && h.from === from && h.to === to ? h : null;
+      });
+      return request(`/entity/${entityId}/history/daily?from=${from}&to=${to}`, "history", normalize);
+    },
+
     /** Checks configured WDW/DLR destination + park UUIDs still exist upstream. */
     async verifyProviderIdentity(): Promise<ThemeParksResult<ThemeParksIdentityReport>> {
       const res = await this.getDestinations();
@@ -868,8 +1119,14 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     _reset() {
       cache.clear();
       inflight.clear();
-      blockedUntil = 0;
-      blockedError = null;
+      blocks.main.until = 0;
+      blocks.main.error = null;
+      for (const t of ["authenticated", "anonymous"] as const) {
+        blocks.history[t].until = 0;
+        blocks.history[t].error = null;
+        historyAttempts[t] = [];
+      }
+      keyRejectedUntil = 0;
     },
   };
 }
@@ -1409,6 +1666,148 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     const r = await client.getLive(DEV_PARK); check("throw → network", !r.ok && r.error.kind === "network"); }
   { const { client } = mk((_u, init) => new Promise<Response>((_res, rej) => init.signal?.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" })))), { timeoutMs: 20 });
     const r = await client.getLive(DEV_PARK); check("hang → timeout", !r.ok && r.error.kind === "timeout"); }
+
+  // Phase 14.4.2 history client.
+  {
+    const mka = (h: (url: string, init: RequestInit) => Promise<Response> | Response, extra: Partial<ThemeParksClientOptions> = {}) => mk(h, { apiKey: null, ...extra });
+    const W = { from: "2026-11-07", to: "2026-11-13" };
+    const day = (date: string, showCount: unknown = 1, om: unknown = 600) => ({ date, showCount, operatingMinutes: om, inParkHours: { scheduledMinutes: 870, operatingMinutes: 600 }, standby: { p50: 1 }, changes: 3 });
+    const body = (over: Record<string, unknown> = {}) => ({ id: DEV_PARK, name: "Park", timezone: "America/New_York", range: W, next: null,
+      entities: [{ id: "a0613b70-293f-4a5b-8169-1357be1777c6", name: "Show", entityType: "SHOW", coverage: { firstRecordedAt: "2021-10-01" }, days: [day("2026-11-07"), day("2026-11-08", 0, 0)] }], ...over });
+    const h = normalizeHistoryDaily(body());
+    check("history: keeps counts/minutes/scheduled, drops standby/changes", h?.entities[0].days[0].showCount === 1 && h.entities[0].days[0].scheduledMinutes === 870 && h.entities[0].days[1].showCount === 0 && !("standby" in (h?.entities[0].days[0] ?? {})));
+    check("history: next:null → complete; next present → hasMore", h?.hasMore === false && normalizeHistoryDaily(body({ next: "cursor" }))?.hasMore === true);
+    check("history: malformed/duplicate/out-of-window day rows are dropped and counted", (() => {
+      const r = normalizeHistoryDaily(body({ entities: [{ id: "a0613b70-293f-4a5b-8169-1357be1777c6", entityType: "SHOW", days: [day("2026-11-07"), day("2026-11-07"), day("bad"), day("2026-12-01"), day("2026-11-09", -1)] }] }));
+      return r?.entities[0].days.length === 1 && r.entities[0].droppedDays === 4;
+    })());
+    check("history: malformed entities dropped and counted; wholly malformed invalid", normalizeHistoryDaily(body({ entities: [body().entities[0], { nope: 1 }] }))?.droppedEntities === 1 && normalizeHistoryDaily(body({ entities: [{ nope: 1 }] })) === null);
+    check("history: valid-empty ok; garbage invalid", normalizeHistoryDaily(body({ entities: [] }))?.entities.length === 0 && normalizeHistoryDaily({}) === null && normalizeHistoryDaily(body({ range: { from: "x", to: "y" } })) === null);
+    check("history: absent days array on an entity drops the entity (never an empty history)", normalizeHistoryDaily(body({ entities: [body().entities[0], { id: "a0613b70-293f-4a5b-8169-1357be1777c7", entityType: "SHOW" }] }))?.droppedEntities === 1);
+    // Client: URL, caching, window identity, input validation.
+    { const { client, calls } = mka(() => devRes(200, body()));
+      const r1 = await client.getHistoryDaily(DEV_PARK, W); const r2 = await client.getHistoryDaily(DEV_PARK, W);
+      check("history: park-level request URL with from/to, then served from the 1 h cache", r1.ok && r2.ok && r2.meta.origin === "cache" && calls.length === 1 && calls[0].url.endsWith(`/entity/${DEV_PARK}/history/daily?from=2026-11-07&to=2026-11-13`));
+      t += 3_599_000; const r3 = await client.getHistoryDaily(DEV_PARK, W); check("history: still fresh just under 1 h", r3.ok && r3.meta.origin === "cache");
+      t += 2_000; await client.getHistoryDaily(DEV_PARK, W); check("history: refetched after 1 h", calls.length === 2); }
+    { const { client } = mka(() => devRes(200, body({ range: { from: "2026-11-06", to: "2026-11-12" } })));
+      const r = await client.getHistoryDaily(DEV_PARK, W); check("history: answered window ≠ requested window → invalid_payload (never cached)", !r.ok && r.error.kind === "invalid_payload"); }
+    { const { client, calls } = mka(() => devRes(200, body()));
+      const a = await client.getHistoryDaily("nope", W); const b = await client.getHistoryDaily(DEV_PARK, { from: "2026-11-01", to: "2026-11-13" }); const c = await client.getHistoryDaily(DEV_PARK, { from: "2026-11-13", to: "2026-11-07" });
+      check("history: bad id / >7-day (anonymous) / reversed range → invalid_request with no network call", !a.ok && !b.ok && !c.ok && calls.length === 0 && [a, b, c].every((x) => !x.ok && x.error.kind === "invalid_request")); }
+    // Stale-if-error (24 h) and flagged.
+    { let fail = false; const { client } = mka(() => (fail ? devRes(500, {}) : devRes(200, body())));
+      await client.getHistoryDaily(DEV_PARK, W); fail = true; t += 2 * 3_600_000;
+      const r = await client.getHistoryDaily(DEV_PARK, W); check("history: failed refresh serves flagged stale data within 24 h", r.ok && r.meta.origin === "stale");
+      t += 23 * 3_600_000; const r2 = await client.getHistoryDaily(DEV_PARK, W); check("history: beyond 24 h the failure surfaces", !r2.ok); }
+    // Separate rate-limit pools: a history 429 must not block live, and vice versa.
+    { let hist429 = true; const { client } = mka((u) => (u.includes("/history/") ? (hist429 ? devRes(429, {}, { "retry-after": "120" }) : devRes(200, body())) : devRes(200, DEV_LIVE)));
+      const h1 = await client.getHistoryDaily(DEV_PARK, W);
+      const lv = await client.getLive(DEV_PARK);
+      check("history 429 → rate_limited, live calls unaffected", !h1.ok && h1.error.kind === "rate_limited" && lv.ok);
+      const h2 = await client.getHistoryDaily(DEV_PARK, W); check("history backoff holds without a network call", !h2.ok && h2.error.kind === "rate_limited"); hist429 = false; }
+    { let live429 = true; const { client } = mka((u) => (u.includes("/history/") ? devRes(200, body()) : live429 ? devRes(429, {}, { "retry-after": "120" }) : devRes(200, DEV_LIVE)));
+      const lv = await client.getLive(DEV_PARK); const hh = await client.getHistoryDaily(DEV_PARK, W); live429 = false;
+      check("live 429 does not block history", !lv.ok && lv.error.kind === "rate_limited" && hh.ok); }
+    // Local budget: at most HISTORY_MAX_CALLS_PER_HOUR network attempts per rolling hour.
+    { const { client, calls } = mka(() => devRes(200, body()));
+      const ranges = Array.from({ length: HISTORY_MAX_CALLS_PER_HOUR + 3 }, (_, i) => { const d = new Date(Date.UTC(2026, 10, 7 + i)); const to = new Date(Date.UTC(2026, 10, 13 + i)); return { from: d.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) }; });
+      let blocked = 0; for (const r of ranges) { const res = await client.getHistoryDaily(DEV_PARK, r); if (!res.ok && res.error.kind === "rate_limited") blocked++; }
+      check(`history: budget caps network attempts at ${HISTORY_MAX_CALLS_PER_HOUR}/hour (rest rate_limited, no call)`, calls.length === HISTORY_MAX_CALLS_PER_HOUR && blocked === 3 && HISTORY_MAX_CALLS_PER_HOUR < 60);
+      t += 3_601_000; const again = await client.getHistoryDaily(DEV_PARK, ranges[0]); check("history: budget recovers after the rolling hour", again.ok); }
+  }
+
+  // Phase 14.4.2 authenticated history (30 d / 600 per hour) vs anonymous (7 d / 60 per hour).
+  {
+    const KEY = "dev-secret-key-0123456789";
+    const W30 = { from: "2026-10-15", to: "2026-11-13" };
+    const W7 = { from: "2026-11-07", to: "2026-11-13" };
+    const day = (date: string) => ({ date, showCount: 1, operatingMinutes: 600, inParkHours: { scheduledMinutes: 870 } });
+    const bodyFor = (r: { from: string; to: string }, over: Record<string, unknown> = {}) => ({ id: DEV_PARK, name: "P", timezone: "America/New_York", range: r, next: null, entities: [{ id: "a0613b70-293f-4a5b-8169-1357be1777c6", entityType: "SHOW", days: [day(r.to)] }], ...over });
+    const rangeOf = (u: string) => { const m = /from=([\d-]+)&to=([\d-]+)/.exec(u); return m ? { from: m[1], to: m[2] } : W7; };
+    const hdr = (init: RequestInit, name: string) => (init.headers as Record<string, string> | undefined)?.[name];
+    const okHandler = (u: string) => devRes(200, bodyFor(rangeOf(u)));
+    const leaks = (v: unknown) => JSON.stringify(v).includes(KEY);
+
+    { const { client, calls } = mk(okHandler, { apiKey: KEY });
+      const acc = client.historyAccess();
+      const r30 = await client.getHistoryDaily(DEV_PARK, W30);
+      await client.getLive(DEV_PARK);
+      const h = calls.find((c) => c.url.includes("/history/"))!; const l = calls.find((c) => c.url.includes("/live"))!;
+      check("auth: key → authenticated tier, 30-day window", acc.tier === "authenticated" && acc.maxDays === 30 && r30.ok);
+      check("auth: x-api-key sent on the history request only (never live, never in the URL)", hdr(h.init, "x-api-key") === KEY && hdr(l.init, "x-api-key") === undefined && !h.url.includes(KEY) && !l.url.includes(KEY));
+      const over = await client.getHistoryDaily(DEV_PARK, { from: "2026-10-14", to: "2026-11-13" });
+      check("auth: 31 days is refused locally (no network)", !over.ok && over.error.kind === "invalid_request" && calls.filter((c) => c.url.includes("/history/")).length === 1);
+      check("auth: no secret in results or errors", !leaks(r30) && !leaks(over) && !leaks(acc)); }
+    for (const [label, key] of [["missing (env)", undefined], ["null", null], ["blank", "   "], ["control chars", "bad\nkey"]] as const) {
+      const saved = process.env.THEMEPARKS_API_KEY; delete process.env.THEMEPARKS_API_KEY;
+      try {
+        const { client, calls } = mk(okHandler, key === undefined ? {} : { apiKey: key });
+        const acc = client.historyAccess(); const r30 = await client.getHistoryDaily(DEV_PARK, W30); const r7 = await client.getHistoryDaily(DEV_PARK, W7);
+        check(`anon (${label}): 7-day anonymous tier, 30-day refused locally, no key header`, acc.tier === "anonymous" && acc.maxDays === 7 && !r30.ok && r7.ok && calls.length === 1 && hdr(calls[0].init, "x-api-key") === undefined);
+      } finally { if (saved !== undefined) process.env.THEMEPARKS_API_KEY = saved; }
+    }
+    { const saved = process.env.THEMEPARKS_API_KEY; process.env.THEMEPARKS_API_KEY = KEY;
+      try { const { client, calls } = mk(okHandler); const r = await client.getHistoryDaily(DEV_PARK, W30);
+        check("env: THEMEPARKS_API_KEY read server-side at request time", r.ok && client.historyAccess().tier === "authenticated" && hdr(calls[0].init, "x-api-key") === KEY);
+      } finally { if (saved === undefined) delete process.env.THEMEPARKS_API_KEY; else process.env.THEMEPARKS_API_KEY = saved; } }
+    // Provider semantics verified live: >7 days without a (valid) key is 403 HISTORY_WINDOW_EXCEEDED.
+    const windowErr = () => devRes(403, { error: { type: "HISTORY_WINDOW_EXCEEDED", message: "Requests without an API key can see history back to 2026-11-07 (7 days).", earliestAllowedDate: "2026-11-07" } });
+    { const { client, calls } = mk(() => windowErr(), { apiKey: KEY }); t = 5_000_000;
+      const r = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: provider ignores a bad key (403 HISTORY_WINDOW_EXCEEDED) → history_window, key cooled down, tier → anonymous", !r.ok && r.error.kind === "history_window" && client.historyAccess().tier === "anonymous" && client.historyAccess().maxDays === 7);
+      check("auth: the rejected key is no longer sent", await (async () => { await client.getHistoryDaily(DEV_PARK, { from: "2026-11-06", to: "2026-11-12" }); return hdr(calls[calls.length - 1].init, "x-api-key") === undefined; })());
+      check("auth: no secret in the failure", !leaks(r));
+      t += KEY_REJECT_COOLDOWN_MS + 1; check("auth: key retried after the cooldown", client.historyAccess().tier === "authenticated"); }
+    { const { client } = mk(() => devRes(401, { error: "nope" }), { apiKey: KEY });
+      const r = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: 401 → unauthorized, key cooled down", !r.ok && r.error.kind === "unauthorized" && client.historyAccess().tier === "anonymous" && !leaks(r)); }
+    { const { client } = mk(() => devRes(403, { error: { type: "FORBIDDEN" } }), { apiKey: KEY });
+      const r = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: other 403 → unauthorized (not a window error)", !r.ok && r.error.kind === "unauthorized" && client.historyAccess().tier === "anonymous"); }
+    { const { client } = mk(() => windowErr(), { apiKey: null });
+      const r = await client.getHistoryDaily(DEV_PARK, W7);
+      check("anon: 403 with no key never marks anything rejected", !r.ok && r.error.kind === "history_window" && client.historyAccess().tier === "anonymous"); }
+    { const { client } = mk(() => devRes(403, "<html>"), { apiKey: KEY });
+      const r = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: unparseable 403 body → unauthorized, no provider text surfaced", !r.ok && r.error.kind === "unauthorized" && !/html/i.test(r.error.message)); }
+    // 429 / quota: per-tier pools; live untouched.
+    { let on429 = true; const { client } = mk((u) => (u.includes("/history/") ? (on429 ? devRes(429, {}, { "retry-after": "90" }) : okHandler(u)) : devRes(200, DEV_LIVE)), { apiKey: KEY }); t = 6_000_000;
+      const a = await client.getHistoryDaily(DEV_PARK, W30); const lv = await client.getLive(DEV_PARK); const b = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: history 429 → rate_limited with Retry-After backoff; live unaffected; no network while backing off", !a.ok && a.error.kind === "rate_limited" && lv.ok && !b.ok && b.error.kind === "rate_limited"); on429 = false;
+      t += 91_000; const c = await client.getHistoryDaily(DEV_PARK, W30); check("auth: backoff ends after Retry-After", c.ok); }
+    { const { client, calls } = mk((u) => devRes(200, bodyFor(rangeOf(u)), { "ratelimit-history-limit": "600", "ratelimit-history-policy": "600;w=3600", "ratelimit-history-remaining": "20", "ratelimit-history-reset": "120" }), { apiKey: KEY }); t = 7_000_000;
+      const r1 = await client.getHistoryDaily(DEV_PARK, W30);
+      const r2 = await client.getHistoryDaily(DEV_PARK, { from: "2026-10-14", to: "2026-11-12" });
+      check("quota: remaining 20/600 (3.3% ≤ 5% reserve) → the first answer is used, the next call is held without network", r1.ok && !r2.ok && r2.error.kind === "rate_limited" && calls.length === 1);
+      t += 121_000; const r3 = await client.getHistoryDaily(DEV_PARK, { from: "2026-10-14", to: "2026-11-12" }); check("quota: resumes after the provider's reported reset", r3.ok && calls.length === 2); }
+    { const { client, calls } = mk((u) => devRes(200, bodyFor(rangeOf(u)), { "ratelimit-history-limit": "600", "ratelimit-history-remaining": "400", "ratelimit-history-reset": "3000" }), { apiKey: KEY }); t = 8_000_000;
+      await client.getHistoryDaily(DEV_PARK, W30); const r2 = await client.getHistoryDaily(DEV_PARK, { from: "2026-10-14", to: "2026-11-12" });
+      check("quota: plenty remaining → no hold", r2.ok && calls.length === 2); }
+    { const { client } = mk((u) => devRes(200, bodyFor(rangeOf(u)), { "ratelimit-history-limit": "60", "ratelimit-history-remaining": "2", "ratelimit-history-reset": "7200" }), { apiKey: null }); t = 9_000_000;
+      await client.getHistoryDaily(DEV_PARK, W7); const r2 = await client.getHistoryDaily(DEV_PARK, { from: "2026-11-06", to: "2026-11-12" });
+      check("quota: anonymous pool (60/h) also honored; wait capped at 1 h", !r2.ok && r2.error.kind === "rate_limited" && (r2.error.retryAfterMs ?? 0) <= 3_600_000); }
+    // Local caps per tier (per instance; the provider pool is shared by every instance).
+    { const { client, calls } = mk(okHandler, { apiKey: KEY }); t = 10_000_000;
+      const ranges = Array.from({ length: HISTORY_MAX_CALLS_PER_HOUR_AUTH + 2 }, (_, i) => ({ from: new Date(Date.UTC(2026, 9, 15 + i)).toISOString().slice(0, 10), to: new Date(Date.UTC(2026, 10, 13 + i)).toISOString().slice(0, 10) }));
+      let blocked = 0; for (const r of ranges) { const x = await client.getHistoryDaily(DEV_PARK, r); if (!x.ok && x.error.kind === "rate_limited") blocked++; }
+      check(`auth: local cap ${HISTORY_MAX_CALLS_PER_HOUR_AUTH}/hour (< provider 600)`, calls.length === HISTORY_MAX_CALLS_PER_HOUR_AUTH && blocked === 2 && HISTORY_MAX_CALLS_PER_HOUR_AUTH < 600); }
+    // Cache: 30-day payload cached 1 h; stale-if-error flagged; window identity enforced.
+    { const { client, calls } = mk(okHandler, { apiKey: KEY }); t = 11_000_000;
+      const a = await client.getHistoryDaily(DEV_PARK, W30); const b = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: second 30-day request served from cache", a.ok && b.ok && b.meta.origin === "cache" && calls.length === 1); }
+    { const { client } = mk(() => devRes(200, bodyFor({ from: "2026-11-07", to: "2026-11-13" })), { apiKey: KEY });
+      const r = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: provider answering a narrower window than asked → invalid_payload (never trusted as 30 days)", !r.ok && r.error.kind === "invalid_payload"); }
+    // Redaction of transport errors.
+    { const { client } = mk(() => { throw new TypeError(`connect failed using header ${KEY}`); }, { apiKey: KEY });
+      const r = await client.getHistoryDaily(DEV_PARK, W30);
+      check("auth: transport error text is redacted", !r.ok && r.error.kind === "network" && !leaks(r) && /redacted/.test(r.error.message)); }
+    // Live behaviour is unchanged by a configured key.
+    { const withKey = mk(() => devRes(200, DEV_LIVE), { apiKey: KEY }); const without = mk(() => devRes(200, DEV_LIVE), { apiKey: null });
+      const a = await withKey.client.getLive(DEV_PARK); const b = await without.client.getLive(DEV_PARK);
+      check("live: identical request/response with or without a key (no credential header)", a.ok && b.ok && JSON.stringify(withKey.calls[0].init.headers) === JSON.stringify(without.calls[0].init.headers)); }
+  }
 
   // Provider identity covers WDW + DLR destinations and every park.
   { const dests = (Object.values(THEMEPARKS_DESTINATIONS) as Array<{ entityId: string; slug: string; providerName: string }>).map((d) => ({

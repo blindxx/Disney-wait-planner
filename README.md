@@ -76,7 +76,7 @@ Park hours and Entertainment showtimes come from the ThemeParks.wiki (Free API),
 - Today's Entertainment showtimes on Waits & Shows (`/api/entertainment/showtimes`)
 - Optional schedule context for Ask Tom (see above)
 
-ThemeParks.wiki does not replace Queue-Times for attraction waits, and it does not decide which attractions or Entertainment exist: the curated DWP catalog stays the canonical identity authority, and Entertainment is matched to the provider only through an explicit mapping. It needs no environment variables. Surfaces that display ThemeParks.wiki data show the linked attribution via `components/ThemeParksAttribution.tsx` ("Powered by ThemeParks.wiki").
+ThemeParks.wiki does not replace Queue-Times for attraction waits, and it does not decide which attractions or Entertainment exist: the curated DWP catalog stays the canonical identity authority, and Entertainment is matched to the provider only through an explicit mapping. It works without credentials; the optional server-only `THEMEPARKS_API_KEY` (free ThemeParks key, sent only as `x-api-key` on `/history/daily` requests) widens history-assisted filtering from 7 to 30 days, and a missing or rejected key falls back to the anonymous 7-day window. Surfaces that display ThemeParks.wiki data show the linked attribution via `components/ThemeParksAttribution.tsx` ("Powered by ThemeParks.wiki").
 
 ---
 

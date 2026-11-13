@@ -259,6 +259,38 @@ export function interpretMeetShowtimes(
   return { showtimes: out, invalid };
 }
 
+/**
+ * Registered meets only: re-read their "Special Ticketed Event" windows as
+ * operating hours (`interpretMeetShowtimes`). Phase 14.4.2: this is the single
+ * place that interpretation is applied — Waits & Shows (`buildParkEventMeets`)
+ * AND All Entertainment (`getParkAllEntertainment`) both feed their provider
+ * payload through it, so a registered party meet reads "Operating hours:
+ * 6:00 PM–12:00 AM" on both pages. Identity-scoped and date-agnostic: every
+ * other entity (shows publishing start==end performances) is untouched.
+ */
+export function applyRegisteredMeetWindows(
+  parkId: ParkId,
+  tp: ThemeParksResult<ThemeParksLive>,
+  instant: Date,
+): ThemeParksResult<ThemeParksLive> {
+  if (!tp.ok) return tp;
+  const resort = PARK_TO_RESORT[parkId] as ResortId;
+  const localDate = getResortLocalDate(resort, instant);
+  const registered = new Set(getEventExclusiveMeetsForPark(parkId).map((m) => m.entityId));
+  if (registered.size === 0) return tp;
+  return {
+    ...tp,
+    data: {
+      ...tp.data,
+      entries: tp.data.entries.map((e) => {
+        if (!registered.has(e.entityId.toLowerCase())) return e;
+        const r = interpretMeetShowtimes(resort, localDate, e.showtimes);
+        return { ...e, showtimes: r.showtimes, droppedShowtimes: e.droppedShowtimes + r.invalid };
+      }),
+    },
+  };
+}
+
 // ============================================
 // BUILD (pure)
 // ============================================
@@ -282,19 +314,7 @@ export function buildParkEventMeets(
   if (confirmed.length === 0 || !tp) return base;
   if (!tp.ok) return { ...base, error: tp.error };
 
-  // Registered meets only: re-read their "Special Ticketed Event" windows as operating hours.
-  const registered = new Set(getEventExclusiveMeetsForPark(parkId).map((m) => m.entityId));
-  const interpreted: ThemeParksResult<ThemeParksLive> = {
-    ...tp,
-    data: {
-      ...tp.data,
-      entries: tp.data.entries.map((e) => {
-        if (!registered.has(e.entityId.toLowerCase())) return e;
-        const r = interpretMeetShowtimes(resort, localDate, e.showtimes);
-        return { ...e, showtimes: r.showtimes, droppedShowtimes: e.droppedShowtimes + r.invalid };
-      }),
-    },
-  };
+  const interpreted = applyRegisteredMeetWindows(parkId, tp, instant);
   const all = buildParkAllEntertainment(parkId, interpreted, instant);
   const payloadCurrent = all.fetchedLocalDate === localDate;
   const seen = new Set<string>();

@@ -49,10 +49,20 @@
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import {
+  MIN_PUBLISHED_ENTITIES_TODAY,
+  buildParkHistoryEvidence,
+  historyShowsActivityToday,
+  historySupportForRef,
+  type InactivityBasis,
+  type ParkHistoryEvidence,
+} from "./entertainmentHistory";
 import { PARK_TO_RESORT } from "./parkMetadata";
+import { getPartyNightState } from "./seasonalEvents";
 import { addDaysToLocalDate, formatResortLocalTime, getResortLocalDate } from "./resortTime";
 import type {
   ThemeParksError,
+  ThemeParksHistoryDaily,
   ThemeParksLive,
   ThemeParksResult,
   ThemeParksShowtime,
@@ -151,6 +161,19 @@ export interface EntertainmentShowtimeEntry {
    * and never a reason to hide. Older bodies lacking the field are unconfirmed.
    */
   confirmedNoActivityToday?: boolean;
+  /**
+   * Phase 14.4.2: how `confirmedNoActivityToday` was established, for
+   * diagnostics only — "forward_horizon" (feed demonstrably extends past
+   * today), "history" / "history_party" / "history_weekly" (ThemeParks history corroborated a
+   * clean live empty day; see entertainmentHistory.ts). Absent when unconfirmed.
+   */
+  inactivityBasis?: InactivityBasis;
+  /**
+   * Phase 14.4.2: live data is clean and empty today but the forward horizon
+   * does not prove it, so history COULD decide. Lets the server fetch history
+   * only when it can matter (bounded provider usage). Never a reason to hide.
+   */
+  historyCandidate?: boolean;
 }
 
 export interface EntertainmentShowtimeMeta {
@@ -376,6 +399,19 @@ export function scanDayActivity(resort: ResortId, localDate: string, raw: ThemeP
   return out;
 }
 
+/**
+ * Phase 14.4.2: distinct live entities (any type, any ref) that have a
+ * performance/operating record overlapping today. A published-today quorum means
+ * the provider has posted today's schedules, so an empty ref is meaningful — no
+ * universal "midnight publication" hour is assumed.
+ */
+export function countEntitiesActiveToday(live: ThemeParksLive | null, resort: ResortId, localDate: string): number {
+  if (!live) return 0;
+  let n = 0;
+  for (const e of live.entries) if (e.showtimes.length > 0 && scanDayActivity(resort, localDate, e.showtimes).activeToday) n++;
+  return n;
+}
+
 export function entryFromMapping(
   m: EntertainmentProviderMapping,
   live: ThemeParksLive | null,
@@ -385,6 +421,8 @@ export function entryFromMapping(
   payloadCurrent: boolean,
   /** Stale-if-error payload (provider refresh failed): never evidence of inactivity. */
   payloadStale = false,
+  /** Phase 14.4.2 park history evidence (null/unusable → forward-horizon proof only). */
+  history: ParkHistoryEvidence | null = null,
 ): EntertainmentShowtimeEntry {
   const base = { dwpName: m.dwpName, parkId: m.parkId };
   if (m.disposition === "unmapped") {
@@ -422,16 +460,34 @@ export function entryFromMapping(
   const { performances, unrecognizedTypes } = collectPerformances(resort, localDate, nowMs, raw);
   const incomplete = anyAbsent || anyDropped || !payloadCurrent || unrecognizedTypes.length > 0;
   const status = statusForPerformances(performances, incomplete);
-  // Phase 14.4.1 zero-activity evidence (all must hold): a current, non-stale
-  // payload for today; every mapped ref present with nothing dropped; every ref's
-  // records interpretable and none overlapping today (performance OR operating);
-  // every ref's feed extends past today; and no ref reports OPERATING (a provider
-  // that says it is operating while publishing no times is ambiguous).
-  const confirmedNoActivityToday =
+  // Phase 14.4.1/14.4.2 zero-activity evidence. Live basics (all must hold): a
+  // current, non-stale payload for today; every mapped ref present with nothing
+  // dropped; every ref's records interpretable and none overlapping today
+  // (performance OR operating); and no ref reports OPERATING (a provider that
+  // says it is operating while publishing no times is ambiguous).
+  const liveClean =
     payloadCurrent && !payloadStale && !incomplete && !anyProviderOperating &&
     m.provider.length > 0 && scans.length === m.provider.length &&
-    scans.every((s) => !s.activeToday && !s.uncertain && s.forwardHorizon);
-  return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider, confirmedNoActivityToday };
+    scans.every((s) => !s.activeToday && !s.uncertain);
+  // Then EVERY ref needs support from one route: the feed extends past today
+  // (14.4.1), or ThemeParks history corroborates (14.4.2). History can also
+  // veto either route when today's own history row shows activity.
+  let inactivityBasis: InactivityBasis | undefined;
+  let historyCandidate = false;
+  if (liveClean && !m.provider.some((r) => historyShowsActivityToday(history, r.entityId))) {
+    const allForward = scans.every((s) => s.forwardHorizon);
+    if (allForward) {
+      inactivityBasis = "forward_horizon";
+    } else {
+      historyCandidate = true;
+      const todayParty = getPartyNightState(m.parkId, localDate);
+      const published = countEntitiesActiveToday(live, resort, localDate) >= MIN_PUBLISHED_ENTITIES_TODAY;
+      const bases = m.provider.map((r, i) => (scans[i].forwardHorizon ? "forward_horizon" as const : published ? historySupportForRef(history, r.entityId, todayParty) : null));
+      if (bases.every((b) => b !== null)) inactivityBasis = bases.includes("history_party") ? "history_party" : bases.includes("history_weekly") ? "history_weekly" : bases.includes("history") ? "history" : "forward_horizon";
+    }
+  }
+  const confirmedNoActivityToday = inactivityBasis !== undefined;
+  return { ...base, status, performances, message: SHOWTIME_STATUS_MESSAGES[status], incomplete, unrecognizedTypes, provider, confirmedNoActivityToday, ...(inactivityBasis ? { inactivityBasis } : {}), ...(historyCandidate ? { historyCandidate: true } : {}) };
 }
 
 /**
@@ -442,6 +498,8 @@ export function normalizeParkEntertainmentShowtimes(
   parkId: ParkId,
   result: ThemeParksResult<ThemeParksLive>,
   instant: Date = new Date(),
+  /** Phase 14.4.2: park-level history result (null = not fetched / failed → forward-horizon proof only). */
+  historyResult: ThemeParksResult<ThemeParksHistoryDaily> | null = null,
 ): ParkEntertainmentShowtimes {
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const localDate = getResortLocalDate(resort, instant);
@@ -452,6 +510,7 @@ export function normalizeParkEntertainmentShowtimes(
   // and stale-if-error are unaffected.
   const fetchedLocalDate = result.ok ? getResortLocalDate(resort, new Date(result.meta.fetchedAt)) : null;
   const payloadCurrent = fetchedLocalDate === localDate;
+  const history = buildParkHistoryEvidence(parkId, resort, historyResult, instant);
   const entries: EntertainmentShowtimeEntry[] = [];
   for (const place of ENTERTAINMENT_PLACES) {
     if (place.parkId !== parkId) continue;
@@ -461,7 +520,7 @@ export function normalizeParkEntertainmentShowtimes(
       entries.push({ dwpName: place.name, parkId, status: "unmapped", performances: [], message: SHOWTIME_STATUS_MESSAGES.unmapped, incomplete: false, unrecognizedTypes: [], provider: [], unmappedReason: "No provider disposition" });
       continue;
     }
-    entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent, result.ok && result.meta.origin === "stale"));
+    entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent, result.ok && result.meta.origin === "stale", history));
   }
   return {
     parkId,

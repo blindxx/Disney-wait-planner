@@ -11,18 +11,28 @@ import { queryCatalog } from "./catalogQuery";
 import { PROVIDER_ENTERTAINMENT_LOCATIONS } from "./entertainmentProviderLocations";
 import { PARK_LABELS } from "./parkMetadata";
 import { buildParkAllEntertainment, type ParkAllEntertainment } from "./entertainmentAll";
+import { HISTORY_ENRICHMENT_DEADLINE_MS, fetchParkHistoryWithin, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
+import { applyRegisteredMeetWindows } from "./eventExclusiveMeets";
 import { themeParks, type ThemeParksLive, type ThemeParksResult } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 /** Fetch the park's live payload via the shared ThemeParks client and build the All Entertainment inventory. */
 export async function getParkAllEntertainment(
   parkId: ParkId,
-  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>> } = {},
+  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess; skipHistory?: boolean; historyDeadlineMs?: number } = {},
 ): Promise<ParkAllEntertainment> {
   const getLive = opts.getLive ?? ((id: string) => themeParks.getLive(id));
-  const result = await getLive(THEMEPARKS_PARKS[parkId].entityId);
+  const raw = await getLive(THEMEPARKS_PARKS[parkId].entityId);
   // `now` is taken after the fetch so passed/upcoming reflects delivery time.
-  return buildParkAllEntertainment(parkId, result, opts.instant ?? new Date());
+  // Phase 14.4.2: registered party meets read their "Special Ticketed Event"
+  // window as operating hours here exactly as on Waits & Shows.
+  const result = applyRegisteredMeetWindows(parkId, raw, opts.instant ?? new Date());
+  const first = buildParkAllEntertainment(parkId, result, opts.instant ?? new Date());
+  // History only when it could decide an entry (bounded provider usage); failure → first pass stands.
+  if (opts.skipHistory || !first.entries.some((e) => e.showtime.historyCandidate)) return first;
+  const instant = opts.instant ?? new Date();
+  const history = await fetchParkHistoryWithin(opts.historyDeadlineMs ?? HISTORY_ENRICHMENT_DEADLINE_MS, parkId, instant, opts.getHistory, opts.getHistoryAccess);
+  return buildParkAllEntertainment(parkId, result, opts.instant ?? new Date(), history);
 }
 
 /** DEV check (run manually; returns failing labels): service uses the park's provider UUID + injected clock. */

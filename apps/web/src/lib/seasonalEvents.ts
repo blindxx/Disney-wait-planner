@@ -16,7 +16,7 @@
  *     `eventNights`, or a record with null dates, never yields a yes/no.
  */
 
-import type { ResortId } from "@disney-wait-planner/shared";
+import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import { getResortLocalDate } from "./resortTime";
@@ -61,6 +61,56 @@ export function listSeasonalEventSeasonsForYear(
   seasonYear: number,
 ): SeasonalEventSeasonRecord[] {
   return SEASONAL_EVENT_SEASONS.filter((s) => s.seasonYear === seasonYear);
+}
+
+export type PartyNightState = "party" | "not_party" | "unknown";
+
+/**
+ * Phase 14.4.2: registry-only state of a park-qualified RESORT-LOCAL date for
+ * separately ticketed select-night parties (MVMCP, Jollywood Nights, MNSSHP,
+ * Oogie Boogie Bash …). Unlike `getSeasonalEventDateState` it has no "past"
+ * gate — the history evidence layer needs to ask whether a date inside its
+ * 7-day window WAS a confirmed party night. "party" = a confirmed event night;
+ * "not_party" = every such event at the park has confirmed nights and none is
+ * this date; anything else (no party at the park, unconfirmed nights, invalid
+ * date) is "unknown" and is never counted as evidence either way.
+ */
+export function getPartyNightState(parkId: ParkId, date: string): PartyNightState {
+  if (!isValidIsoCalendarDate(date)) return "unknown";
+  const year = Number(date.slice(0, 4));
+  let sawEvent = false;
+  let allConfirmed = true;
+  for (const event of SEASONAL_EVENTS) {
+    if (event.format !== "select-night" || event.admission !== "separate-ticket" || !event.parkIds.includes(parkId)) continue;
+    sawEvent = true;
+    // A cross-year season (Jollywood January nights) belongs to the prior season year.
+    const seasons = [getSeasonalEventSeason(event.id, year), getSeasonalEventSeason(event.id, year - 1)];
+    const withNights = seasons.filter((x) => x?.eventNights);
+    if (withNights.some((x) => x!.eventNights!.includes(date))) return "party";
+    // Only the date's own season record can confirm absence (a prior-year record only confirms nights).
+    if (!seasons[0]?.eventNights) allConfirmed = false;
+  }
+  return sawEvent && allConfirmed ? "not_party" : "unknown";
+}
+
+/**
+ * Phase 14.4.2: ids of the separately ticketed select-night parties confirmed on
+ * a park-qualified resort-local date (registry-only, same data and rules as
+ * `getPartyNightState`, which is "party" exactly when this is non-empty). A
+ * 30-day history window can span different parties (e.g. MNSSHP in October,
+ * MVMCP in November): learned suppression is only ever compared against nights
+ * of the SAME event as the date being judged.
+ */
+export function getPartyNightEventIds(parkId: ParkId, date: string): string[] {
+  if (!isValidIsoCalendarDate(date)) return [];
+  const year = Number(date.slice(0, 4));
+  const ids: string[] = [];
+  for (const event of SEASONAL_EVENTS) {
+    if (event.format !== "select-night" || event.admission !== "separate-ticket" || !event.parkIds.includes(parkId)) continue;
+    const seasons = [getSeasonalEventSeason(event.id, year), getSeasonalEventSeason(event.id, year - 1)];
+    if (seasons.some((x) => x?.eventNights?.includes(date))) ids.push(event.id);
+  }
+  return ids;
 }
 
 export type SeasonalEventSeasonStatus =

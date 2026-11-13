@@ -312,6 +312,46 @@ Queue-Times status/waits only (never generic ThemeParks OPERATING/CLOSED). DEV
 checks: `runDevPerformanceDayEvidenceCases()` plus the 14.4.1 cases in the
 seasonal-visibility, event-filter and event-meet suites.
 
+## History-assisted performance-day filtering (Phase 14.4.2)
+
+ThemeParks `/entity/{parkId}/history/daily` (client: `getHistoryDaily` +
+`historyAccess()` in `themeParksApi.ts`) is a CHANGE LOG: missing rows or
+`showCount: 0` alone prove nothing. Access tiers (history requests only; live,
+schedule and children calls never carry credentials):
+- **Authenticated**: optional server-only `THEMEPARKS_API_KEY`, sent only as
+  `x-api-key`; ≤ 30 days, provider pool 600/h. **Anonymous** (missing, blank or
+  rejected key): ≤ 7 days, pool 60/h. The provider answers a window beyond the
+  tier with 403 `HISTORY_WINDOW_EXCEEDED` and treats a bad key as anonymous; the
+  client maps 401/403 to `unauthorized`/`history_window`, stops sending a
+  rejected key for an hour, and the service (`entertainmentHistoryService.ts`)
+  retries ONCE with the 7-day window (also when the long answer is paged).
+  The key never appears in URLs, errors, cache keys, responses or logs.
+- Budget: per-tier per-instance local caps (anonymous 50/h, authenticated
+  300/h) plus the provider's `RateLimit-History-*` headers (stop at ≤ 5% of the
+  pool until the reported reset) — local caps are never assumed to be global.
+  One park-level request per park, cached 1 h (stale-if-error 24 h), fetched only
+  when a first pass flags a `historyCandidate`; each tier keeps its own 429
+  Retry-After backoff, separate from live.
+
+`entertainmentHistory.ts` (pure) turns the window the provider ANSWERED into
+per-ref evidence that can only veto hiding (today's row active) or corroborate a
+clean, current live-empty day; it never overrides a verified live
+performance/operating window. 7-day payloads use the "short" rules (the
+anonymous fallback, unchanged); 30-day payloads use the "long" rules (recent-14-day
+activity, weekday recurrence, intermittence rate, learned party nights matched to
+the SAME event via `getPartyNightEventIds`). Thresholds, rationale and reliability
+gates are in the `entertainmentHistory.ts` header. `entryFromMapping` sets
+`confirmedNoActivityToday` when live is clean AND every mapped ref is supported by
+the forward horizon (14.4.1) or history (`inactivityBasis`). Never hardcode show
+schedules or exceptions; lifecycle detection is a later phase. Registered party
+meets read "Special Ticketed Event" windows as operating hours on both pages via
+`applyRegisteredMeetWindows` (`eventExclusiveMeets.ts`). DEV checks:
+`runDevEntertainmentHistoryCases()`, `runDevEntertainmentHistoryLongWindowCases()`,
+`runDevHistoryAssistedFilteringCases()`, `runDevHistoryAccessChainCases()`,
+`runDevHistoryLongWindowFilteringCases()`, `runDevPartyMeetHoursConsistencyCases()`
+(`entertainmentHistoryDev.ts`) plus the history-client cases in
+`runDevThemeParksApiCases()`.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

@@ -57,7 +57,8 @@ import {
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getProviderEntertainmentLocation } from "./entertainmentProviderLocations";
 import { getResortLocalDate } from "./resortTime";
-import type { ThemeParksError, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
+import type { ThemeParksError, ThemeParksHistoryDaily, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
+import { buildParkHistoryEvidence } from "./entertainmentHistory";
 import { THEMEPARKS_ENTERTAINMENT_MAPPING } from "./themeParksEntertainmentMapping";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
@@ -151,8 +152,11 @@ export function buildParkAllEntertainment(
   parkId: ParkId,
   result: ThemeParksResult<ThemeParksLive>,
   instant: Date = new Date(),
+  /** Phase 14.4.2: park history (null → forward-horizon proof only); same evidence as Waits & Shows. */
+  historyResult: ThemeParksResult<ThemeParksHistoryDaily> | null = null,
 ): ParkAllEntertainment {
-  const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant);
+  const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant, historyResult);
+  const history = buildParkHistoryEvidence(parkId, PARK_TO_RESORT[parkId] as ResortId, historyResult, instant);
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const entries: AllEntertainmentEntry[] = [];
   const liveForHours = result.ok ? result.data : null;
@@ -200,6 +204,7 @@ export function buildParkAllEntertainment(
         nowMs,
         payloadCurrent,
         curated.stale,
+        history,
       );
       const location = getProviderEntertainmentLocation(parkId, key);
       entries.push({ id: `provider:${key}`, source: "provider_only", name: le.name, land: location?.land ?? null, venue: location?.venue ?? null, showtime, ...hoursFor([le.entityId], showtime.provider) });
