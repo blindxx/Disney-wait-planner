@@ -486,6 +486,15 @@ export function resolveEntertainmentKey(name: string, resort?: ResortId): string
 }
 
 /**
+ * Read-only view of the retired/replaced entertainment identities, for
+ * maintenance consumers that must keep recognizing them as history (e.g. the
+ * lifecycle registry, Phase 14.5A). Not used for planner suggestions.
+ */
+export function getLegacyEntertainmentPlaces(): readonly EntertainmentPlace[] {
+  return LEGACY_ENTERTAINMENT_PLACES;
+}
+
+/**
  * Find catalog entries by a key already resolved via resolveEntertainmentKey
  * — active catalog first, legacy as fallback (a key can only ever exist in
  * one or the other, never both, so this is unambiguous). Shared by the

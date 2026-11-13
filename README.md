@@ -89,6 +89,8 @@ ThemeParks.wiki does not replace Queue-Times for attraction waits, and it does n
 - Tom is integrated through a server-side proxy (`/api/tom/ask`) to the Tom Railway API — Tom credentials are never exposed to the browser
 - Attraction naming is resolved deterministically through coordinated canonical-identity paths — one for live data and planned closures, one for My Plans and Lightning Lane — kept in parity so naming differences never cause mismatches or duplicates
 
+Entertainment lifecycle maintenance metadata for the recurring data audit lives in `apps/web/src/data/entertainmentLifecycleRegistry.json` (empty until the audit records verified findings; maintenance-only, no runtime effect). See `AGENTS.md`.
+
 For implementation-level invariants, data flow details, and correctness constraints, see [`AGENTS.md`](./AGENTS.md).
 
 ---
