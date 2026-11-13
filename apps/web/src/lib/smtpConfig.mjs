@@ -83,6 +83,31 @@ export function parseSmtpServer(server) {
   return options;
 }
 
+/**
+ * parseSmtpServer() for NextAuth's EmailProvider specifically.
+ *
+ * NextAuth deep-merges an object `server` over its provider defaults
+ * ({ host: "localhost", port: 25, auth: { user: "", pass: "" } }), whereas a
+ * string `server` replaced them wholesale. Any key the URL did not set would
+ * therefore silently inherit a default. Pin those explicitly to what nodemailer
+ * itself would have chosen for the string form:
+ *  - no port => nodemailer's own default (465 when secure, else 587), not 25
+ *  - no credentials => `auth: undefined` (no empty-credential AUTH attempt)
+ *  - no host => nodemailer's default "localhost" (same as before)
+ * Non-object results (missing/invalid EMAIL_SERVER) are returned unchanged.
+ *
+ * @param {unknown} server EMAIL_SERVER value
+ */
+export function toEmailProviderServer(server) {
+  const parsed = parseSmtpServer(server);
+  if (parsed === null || typeof parsed !== "object") return parsed;
+  const out = { ...parsed };
+  if (!out.direct && !("port" in out)) out.port = out.secure ? 465 : 587;
+  if (!("host" in out)) out.host = "localhost";
+  if (!("auth" in out)) out.auth = undefined;
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // DEV checks (run manually from Node; return failing labels):
 //   node -e 'import("./src/lib/smtpConfig.mjs").then(async m=>console.log(await m.runDevSmtpConfigCases()))'
@@ -181,14 +206,51 @@ export async function runDevSmtpConfigCases() {
     failures.push("transport/deprecation check failed to run");
   }
 
+  // End to end through NextAuth's real provider merge (EmailProvider defaults
+  // port 25 / empty auth must not leak): compare string vs structured transport.
+  try {
+    const { createRequire: cr } = await import("node:module");
+    const rq = cr(import.meta.url);
+    const EmailProvider = rq("next-auth/providers/email").default;
+    // Internal module (not in next-auth's "exports"): load by absolute path.
+    const { dirname, join } = await import("node:path");
+    const parseProviders = rq(join(dirname(rq.resolve("next-auth")), "core", "lib", "providers.js")).default;
+    const nm = rq("nodemailer");
+    const SmtpTransport = rq("nodemailer/lib/smtp-transport");
+    const effective = (server) => {
+      const { providers } = parseProviders({ providers: [EmailProvider({ server, from: "a@b.c" })], url: new URL("https://x.test/api/auth"), providerId: "email" });
+      const prov = providers.find((x) => x.id === "email");
+      const prev = process.noDeprecation; process.noDeprecation = true;
+      try {
+        const t = nm.createTransport(prov.server);
+        const tr = new SmtpTransport(t.options);
+        const c = new (rq("nodemailer/lib/smtp-connection"))(tr.options);
+        return { host: tr.options.host, port: c.port, secure: c.secureConnection, auth: tr.options.auth ? { user: tr.options.auth.user, pass: tr.options.auth.pass } : null };
+      } finally { process.noDeprecation = prev; }
+    };
+    for (const u of [
+      "smtp://u:p@smtp.example.com:587", "smtp://u:p@smtp.example.com", "smtps://u:p@smtp.example.com",
+      "smtps://u:p@smtp.example.com:465", "smtp://smtp.example.com", "smtp://smtp.example.com:2525",
+      "smtp://u:p@smtp.example.com:465", "smtp://u%40x:p%3Aq@smtp.example.com:587?requireTLS=true",
+    ]) {
+      check(`e2e provider merge equals string path: ${u.replace(/:[^:@/]*@/, ":***@")}`, eq(effective(toEmailProviderServer(u)), effective(u)));
+    }
+    check("e2e implicit smtps port 465", effective(toEmailProviderServer("smtps://u:p@h.example.com")).port === 465);
+    check("e2e implicit smtp port 587", effective(toEmailProviderServer("smtp://u:p@h.example.com")).port === 587);
+    check("e2e no creds => no auth", effective(toEmailProviderServer("smtp://h.example.com:587")).auth === null);
+    check("toEmailProviderServer passthrough", toEmailProviderServer(undefined) === undefined && toEmailProviderServer("nope") === "nope");
+  } catch (e) {
+    failures.push("end-to-end provider merge check failed to run");
+  }
+
   // Wiring: auth.ts uses the helper and not the raw string.
   try {
     const fs = await import("node:fs");
     const path = await import("node:path");
     const { fileURLToPath } = await import("node:url");
     const auth = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "auth.ts"), "utf8");
-    check("auth.ts imports helper", /parseSmtpServer[\s\S]*from "\.\/smtpConfig\.mjs"/.test(auth));
-    check("auth.ts: server parsed", /server: parseSmtpServer\(process\.env\.EMAIL_SERVER\)/.test(auth));
+    check("auth.ts imports helper", /toEmailProviderServer[\s\S]*from "\.\/smtpConfig\.mjs"/.test(auth));
+    check("auth.ts: server parsed", /server: toEmailProviderServer\(process\.env\.EMAIL_SERVER\)/.test(auth));
     check("auth.ts: no raw EMAIL_SERVER server", !/server: process\.env\.EMAIL_SERVER/.test(auth));
     check("auth.ts: from/session/pages unchanged", /from: process\.env\.EMAIL_FROM/.test(auth) && /strategy: "database"/.test(auth) && /signIn: "\/settings"/.test(auth));
   } catch {
