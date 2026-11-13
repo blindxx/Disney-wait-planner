@@ -43,13 +43,13 @@
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { buildParkAllEntertainment, allEntryViewAt, type AllEntertainmentEntry } from "./entertainmentAll";
-import { PARTIAL_SHOWTIMES_NOTE } from "./entertainmentShowtimes";
+import { MAX_OPERATING_INTERVAL_MS, PARTIAL_SHOWTIMES_NOTE } from "./entertainmentShowtimes";
 import { QUEUE_TIMES_PARK_MAP } from "./liveWaitApi";
 import { PARK_TO_RESORT } from "./parkMetadata";
-import { getResortLocalDate } from "./resortTime";
+import { addDaysToLocalDate, getResortLocalDate } from "./resortTime";
 import { SEASONAL_PROVIDER_ONLY_EVENTS, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
 import { isAllEntryConfirmedInactiveToday } from "./seasonalVisibility";
-import type { ThemeParksError, ThemeParksLive, ThemeParksResult } from "./themeParksApi";
+import type { ThemeParksError, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 
 // ============================================
 // REGISTRY (explicit, park-qualified, exact ids)
@@ -213,6 +213,53 @@ function waitFor(meet: EventExclusiveMeet, qt: QueueTimesFetch | null, instant: 
 }
 
 // ============================================
+// MEET SCHEDULE INTERPRETATION (Phase 14.4.1)
+// ============================================
+
+const SPECIAL_TICKETED_EVENT = "Special Ticketed Event";
+
+/**
+ * ThemeParks publishes an event-exclusive meet's availability as a
+ * "Special Ticketed Event" record whose start and end differ (e.g. Join Santa:
+ * 6:00 PM → midnight): an operating WINDOW, not a performance start time.
+ * Scoped to REGISTERED meet entities only (the caller never passes any other
+ * entity) — "Special Ticketed Event" is never reclassified globally; party shows
+ * publish it with start == end as genuine discrete performances.
+ *
+ *   end after start, ≤ 24 h  → window: re-typed "Operating" so the shared
+ *                              operating-hours normalizer/format handles it
+ *   end == start             → discrete performance, kept unchanged
+ *   missing / unparseable / reversed / over-24 h end, or unparseable start,
+ *   dated today or yesterday → ambiguous: dropped (nothing guessed) and counted
+ *                              in `invalid` so the shared completeness logic
+ *                              marks the schedule incomplete
+ * Invalid records dated on other days cannot affect today and are left alone.
+ */
+export function interpretMeetShowtimes(
+  resort: ResortId,
+  localDate: string,
+  showtimes: ThemeParksShowtime[],
+): { showtimes: ThemeParksShowtime[]; invalid: number } {
+  const yesterday = addDaysToLocalDate(localDate, -1);
+  const out: ThemeParksShowtime[] = [];
+  let invalid = 0;
+  for (const s of showtimes) {
+    if (s.type !== SPECIAL_TICKETED_EVENT) { out.push(s); continue; }
+    const startMs = Date.parse(s.startTime);
+    if (!Number.isFinite(startMs)) { invalid++; continue; }
+    const startDate = getResortLocalDate(resort, new Date(startMs));
+    const relevant = startDate === localDate || startDate === yesterday;
+    const endMs = s.endTime ? Date.parse(s.endTime) : NaN;
+    if (!Number.isFinite(endMs) || endMs < startMs || endMs - startMs > MAX_OPERATING_INTERVAL_MS) {
+      if (relevant) invalid++; else out.push(s);
+      continue;
+    }
+    out.push(endMs === startMs ? s : { ...s, type: "Operating" });
+  }
+  return { showtimes: out, invalid };
+}
+
+// ============================================
 // BUILD (pure)
 // ============================================
 
@@ -235,7 +282,20 @@ export function buildParkEventMeets(
   if (confirmed.length === 0 || !tp) return base;
   if (!tp.ok) return { ...base, error: tp.error };
 
-  const all = buildParkAllEntertainment(parkId, tp, instant);
+  // Registered meets only: re-read their "Special Ticketed Event" windows as operating hours.
+  const registered = new Set(getEventExclusiveMeetsForPark(parkId).map((m) => m.entityId));
+  const interpreted: ThemeParksResult<ThemeParksLive> = {
+    ...tp,
+    data: {
+      ...tp.data,
+      entries: tp.data.entries.map((e) => {
+        if (!registered.has(e.entityId.toLowerCase())) return e;
+        const r = interpretMeetShowtimes(resort, localDate, e.showtimes);
+        return { ...e, showtimes: r.showtimes, droppedShowtimes: e.droppedShowtimes + r.invalid };
+      }),
+    },
+  };
+  const all = buildParkAllEntertainment(parkId, interpreted, instant);
   const payloadCurrent = all.fetchedLocalDate === localDate;
   const seen = new Set<string>();
   const entries: EventMeetEntry[] = [];
@@ -573,6 +633,60 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
         const v = describeEventMeet(js(r), MVMCP_EVENING);
         const vs = describeEventMeet(santa(r), MVMCP_EVENING);
         return v.waitText === "Wait: 25 min" && v.scheduleText === "Operating hours: 6:00 PM–12:00 AM" && vs.waitText === null && vs.waitNote === null;
+      } },
+      // ── real-provider-shape cases (payloads captured from ThemeParks.wiki 2026-11-13) ──
+      { label: "14.4.1 real shape: Join Santa 'Special Ticketed Event' 6 PM→midnight is operating hours, not the performance '6:00 PM'", ok: () => {
+        const at13 = at("2026-11-13T13:10:00Z");
+        const stw = { type: "Special Ticketed Event", startTime: "2026-11-13T18:00:00-05:00", endTime: "2026-11-14T00:00:00-05:00" };
+        const r = build(at13, tpOk(MK, mkEntries("OPERATING").map((e) => (e.entityId === SANTA_ID ? { ...e, showtimes: [stw] } : e))), null);
+        const e = santa(r);
+        return describeEventMeet(e, at13).scheduleText === "Operating hours: 6:00 PM–12:00 AM" && e.schedule.showtime.performances.length === 0 &&
+          e.schedule.operatingHours?.length === 1 && !e.schedule.operatingHoursIncomplete && describeEventMeet(e, at13).statusText === null;
+      } },
+      { label: "14.4.1 real shape: Santa Jack & Sally 7:00–11:30 PM event window → 'Operating hours: 7:00 PM–11:30 PM'; Queue-Times wait/status stay independent", ok: () => {
+        const stw = { type: "Special Ticketed Event", startTime: "2026-11-12T19:00:00-05:00", endTime: "2026-11-12T23:30:00-05:00" };
+        const r = build(MVMCP_EVENING, tpOk(MK, mkEntries("OPERATING", [stw])), { ok: true, body: qtBody([jsRow({ is_open: true, wait_time: 35 }, MVMCP_EVENING)]) });
+        const v = describeEventMeet(js(r), MVMCP_EVENING);
+        return v.scheduleText === "Operating hours: 7:00 PM–11:30 PM" && v.waitText === "Wait: 35 min" && v.statusText === "Operating" && js(r).schedule.showtime.performances.length === 0;
+      } },
+      { label: "14.4.1 closed Queue-Times row + window: both shown independently; no ThemeParks status text without a Queue-Times row", ok: () => {
+        const stw = { type: "Special Ticketed Event", startTime: "2026-11-12T19:00:00-05:00", endTime: "2026-11-12T23:30:00-05:00" };
+        const withQt = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [stw])));
+        const noQt = build(MVMCP_MORNING, tpOk(MK, mkEntries("OPERATING", [stw])), null);
+        const a = describeEventMeet(js(withQt), MVMCP_MORNING), b = describeEventMeet(js(noQt), MVMCP_MORNING);
+        return a.statusText === "Closed" && a.scheduleText === "Operating hours: 7:00 PM–11:30 PM" && b.statusText === null && b.waitText === null && b.scheduleText === "Operating hours: 7:00 PM–11:30 PM";
+      } },
+      { label: "14.4.1 genuine discrete performances (start == end) on a meet stay performances; mixed with a window: times first, hours second", ok: () => {
+        const d1 = { type: "Special Ticketed Event", startTime: "2026-11-12T20:30:00-05:00", endTime: "2026-11-12T20:30:00-05:00" };
+        const d2 = { type: "Performance Time", startTime: "2026-11-12T23:00:00-05:00", endTime: null };
+        const win = { type: "Special Ticketed Event", startTime: "2026-11-12T18:00:00-05:00", endTime: "2026-11-13T00:00:00-05:00" };
+        const only = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [d1, d2])), null);
+        const mixed = build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [d1, win])), null);
+        return describeEventMeet(js(only), MVMCP_MORNING).scheduleText === "8:30 PM • 11:00 PM" && js(only).schedule.operatingHours?.length === 0 &&
+          describeEventMeet(js(mixed), MVMCP_MORNING).scheduleText === "8:30 PM • Operating hours: 6:00 PM–12:00 AM";
+      } },
+      { label: "14.4.1 invalid/incomplete meet windows (missing, reversed, unparseable, >24 h end) are never shown: schedule 'Showtimes unavailable', meet still listed", ok: () =>
+        [null, "2026-11-12T17:00:00-05:00", "garbage", "2026-11-13T19:00:01-05:00"].every((end) => {
+          const bad = { type: "Special Ticketed Event", startTime: "2026-11-12T18:00:00-05:00", endTime: end };
+          const r = build(MVMCP_MORNING, tpOk(MK, mkEntries("OPERATING", [bad])), null);
+          const e = r.entries.find((x) => x.entityId === JS_ID);
+          return !!e && e.schedule.showtime.performances.length === 0 && (e.schedule.operatingHours?.length ?? 0) === 0 &&
+            describeEventMeet(e, MVMCP_MORNING).scheduleText === "Showtimes unavailable" && e.schedule.showtime.incomplete;
+        }) },
+      { label: "14.4.1 an invalid window beside a valid one: valid hours kept, qualified '(may be incomplete)' beside 'Showtimes unavailable'; invalid on another day is ignored", ok: () => {
+        const bad = { type: "Special Ticketed Event", startTime: "2026-11-12T12:00:00-05:00", endTime: null };
+        const good = { type: "Special Ticketed Event", startTime: "2026-11-12T18:00:00-05:00", endTime: "2026-11-13T00:00:00-05:00" };
+        const old = { type: "Special Ticketed Event", startTime: "2026-11-05T18:00:00-05:00", endTime: null };
+        const mixed = describeEventMeet(js(build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [bad, good])), null)), MVMCP_MORNING).scheduleText;
+        const stale = describeEventMeet(js(build(MVMCP_MORNING, tpOk(MK, mkEntries("CLOSED", [old, good])), null)), MVMCP_MORNING).scheduleText;
+        return mixed === "Showtimes unavailable • Operating hours: 6:00 PM–12:00 AM (may be incomplete)" && stale === "Operating hours: 6:00 PM–12:00 AM";
+      } },
+      { label: "14.4.1 scoping: interpretation touches registered meets only — a regular show's window-shaped 'Special Ticketed Event' stays a performance", ok: () => {
+        const r = interpretMeetShowtimes("WDW", "2026-11-12", [{ type: "Special Ticketed Event", startTime: "2026-11-12T18:00:00-05:00", endTime: "2026-11-13T00:00:00-05:00" }]);
+        const win = { type: "Special Ticketed Event", startTime: "2026-11-12T18:00:00-05:00", endTime: "2026-11-13T00:00:00-05:00" };
+        const all = buildParkAllEntertainment("mk", tpOk(MK, [...mkEntries(), tpEntry("767b8357-ce52-4e09-810f-30ee81f8136c", "Mickey's Most Merriest Celebration at Mickey's Very Merry Christmas Party", MK, "OPERATING", [win])]), MVMCP_MORNING);
+        const merriest = all.entries.find((e) => e.name === "Mickey's Most Merriest Celebration");
+        return r.showtimes[0].type === "Operating" && !!merriest && merriest.showtime.performances.length === 1 && (merriest.operatingHours?.length ?? 0) === 0;
       } },
       { label: "14.4.1 meets are not performance-day filtered: confirmed-zero evidence on a party night never hides them (section state, listing, All Entertainment rule)", ok: () => {
         const later = { type: "Performance Time", startTime: "2026-11-13T19:00:00-05:00", endTime: null };

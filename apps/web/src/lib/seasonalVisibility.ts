@@ -200,9 +200,10 @@ export function isAllEntryConfirmedOutOfSeason(
 }
 
 /**
- * All Entertainment list after the seasonal rule: toggle OFF hides confirmed
+ * All Entertainment list after the visibility rules: toggle OFF hides confirmed
  * out-of-season entries (curated and explicitly-classified provider-only),
- * toggle ON reveals them. Pure, so the page and DEV cases share one rule.
+ * toggle ON reveals them; entries confirmed inactive today (Phase 14.4.1) stay
+ * hidden either way. Pure, so the page and DEV cases share one rule.
  */
 export function applyAllEntertainmentSeasonalVisibility(
   entries: AllEntertainmentEntry[],
@@ -212,11 +213,14 @@ export function applyAllEntertainmentSeasonalVisibility(
   showOutOfSeason: boolean,
   instant?: Date,
 ): AllEntertainmentEntry[] {
-  return showOutOfSeason
-    ? entries
-    : entries.filter(
-        (e) => !isAllEntryConfirmedOutOfSeason(e, parkId, resort, today, instant) && !isAllEntryConfirmedInactiveToday(e, parkId, resort, today, instant),
-      );
+  // Two independent reasons to hide. The out-of-season toggle controls ONLY the
+  // seasonal one; an entry hidden solely because today's verified schedule confirms
+  // no activity is never revealed by it. (A confirmed out-of-season entry is hidden
+  // for its season; the toggle reveals it regardless of today's evidence.)
+  return entries.filter((e) => {
+    if (isAllEntryConfirmedOutOfSeason(e, parkId, resort, today, instant)) return showOutOfSeason;
+    return !isAllEntryConfirmedInactiveToday(e, parkId, resort, today, instant);
+  });
 }
 
 // ============================================
@@ -839,7 +843,15 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     return [
       { label: "14.4.1 Waits & Shows + All Entertainment: neutral show hidden only with complete zero-activity evidence (feed extends past today, nothing today)", ok: () => {
         const h = hidden(HAPPILY_UUID, "Happily Ever After", [perf("2026-11-11T21:00:00-05:00")]);
-        return h.ws && h.all && h.allOn; // the toggle ON still reveals it
+        return h.ws && h.all && !h.allOn; // hidden solely for inactivity: the out-of-season toggle must NOT reveal it
+      } },
+      { label: "14.4.1 independence: out-of-season toggle reveals seasonal hides (even when also inactive) but never an inactivity-only hide; event browsing still lists it", ok: () => {
+        const FR = "46a67154-8d90-427a-ad5c-700b41d90966";
+        const off = hidden(FR, "Frozen Holiday Surprise", [perf(nextDay("2026-11-10"))], "2026-11-10"); // off-season AND flagged inactive
+        const season = hidden(FR, "Frozen Holiday Surprise", [perf(nextDay("2026-11-21"))], "2026-11-21"); // in season, inactive only
+        const neutral = hidden(HAPPILY_UUID, "Happily Ever After", [perf("2026-11-11T21:00:00-05:00")]); // neutral, inactive only
+        const offNoEvidence = hidden(FR, "Frozen Holiday Surprise", [], "2026-11-10"); // off-season, no evidence
+        return off.all && off.allOn && season.all && !season.allOn && neutral.all && !neutral.allOn && offNoEvidence.all && offNoEvidence.allOn;
       } },
       { label: "14.4.1 empty showtimes, missing entity, failed provider, stale, dropped, provider OPERATING never hide", ok: () => {
         const when = NOW;
