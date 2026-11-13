@@ -11,14 +11,14 @@ import {
   normalizeParkEntertainmentShowtimes,
   type ParkEntertainmentShowtimes,
 } from "./entertainmentShowtimes";
-import { fetchParkHistory, type GetHistory } from "./entertainmentHistoryService";
+import { fetchParkHistory, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
 import { themeParks, type ThemeParksLive, type ThemeParksResult } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 /** Fetch the park's live payload via the shared ThemeParks client and normalize it. */
 export async function getParkEntertainmentShowtimes(
   parkId: ParkId,
-  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory } = {},
+  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess } = {},
 ): Promise<ParkEntertainmentShowtimes> {
   const getLive = opts.getLive ?? ((id: string) => themeParks.getLive(id));
   const result = await getLive(THEMEPARKS_PARKS[parkId].entityId);
@@ -27,7 +27,7 @@ export async function getParkEntertainmentShowtimes(
   // Phase 14.4.2: history only when it could decide an entry (bounded provider usage); failure → first pass stands.
   if (!first.entries.some((e) => e.historyCandidate)) return first;
   const instant = opts.instant ?? new Date();
-  const history = await fetchParkHistory(parkId, instant, opts.getHistory);
+  const history = await fetchParkHistory(parkId, instant, opts.getHistory, opts.getHistoryAccess);
   return normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date(), history);
 }
 

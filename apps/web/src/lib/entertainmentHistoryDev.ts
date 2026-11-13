@@ -7,8 +7,11 @@
  *   runDevHistoryAssistedFilteringCases()   // sync: evidence thresholds + visibility
  *   runDevPartyMeetHoursConsistencyCases()  // async: All Entertainment vs Waits & Shows
  *
+ * Phase 14.4.2 authenticated expansion: runDevHistoryAccessChainCases() (async, service
+ * fetch chain), runDevHistoryLongWindowFilteringCases() (async, 30-day end to end).
+ *
  * Pure evidence-reliability cases live beside the logic: runDevEntertainmentHistoryCases()
- * (entertainmentHistory.ts); provider-client history cases: runDevThemeParksApiCases().
+ * and runDevEntertainmentHistoryLongWindowCases() (entertainmentHistory.ts); provider-client history cases: runDevThemeParksApiCases().
  */
 
 import type { ParkId } from "@disney-wait-planner/shared";
@@ -19,6 +22,7 @@ import { normalizeParkEntertainmentShowtimes, type EntertainmentShowtimeEntry } 
 import { buildParkEventMeets, describeEventMeet } from "./eventExclusiveMeets";
 import { applyAllEntertainmentSeasonalVisibility, isEntertainmentHiddenToday } from "./seasonalVisibility";
 import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { THEMEPARKS_PARKS } from "./themeParksProviders";
 import type { ThemeParksHistoryDaily, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 
 const HEA = "22b78ed9-a692-47cb-b6a4-6d1224ff67e3";
@@ -179,4 +183,161 @@ export async function runDevPartyMeetHoursConsistencyCases(): Promise<string[]> 
   check("ambiguous registered window (no end) is dropped, never shown as a time, schedule incomplete", bv.collapsedText !== "6:00 PM" && bad.all.entries.find((e) => e.id === `provider:${JOIN_SANTA}`)!.showtime.incomplete);
   check("Queue-Times behavior untouched: no-record meet shows no wait and no status text", meetView.waitText === null && meetView.statusText === null);
   return failures;
+}
+
+// ============================================
+// Phase 14.4.2 (authenticated 30-day expansion) DEV cases
+// ============================================
+
+const FANTASMIC_DLR = "8c36ff0b-3a32-4d7b-9388-0516c19277db";
+const DLR_NOW = new Date("2026-11-13T19:00:00Z"); // 11:00 AM PST Fri Nov 13
+const DLR_TODAY = "2026-11-13";
+const wdOf = (d: string) => new Date(`${d}T12:00:00Z`).getUTCDay();
+/** Dark every Friday, performing otherwise (a weekly pattern generated from dates, not from a show name). */
+const weeklyFriDark = (d: string): number | "-" => (d === DLR_TODAY ? "-" : wdOf(d) === 5 ? 0 : 2);
+
+/** Service chain: one bounded request, a 7-day retry only for access/shape failures. */
+export async function runDevHistoryAccessChainCases(): Promise<string[]> {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const { fetchParkHistory } = await import("./entertainmentHistoryService");
+  const span = (r: { from: string; to: string }) => Math.round((Date.parse(`${r.to}T00:00:00Z`) - Date.parse(`${r.from}T00:00:00Z`)) / 86_400_000) + 1;
+  const run = async (maxDays: number, answers: Array<ThemeParksResult<ThemeParksHistoryDaily> | "throw">) => {
+    const asked: number[] = [];
+    let i = 0;
+    const res = await fetchParkHistory("disneyland", DLR_NOW, async (_id, r) => {
+      asked.push(span(r));
+      const a = answers[Math.min(i++, answers.length - 1)];
+      if (a === "throw") throw new Error("boom");
+      return a;
+    }, () => ({ maxDays }));
+    return { asked, res };
+  };
+  const good = (days: number, over: { hasMore?: boolean } = {}) => devHistoryFixture(DLR_TODAY, { x: () => 2 }, { days, ...over });
+  const err = (kind: "unauthorized" | "history_window" | "rate_limited" | "timeout" | "network"): ThemeParksResult<ThemeParksHistoryDaily> => ({ ok: false, error: { kind, message: "x" } });
+
+  let r = await run(30, [good(30)]);
+  check("authenticated: ONE 30-day request when it works", r.asked.join() === "30" && r.res.ok);
+  r = await run(7, [good(7)]);
+  check("anonymous: ONE 7-day request", r.asked.join() === "7" && r.res.ok);
+  r = await run(30, [err("history_window"), good(7)]);
+  check("30-day refused (key not honored) → exactly one 7-day retry", r.asked.join() === "30,7" && r.res.ok && r.res.data.to === DLR_TODAY);
+  r = await run(30, [err("unauthorized"), good(7)]);
+  check("401/403 credential failure → one 7-day retry", r.asked.join() === "30,7" && r.res.ok);
+  r = await run(30, [good(30, { hasMore: true }), good(7)]);
+  check("paged 30-day answer (hasMore) → one 7-day retry", r.asked.join() === "30,7" && r.res.ok && !r.res.data.hasMore);
+  for (const k of ["rate_limited", "timeout", "network"] as const) {
+    r = await run(30, [err(k), good(7)]);
+    check(`${k} on the 30-day request → no retry storm`, r.asked.join() === "30" && !r.res.ok && r.res.error.kind === k);
+  }
+  r = await run(30, ["throw"]);
+  check("a throwing provider call never throws out of the service", !r.res.ok && r.res.error.kind === "network" && r.asked.join() === "30");
+  r = await run(30, [err("history_window"), err("rate_limited")]);
+  check("retry failure surfaces the last typed error", !r.res.ok && r.res.error.kind === "rate_limited" && r.asked.join() === "30,7");
+  r = await run(7, [err("history_window"), good(7)]);
+  check("anonymous 7-day failure is never retried", r.asked.join() === "7" && !r.res.ok);
+  r = await run(5, [good(7)]);
+  check("a tier reporting <7 days still asks the 7-day minimum once", r.asked.join() === "7");
+  return failures;
+}
+
+/** 30-day evidence through showtimes/All Entertainment: live wins, multi-ref, midnight, fallback, no leakage. */
+export async function runDevHistoryLongWindowFilteringCases(): Promise<string[]> {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const { createThemeParksClient } = await import("./themeParksApi");
+  const { getParkEntertainmentShowtimes } = await import("./entertainmentShowtimesService");
+  const find = (r: { entries: EntertainmentShowtimeEntry[] }, name: string) => r.entries.find((e) => e.dwpName === name)!;
+  const hid = (e: EntertainmentShowtimeEntry) => e.confirmedNoActivityToday === true;
+  const dq = (): LiveEntry[] => ["a", "b", "c"].map((k, i) => entry(`0000000${i}-0000-4000-8000-00000000000${i}`, [st("2026-11-13T15:00:00-08:00")], k, "OPERATING"));
+  const fan = (liveEntries: LiveEntry[], hist: ThemeParksResult<ThemeParksHistoryDaily> | null, at = DLR_NOW, over = {}) =>
+    find(normalizeParkEntertainmentShowtimes("disneyland", liveOf([...dq(), ...liveEntries], at, over), at, hist), "Fantasmic!");
+  const h30 = (spec: Parameters<typeof devHistoryFixture>[1] = { [FANTASMIC_DLR]: weeklyFriDark }, o = {}) => devHistoryFixture(DLR_TODAY, spec, { days: 30, ...o });
+  const h7 = (spec: Parameters<typeof devHistoryFixture>[1]) => devHistoryFixture(DLR_TODAY, spec, { days: 7 });
+
+  const w = fan([entry(FANTASMIC_DLR, [])], h30());
+  check("30-day weekly pattern + clean empty live + quorum → confirmed (history_weekly)", hid(w) && w.inactivityBasis === "history_weekly" && w.status === "none_posted");
+  check("same entry without a published-today quorum → visible", !hid(find(normalizeParkEntertainmentShowtimes("disneyland", liveOf([entry(FANTASMIC_DLR, [])], DLR_NOW), DLR_NOW, h30()), "Fantasmic!")));
+  check("live performance today beats the 30-day weekly pattern", !hid(fan([entry(FANTASMIC_DLR, [st("2026-11-13T21:30:00-08:00")])], h30())));
+  check("live operating window today beats history", !hid(fan([entry(FANTASMIC_DLR, [st("2026-11-13T09:00:00-08:00", "Operating", "2026-11-13T22:00:00-08:00")])], h30())));
+  check("today's history row active vetoes the 30-day pattern", !hid(fan([entry(FANTASMIC_DLR, [])], h30({ [FANTASMIC_DLR]: (d) => (d === DLR_TODAY ? 1 : weeklyFriDark(d)) }))));
+  check("history failure / null → visible (no history route), forward horizon still works", !hid(fan([entry(FANTASMIC_DLR, [])], null)) && !hid(fan([entry(FANTASMIC_DLR, [])], { ok: false, error: { kind: "unauthorized", message: "x" } })) && hid(fan([entry(FANTASMIC_DLR, [st("2026-11-14T21:30:00-08:00")])], null)));
+  check("paged/stale/lagging 30-day history → visible", !hid(fan([entry(FANTASMIC_DLR, [])], h30(undefined, { hasMore: true }))) && !hid(fan([entry(FANTASMIC_DLR, [])], h30(undefined, { origin: "stale" }))));
+  check("schedule changed (performed the last two Fridays) → visible", !hid(fan([entry(FANTASMIC_DLR, [])], h30({ [FANTASMIC_DLR]: (d) => (d === DLR_TODAY ? "-" : wdOf(d) === 5 && d < "2026-10-30" ? 0 : 2) }))));
+  check("30 days of daily performances then an empty live day → visible", !hid(fan([entry(FANTASMIC_DLR, [])], h30({ [FANTASMIC_DLR]: (d) => (d === DLR_TODAY ? "-" : 2) }))));
+  check("anonymous 7-day fallback keeps the short rules (≥3 performed, ≥2 unexplained dark, ≥5 classified)", hid(fan([entry(FANTASMIC_DLR, [])], h7({ [FANTASMIC_DLR]: [2, 0, 2, 0, 2, 2, "-"] }))) && fan([entry(FANTASMIC_DLR, [])], h7({ [FANTASMIC_DLR]: [2, 0, 2, 0, 2, 2, "-"] })).inactivityBasis === "history");
+  check("a Friday-dark weekly show is NOT hidden by the 7-day window alone (one dark day)", !hid(fan([entry(FANTASMIC_DLR, [])], h7({ [FANTASMIC_DLR]: [2, 2, 2, 2, 2, 0, "-"] }))));
+
+  // Multi-ref (Bluey show + attraction): every ref needs the same evidence.
+  {
+    const both = [entry(BLUEY_SHOW, []), entry(BLUEY_ATTR, [])];
+    const f = (hist: ThemeParksResult<ThemeParksHistoryDaily>, live: LiveEntry[] = both) =>
+      find(normalizeParkEntertainmentShowtimes("disneyland", liveOf([...dq(), ...live], DLR_NOW), DLR_NOW, hist), "Bluey's Best Day Ever!");
+    check("multi-ref 30-day: both refs weekly-dark → confirmed", hid(f(h30({ [BLUEY_SHOW]: weeklyFriDark, [BLUEY_ATTR]: weeklyFriDark }))));
+    check("multi-ref 30-day: one ref performing daily → visible", !hid(f(h30({ [BLUEY_SHOW]: weeklyFriDark, [BLUEY_ATTR]: (d) => (d === DLR_TODAY ? "-" : 2) }))));
+    check("multi-ref 30-day: one ref absent from history → visible", !hid(f(h30({ [BLUEY_SHOW]: weeklyFriDark }))));
+    check("multi-ref 30-day: one ref absent from live → visible", !hid(f(h30({ [BLUEY_SHOW]: weeklyFriDark, [BLUEY_ATTR]: weeklyFriDark }), [entry(BLUEY_SHOW, [])])));
+  }
+
+  // Resort-local midnight.
+  const AFTER_MIDNIGHT = new Date("2026-11-14T08:30:00Z"); // 12:30 AM PST Nov 14
+  check("just after local midnight: yesterday's 30-day window is rejected", !hid(fan([entry(FANTASMIC_DLR, [])], h30(), AFTER_MIDNIGHT)));
+  check("evening: 11:30 PM PST is still Nov 13 although UTC is Nov 14", (() => {
+    const late = new Date("2026-11-14T07:30:00Z");
+    const q = dq().map((x) => ({ ...x, showtimes: [st("2026-11-13T22:00:00-08:00")] }));
+    return hid(find(normalizeParkEntertainmentShowtimes("disneyland", liveOf([...q, entry(FANTASMIC_DLR, [])], late, { fetchedAt: late.getTime() }), late, devHistoryFixture(DLR_TODAY, { [FANTASMIC_DLR]: weeklyFriDark }, { days: 30, fetchedAt: late.getTime() })), "Fantasmic!"));
+  })());
+
+  // All Entertainment shares the evidence (curated + provider-only) and honors seasonal/party rules.
+  {
+    const PO = "11111111-2222-4333-8444-555555555555";
+    const all = buildParkAllEntertainment("disneyland", liveOf([...dq(), entry(FANTASMIC_DLR, []), { ...entry(PO, []), name: "Some Unlisted Show" }], DLR_NOW), DLR_NOW, h30({ [FANTASMIC_DLR]: weeklyFriDark, [PO]: weeklyFriDark }));
+    const shown = applyAllEntertainmentSeasonalVisibility(all.entries, "disneyland", "DLR", DLR_TODAY, false, DLR_NOW);
+    check("All Entertainment: curated and provider-only entries hidden on the same 30-day evidence", !shown.some((x) => x.name === "Fantasmic!" || x.name === "Some Unlisted Show") && all.entries.some((x) => x.name === "Fantasmic!"));
+    check("All Entertainment without history keeps them visible", applyAllEntertainmentSeasonalVisibility(buildParkAllEntertainment("disneyland", liveOf([...dq(), entry(FANTASMIC_DLR, [])], DLR_NOW), DLR_NOW, null).entries, "disneyland", "DLR", DLR_TODAY, false, DLR_NOW).some((x) => x.name === "Fantasmic!"));
+  }
+
+  // End to end through the real client (mock transport): key tiers, fallback, no secret leakage.
+  {
+    const KEY = "e2e-secret-key-9876543210";
+    const body = (hist: ThemeParksResult<ThemeParksHistoryDaily>) => {
+      if (!hist.ok) return {};
+      const d = hist.data;
+      return { id: THEMEPARKS_PARKS_DLR(), name: "DLR", timezone: "America/Los_Angeles", range: { from: d.from, to: d.to }, next: null,
+        entities: d.entities.map((e) => ({ id: e.entityId.length === 36 ? e.entityId : `00000000-0000-4000-8000-${String(Math.abs([...e.entityId].reduce((a, c) => a * 31 + c.charCodeAt(0), 7)) % 1e12).padStart(12, "0")}`, name: e.entityId, entityType: e.entityType, days: e.days.map((x) => ({ date: x.date, showCount: x.showCount, operatingMinutes: x.operatingMinutes, inParkHours: { scheduledMinutes: x.scheduledMinutes } })) })) };
+    };
+    const mkClient = (mode: "ok" | "badkey", apiKey: string | null) => {
+      const calls: Array<{ url: string; key: string | undefined }> = [];
+      const client = createThemeParksClient({
+        apiKey,
+        now: () => DLR_NOW.getTime(),
+        fetchImpl: (async (u: unknown, init?: RequestInit) => {
+          const url = String(u); const k = (init?.headers as Record<string, string> | undefined)?.["x-api-key"];
+          calls.push({ url, key: k });
+          const m = /from=([\d-]+)&to=([\d-]+)/.exec(url)!;
+          const days = Math.round((Date.parse(`${m[2]}T00:00:00Z`) - Date.parse(`${m[1]}T00:00:00Z`)) / 86_400_000) + 1;
+          if (mode === "badkey" && days > 7) return new Response(JSON.stringify({ error: { type: "HISTORY_WINDOW_EXCEEDED" } }), { status: 403 });
+          return new Response(JSON.stringify(body(devHistoryFixture(DLR_TODAY, { [FANTASMIC_DLR]: weeklyFriDark }, { days }))), { status: 200 });
+        }) as typeof fetch,
+      });
+      return { client, calls };
+    };
+    const liveOk = async () => liveOf([...dq(), entry(FANTASMIC_DLR, [])], DLR_NOW);
+    const run = async (client: ReturnType<typeof createThemeParksClient>) =>
+      getParkEntertainmentShowtimes("disneyland", { instant: DLR_NOW, getLive: liveOk, getHistory: (id, r) => client.getHistoryDaily(id, r), getHistoryAccess: () => client.historyAccess() });
+    const a = mkClient("ok", KEY); const ra = await run(a.client);
+    check("e2e authenticated: one 30-day request carrying the key; entry confirmed (history_weekly)", a.calls.length === 1 && a.calls[0].key === KEY && /from=2026-10-15&to=2026-11-13/.test(a.calls[0].url) && find(ra, "Fantasmic!").inactivityBasis === "history_weekly");
+    const b = mkClient("badkey", KEY); const rb = await run(b.client);
+    check("e2e bad key: 30-day refused → one anonymous 7-day retry without the key (short rules apply, weekly pattern alone not enough)", b.calls.length === 2 && b.calls[0].key === KEY && b.calls[1].key === undefined && /from=2026-11-07/.test(b.calls[1].url) && !hid(find(rb, "Fantasmic!")));
+    const c = mkClient("ok", null); const rc = await run(c.client);
+    check("e2e no key: one anonymous 7-day request, no key header", c.calls.length === 1 && c.calls[0].key === undefined && /from=2026-11-07/.test(c.calls[0].url) && !hid(find(rc, "Fantasmic!")));
+    check("e2e: no secret in service responses or request URLs", ![ra, rb, rc].some((x) => JSON.stringify(x).includes(KEY)) && ![...a.calls, ...b.calls, ...c.calls].some((x) => x.url.includes(KEY)));
+    const d = mkClient("ok", KEY); await run(d.client); await run(d.client);
+    check("e2e: second request within the hour is served from cache (no extra provider call)", d.calls.length === 1);
+  }
+  return failures;
+}
+
+function THEMEPARKS_PARKS_DLR(): string {
+  return THEMEPARKS_PARKS.disneyland.entityId;
 }

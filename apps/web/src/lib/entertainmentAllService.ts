@@ -11,7 +11,7 @@ import { queryCatalog } from "./catalogQuery";
 import { PROVIDER_ENTERTAINMENT_LOCATIONS } from "./entertainmentProviderLocations";
 import { PARK_LABELS } from "./parkMetadata";
 import { buildParkAllEntertainment, type ParkAllEntertainment } from "./entertainmentAll";
-import { fetchParkHistory, type GetHistory } from "./entertainmentHistoryService";
+import { fetchParkHistory, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
 import { applyRegisteredMeetWindows } from "./eventExclusiveMeets";
 import { themeParks, type ThemeParksLive, type ThemeParksResult } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
@@ -19,7 +19,7 @@ import { THEMEPARKS_PARKS } from "./themeParksProviders";
 /** Fetch the park's live payload via the shared ThemeParks client and build the All Entertainment inventory. */
 export async function getParkAllEntertainment(
   parkId: ParkId,
-  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory } = {},
+  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess } = {},
 ): Promise<ParkAllEntertainment> {
   const getLive = opts.getLive ?? ((id: string) => themeParks.getLive(id));
   const raw = await getLive(THEMEPARKS_PARKS[parkId].entityId);
@@ -31,7 +31,7 @@ export async function getParkAllEntertainment(
   // History only when it could decide an entry (bounded provider usage); failure → first pass stands.
   if (!first.entries.some((e) => e.showtime.historyCandidate)) return first;
   const instant = opts.instant ?? new Date();
-  const history = await fetchParkHistory(parkId, instant, opts.getHistory);
+  const history = await fetchParkHistory(parkId, instant, opts.getHistory, opts.getHistoryAccess);
   return buildParkAllEntertainment(parkId, result, opts.instant ?? new Date(), history);
 }
 

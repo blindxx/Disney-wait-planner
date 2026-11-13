@@ -93,6 +93,26 @@ export function getPartyNightState(parkId: ParkId, date: string): PartyNightStat
   return sawEvent && allConfirmed ? "not_party" : "unknown";
 }
 
+/**
+ * Phase 14.4.2: ids of the separately ticketed select-night parties confirmed on
+ * a park-qualified resort-local date (registry-only, same data and rules as
+ * `getPartyNightState`, which is "party" exactly when this is non-empty). A
+ * 30-day history window can span different parties (e.g. MNSSHP in October,
+ * MVMCP in November): learned suppression is only ever compared against nights
+ * of the SAME event as the date being judged.
+ */
+export function getPartyNightEventIds(parkId: ParkId, date: string): string[] {
+  if (!isValidIsoCalendarDate(date)) return [];
+  const year = Number(date.slice(0, 4));
+  const ids: string[] = [];
+  for (const event of SEASONAL_EVENTS) {
+    if (event.format !== "select-night" || event.admission !== "separate-ticket" || !event.parkIds.includes(parkId)) continue;
+    const seasons = [getSeasonalEventSeason(event.id, year), getSeasonalEventSeason(event.id, year - 1)];
+    if (seasons.some((x) => x?.eventNights?.includes(date))) ids.push(event.id);
+  }
+  return ids;
+}
+
 export type SeasonalEventSeasonStatus =
   | "upcoming"
   | "in_progress"

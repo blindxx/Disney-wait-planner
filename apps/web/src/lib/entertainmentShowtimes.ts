@@ -164,7 +164,7 @@ export interface EntertainmentShowtimeEntry {
   /**
    * Phase 14.4.2: how `confirmedNoActivityToday` was established, for
    * diagnostics only — "forward_horizon" (feed demonstrably extends past
-   * today), "history" / "history_party" (ThemeParks history corroborated a
+   * today), "history" / "history_party" / "history_weekly" (ThemeParks history corroborated a
    * clean live empty day; see entertainmentHistory.ts). Absent when unconfirmed.
    */
   inactivityBasis?: InactivityBasis;
@@ -483,7 +483,7 @@ export function entryFromMapping(
       const todayParty = getPartyNightState(m.parkId, localDate);
       const published = countEntitiesActiveToday(live, resort, localDate) >= MIN_PUBLISHED_ENTITIES_TODAY;
       const bases = m.provider.map((r, i) => (scans[i].forwardHorizon ? "forward_horizon" as const : published ? historySupportForRef(history, r.entityId, todayParty) : null));
-      if (bases.every((b) => b !== null)) inactivityBasis = bases.includes("history_party") ? "history_party" : bases.includes("history") ? "history" : "forward_horizon";
+      if (bases.every((b) => b !== null)) inactivityBasis = bases.includes("history_party") ? "history_party" : bases.includes("history_weekly") ? "history_weekly" : bases.includes("history") ? "history" : "forward_horizon";
     }
   }
   const confirmedNoActivityToday = inactivityBasis !== undefined;
