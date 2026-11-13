@@ -663,6 +663,7 @@ const TTL = {
 } as const;
 
 export type HistoryTier = "authenticated" | "anonymous";
+export type HistoryKeyStatus = "none" | "active" | "cooldown";
 /** Provider windows per tier (calendar days, inclusive of today). */
 export const HISTORY_MAX_DAYS: Record<HistoryTier, number> = { authenticated: 30, anonymous: 7 };
 /** Provider pools: authenticated 600/hour, anonymous 60/hour. Local per-instance caps stay well below. */
@@ -732,9 +733,12 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     return k ? message.split(k).join("[redacted]") : message;
   }
   /** Current history access: the key tier unless the key was recently rejected. */
-  function historyAccess(): { tier: HistoryTier; maxDays: number } {
-    const tier: HistoryTier = readApiKey() !== null && now() >= keyRejectedUntil ? "authenticated" : "anonymous";
-    return { tier, maxDays: HISTORY_MAX_DAYS[tier] };
+  function historyAccess(): { tier: HistoryTier; maxDays: number; keyStatus: HistoryKeyStatus } {
+    const configured = readApiKey() !== null;
+    const tier: HistoryTier = configured && now() >= keyRejectedUntil ? "authenticated" : "anonymous";
+    // keyStatus is non-secret diagnostics: "none" = no usable key configured, "active" = configured and
+    // not rejected, "cooldown" = configured but refused within the last KEY_REJECT_COOLDOWN_MS.
+    return { tier, maxDays: HISTORY_MAX_DAYS[tier], keyStatus: !configured ? "none" : tier === "authenticated" ? "active" : "cooldown" };
   }
 
   function remember(key: string, entry: CacheEntry) {

@@ -22,7 +22,17 @@ import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 export type GetHistory = (id: string, range: { from: string; to: string }) => Promise<ThemeParksResult<ThemeParksHistoryDaily>>;
 /** Current history access tier (never exposes the key). */
-export type GetHistoryAccess = () => { maxDays: number };
+export type GetHistoryAccess = () => { maxDays: number; keyStatus?: "none" | "active" | "cooldown" };
+
+/**
+ * Optional, secret-free record of what `fetchParkHistory` did (diagnostics only):
+ * the tier/window of each attempt and its typed outcome. Filling it never changes
+ * behavior and never issues a request.
+ */
+export interface HistoryFetchTrace {
+  keyStatus: "none" | "active" | "cooldown" | "unknown";
+  attempts: Array<{ days: number; tier: "authenticated" | "anonymous"; outcome: string }>;
+}
 
 /**
  * Park-level history for `instant`'s resort-local window; never throws.
@@ -40,15 +50,27 @@ export async function fetchParkHistory(
   instant: Date,
   getHistory: GetHistory = (id, range) => themeParks.getHistoryDaily(id, range),
   getAccess: GetHistoryAccess = () => themeParks.historyAccess(),
+  trace?: HistoryFetchTrace,
 ): Promise<ThemeParksResult<ThemeParksHistoryDaily>> {
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const id = THEMEPARKS_PARKS[parkId].entityId;
   const call = async (days: number): Promise<ThemeParksResult<ThemeParksHistoryDaily>> => {
+    const access = getAccess();
+    let res: ThemeParksResult<ThemeParksHistoryDaily>;
     try {
-      return await getHistory(id, historyWindow(resort, instant, days));
+      res = await getHistory(id, historyWindow(resort, instant, days));
     } catch (e) {
-      return { ok: false, error: { kind: "network", message: e instanceof Error ? e.message : "history request failed" } };
+      res = { ok: false, error: { kind: "network", message: e instanceof Error ? e.message : "history request failed" } };
     }
+    if (trace) {
+      trace.keyStatus = access.keyStatus ?? "unknown";
+      trace.attempts.push({
+        days,
+        tier: access.maxDays > HISTORY_SHORT_DAYS ? "authenticated" : "anonymous",
+        outcome: res.ok ? (res.meta.origin === "stale" ? "stale" : res.data.hasMore ? "paged" : "ok") : res.error.kind,
+      });
+    }
+    return res;
   };
   const firstDays = Math.max(HISTORY_SHORT_DAYS, getAccess().maxDays);
   const first = await call(firstDays);
@@ -77,13 +99,14 @@ export async function fetchParkHistoryWithin(
   instant: Date,
   getHistory?: GetHistory,
   getAccess?: GetHistoryAccess,
+  trace?: HistoryFetchTrace,
 ): Promise<ThemeParksResult<ThemeParksHistoryDaily>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<ThemeParksResult<ThemeParksHistoryDaily>>((resolve) => {
     timer = setTimeout(() => resolve({ ok: false, error: { kind: "timeout", message: "history enrichment deadline" } }), deadlineMs);
   });
   try {
-    return await Promise.race([fetchParkHistory(parkId, instant, getHistory, getAccess), deadline]);
+    return await Promise.race([fetchParkHistory(parkId, instant, getHistory, getAccess, trace), deadline]);
   } finally {
     clearTimeout(timer);
   }

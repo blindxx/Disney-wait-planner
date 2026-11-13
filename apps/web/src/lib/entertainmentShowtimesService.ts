@@ -11,14 +11,15 @@ import {
   normalizeParkEntertainmentShowtimes,
   type ParkEntertainmentShowtimes,
 } from "./entertainmentShowtimes";
-import { HISTORY_ENRICHMENT_DEADLINE_MS, fetchParkHistoryWithin, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
+import { HISTORY_ENRICHMENT_DEADLINE_MS, fetchParkHistoryWithin, type GetHistory, type GetHistoryAccess, type HistoryFetchTrace } from "./entertainmentHistoryService";
+import { logHistoryDiagnostics, type HistoryDiagSink } from "./historyDiagnostics"; // history-diagnostics (temporary, Preview-only)
 import { themeParks, type ThemeParksLive, type ThemeParksResult } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 /** Fetch the park's live payload via the shared ThemeParks client and normalize it. */
 export async function getParkEntertainmentShowtimes(
   parkId: ParkId,
-  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess; skipHistory?: boolean; historyDeadlineMs?: number } = {},
+  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess; skipHistory?: boolean; historyDeadlineMs?: number; diagEnv?: Record<string, string | undefined>; diagSink?: HistoryDiagSink } = {},
 ): Promise<ParkEntertainmentShowtimes> {
   const getLive = opts.getLive ?? ((id: string) => themeParks.getLive(id));
   const result = await getLive(THEMEPARKS_PARKS[parkId].entityId);
@@ -26,10 +27,17 @@ export async function getParkEntertainmentShowtimes(
   const first = normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date());
   // Phase 14.4.2: history only when it could decide an entry (bounded provider usage); failure → first pass stands.
   // Callers with their own tight deadlines (Tom) pass skipHistory: they never consume the inactivity flag.
-  if (opts.skipHistory || !first.entries.some((e) => e.historyCandidate)) return first;
+  if (opts.skipHistory) return first;
+  if (!first.entries.some((e) => e.historyCandidate)) {
+    logHistoryDiagnostics({ parkId, instant: opts.instant ?? new Date(), live: result, history: null, entries: first.entries }, opts.diagEnv ? { env: opts.diagEnv, sink: opts.diagSink } : {}); // history-diagnostics
+    return first;
+  }
   const instant = opts.instant ?? new Date();
-  const history = await fetchParkHistoryWithin(opts.historyDeadlineMs ?? HISTORY_ENRICHMENT_DEADLINE_MS, parkId, instant, opts.getHistory, opts.getHistoryAccess);
-  return normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date(), history);
+  const trace: HistoryFetchTrace = { keyStatus: "unknown", attempts: [] }; // history-diagnostics
+  const history = await fetchParkHistoryWithin(opts.historyDeadlineMs ?? HISTORY_ENRICHMENT_DEADLINE_MS, parkId, instant, opts.getHistory, opts.getHistoryAccess, trace);
+  const final = normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date(), history);
+  logHistoryDiagnostics({ parkId, instant: opts.instant ?? new Date(), live: result, history, trace, entries: final.entries }, opts.diagEnv ? { env: opts.diagEnv, sink: opts.diagSink } : {}); // history-diagnostics
+  return final;
 }
 
 /** DEV check (run manually; returns failing labels): service uses the park's provider UUID + injected clock. */

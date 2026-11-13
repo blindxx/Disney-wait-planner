@@ -398,3 +398,131 @@ export async function runDevHistoryLongWindowFilteringCases(): Promise<string[]>
 function THEMEPARKS_PARKS_DLR(): string {
   return THEMEPARKS_PARKS.disneyland.entityId;
 }
+
+// ============================================
+// Phase 14.4.2 Vercel-Preview history diagnostics (temporary) — DEV cases
+// ============================================
+
+/** Diagnostics: Preview-only gating, aggregate/safe output, dedupe, no extra requests, no secret leakage. */
+export async function runDevHistoryDiagnosticsCases(): Promise<string[]> {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const diag = await import("./historyDiagnostics");
+  const { getPartyNightEventIds } = await import("./seasonalEvents");
+  const { getParkEntertainmentShowtimes } = await import("./entertainmentShowtimesService");
+  const { getParkAllEntertainment } = await import("./entertainmentAllService");
+  const { createThemeParksClient } = await import("./themeParksApi");
+  const SECRET = "diag-secret-key-5566778899";
+  const preview = { VERCEL_ENV: "preview" };
+  const quorumMk = (): LiveEntry[] => ["a", "b", "c"].map((k, i) => entry(`0000000${i}-0000-4000-8000-00000000000${i}`, [st("2026-11-13T20:00:00-05:00")], k, "OPERATING"));
+  const mvmcp = (d: string) => getPartyNightEventIds("mk", d).includes("mvmcp");
+  // HEA-like: dark on MVMCP nights it has rows for; the 11-09 row is MISSING (a change log) → only 2 observed party-dark nights.
+  const hea = (d: string): number | "-" => (d === MK_TODAY || d === "2026-11-09" ? "-" : mvmcp(d) ? 0 : 2);
+  const hist = (days: number, o: Record<string, unknown> = {}) => devHistoryFixture(MK_TODAY, { [HEA]: hea }, { days, ...o });
+  const liveMk = () => liveOf([...quorumMk(), entry(HEA, [])], MK_NOW);
+  type S = import("./historyDiagnostics").HistoryDiagnosticSummary;
+  const run = async (getHistory: GetHistoryFn, access: { maxDays: number; keyStatus?: "none" | "active" | "cooldown" }, env: Record<string, string | undefined>, sink: (t: string, s: S) => void) =>
+    getParkEntertainmentShowtimes("mk", { instant: MK_NOW, getLive: async () => liveMk(), getHistory, getHistoryAccess: () => access, diagEnv: env, diagSink: sink });
+  type GetHistoryFn = NonNullable<Parameters<typeof getParkEntertainmentShowtimes>[1]>["getHistory"] & object;
+  const ok7 = async () => hist(7); const ok30 = async (_i: string, r: { from: string; to: string }) => hist(Math.round((Date.parse(`${r.to}T00:00:00Z`) - Date.parse(`${r.from}T00:00:00Z`)) / 86_400_000) + 1);
+
+  // Gating
+  check("enabled only when VERCEL_ENV === 'preview'", diag.isHistoryDiagnosticsEnabled({ VERCEL_ENV: "preview" }) && ![{ VERCEL_ENV: "production" }, { VERCEL_ENV: "development" }, { VERCEL_ENV: "Preview" }, { VERCEL_ENV: "" }, {}, { NODE_ENV: "development" }, { NEXT_PUBLIC_VERCEL_ENV: "preview" }].some((e) => diag.isHistoryDiagnosticsEnabled(e as Record<string, string>)));
+  for (const env of [{ VERCEL_ENV: "production" }, {}, { VERCEL_ENV: "development" }]) {
+    diag._resetHistoryDiagnosticsDedupe(); const lines: S[] = [];
+    await run(ok30, { maxDays: 30, keyStatus: "active" }, env, (_t, s) => lines.push(s));
+    check(`no output when VERCEL_ENV=${(env as { VERCEL_ENV?: string }).VERCEL_ENV ?? "(unset)"}`, lines.length === 0);
+  }
+  { // default (no injected env): this process is not a Vercel Preview → silent, never throws
+    diag._resetHistoryDiagnosticsDedupe(); const orig = console.info; let called = 0; console.info = () => { called++; };
+    const saved = process.env.VERCEL_ENV; delete process.env.VERCEL_ENV;
+    try { await getParkEntertainmentShowtimes("mk", { instant: MK_NOW, getLive: async () => liveMk(), getHistory: ok30, getHistoryAccess: () => ({ maxDays: 30 }) }); } finally { console.info = orig; if (saved !== undefined) process.env.VERCEL_ENV = saved; }
+    check("default env: nothing logged", called === 0);
+  }
+
+  // Authenticated 30-day: HEA has only 2 observed MVMCP dark nights → long rule (needs 3) keeps it visible; summary says why.
+  diag._resetHistoryDiagnosticsDedupe();
+  let lines: S[] = []; let historyCalls = 0;
+  const counting = (g: typeof ok30) => async (i: string, r: { from: string; to: string }) => { historyCalls++; return g(i, r); };
+  const trace30 = await (async () => {
+    const { fetchParkHistory } = await import("./entertainmentHistoryService");
+    const t: import("./entertainmentHistoryService").HistoryFetchTrace = { keyStatus: "unknown", attempts: [] };
+    await fetchParkHistory("mk", MK_NOW, ok30, () => ({ maxDays: 30, keyStatus: "active" }), t);
+    return t;
+  })();
+  check("trace: tier/window/outcome recorded without issuing extra requests", trace30.attempts.length === 1 && trace30.attempts[0].days === 30 && trace30.attempts[0].tier === "authenticated" && trace30.attempts[0].outcome === "ok" && trace30.keyStatus === "active");
+  const r1 = await run(counting(ok30), { maxDays: 30, keyStatus: "active" }, preview, (_t, s) => lines.push(s));
+  const s1 = lines[0];
+  check("preview: exactly one summary and exactly one history request", lines.length === 1 && historyCalls === 1 && r1.entries.length > 0);
+  check("30-day summary: tier, windows, outcome, coverage", !!s1 && s1.tier === "authenticated" && s1.keyStatus === "active" && s1.requestedDays.join() === "30" && s1.receivedDays === 30 && s1.outcome === "ok" && s1.windowComplete === true && s1.coverage.mode === "long" && s1.evidence === "accepted" && s1.park === "mk" && s1.date === MK_TODAY && s1.partyState === "party");
+  check("30-day summary: HEA kept visible with the aggregate code party_dark_insufficient, nothing hidden by history", !!s1 && s1.candidates >= 1 && (s1.keptVisible.party_dark_insufficient ?? 0) >= 1 && s1.hiddenByHistory.party === 0 && s1.hiddenByHistory.generic === 0);
+  // Same data on the anonymous 7-day tier: the short party rule (≥2) hides it.
+  diag._resetHistoryDiagnosticsDedupe(); lines = [];
+  const r2 = await run(ok7, { maxDays: 7, keyStatus: "none" }, preview, (_t, s) => lines.push(s));
+  const s2 = lines[0];
+  check("7-day anonymous summary: HEA hidden by history_party; tier anonymous, key none", !!s2 && s2.tier === "anonymous" && s2.keyStatus === "none" && s2.receivedDays === 7 && s2.coverage.mode === "short" && s2.hiddenByHistory.party >= 1 && r2.entries.some((e) => e.dwpName === "Happily Ever After" && e.inactivityBasis === "history_party"));
+  // Fallback, stale, paged, failure outcomes
+  diag._resetHistoryDiagnosticsDedupe(); lines = [];
+  const refusedThen7 = async (_i: string, r: { from: string; to: string }): Promise<ThemeParksResult<ThemeParksHistoryDaily>> => (Date.parse(r.to) - Date.parse(r.from) > 7 * 86_400_000 ? { ok: false, error: { kind: "history_window", message: SECRET } } : hist(7));
+  let accessCalls = 0;
+  await getParkEntertainmentShowtimes("mk", { instant: MK_NOW, getLive: async () => liveMk(), getHistory: refusedThen7, getHistoryAccess: () => ({ maxDays: ++accessCalls <= 2 ? 30 : 7, keyStatus: accessCalls <= 2 ? "active" : "cooldown" }), diagEnv: preview, diagSink: (_t, s) => lines.push(s) });
+  check("fallback summary: 30 then 7 requested, outcome fallback_7d", lines.length === 1 && lines[0].requestedDays.join() === "30,7" && lines[0].outcome === "fallback_7d" && lines[0].receivedDays === 7 && lines[0].tier === "authenticated");
+  const outcomeOf = async (h: ThemeParksResult<ThemeParksHistoryDaily>) => { diag._resetHistoryDiagnosticsDedupe(); const l: S[] = []; await run(async () => h, { maxDays: 7 }, preview, (_t, s) => l.push(s)); return l[0]; };
+  const stale = await outcomeOf(hist(7, { origin: "stale" }));
+  check("stale summary: outcome stale, evidence code stale, nothing hidden", stale.outcome === "stale" && stale.evidence === "stale" && stale.hiddenByHistory.party === 0 && (stale.keptVisible.no_evidence ?? 0) >= 1);
+  const paged = await outcomeOf(hist(30, { hasMore: true }));
+  check("paged summary: windowComplete false, evidence paged", paged.windowComplete === false && paged.outcome === "paged" && paged.evidence === "paged");
+  const failed = await outcomeOf({ ok: false, error: { kind: "rate_limited", message: SECRET } });
+  check("failure summary: failed:<kind>, evidence unavailable, no payload", failed.outcome === "failed:rate_limited" && failed.evidence === "unavailable" && failed.receivedDays === null && failed.windowComplete === null);
+  const thin = await outcomeOf(devHistoryFixture(MK_TODAY, { [HEA]: hea }, { days: 30, filler: false }));
+  check("thin coverage summary carries an aggregate reject code, not text", typeof thin.evidence === "string" && thin.evidence !== "accepted" && /^[a-z_]+$/.test(thin.evidence));
+
+  // Not needed: no candidate → no request, still one concise summary
+  diag._resetHistoryDiagnosticsDedupe(); lines = []; historyCalls = 0;
+  await getParkEntertainmentShowtimes("mk", { instant: MK_NOW, getLive: async () => liveOf([...quorumMk(), entry(HEA, [st("2026-11-13T21:00:00-05:00")])], MK_NOW), getHistory: counting(ok30), getHistoryAccess: () => ({ maxDays: 30 }), diagEnv: preview, diagSink: (_t, s) => lines.push(s) });
+  check("no candidate: zero history requests, one 'not_needed' summary", historyCalls === 0 && lines.length === 1 && lines[0].outcome === "not_needed" && lines[0].historyAttempted === false);
+  // skipHistory (Tom): nothing logged, nothing requested
+  diag._resetHistoryDiagnosticsDedupe(); lines = []; historyCalls = 0;
+  await getParkEntertainmentShowtimes("mk", { instant: MK_NOW, getLive: async () => liveMk(), getHistory: counting(ok30), skipHistory: true, diagEnv: preview, diagSink: (_t, s) => lines.push(s) });
+  check("skipHistory: no request and no diagnostics", historyCalls === 0 && lines.length === 0);
+
+  // Dedupe + volume
+  diag._resetHistoryDiagnosticsDedupe(); lines = []; historyCalls = 0;
+  for (let i = 0; i < 5; i++) await run(counting(ok30), { maxDays: 30, keyStatus: "active" }, preview, (_t, s) => lines.push(s));
+  check("identical decisions log once (deduped); requests are not added by diagnostics", lines.length === 1 && historyCalls === 5);
+  const input = { parkId: "mk" as const, instant: MK_NOW, live: liveMk(), history: hist(30), entries: [] as EntertainmentShowtimeEntry[] };
+  diag._resetHistoryDiagnosticsDedupe(); let n = 0;
+  const sink = () => { n++; };
+  diag.logHistoryDiagnostics(input, { env: preview, sink, nowMs: 1_000 });
+  diag.logHistoryDiagnostics(input, { env: preview, sink, nowMs: 1_000 + diag.HISTORY_DIAG_DEDUPE_MS - 1 });
+  diag.logHistoryDiagnostics(input, { env: preview, sink, nowMs: 1_000 + diag.HISTORY_DIAG_DEDUPE_MS });
+  check("dedupe window: suppressed inside, logged again after", n === 2);
+  check("a throwing sink never throws out of logging (responses unaffected)", diag.logHistoryDiagnostics(input, { env: preview, sink: () => { throw new Error("sink"); }, nowMs: 99_000_000 }) === false);
+  const all = await getParkAllEntertainment("mk", { instant: MK_NOW, getLive: async () => liveMk(), getHistory: ok7, getHistoryAccess: () => ({ maxDays: 7 }), diagEnv: preview, diagSink: (() => { n += 100; }) });
+  check("All Entertainment path also logs (once) and still returns the inventory", n >= 102 && all.entries.length > 0);
+
+  // Safe output / no secret leakage
+  diag._resetHistoryDiagnosticsDedupe(); lines = [];
+  const SHOW_NAME = "Secret Show Name " + SECRET;
+  const leakyLive = liveOf([...quorumMk(), { ...entry(HEA, []), name: SHOW_NAME, externalId: SECRET }], MK_NOW);
+  await getParkEntertainmentShowtimes("mk", { instant: MK_NOW, getLive: async () => leakyLive, getHistory: async () => ({ ok: false, error: { kind: "unauthorized", message: `bad header x-api-key: ${SECRET}`, httpStatus: 403 } }), getHistoryAccess: () => ({ maxDays: 30, keyStatus: "active" }), diagEnv: preview, diagSink: (_t, s) => lines.push(s) });
+  const out = JSON.stringify(lines);
+  const WHITELIST = ["park", "date", "partyState", "historyAttempted", "tier", "keyStatus", "requestedDays", "receivedDays", "outcome", "windowComplete", "coverage", "evidence", "entries", "candidates", "hiddenByHistory", "hiddenByForwardHorizon", "keptVisible"].sort().join();
+  check("output carries no secret, header text, provider message or entity name/id", lines.length === 1 && !out.includes(SECRET) && !/x-api-key|bearer|authorization/i.test(out) && !out.includes(HEA) && !/Secret Show/.test(out));
+  check("summary fields are the fixed whitelist of primitives/aggregates", lines.length === 1 && Object.keys(lines[0]).sort().join() === WHITELIST);
+  // Real client with a configured key: the logged line never contains it.
+  {
+    const lines2: string[] = [];
+    const client = createThemeParksClient({ apiKey: SECRET, now: () => MK_NOW.getTime(), fetchImpl: (async () => new Response(JSON.stringify({ error: { type: "HISTORY_WINDOW_EXCEEDED" } }), { status: 403 })) as typeof fetch });
+    diag._resetHistoryDiagnosticsDedupe();
+    const { fetchParkHistoryWithin } = await import("./entertainmentHistoryService");
+    const t: import("./entertainmentHistoryService").HistoryFetchTrace = { keyStatus: "unknown", attempts: [] };
+    const h = await fetchParkHistoryWithin(2_000, "mk", MK_NOW, (id, r) => client.getHistoryDaily(id, r), () => client.historyAccess(), t);
+    diag.logHistoryDiagnostics({ parkId: "mk", instant: MK_NOW, live: liveMk(), history: h, trace: t, entries: [] }, { env: preview, sink: (tag, s) => lines2.push(tag + JSON.stringify(s)) });
+    check("real client: key refused → logged as keyStatus cooldown / fallback attempts, never the key", lines2.length === 1 && !lines2[0].includes(SECRET) && /"keyStatus":"cooldown"|"keyStatus":"active"/.test(lines2[0]) && t.attempts[0].tier === "authenticated");
+    check("client.historyAccess() reports key status without exposing the key", JSON.stringify(client.historyAccess()) === JSON.stringify({ tier: "anonymous", maxDays: 7, keyStatus: "cooldown" }) && !JSON.stringify(client.historyAccess()).includes(SECRET));
+    const none = createThemeParksClient({ apiKey: null });
+    check("no configured key → keyStatus none", none.historyAccess().keyStatus === "none" && createThemeParksClient({ apiKey: SECRET }).historyAccess().keyStatus === "active");
+  }
+  return failures;
+}

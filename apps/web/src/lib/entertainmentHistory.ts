@@ -99,6 +99,15 @@ export const HISTORY_LONG_INTERMITTENT_MIN_DARK_SHARE = 0.2;
 /** Distinct live entities with a performance/operating record today before an empty ref is meaningful ("today's schedules have posted"). */
 export const MIN_PUBLISHED_ENTITIES_TODAY = 3;
 
+/** Park-level evidence rejection codes (diagnostics only; the decision logic is unchanged). */
+export type HistoryRejectCode =
+  | "unavailable" | "stale" | "fetched_other_day" | "window_unsupported" | "window_mismatch"
+  | "paged" | "dropped_entities" | "lagging" | "few_usable_days" | "low_recent_coverage";
+/** Per-ref decision codes: "supported" or the first reason a ref did not qualify. */
+export type HistoryRefCode =
+  | "supported" | "no_evidence" | "ref_absent" | "ref_unreliable" | "today_active" | "party_performed"
+  | "recent_coverage_low" | "recent_performed_low" | "party_dark_insufficient" | "party_recent_insufficient" | "no_pattern" | "party_pattern_insufficient";
+
 export type InactivityBasis = "forward_horizon" | "history" | "history_party" | "history_weekly";
 
 interface DayCounts { classified: number; performed: number; dark: number; unexplainedDark: number; partyDark: number; nonPartyPerformed: number }
@@ -134,6 +143,8 @@ export interface ParkHistoryEvidence {
   usable: boolean;
   /** Why not usable (null when usable). Diagnostic only. */
   reason: string | null;
+  /** Stable aggregate code for `reason` (diagnostics/logging; never free text). */
+  reasonCode: HistoryRejectCode | null;
   usablePriorDays: string[];
   anomalousDays: string[];
   /** lowercase entityId → profile; computed only when `usable` (todayActive is also kept when not). */
@@ -222,8 +233,8 @@ export function buildParkHistoryEvidence(
 ): ParkHistoryEvidence | null {
   if (!result) return null;
   const today = getResortLocalDate(resort, instant);
-  const base: ParkHistoryEvidence = { today, windowDays: 0, mode: null, usable: false, reason: null, usablePriorDays: [], anomalousDays: [], refs: new Map() };
-  if (!result.ok) return { ...base, reason: `history unavailable (${result.error.kind})` };
+  const base: ParkHistoryEvidence = { today, windowDays: 0, mode: null, usable: false, reason: null, reasonCode: null, usablePriorDays: [], anomalousDays: [], refs: new Map() };
+  if (!result.ok) return { ...base, reason: `history unavailable (${result.error.kind})`, reasonCode: "unavailable" };
   const h = result.data;
   const span = Math.round((Date.parse(`${h.to}T00:00:00Z`) - Date.parse(`${h.from}T00:00:00Z`)) / 86_400_000) + 1;
 
@@ -236,14 +247,14 @@ export function buildParkHistoryEvidence(
       if (t && isActive(t)) todayVeto.set(e.entityId.toLowerCase(), blank());
     }
   }
-  const reject = (reason: string): ParkHistoryEvidence => ({ ...base, reason, refs: todayVeto });
+  const reject = (reason: string, reasonCode: HistoryRejectCode): ParkHistoryEvidence => ({ ...base, reason, reasonCode, refs: todayVeto });
 
-  if (result.meta.origin === "stale") return reject("history is stale-if-error");
-  if (getResortLocalDate(resort, new Date(result.meta.fetchedAt)) !== today) return reject("history fetched on a different resort-local day");
-  if (span !== HISTORY_SHORT_DAYS && span !== HISTORY_LONG_DAYS) return reject("history window is neither the 7-day nor the 30-day window");
-  if (h.to !== today || h.from !== (addDaysToLocalDate(today, -(span - 1)) ?? "")) return reject("history window does not match today's resort-local window");
-  if (h.hasMore) return reject("history has a continuation (incomplete)");
-  if (h.droppedEntities > 0) return reject("history had malformed entities discarded");
+  if (result.meta.origin === "stale") return reject("history is stale-if-error", "stale");
+  if (getResortLocalDate(resort, new Date(result.meta.fetchedAt)) !== today) return reject("history fetched on a different resort-local day", "fetched_other_day");
+  if (span !== HISTORY_SHORT_DAYS && span !== HISTORY_LONG_DAYS) return reject("history window is neither the 7-day nor the 30-day window", "window_unsupported");
+  if (h.to !== today || h.from !== (addDaysToLocalDate(today, -(span - 1)) ?? "")) return reject("history window does not match today's resort-local window", "window_mismatch");
+  if (h.hasMore) return reject("history has a continuation (incomplete)", "paged");
+  if (h.droppedEntities > 0) return reject("history had malformed entities discarded", "dropped_entities");
   const mode = span === HISTORY_LONG_DAYS ? "long" : "short";
 
   const priorDays: string[] = [];
@@ -268,47 +279,64 @@ export function buildParkHistoryEvidence(
   const anomalousDays = stats.filter((s) => covered(s) && anomalous(s)).map((s) => s.date);
   const usablePriorDays = stats.filter((s) => covered(s) && !anomalous(s)).map((s) => s.date);
   const withDays = { ...base, windowDays: span, mode, anomalousDays, usablePriorDays } as ParkHistoryEvidence;
-  if (!yStat || !covered(yStat)) return { ...withDays, reason: "history does not yet cover yesterday (lagging feed)", refs: todayVeto };
+  if (!yStat || !covered(yStat)) return { ...withDays, reason: "history does not yet cover yesterday (lagging feed)", reasonCode: "lagging", refs: todayVeto };
   if (mode === "short") {
-    if (usablePriorDays.length < HISTORY_MIN_USABLE_PRIOR_DAYS) return { ...withDays, reason: "too few usable prior days", refs: todayVeto };
+    if (usablePriorDays.length < HISTORY_MIN_USABLE_PRIOR_DAYS) return { ...withDays, reason: "too few usable prior days", reasonCode: "few_usable_days", refs: todayVeto };
   } else {
     const recent7 = new Set(priorDays.slice(-7));
-    if (usablePriorDays.length < Math.ceil(priorDays.length * HISTORY_LONG_MIN_USABLE_SHARE)) return { ...withDays, reason: "too few usable prior days (30-day window)", refs: todayVeto };
-    if (usablePriorDays.filter((d) => recent7.has(d)).length < HISTORY_LONG_MIN_USABLE_RECENT7) return { ...withDays, reason: "too little recent coverage (last 7 days)", refs: todayVeto };
+    if (usablePriorDays.length < Math.ceil(priorDays.length * HISTORY_LONG_MIN_USABLE_SHARE)) return { ...withDays, reason: "too few usable prior days (30-day window)", reasonCode: "few_usable_days", refs: todayVeto };
+    if (usablePriorDays.filter((d) => recent7.has(d)).length < HISTORY_LONG_MIN_USABLE_RECENT7) return { ...withDays, reason: "too little recent coverage (last 7 days)", reasonCode: "low_recent_coverage", refs: todayVeto };
   }
 
   const refs = new Map<string, HistoryRefProfile>();
   for (const e of h.entities) refs.set(e.entityId.toLowerCase(), profileFor(parkId, e, usablePriorDays, priorDays, today));
-  return { ...withDays, usable: true, reason: null, refs };
+  return { ...withDays, usable: true, reason: null, reasonCode: null, refs };
 }
 
 /**
- * Per-ref verdict. `null` = history does not support inactivity (visible).
- * `todayParty` is the registry state for today's resort-local date at the park.
+ * Per-ref verdict with the reason (Phase 14.4.2 diagnostics). `basis: null` =
+ * history does not support inactivity (visible). `todayParty` is the registry
+ * state for today's resort-local date at the park. The `code` explains the
+ * FIRST failing gate; it never changes the decision.
  */
+export function historySupportDecision(
+  evidence: ParkHistoryEvidence | null,
+  entityId: string,
+  todayParty: "party" | "not_party" | "unknown",
+): { basis: InactivityBasis | null; code: HistoryRefCode } {
+  const no = (code: HistoryRefCode) => ({ basis: null, code });
+  if (!evidence || !evidence.usable) return no("no_evidence");
+  const p = evidence.refs.get(entityId.toLowerCase());
+  if (!p) return no("ref_absent");
+  if (p.unreliable) return no("ref_unreliable");
+  if (p.todayActive) return no("today_active");
+  if (todayParty === "party" && p.partyPerformed > 0) return no("party_performed"); // performs on party nights: never assume suppression
+  const yes = (basis: InactivityBasis) => ({ basis, code: "supported" as HistoryRefCode });
+  if (evidence.mode === "long") {
+    const r = p.recent;
+    if (r.classified < HISTORY_LONG_MIN_RECENT_CLASSIFIED) return no("recent_coverage_low"); // sparsely recorded recently
+    if (r.performed < HISTORY_LONG_MIN_RECENT_PERFORMED) return no("recent_performed_low"); // not demonstrably active recently
+    if (todayParty === "party" && p.partyDark >= HISTORY_LONG_PARTY_MIN_DARK && r.partyDark >= 1 && r.nonPartyPerformed >= HISTORY_LONG_PARTY_MIN_RECENT_NONPARTY_PERFORMED) return yes("history_party");
+    if (p.sameWeekday.classified >= HISTORY_LONG_WEEKLY_MIN_DARK && p.sameWeekday.performed === 0 && p.sameWeekday.dark >= HISTORY_LONG_WEEKLY_MIN_DARK) return yes("history_weekly");
+    if (r.unexplainedDark >= HISTORY_LONG_INTERMITTENT_MIN_DARK && r.unexplainedDark / r.classified >= HISTORY_LONG_INTERMITTENT_MIN_DARK_SHARE && p.darkLast7 >= 1) return yes("history");
+    if (todayParty === "party") return no(p.partyDark < HISTORY_LONG_PARTY_MIN_DARK ? "party_dark_insufficient" : "party_recent_insufficient");
+    return no("no_pattern");
+  }
+  const classified = p.performed + p.dark;
+  if (todayParty === "party") {
+    if (p.partyDark >= HISTORY_PARTY_MIN_DARK && p.nonPartyPerformed >= HISTORY_PARTY_MIN_NONPARTY_PERFORMED && classified >= HISTORY_PARTY_MIN_CLASSIFIED) return yes("history_party");
+  }
+  if (p.performed >= HISTORY_GENERIC_MIN_PERFORMED && p.unexplainedDark >= HISTORY_GENERIC_MIN_UNEXPLAINED_DARK && classified >= HISTORY_GENERIC_MIN_CLASSIFIED) return yes("history");
+  return no(todayParty === "party" ? "party_pattern_insufficient" : "no_pattern");
+}
+
+/** Per-ref verdict (basis only). `null` = history does not support inactivity (visible). */
 export function historySupportForRef(
   evidence: ParkHistoryEvidence | null,
   entityId: string,
   todayParty: "party" | "not_party" | "unknown",
 ): InactivityBasis | null {
-  if (!evidence || !evidence.usable) return null;
-  const p = evidence.refs.get(entityId.toLowerCase());
-  if (!p || p.unreliable || p.todayActive) return null;
-  if (todayParty === "party" && p.partyPerformed > 0) return null; // performs on party nights: never assume suppression
-  if (evidence.mode === "long") {
-    const r = p.recent;
-    if (r.classified < HISTORY_LONG_MIN_RECENT_CLASSIFIED || r.performed < HISTORY_LONG_MIN_RECENT_PERFORMED) return null; // not demonstrably active recently
-    if (todayParty === "party" && p.partyDark >= HISTORY_LONG_PARTY_MIN_DARK && r.partyDark >= 1 && r.nonPartyPerformed >= HISTORY_LONG_PARTY_MIN_RECENT_NONPARTY_PERFORMED) return "history_party";
-    if (p.sameWeekday.classified >= HISTORY_LONG_WEEKLY_MIN_DARK && p.sameWeekday.performed === 0 && p.sameWeekday.dark >= HISTORY_LONG_WEEKLY_MIN_DARK) return "history_weekly";
-    if (r.unexplainedDark >= HISTORY_LONG_INTERMITTENT_MIN_DARK && r.unexplainedDark / r.classified >= HISTORY_LONG_INTERMITTENT_MIN_DARK_SHARE && p.darkLast7 >= 1) return "history";
-    return null;
-  }
-  const classified = p.performed + p.dark;
-  if (todayParty === "party") {
-    if (p.partyDark >= HISTORY_PARTY_MIN_DARK && p.nonPartyPerformed >= HISTORY_PARTY_MIN_NONPARTY_PERFORMED && classified >= HISTORY_PARTY_MIN_CLASSIFIED) return "history_party";
-  }
-  if (p.performed >= HISTORY_GENERIC_MIN_PERFORMED && p.unexplainedDark >= HISTORY_GENERIC_MIN_UNEXPLAINED_DARK && classified >= HISTORY_GENERIC_MIN_CLASSIFIED) return "history";
-  return null;
+  return historySupportDecision(evidence, entityId, todayParty).basis;
 }
 
 /** True when history for this ref shows activity in today's (partial) row: vetoes ANY inactivity route. */
