@@ -14,6 +14,8 @@
  *   getChildren(id)              GET /entity/{id}/children  (identity discovery)
  *   getLive(id)                  GET /entity/{id}/live      (status + showtimes)
  *   getSchedule(id, {year,month}?) GET /entity/{id}/schedule[/{y}/{m}]
+ *   getHistoryDaily(id, {from,to}) GET /entity/{id}/history/daily (Phase 14.4.2;
+ *                                anonymous, separately rate-limited — see below)
  *   verifyProviderIdentity()     discovery vs. configured WDW/DLR ids
  *   verifyEntertainmentMapping() DWP Entertainment → provider UUID audit
  *                                (themeParksEntertainmentMapping.ts)
@@ -30,6 +32,12 @@
  *   destinations/entity/children  fresh 6h,  stale-if-error up to 7d
  *   schedule             fresh 15m, stale-if-error up to 6h
  *   live                 fresh 60s, stale-if-error up to 10m
+ *   history              fresh 1h,  stale-if-error up to 24h (Phase 14.4.2)
+ * History is a daily CHANGE LOG, not a calendar, and the provider limits it to
+ * 60 calls/hour with no key: the client spends at most HISTORY_MAX_CALLS_PER_HOUR
+ * (50) network attempts per rolling hour, keeps its own 429/Retry-After backoff
+ * (a history 429 never blocks live/schedule calls, and vice versa), and callers
+ * request one park-level 7-day window (≤ 6 parks → ≤ 6 calls/hour/instance).
  * A stale hit is only served when the refresh failed, and is flagged
  * (`meta.origin === "stale"`, `meta.staleReason`, `meta.fetchedAt`) — never
  * silent. Expired entries revalidate with `If-None-Match` (ETag); a 304 just
@@ -198,6 +206,42 @@ export interface ThemeParksSchedule {
   /** Per-park schedules for a destination request (empty for a park request). */
   parks: ThemeParksParkSchedule[];
   droppedEntries: number;
+}
+
+export interface ThemeParksHistoryDay {
+  /** Resort-local calendar date (YYYY-MM-DD). */
+  date: string;
+  /** Provider-counted shows that day; null when not supplied. */
+  showCount: number | null;
+  /** Minutes the entity was OPERATING that day; null when not supplied. */
+  operatingMinutes: number | null;
+  /** Park-open minutes the entity was scheduled against (`inParkHours.scheduledMinutes`); null when not supplied. */
+  scheduledMinutes: number | null;
+}
+
+export interface ThemeParksHistoryEntity {
+  entityId: string;
+  /** ATTRACTION | SHOW | RESTAURANT | PARK | ... (provider value). */
+  entityType: string;
+  /** `coverage.firstRecordedAt` (YYYY-MM-DD) when supplied. */
+  firstRecordedAt: string | null;
+  /** Valid day rows only. A missing date is NOT evidence of anything (change log). */
+  days: ThemeParksHistoryDay[];
+  /** Malformed/duplicate day rows discarded for this entity (non-zero → unreliable). */
+  droppedDays: number;
+}
+
+export interface ThemeParksHistoryDaily {
+  entityId: string;
+  timeZone: string | null;
+  /** Window the provider says it answered (resort-local dates). */
+  from: string;
+  to: string;
+  entities: ThemeParksHistoryEntity[];
+  /** Provider reports a continuation (`next`): the window is NOT complete. */
+  hasMore: boolean;
+  /** Malformed entity records discarded during validation. */
+  droppedEntities: number;
 }
 
 export interface ThemeParksIdentityReport {
@@ -521,6 +565,58 @@ function releaseBody(res: Response): void {
   }
 }
 
+/**
+ * Phase 14.4.2 — `/entity/{id}/history/daily` validator. Unknown/unused fields
+ * (standby stats, changes, firstOperatingAt, …) are dropped. Never fabricates:
+ * a malformed day row is discarded and counted (`droppedDays`), a malformed
+ * entity is discarded and counted, and a non-empty `entities` list that yields
+ * nothing valid is schema drift (null → invalid_payload).
+ */
+export function normalizeHistoryDaily(body: unknown): ThemeParksHistoryDaily | null {
+  if (!isObj(body) || !Array.isArray(body.entities) || !isObj(body.range)) return null;
+  const entityId = asId(body.id);
+  const from = str(body.range.from);
+  const to = str(body.range.to);
+  if (!entityId || !from || !to || !isValidIsoCalendarDate(from) || !isValidIsoCalendarDate(to) || to < from) return null;
+  const nonNegNum = (v: unknown): number | null | typeof INVALID =>
+    v === undefined || v === null ? null : typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : INVALID;
+  const entities: ThemeParksHistoryEntity[] = [];
+  let droppedEntities = 0;
+  for (const e of body.entities) {
+    if (!isObj(e)) { droppedEntities++; continue; }
+    const id = asId(e.id);
+    const entityType = str(e.entityType);
+    if (!id || !entityType || !Array.isArray(e.days)) { droppedEntities++; continue; }
+    const first = isObj(e.coverage) ? str(e.coverage.firstRecordedAt) : null;
+    const days: ThemeParksHistoryDay[] = [];
+    const seen = new Set<string>();
+    let droppedDays = 0;
+    for (const d of e.days) {
+      const date = isObj(d) ? str(d.date) : null;
+      if (!isObj(d) || !date || !isValidIsoCalendarDate(date) || date < from || date > to) { droppedDays++; continue; }
+      const showCount = nonNegNum(d.showCount);
+      const operatingMinutes = nonNegNum(d.operatingMinutes);
+      const scheduledMinutes = isObj(d.inParkHours) ? nonNegNum(d.inParkHours.scheduledMinutes) : null;
+      if (showCount === INVALID || operatingMinutes === INVALID || scheduledMinutes === INVALID || seen.has(date)) {
+        droppedDays++; // duplicate dates are ambiguous: the earlier row stays, the entity is flagged
+        continue;
+      }
+      seen.add(date);
+      days.push({ date, showCount, operatingMinutes, scheduledMinutes });
+    }
+    entities.push({
+      entityId: id,
+      entityType,
+      firstRecordedAt: first && isValidIsoCalendarDate(first) ? first : null,
+      days: days.sort((a, b) => a.date.localeCompare(b.date)),
+      droppedDays,
+    });
+  }
+  if (body.entities.length > 0 && entities.length === 0) return null;
+  const hasMore = body.next !== undefined && body.next !== null && body.next !== false && body.next !== "";
+  return { entityId, timeZone: str(body.timezone), from, to, entities, hasMore, droppedEntities };
+}
+
 /** True when both endpoints parse and the end instant precedes the start instant (equal is fine). */
 function endsBeforeStart(start: string, end: string | null): boolean {
   return end !== null && Date.parse(end) < Date.parse(start);
@@ -550,7 +646,11 @@ const TTL = {
   static: { fresh: 6 * 3_600_000, maxStale: 7 * 86_400_000 },
   schedule: { fresh: 15 * 60_000, maxStale: 6 * 3_600_000 },
   live: { fresh: 60_000, maxStale: 10 * 60_000 },
+  history: { fresh: 3_600_000, maxStale: 24 * 3_600_000 },
 } as const;
+
+/** Provider allows 60 anonymous history calls/hour; stay safely below it. */
+export const HISTORY_MAX_CALLS_PER_HOUR = 50;
 
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_CACHE_ENTRIES = 64;
@@ -579,8 +679,14 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
 
   const cache = new Map<string, CacheEntry>();
   const inflight = new Map<string, Promise<ThemeParksResult<unknown>>>();
-  let blockedUntil = 0;
-  let blockedError: ThemeParksError | null = null;
+  // Client-wide Retry-After backoff, tracked per rate-limit pool: history has its
+  // own provider limit, so a history 429 must never block live/schedule calls
+  // (and a live 429 must not suppress history's own accounting).
+  const blocks = {
+    main: { until: 0, error: null as ThemeParksError | null },
+    history: { until: 0, error: null as ThemeParksError | null },
+  };
+  let historyAttempts: number[] = [];
 
   function remember(key: string, entry: CacheEntry) {
     cache.delete(key);
@@ -639,8 +745,22 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
   ): Promise<ThemeParksResult<unknown>> {
     const cached = cache.get(key);
     const t0 = now();
-    if (t0 < blockedUntil && blockedError) {
-      return fail({ ...blockedError, retryAfterMs: blockedUntil - t0 }, cached, cls);
+    const block = cls === "history" ? blocks.history : blocks.main;
+    if (t0 < block.until && block.error) {
+      return fail({ ...block.error, retryAfterMs: block.until - t0 }, cached, cls);
+    }
+    if (cls === "history") {
+      // Local call budget (rolling hour): the provider's 60/h limit is shared by
+      // every instance behind our egress, so spend conservatively.
+      historyAttempts = historyAttempts.filter((t) => t0 - t < 3_600_000);
+      if (historyAttempts.length >= HISTORY_MAX_CALLS_PER_HOUR) {
+        return fail(
+          { kind: "rate_limited", message: "ThemeParks history call budget exhausted", retryAfterMs: historyAttempts[0] + 3_600_000 - t0 },
+          cached,
+          cls,
+        );
+      }
+      historyAttempts.push(t0);
     }
 
     const headers: Record<string, string> = {
@@ -701,12 +821,12 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       // Client-wide backoff is monotonic: concurrent responses may arrive in any
       // order, and a later shorter Retry-After must never shorten an active
       // longer deadline (the error travels with the deadline that wins).
-      if (t1 + retryAfterMs > blockedUntil) {
-        blockedUntil = t1 + retryAfterMs;
-        blockedError = error;
+      if (t1 + retryAfterMs > block.until) {
+        block.until = t1 + retryAfterMs;
+        block.error = error;
       }
-      const effective = blockedError ?? error;
-      return fail({ ...effective, retryAfterMs: Math.max(0, blockedUntil - t1) }, cached, cls);
+      const effective = block.error ?? error;
+      return fail({ ...effective, retryAfterMs: Math.max(0, block.until - t1) }, cached, cls);
     }
     if (res.status === 404) {
       return fail({ kind: "not_found", message: "ThemeParks entity not found", httpStatus: 404 }, cached, cls);
@@ -815,6 +935,33 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
       return request(`/entity/${entityId}/schedule${suffix}`, "schedule", forEntity(entityId, normalize));
     },
 
+    /**
+     * Phase 14.4.2: park-level daily history for [from, to] (resort-local
+     * YYYY-MM-DD, ≤ 7 days inclusive). One request covers every child entity —
+     * never call this per entity. See header for cache/budget behavior.
+     */
+    getHistoryDaily(
+      requestedId: string,
+      range: { from: string; to: string },
+    ): Promise<ThemeParksResult<ThemeParksHistoryDaily>> {
+      const bad = badId(requestedId);
+      if (bad) return Promise.resolve({ ok: false, error: bad });
+      const { from, to } = range;
+      const spanDays = isValidIsoCalendarDate(from) && isValidIsoCalendarDate(to)
+        ? (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000 + 1
+        : NaN;
+      if (!(spanDays >= 1 && spanDays <= 7)) {
+        return Promise.resolve({ ok: false, error: { kind: "invalid_request", message: "history range must be 1–7 valid dates" } });
+      }
+      const entityId = requestedId.toLowerCase();
+      // The answered window must be the requested one (a stale/other-window body is never cached under this key).
+      const normalize = forEntity(entityId, (body: unknown) => {
+        const h = normalizeHistoryDaily(body);
+        return h && h.from === from && h.to === to ? h : null;
+      });
+      return request(`/entity/${entityId}/history/daily?from=${from}&to=${to}`, "history", normalize);
+    },
+
     /** Checks configured WDW/DLR destination + park UUIDs still exist upstream. */
     async verifyProviderIdentity(): Promise<ThemeParksResult<ThemeParksIdentityReport>> {
       const res = await this.getDestinations();
@@ -868,8 +1015,11 @@ export function createThemeParksClient(opts: ThemeParksClientOptions = {}) {
     _reset() {
       cache.clear();
       inflight.clear();
-      blockedUntil = 0;
-      blockedError = null;
+      blocks.main.until = 0;
+      blocks.main.error = null;
+      blocks.history.until = 0;
+      blocks.history.error = null;
+      historyAttempts = [];
     },
   };
 }
@@ -1409,6 +1559,55 @@ export async function runDevThemeParksApiCases(): Promise<string[]> {
     const r = await client.getLive(DEV_PARK); check("throw → network", !r.ok && r.error.kind === "network"); }
   { const { client } = mk((_u, init) => new Promise<Response>((_res, rej) => init.signal?.addEventListener("abort", () => rej(Object.assign(new Error("aborted"), { name: "AbortError" })))), { timeoutMs: 20 });
     const r = await client.getLive(DEV_PARK); check("hang → timeout", !r.ok && r.error.kind === "timeout"); }
+
+  // Phase 14.4.2 history client.
+  {
+    const W = { from: "2026-11-07", to: "2026-11-13" };
+    const day = (date: string, showCount: unknown = 1, om: unknown = 600) => ({ date, showCount, operatingMinutes: om, inParkHours: { scheduledMinutes: 870, operatingMinutes: 600 }, standby: { p50: 1 }, changes: 3 });
+    const body = (over: Record<string, unknown> = {}) => ({ id: DEV_PARK, name: "Park", timezone: "America/New_York", range: W, next: null,
+      entities: [{ id: "a0613b70-293f-4a5b-8169-1357be1777c6", name: "Show", entityType: "SHOW", coverage: { firstRecordedAt: "2021-10-01" }, days: [day("2026-11-07"), day("2026-11-08", 0, 0)] }], ...over });
+    const h = normalizeHistoryDaily(body());
+    check("history: keeps counts/minutes/scheduled, drops standby/changes", h?.entities[0].days[0].showCount === 1 && h.entities[0].days[0].scheduledMinutes === 870 && h.entities[0].days[1].showCount === 0 && !("standby" in (h?.entities[0].days[0] ?? {})));
+    check("history: next:null → complete; next present → hasMore", h?.hasMore === false && normalizeHistoryDaily(body({ next: "cursor" }))?.hasMore === true);
+    check("history: malformed/duplicate/out-of-window day rows are dropped and counted", (() => {
+      const r = normalizeHistoryDaily(body({ entities: [{ id: "a0613b70-293f-4a5b-8169-1357be1777c6", entityType: "SHOW", days: [day("2026-11-07"), day("2026-11-07"), day("bad"), day("2026-12-01"), day("2026-11-09", -1)] }] }));
+      return r?.entities[0].days.length === 1 && r.entities[0].droppedDays === 4;
+    })());
+    check("history: malformed entities dropped and counted; wholly malformed invalid", normalizeHistoryDaily(body({ entities: [body().entities[0], { nope: 1 }] }))?.droppedEntities === 1 && normalizeHistoryDaily(body({ entities: [{ nope: 1 }] })) === null);
+    check("history: valid-empty ok; garbage invalid", normalizeHistoryDaily(body({ entities: [] }))?.entities.length === 0 && normalizeHistoryDaily({}) === null && normalizeHistoryDaily(body({ range: { from: "x", to: "y" } })) === null);
+    check("history: absent days array on an entity drops the entity (never an empty history)", normalizeHistoryDaily(body({ entities: [body().entities[0], { id: "a0613b70-293f-4a5b-8169-1357be1777c7", entityType: "SHOW" }] }))?.droppedEntities === 1);
+    // Client: URL, caching, window identity, input validation.
+    { const { client, calls } = mk(() => devRes(200, body()));
+      const r1 = await client.getHistoryDaily(DEV_PARK, W); const r2 = await client.getHistoryDaily(DEV_PARK, W);
+      check("history: park-level request URL with from/to, then served from the 1 h cache", r1.ok && r2.ok && r2.meta.origin === "cache" && calls.length === 1 && calls[0].url.endsWith(`/entity/${DEV_PARK}/history/daily?from=2026-11-07&to=2026-11-13`));
+      t += 3_599_000; const r3 = await client.getHistoryDaily(DEV_PARK, W); check("history: still fresh just under 1 h", r3.ok && r3.meta.origin === "cache");
+      t += 2_000; await client.getHistoryDaily(DEV_PARK, W); check("history: refetched after 1 h", calls.length === 2); }
+    { const { client } = mk(() => devRes(200, body({ range: { from: "2026-11-06", to: "2026-11-12" } })));
+      const r = await client.getHistoryDaily(DEV_PARK, W); check("history: answered window ≠ requested window → invalid_payload (never cached)", !r.ok && r.error.kind === "invalid_payload"); }
+    { const { client, calls } = mk(() => devRes(200, body()));
+      const a = await client.getHistoryDaily("nope", W); const b = await client.getHistoryDaily(DEV_PARK, { from: "2026-11-01", to: "2026-11-13" }); const c = await client.getHistoryDaily(DEV_PARK, { from: "2026-11-13", to: "2026-11-07" });
+      check("history: bad id / >7-day / reversed range → invalid_request with no network call", !a.ok && !b.ok && !c.ok && calls.length === 0 && [a, b, c].every((x) => !x.ok && x.error.kind === "invalid_request")); }
+    // Stale-if-error (24 h) and flagged.
+    { let fail = false; const { client } = mk(() => (fail ? devRes(500, {}) : devRes(200, body())));
+      await client.getHistoryDaily(DEV_PARK, W); fail = true; t += 2 * 3_600_000;
+      const r = await client.getHistoryDaily(DEV_PARK, W); check("history: failed refresh serves flagged stale data within 24 h", r.ok && r.meta.origin === "stale");
+      t += 23 * 3_600_000; const r2 = await client.getHistoryDaily(DEV_PARK, W); check("history: beyond 24 h the failure surfaces", !r2.ok); }
+    // Separate rate-limit pools: a history 429 must not block live, and vice versa.
+    { let hist429 = true; const { client } = mk((u) => (u.includes("/history/") ? (hist429 ? devRes(429, {}, { "retry-after": "120" }) : devRes(200, body())) : devRes(200, DEV_LIVE)));
+      const h1 = await client.getHistoryDaily(DEV_PARK, W);
+      const lv = await client.getLive(DEV_PARK);
+      check("history 429 → rate_limited, live calls unaffected", !h1.ok && h1.error.kind === "rate_limited" && lv.ok);
+      const h2 = await client.getHistoryDaily(DEV_PARK, W); check("history backoff holds without a network call", !h2.ok && h2.error.kind === "rate_limited"); hist429 = false; }
+    { let live429 = true; const { client } = mk((u) => (u.includes("/history/") ? devRes(200, body()) : live429 ? devRes(429, {}, { "retry-after": "120" }) : devRes(200, DEV_LIVE)));
+      const lv = await client.getLive(DEV_PARK); const hh = await client.getHistoryDaily(DEV_PARK, W); live429 = false;
+      check("live 429 does not block history", !lv.ok && lv.error.kind === "rate_limited" && hh.ok); }
+    // Local budget: at most HISTORY_MAX_CALLS_PER_HOUR network attempts per rolling hour.
+    { const { client, calls } = mk(() => devRes(200, body()));
+      const ranges = Array.from({ length: HISTORY_MAX_CALLS_PER_HOUR + 3 }, (_, i) => { const d = new Date(Date.UTC(2026, 10, 7 + i)); const to = new Date(Date.UTC(2026, 10, 13 + i)); return { from: d.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) }; });
+      let blocked = 0; for (const r of ranges) { const res = await client.getHistoryDaily(DEV_PARK, r); if (!res.ok && res.error.kind === "rate_limited") blocked++; }
+      check(`history: budget caps network attempts at ${HISTORY_MAX_CALLS_PER_HOUR}/hour (rest rate_limited, no call)`, calls.length === HISTORY_MAX_CALLS_PER_HOUR && blocked === 3 && HISTORY_MAX_CALLS_PER_HOUR < 60);
+      t += 3_601_000; const again = await client.getHistoryDaily(DEV_PARK, ranges[0]); check("history: budget recovers after the rolling hour", again.ok); }
+  }
 
   // Provider identity covers WDW + DLR destinations and every park.
   { const dests = (Object.values(THEMEPARKS_DESTINATIONS) as Array<{ entityId: string; slug: string; providerName: string }>).map((d) => ({

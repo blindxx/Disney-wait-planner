@@ -312,6 +312,29 @@ Queue-Times status/waits only (never generic ThemeParks OPERATING/CLOSED). DEV
 checks: `runDevPerformanceDayEvidenceCases()` plus the 14.4.1 cases in the
 seasonal-visibility, event-filter and event-meet suites.
 
+## History-assisted performance-day filtering (Phase 14.4.2)
+
+ThemeParks anonymous `/entity/{parkId}/history/daily` (client:
+`getHistoryDaily`, one park-level `[today-6, today]` request; fresh 1 h,
+stale-if-error 24 h, own 429 backoff separate from live, ≤ 50 network attempts
+per rolling hour vs. the provider's 60) is a CHANGE LOG: missing rows or
+`showCount: 0` alone prove nothing. `entertainmentHistory.ts` (pure) turns it
+into per-ref evidence that can only veto hiding (today's row active) or
+corroborate a clean, current live-empty day; it never overrides a verified live
+performance/operating window. `entryFromMapping` sets
+`confirmedNoActivityToday` when live is clean AND every mapped ref is supported
+by the forward horizon (14.4.1) or history (`inactivityBasis`). Thresholds and
+reliability gates are in the `entertainmentHistory.ts` header. Party-night
+suppression is learned per ref from registry-confirmed nights
+(`getPartyNightState`, `seasonalEvents.ts`) — never hardcode show exceptions.
+History is fetched only when a first pass flags a `historyCandidate`
+(`entertainmentHistoryService.ts`); failure falls back to forward-horizon only.
+Registered party meets read "Special Ticketed Event" windows as operating hours
+on both pages via `applyRegisteredMeetWindows` (`eventExclusiveMeets.ts`). DEV
+checks: `runDevEntertainmentHistoryCases()`, `runDevHistoryAssistedFilteringCases()`,
+`runDevPartyMeetHoursConsistencyCases()` (`entertainmentHistoryDev.ts`) plus the
+history-client cases in `runDevThemeParksApiCases()`.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)
