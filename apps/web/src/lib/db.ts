@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { normalizeDatabaseUrl } from "./dbConnectionString.mjs";
 
 // Lazily-created singleton pool.
 // The pool is not instantiated until the first getPool() call,
@@ -23,7 +24,7 @@ export function getPool(): Pool {
   // globalThis persists across HMR cycles in dev and across warm invocations
   // in production serverless runtimes, preventing connection accumulation.
   if (!global.__pgPool) {
-    global.__pgPool = new Pool({ connectionString: process.env.DATABASE_URL });
+    global.__pgPool = new Pool({ connectionString: normalizeDatabaseUrl(process.env.DATABASE_URL) });
   }
   return global.__pgPool;
 }
@@ -41,7 +42,7 @@ export function getParkHoursPool(): Pool {
   }
   if (!global.__pgParkHoursPool) {
     const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
+      connectionString: normalizeDatabaseUrl(process.env.DATABASE_URL),
       max: 1,
       connectionTimeoutMillis: 2000,
       idleTimeoutMillis: 10_000,

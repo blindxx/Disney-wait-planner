@@ -97,6 +97,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import pg from "pg";
+import { normalizeDatabaseUrl } from "../src/lib/dbConnectionString.mjs";
 
 const { Client } = pg;
 
@@ -751,7 +752,7 @@ async function main() {
     return;
   }
 
-  const client = new Client({ connectionString: databaseUrl });
+  const client = new Client({ connectionString: normalizeDatabaseUrl(databaseUrl) });
   try {
     await client.connect();
   } catch (err) {
