@@ -83,7 +83,7 @@ export interface LifecycleProviderEvidence {
   /** YYYY-MM-DD the observation was made. */
   observedOn: string;
   summary: string;
-  /** Provider entity id when the observation is about a specific entity. */
+  /** Provider entity id: lowercase UUID for ThemeParks, numeric ride id string for Queue-Times. */
   entityId?: string;
 }
 
@@ -167,6 +167,16 @@ export function lifecycleRecordKey(r: Pick<EntertainmentLifecycleRecord, "parkId
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Queue-Times ride ids are numeric (see `queueTimes.rideId` in eventExclusiveMeets.ts). */
+const QT_RIDE_ID_RE = /^[1-9]\d*$/;
+
+/** Provider-specific identifier shape: ThemeParks UUID, Queue-Times numeric ride id; dwp-runtime may carry either. */
+function isValidEvidenceEntityId(source: unknown, id: unknown): boolean {
+  if (typeof id !== "string") return false;
+  if (source === "themeparks") return UUID_RE.test(id);
+  if (source === "queue-times") return QT_RIDE_ID_RE.test(id);
+  return UUID_RE.test(id) || QT_RIDE_ID_RE.test(id);
+}
 
 function isRealDate(v: unknown): v is string {
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -271,7 +281,9 @@ export function validateEntertainmentLifecycleRegistry(
       oneOf(e.kind, LIFECYCLE_EVIDENCE_KINDS, `providerEvidence[${j}].kind`);
       date(e.observedOn, `providerEvidence[${j}].observedOn`);
       if (!nonEmpty(e.summary)) add("bad_shape", key, `providerEvidence[${j}].summary is required`);
-      if (e.entityId !== undefined && !(typeof e.entityId === "string" && UUID_RE.test(e.entityId))) add("bad_uuid", key, `providerEvidence[${j}].entityId must be a lowercase UUID`);
+      if (e.entityId !== undefined && !isValidEvidenceEntityId(e.source, e.entityId)) {
+        add("bad_uuid", key, `providerEvidence[${j}].entityId must be a lowercase UUID (themeparks) or numeric ride id (queue-times)`);
+      }
     });
     const limits = Array.isArray(r.coverageLimitations) ? r.coverageLimitations : (add("bad_shape", key, "coverageLimitations must be an array"), []);
     if (limits.some((l: unknown) => !nonEmpty(l))) add("bad_shape", key, "coverageLimitations entries must be non-empty strings");
@@ -399,6 +411,14 @@ export function runDevEntertainmentLifecycleRegistryCases(): string[] {
   check("schema: missing visibility reason rejected", kinds(wrap(base({ visibility: { decision: "undecided", reason: " " } }))).includes("missing_reason"));
   check("schema: bad evidence entityId rejected",
     kinds(wrap(base({ providerEvidence: [{ source: "themeparks", kind: "entity_missing", observedOn: "2026-11-10", summary: "x", entityId: "nope" }] }))).includes("bad_uuid"));
+  const ev = (source: string, entityId: string) =>
+    kinds(wrap(base({ providerEvidence: [{ source, kind: "entity_missing", observedOn: "2026-11-10", summary: "x", entityId }] })));
+  check("schema: queue-times numeric ride id accepted", ev("queue-times", "1234").length === 0);
+  check("schema: queue-times UUID / non-numeric id rejected", ev("queue-times", "8c36ff0b-3a32-4d7b-9388-0516c19277db").includes("bad_uuid") && ev("queue-times", "12ab").includes("bad_uuid") && ev("queue-times", "0").includes("bad_uuid"));
+  check("schema: themeparks UUID accepted, numeric id rejected",
+    ev("themeparks", "8c36ff0b-3a32-4d7b-9388-0516c19277db").length === 0 && ev("themeparks", "1234").includes("bad_uuid"));
+  check("schema: dwp-runtime accepts either id form, rejects junk",
+    ev("dwp-runtime", "1234").length === 0 && ev("dwp-runtime", "8c36ff0b-3a32-4d7b-9388-0516c19277db").length === 0 && ev("dwp-runtime", "nope").includes("bad_uuid"));
   check("schema: non-http verification url rejected",
     kinds(wrap(base({ verificationSources: [{ url: "javascript:alert(1)", retrievedOn: "2026-11-10", claim: "x", independent: true }] }))).includes("bad_url"));
 
