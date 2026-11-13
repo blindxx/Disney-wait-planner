@@ -352,6 +352,49 @@ meets read "Special Ticketed Event" windows as operating hours on both pages via
 (`entertainmentHistoryDev.ts`) plus the history-client cases in
 `runDevThemeParksApiCases()`.
 
+## Entertainment lifecycle registry (Phase 14.5A)
+
+`apps/web/src/data/entertainmentLifecycleRegistry.json` is a Git-tracked
+MAINTENANCE file for the recurring GPT Data Audit; types, validation and DEV
+checks live in `apps/web/src/lib/entertainmentLifecycleRegistry.ts`. It is not
+a second catalog: `ENTERTAINMENT_PLACES` stays the only identity/metadata
+authority, and a record only points at an ACTIVE entry by exact canonical
+`(parkId, name)` (key = `entertainmentMappingKey`; duplicates, unknown or
+legacy names are rejected). Nothing outside that module imports it in 14.5A:
+no hiding, UI, Smart Entry/My Plans effect, detector or catalog retirement.
+
+Rules (enforced by `validateEntertainmentLifecycleRegistry`):
+- `category` (regular | limited) only guides audits, must equal the catalog's
+  availabilityType, and both use identical inactivity rules.
+- Seasonal/holiday/festival/party offerings (availabilityType `seasonal`, any
+  availabilityTheme, any `SEASONAL_ENTERTAINMENT_EVENTS` association) are
+  exempt and cannot have records.
+- Provider evidence is never confirmation and must list `coverageLimitations`
+  (missing history/empty schedules alone prove nothing). `confirmed` needs a
+  verification source with `independent: true`; `discontinued` requires
+  `confirmed`; `returning` needs a `futureReturns` entry; a `hidden` decision
+  needs a non-active/non-unknown assessment. The visibility decision is
+  recorded only, never applied at runtime.
+- Records are never invented: the file ships with `"records": []`.
+
+**How the recurring audit reads it.** Read the file from `main`
+(`apps/web/src/data/entertainmentLifecycleRegistry.json`). Unresolved records
+are those whose `nextReviewAction.action` is not `"none"` (this includes every
+`provisional` record — validation forbids provisional + `none`); work them
+oldest `lastReviewed` first, honoring `dueBy` for `re_review_on_date`. Resolve a
+record by updating its evidence/sources/`lastReviewed`/`confirmation` and
+setting `nextReviewAction` to `none` once confirmed. Changes land on `main` only
+through a reviewed commit/PR that keeps `runDevEntertainmentLifecycleRegistryCases()`
+passing. `getUnresolvedLifecycleRecords()` implements the same rule.
+
+**Future runtime-detection path (not built).** Vercel never writes repository
+files. A later phase may have a detector persist candidate observations (same
+shape as `LifecycleProviderEvidence`) to Postgres and expose them through a
+server-key-protected, read-only endpoint (pattern: `/api/catalog/query`) that
+the audit reads alongside the registry; the audit then proposes registry
+changes via a normal commit/PR. Candidates are never auto-promoted and never
+change visibility on their own. Defer tables/endpoints until a detector exists.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)
