@@ -358,10 +358,21 @@ meets read "Special Ticketed Event" windows as operating hours on both pages via
 MAINTENANCE file for the recurring GPT Data Audit; types, validation and DEV
 checks live in `apps/web/src/lib/entertainmentLifecycleRegistry.ts`. It is not
 a second catalog: `ENTERTAINMENT_PLACES` stays the only identity/metadata
-authority, and a record only points at an ACTIVE entry by exact canonical
-`(parkId, name)` (key = `entertainmentMappingKey`; duplicates, unknown or
-legacy names are rejected). Nothing outside that module imports it in 14.5A:
-no hiding, UI, Smart Entry/My Plans effect, detector or catalog retirement.
+authority, and a record only points at an existing entry by exact canonical
+`(parkId, name)` (key = `entertainmentMappingKey`; duplicates and unknown names
+are rejected). Nothing outside that module imports it in 14.5A: no hiding, UI,
+Smart Entry/My Plans effect, detector or catalog retirement.
+
+Active vs legacy: the identity may be in the ACTIVE catalog
+(`ENTERTAINMENT_PLACES`) or the LEGACY catalog (read via
+`getLegacyEntertainmentPlaces()`), so moving a confirmed discontinued show to
+legacy never invalidates its audit record. Legacy records get identical
+validation (park qualification, uniqueness, category, seasonal exemption,
+confirmation/evidence rules) and are retained for AUDIT HISTORY ONLY:
+`isEligibleForInactivityDetection()` is true only for active identities, so
+future automatic inactivity detection and any runtime resurfacing must skip
+legacy records. An identity lives in exactly one catalog, so one key is one
+record regardless of catalog state.
 
 Rules (enforced by `validateEntertainmentLifecycleRegistry`):
 - `category` (regular | limited) only guides audits, must equal the catalog's

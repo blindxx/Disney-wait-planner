@@ -17,7 +17,12 @@
  * - Key = `entertainmentMappingKey(parkId, name)` — the same park-qualified
  *   normalized key the ThemeParks mapping uses (names repeat across parks).
  *   Duplicate keys are rejected; the name must be the exact canonical name of
- *   an ACTIVE catalog entry in that park (legacy/unknown names are rejected).
+ *   an entry in that park in the ACTIVE catalog (ENTERTAINMENT_PLACES) or the
+ *   LEGACY catalog (retired/replaced identities). Unknown names are rejected.
+ *   Legacy records are retained for AUDIT HISTORY ONLY (so retiring a confirmed
+ *   discontinued show never invalidates its record): they get the same
+ *   validation, but `isEligibleForInactivityDetection` is false for them —
+ *   future automatic detection and any runtime resurfacing must skip them.
  *
  * Invariants enforced by `validateEntertainmentLifecycleRegistry`
  * - `category` ("regular" | "limited") only guides audits and must equal the
@@ -44,7 +49,7 @@
 
 import type { ParkId } from "@disney-wait-planner/shared";
 import registryJson from "../data/entertainmentLifecycleRegistry.json";
-import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { entertainmentMappingKey } from "./themeParksEntertainmentMapping";
 import { SEASONAL_ENTERTAINMENT_EVENTS } from "./seasonalEntertainment";
 
@@ -161,6 +166,35 @@ export function lifecycleRecordKey(r: Pick<EntertainmentLifecycleRecord, "parkId
 }
 
 // ============================================
+// IDENTITY RESOLUTION (active vs legacy)
+// ============================================
+
+export type LifecycleCatalogState = "active" | "legacy";
+
+type CatalogPlace = (typeof ENTERTAINMENT_PLACES)[number];
+
+/** Exact (parkId, canonical name) lookup; active catalog first, then legacy. */
+function resolveLifecycleIdentity(parkId: unknown, name: unknown): { place: CatalogPlace; state: LifecycleCatalogState } | null {
+  const active = ENTERTAINMENT_PLACES.find((p) => p.parkId === parkId && p.name === name);
+  if (active) return { place: active, state: "active" };
+  const legacy = getLegacyEntertainmentPlaces().find((p) => p.parkId === parkId && p.name === name);
+  return legacy ? { place: legacy, state: "legacy" } : null;
+}
+
+/** Which catalog the record's identity currently lives in (null = unknown identity). */
+export function getLifecycleCatalogState(r: Pick<EntertainmentLifecycleRecord, "parkId" | "name">): LifecycleCatalogState | null {
+  return resolveLifecycleIdentity(r.parkId, r.name)?.state ?? null;
+}
+
+/**
+ * Only ACTIVE catalog identities may ever be considered by future automatic
+ * inactivity detection. Legacy records are audit history only.
+ */
+export function isEligibleForInactivityDetection(r: Pick<EntertainmentLifecycleRecord, "parkId" | "name">): boolean {
+  return getLifecycleCatalogState(r) === "active";
+}
+
+// ============================================
 // VALIDATION
 // ============================================
 
@@ -190,7 +224,7 @@ function isHttpUrl(v: unknown): boolean {
 }
 
 /** Catalog exemption: seasonal/holiday/festival/party offerings never get lifecycle records. */
-function seasonalExemptionReason(place: (typeof ENTERTAINMENT_PLACES)[number]): string | null {
+function seasonalExemptionReason(place: CatalogPlace): string | null {
   if (place.availabilityType === "seasonal") return 'availabilityType "seasonal"';
   if (place.availabilityTheme) return `availabilityTheme "${place.availabilityTheme}"`;
   if (SEASONAL_ENTERTAINMENT_EVENTS[place.name]?.length) return "seasonal event association";
@@ -237,8 +271,9 @@ export function validateEntertainmentLifecycleRegistry(
     if (!nonEmpty(r.parkId) || !nonEmpty(r.name)) { add("bad_shape", key, "parkId and name are required strings"); return; }
     if (seen.has(key)) add("duplicate_identity", key, "duplicate (park, name) identity");
     seen.add(key);
-    const place = ENTERTAINMENT_PLACES.find((p) => p.parkId === r.parkId && p.name === r.name);
-    if (!place) add("unknown_identity", key, "name is not the exact canonical name of an active catalog entry in this park");
+    const resolved = resolveLifecycleIdentity(r.parkId, r.name);
+    const place = resolved?.place;
+    if (!place) add("unknown_identity", key, "name is not the exact canonical name of an active or legacy catalog entry in this park");
 
     // ---- category / seasonal exemption ----
     const categoryOk = oneOf(r.category, LIFECYCLE_CATEGORIES, "category");
@@ -430,8 +465,44 @@ export function runDevEntertainmentLifecycleRegistryCases(): string[] {
     !kinds(wrap(base({ name: "Fantasmic!" }), base({ parkId: "hs", name: "Fantasmic!" }))).includes("duplicate_identity"));
   check("identity: unknown name rejected", kinds(wrap(base({ name: "Not A Real Show" }))).includes("unknown_identity"));
   check("identity: wrong park rejected", kinds(wrap(base({ parkId: "mk" }))).includes("unknown_identity"));
-  check("identity: legacy-only entry rejected (not an active catalog entry)",
-    kinds(wrap(base({ name: "Together Forever — A Pixar Nighttime Spectacular" }))).includes("unknown_identity"));
+  // Legacy retention (14.5A fix): legacy identities stay valid as audit history.
+  const legacyPlaces = getLegacyEntertainmentPlaces();
+  const LEG = "Together Forever — A Pixar Nighttime Spectacular";
+  const legacyBase = (over: Record<string, unknown> = {}) => base({ name: LEG, category: "limited", ...over });
+  const indepL = [{ url: "https://example.com/notice", retrievedOn: "2026-11-10", claim: "Official end notice", independent: true }];
+  check("legacy: catalog has legacy entries to exercise", legacyPlaces.length > 0 && legacyPlaces.some((p) => p.name === LEG && p.parkId === "disneyland"));
+  check("legacy: every legacy identity resolves and is not active",
+    legacyPlaces.every((p) => getLifecycleCatalogState({ parkId: p.parkId as ParkId, name: p.name }) === "legacy"));
+  check("legacy: valid provisional legacy record retained", kinds(wrap(legacyBase())).length === 0);
+  check("legacy: confirmed discontinued legacy record stays valid",
+    kinds(wrap(legacyBase({ assessment: "discontinued", confirmation: "confirmed", verificationSources: indepL, nextReviewAction: { action: "none" } }))).length === 0);
+  check("legacy: confirmed discontinued still needs independent evidence",
+    kinds(wrap(legacyBase({ assessment: "discontinued", confirmation: "confirmed", nextReviewAction: { action: "none" } }))).includes("confirmation_unsupported"));
+  check("legacy: discontinued while provisional still rejected",
+    kinds(wrap(legacyBase({ assessment: "discontinued" }))).includes("discontinued_unconfirmed"));
+  check("legacy: evidence rules unchanged (coverage required, per-source ids)",
+    kinds(wrap(legacyBase({ coverageLimitations: [] }))).includes("missing_coverage") &&
+    kinds(wrap(legacyBase({ providerEvidence: [{ source: "queue-times", kind: "other", observedOn: "2026-11-10", summary: "x", entityId: "abc" }] }))).includes("bad_uuid"));
+  check("legacy: park-qualified (wrong park rejected)", kinds(wrap(legacyBase({ parkId: "dca" }))).includes("unknown_identity"));
+  check("legacy: category must still match catalog availabilityType", kinds(wrap(legacyBase({ category: "regular" }))).includes("category_mismatch"));
+  check("legacy: duplicate legacy identity rejected (incl. normalization)",
+    kinds(wrap(legacyBase(), legacyBase({ name: LEG.toLowerCase() }))).includes("duplicate_identity"));
+  check("legacy: unknown near-miss name still rejected", kinds(wrap(legacyBase({ name: "Together Forever" }))).includes("unknown_identity"));
+  const activeKeys = new Set(ENTERTAINMENT_PLACES.map((p) => entertainmentMappingKey(p.parkId as ParkId, p.name)));
+  check("identity uniqueness: no identity exists in both active and legacy catalogs",
+    legacyPlaces.every((p) => !activeKeys.has(entertainmentMappingKey(p.parkId as ParkId, p.name))));
+  check("legacy: same record cannot be registered under both catalog states (one key, one record)",
+    kinds(wrap(base(), legacyBase())).length === 0 && kinds(wrap(legacyBase(), legacyBase())).includes("duplicate_identity"));
+  check("legacy: catalog state reported; only active eligible for inactivity detection",
+    getLifecycleCatalogState({ parkId: "disneyland", name: LEG }) === "legacy" &&
+    getLifecycleCatalogState({ parkId: "disneyland", name: "Wondrous Journeys" }) === "active" &&
+    getLifecycleCatalogState({ parkId: "disneyland", name: "Nope" }) === null &&
+    !isEligibleForInactivityDetection({ parkId: "disneyland", name: LEG }) &&
+    isEligibleForInactivityDetection({ parkId: "disneyland", name: "Wondrous Journeys" }) &&
+    !isEligibleForInactivityDetection({ parkId: "disneyland", name: "Nope" }));
+  check("legacy: seasonal exemption applies to any seasonal/themed legacy identity (vacuous while none exist; active cases above cover the rule)",
+    legacyPlaces.filter((p) => p.availabilityType === "seasonal" || p.availabilityTheme).every((p) =>
+      kinds(wrap(base({ parkId: p.parkId, name: p.name, category: p.availabilityType ?? "regular" }))).includes("seasonal_exempt")));
   check("identity: category must match catalog availabilityType",
     kinds(wrap(base({ category: "limited" }))).includes("category_mismatch") && kinds(wrap(base({ name: "Paint the Night" }))).includes("category_mismatch"));
 
