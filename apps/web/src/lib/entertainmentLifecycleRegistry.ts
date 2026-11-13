@@ -375,9 +375,13 @@ export function runDevEntertainmentLifecycleRegistryCases(): string[] {
 
   // Shipped registry
   check("shipped: registry validates", validateEntertainmentLifecycleRegistry().length === 0);
-  check("shipped: initial records are empty (no invented findings)", ENTERTAINMENT_LIFECYCLE_REGISTRY.records.length === 0);
   check("shipped: schemaVersion 1", ENTERTAINMENT_LIFECYCLE_REGISTRY.schemaVersion === 1);
-  check("shipped: unresolved set empty", getUnresolvedLifecycleRecords().length === 0);
+  check("shipped: unresolved records are a subset of the maintained records",
+    getUnresolvedLifecycleRecords().every((r) => ENTERTAINMENT_LIFECYCLE_REGISTRY.records.includes(r)));
+  // Empty-state behavior is asserted on an explicit fixture so adding real records never breaks the suite.
+  const empty = { schemaVersion: 1, records: [] } as EntertainmentLifecycleRegistry;
+  check("empty fixture: validates", validateEntertainmentLifecycleRegistry(empty).length === 0);
+  check("empty fixture: unresolved set empty", getUnresolvedLifecycleRecords(empty).length === 0);
 
   // Schema
   check("schema: valid regular provisional record passes", kinds(wrap(base())).length === 0);
