@@ -11,23 +11,24 @@ import {
   normalizeParkEntertainmentShowtimes,
   type ParkEntertainmentShowtimes,
 } from "./entertainmentShowtimes";
-import { fetchParkHistory, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
+import { HISTORY_ENRICHMENT_DEADLINE_MS, fetchParkHistoryWithin, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
 import { themeParks, type ThemeParksLive, type ThemeParksResult } from "./themeParksApi";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 /** Fetch the park's live payload via the shared ThemeParks client and normalize it. */
 export async function getParkEntertainmentShowtimes(
   parkId: ParkId,
-  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess } = {},
+  opts: { instant?: Date; getLive?: (id: string) => Promise<ThemeParksResult<ThemeParksLive>>; getHistory?: GetHistory; getHistoryAccess?: GetHistoryAccess; skipHistory?: boolean; historyDeadlineMs?: number } = {},
 ): Promise<ParkEntertainmentShowtimes> {
   const getLive = opts.getLive ?? ((id: string) => themeParks.getLive(id));
   const result = await getLive(THEMEPARKS_PARKS[parkId].entityId);
   // `now` is taken after the fetch so passed/upcoming reflects delivery time.
   const first = normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date());
   // Phase 14.4.2: history only when it could decide an entry (bounded provider usage); failure → first pass stands.
-  if (!first.entries.some((e) => e.historyCandidate)) return first;
+  // Callers with their own tight deadlines (Tom) pass skipHistory: they never consume the inactivity flag.
+  if (opts.skipHistory || !first.entries.some((e) => e.historyCandidate)) return first;
   const instant = opts.instant ?? new Date();
-  const history = await fetchParkHistory(parkId, instant, opts.getHistory, opts.getHistoryAccess);
+  const history = await fetchParkHistoryWithin(opts.historyDeadlineMs ?? HISTORY_ENRICHMENT_DEADLINE_MS, parkId, instant, opts.getHistory, opts.getHistoryAccess);
   return normalizeParkEntertainmentShowtimes(parkId, result, opts.instant ?? new Date(), history);
 }
 

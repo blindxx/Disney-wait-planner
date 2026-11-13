@@ -52,7 +52,39 @@ export async function fetchParkHistory(
   };
   const firstDays = Math.max(HISTORY_SHORT_DAYS, getAccess().maxDays);
   const first = await call(firstDays);
-  const retryable = first.ok ? first.data.hasMore : first.error.kind === "unauthorized" || first.error.kind === "history_window";
+  const accessFailure = (k: string | undefined) => k === "unauthorized" || k === "history_window";
+  // A stale-if-error answer whose refresh was refused (key rejected after a good 30-day fetch) is
+  // an access failure too: the client serves the cached payload as ok, but it can never be evidence.
+  const retryable = first.ok
+    ? first.data.hasMore || (first.meta.origin === "stale" && accessFailure(first.meta.staleReason?.kind))
+    : accessFailure(first.error.kind);
   if (!retryable || firstDays <= HISTORY_SHORT_DAYS) return first;
   return call(HISTORY_SHORT_DAYS);
+}
+
+/** Optional enrichment must never hold the response: past this, callers keep the history-free result. */
+export const HISTORY_ENRICHMENT_DEADLINE_MS = 2_000;
+
+/**
+ * `fetchParkHistory` bounded by a deadline. On expiry the result is a typed
+ * timeout (callers fall back to forward-horizon-only); the underlying request
+ * keeps going so the client cache can serve the next call, and its late result
+ * is discarded here.
+ */
+export async function fetchParkHistoryWithin(
+  deadlineMs: number,
+  parkId: ParkId,
+  instant: Date,
+  getHistory?: GetHistory,
+  getAccess?: GetHistoryAccess,
+): Promise<ThemeParksResult<ThemeParksHistoryDaily>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<ThemeParksResult<ThemeParksHistoryDaily>>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, error: { kind: "timeout", message: "history enrichment deadline" } }), deadlineMs);
+  });
+  try {
+    return await Promise.race([fetchParkHistory(parkId, instant, getHistory, getAccess), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }

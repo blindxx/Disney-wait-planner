@@ -243,7 +243,7 @@ export async function buildTomScheduleContext(
     // its provider fetch, so a request crossing resort-local midnight never
     // normalizes a late response against the request-start day.
     const getHours = deps.getHours ?? ((p: ParkId, d: string) => getParkHoursForDate(p, d));
-    const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p));
+    const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p, { skipHistory: true }));
 
     const targets = targetsFromPlanner(plannerContext, instant);
     if (targets.length === 0) return null;
@@ -444,7 +444,7 @@ export async function lookupTomParkShowtimes(
   const resort = PARK_TO_RESORT[park] as ResortId;
   const fixed = deps.instant;
   const clock = deps.now ?? (fixed ? () => fixed : () => new Date());
-  const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p));
+  const getShowtimes = deps.getShowtimes ?? ((p: ParkId) => getParkEntertainmentShowtimes(p, { skipHistory: true }));
   const localDate = getResortLocalDate(resort, clock());
 
   let wanted = mappedEntertainmentIdentities(park, resort);

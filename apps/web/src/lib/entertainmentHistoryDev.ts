@@ -238,6 +238,42 @@ export async function runDevHistoryAccessChainCases(): Promise<string[]> {
   check("anonymous 7-day failure is never retried", r.asked.join() === "7" && !r.res.ok);
   r = await run(5, [good(7)]);
   check("a tier reporting <7 days still asks the 7-day minimum once", r.asked.join() === "7");
+
+  // Stale-if-error masking an access failure (review finding): the client serves the cached 30-day
+  // payload as ok/stale with the refusal in staleReason — that must still reach the 7-day retry.
+  const staleWith = (kind: "unauthorized" | "history_window" | "rate_limited" | "timeout"): ThemeParksResult<ThemeParksHistoryDaily> => {
+    const g = good(30);
+    return g.ok ? { ...g, meta: { ...g.meta, origin: "stale", staleReason: { kind, message: "x" } } } : g;
+  };
+  r = await run(30, [staleWith("unauthorized"), good(7)]);
+  check("stale 30-day payload whose refresh was refused (401/403) → 7-day anonymous retry", r.asked.join() === "30,7" && r.res.ok && r.res.meta.origin !== "stale");
+  r = await run(30, [staleWith("history_window"), good(7)]);
+  check("stale payload with a window refusal → 7-day retry", r.asked.join() === "30,7");
+  for (const k of ["rate_limited", "timeout"] as const) {
+    r = await run(30, [staleWith(k), good(7)]);
+    check(`stale payload from ${k} → no retry (it would not help)`, r.asked.join() === "30");
+  }
+  {
+    // Real client: a cached good 30-day answer, expired, refresh refused with 403 → stale ok → retried anonymously.
+    const { createThemeParksClient } = await import("./themeParksApi");
+    let now = DLR_NOW.getTime(); let refuse = false; const keys: Array<string | undefined> = [];
+    const client = createThemeParksClient({ apiKey: "chain-secret-key", now: () => now, fetchImpl: (async (u: unknown, init?: RequestInit) => {
+      keys.push((init?.headers as Record<string, string> | undefined)?.["x-api-key"]);
+      const m = /from=([\d-]+)&to=([\d-]+)/.exec(String(u))!;
+      if (refuse && keys[keys.length - 1]) return new Response(JSON.stringify({ error: { type: "HISTORY_WINDOW_EXCEEDED" } }), { status: 403 });
+      const d = Math.round((Date.parse(`${m[2]}T00:00:00Z`) - Date.parse(`${m[1]}T00:00:00Z`)) / 86_400_000) + 1;
+      const f = devHistoryFixture(DLR_TODAY, { x: () => 2 }, { days: d });
+      if (!f.ok) throw new Error("fixture");
+      return new Response(JSON.stringify({ id: THEMEPARKS_PARKS.disneyland.entityId, name: "p", timezone: "America/Los_Angeles", range: { from: f.data.from, to: f.data.to }, next: null,
+        entities: f.data.entities.map((e, i) => ({ id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`, entityType: "SHOW", days: e.days.map((x) => ({ date: x.date, showCount: x.showCount, operatingMinutes: x.operatingMinutes, inParkHours: { scheduledMinutes: x.scheduledMinutes } })) })) }), { status: 200 });
+    }) as typeof fetch });
+    const go = () => fetchParkHistory("disneyland", new Date(now), (id, rg) => client.getHistoryDaily(id, rg), () => client.historyAccess());
+    const warm = await go();
+    check("real client: warm 30-day fetch", warm.ok && warm.data.from === "2026-10-15");
+    now += 2 * 3_600_000 - 1; refuse = true; // still the same local day? 11:00 AM PST + 2h
+    const after = await go();
+    check("real client: expired 30-day cache + refused refresh → falls back to a fresh anonymous 7-day answer", after.ok && after.meta.origin !== "stale" && after.data.from === "2026-11-07" && keys[keys.length - 1] === undefined);
+  }
   return failures;
 }
 
@@ -334,6 +370,27 @@ export async function runDevHistoryLongWindowFilteringCases(): Promise<string[]>
     check("e2e: no secret in service responses or request URLs", ![ra, rb, rc].some((x) => JSON.stringify(x).includes(KEY)) && ![...a.calls, ...b.calls, ...c.calls].some((x) => x.url.includes(KEY)));
     const d = mkClient("ok", KEY); await run(d.client); await run(d.client);
     check("e2e: second request within the hour is served from cache (no extra provider call)", d.calls.length === 1);
+  }
+
+  // Bounded enrichment: a slow/hung history request never withholds the live result.
+  {
+    const { fetchParkHistoryWithin } = await import("./entertainmentHistoryService");
+    const { getParkAllEntertainment } = await import("./entertainmentAllService");
+    const never = () => new Promise<ThemeParksResult<ThemeParksHistoryDaily>>(() => {});
+    const t0 = Date.now();
+    const timed = await fetchParkHistoryWithin(25, "disneyland", DLR_NOW, never, () => ({ maxDays: 30 }));
+    check("history deadline: a hung request resolves to a typed timeout at the deadline", !timed.ok && timed.error.kind === "timeout" && Date.now() - t0 < 1_000);
+    const live = liveOf([...dq(), entry(FANTASMIC_DLR, [])], DLR_NOW);
+    const t1 = Date.now();
+    const sv = await getParkEntertainmentShowtimes("disneyland", { instant: DLR_NOW, getLive: async () => live, getHistory: never, getHistoryAccess: () => ({ maxDays: 30 }), historyDeadlineMs: 25 });
+    check("showtimes: hung history → live showtimes returned promptly, entry unconfirmed", !sv.error && sv.entries.length > 0 && !hid(find(sv, "Fantasmic!")) && Date.now() - t1 < 1_000);
+    const al = await getParkAllEntertainment("disneyland", { instant: DLR_NOW, getLive: async () => live, getHistory: never, getHistoryAccess: () => ({ maxDays: 30 }), historyDeadlineMs: 25 });
+    check("All Entertainment: hung history → inventory returned promptly", al.entries.some((x) => x.name === "Fantasmic!") && !al.entries.find((x) => x.name === "Fantasmic!")!.showtime.confirmedNoActivityToday);
+    let calls = 0;
+    const sk = await getParkEntertainmentShowtimes("disneyland", { instant: DLR_NOW, getLive: async () => live, skipHistory: true, getHistory: async () => { calls++; return h30(); }, getHistoryAccess: () => ({ maxDays: 30 }) });
+    check("skipHistory (Tom callers): no history request, first pass returned", calls === 0 && !hid(find(sk, "Fantasmic!")));
+    const ok = await getParkEntertainmentShowtimes("disneyland", { instant: DLR_NOW, getLive: async () => live, getHistory: async () => h30(), getHistoryAccess: () => ({ maxDays: 30 }) });
+    check("history inside the deadline still applies", hid(find(ok, "Fantasmic!")));
   }
   return failures;
 }
