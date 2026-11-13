@@ -352,14 +352,6 @@ meets read "Special Ticketed Event" windows as operating hours on both pages via
 (`entertainmentHistoryDev.ts`) plus the history-client cases in
 `runDevThemeParksApiCases()`.
 
-**Temporary Preview diagnostics (remove after verification):**
-`historyDiagnostics.ts` logs one aggregate `[themeparks/history]` line per
-history decision, ONLY when `VERCEL_ENV === "preview"` (deduped 10 min, no
-extra requests, whitelisted primitives only — never keys, headers, provider
-text, entity names/ids or payloads). To remove: delete the file, the two
-`history-diagnostics` call sites in `entertainmentShowtimesService.ts` /
-`entertainmentAllService.ts`, and `runDevHistoryDiagnosticsCases()`.
-
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)
