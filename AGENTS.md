@@ -300,6 +300,18 @@ registered. Providers are only called on confirmed party dates
 (`/api/entertainment/event-meets`). DEV checks:
 `runDevEventExclusiveMeetCases()`, `runDevEventExclusiveMeetsServiceCases()`.
 
+## Performance-day filtering (Phase 14.4.1)
+
+Waits & Shows and default All Entertainment hide an entry for not performing
+today ONLY when `EntertainmentShowtimeEntry.confirmedNoActivityToday` is true
+(computed in `entryFromMapping`/`scanDayActivity`, `entertainmentShowtimes.ts`;
+consumed by `seasonalVisibility.ts`). An empty showtimes array alone is never
+evidence. Registry-confirmed party nights always stay visible; event browsing in
+All Entertainment bypasses the rule; party meets are never filtered and show
+Queue-Times status/waits only (never generic ThemeParks OPERATING/CLOSED). DEV
+checks: `runDevPerformanceDayEvidenceCases()` plus the 14.4.1 cases in the
+seasonal-visibility, event-filter and event-meet suites.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

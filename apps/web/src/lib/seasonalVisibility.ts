@@ -86,6 +86,70 @@ export function isEntertainmentConfirmedOutOfSeason(
 }
 
 // ============================================
+// PERFORMANCE-DAY VISIBILITY (Phase 14.4.1)
+// ============================================
+
+/**
+ * Whether a curated entry is hidden because reliable, complete provider
+ * evidence confirms it has no performance and no operating hours today
+ * (`EntertainmentShowtimeEntry.confirmedNoActivityToday`, computed in
+ * entertainmentShowtimes.ts — an empty showtimes array alone never sets it).
+ *
+ * Precedence: a registry-confirmed party night ("party-night" rank) always keeps
+ * the entry visible. Otherwise this is independent of — and applied in addition
+ * to — the seasonal rule above; it never un-hides a confirmed off-season entry
+ * and never hides anything the evidence flag does not confirm. Missing entries,
+ * failed/stale/partial data and older bodies lacking the flag are unconfirmed.
+ */
+export function isEntertainmentConfirmedInactiveToday(
+  place: EntertainmentPlace,
+  resort: ResortId,
+  today: string,
+  showtimeEntries?: { dwpName: string; performances: unknown[]; confirmedNoActivityToday?: boolean }[],
+  instant?: Date,
+): boolean {
+  const entry = showtimeEntries?.find((e) => e.dwpName === place.name);
+  if (!entry || entry.confirmedNoActivityToday !== true || entry.performances.length > 0) return false;
+  const rank = getSeasonalEntertainmentRank(place.name, { resort, date: today, parkId: place.parkId, instant: instant ?? new Date() });
+  return rank !== "party-night";
+}
+
+/** Waits & Shows rule: hidden when confirmed out-of-season OR confirmed inactive today. */
+export function isEntertainmentHiddenToday(
+  place: EntertainmentPlace,
+  resort: ResortId,
+  today: string,
+  showtimeEntries?: { dwpName: string; performances: unknown[]; confirmedNoActivityToday?: boolean }[],
+  instant?: Date,
+): boolean {
+  return isEntertainmentConfirmedOutOfSeason(place, resort, today, showtimeEntries, instant) ||
+    isEntertainmentConfirmedInactiveToday(place, resort, today, showtimeEntries, instant);
+}
+
+/**
+ * All Entertainment (default mode) counterpart for curated and provider-only
+ * entries: confirmed zero activity today (no performances, no operating hours)
+ * and not on a confirmed party night. Synthesized/unconfirmed entries are never inactive.
+ */
+export function isAllEntryConfirmedInactiveToday(
+  entry: AllEntertainmentEntry,
+  parkId: ParkId,
+  resort: ResortId,
+  today: string,
+  instant?: Date,
+): boolean {
+  if (entry.showtime.confirmedNoActivityToday !== true) return false;
+  if (entry.showtime.performances.length > 0 || (entry.operatingHours?.length ?? 0) > 0) return false;
+  const ctx = { resort, date: today, parkId, instant: instant ?? new Date() };
+  if (entry.source === "provider_only") {
+    if (!entry.id.startsWith("provider:")) return false;
+    return getSeasonalProviderEntertainmentRank(parkId, entry.id.slice("provider:".length), ctx) !== "party-night";
+  }
+  if (entry.source !== "curated") return false;
+  return getSeasonalEntertainmentRank(entry.name, ctx) !== "party-night";
+}
+
+// ============================================
 // ALL ENTERTAINMENT ENTRY VISIBILITY
 // ============================================
 
@@ -136,9 +200,10 @@ export function isAllEntryConfirmedOutOfSeason(
 }
 
 /**
- * All Entertainment list after the seasonal rule: toggle OFF hides confirmed
+ * All Entertainment list after the visibility rules: toggle OFF hides confirmed
  * out-of-season entries (curated and explicitly-classified provider-only),
- * toggle ON reveals them. Pure, so the page and DEV cases share one rule.
+ * toggle ON reveals them; entries confirmed inactive today (Phase 14.4.1) stay
+ * hidden either way. Pure, so the page and DEV cases share one rule.
  */
 export function applyAllEntertainmentSeasonalVisibility(
   entries: AllEntertainmentEntry[],
@@ -148,9 +213,14 @@ export function applyAllEntertainmentSeasonalVisibility(
   showOutOfSeason: boolean,
   instant?: Date,
 ): AllEntertainmentEntry[] {
-  return showOutOfSeason
-    ? entries
-    : entries.filter((e) => !isAllEntryConfirmedOutOfSeason(e, parkId, resort, today, instant));
+  // Two independent reasons to hide. The out-of-season toggle controls ONLY the
+  // seasonal one; an entry hidden solely because today's verified schedule confirms
+  // no activity is never revealed by it. (A confirmed out-of-season entry is hidden
+  // for its season; the toggle reveals it regardless of today's evidence.)
+  return entries.filter((e) => {
+    if (isAllEntryConfirmedOutOfSeason(e, parkId, resort, today, instant)) return showOutOfSeason;
+    return !isAllEntryConfirmedInactiveToday(e, parkId, resort, today, instant);
+  });
 }
 
 // ============================================
@@ -748,6 +818,99 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     const on = applyAllEntertainmentSeasonalVisibility(all.entries, "dca", "DLR", TODAY_DLR, true, NOW).some((e) => e.name.startsWith("The Storytellers"));
     return !off && on;
   } },
+
+  // ── Phase 14.4.1: performance-day filtering ─────────────────────────────
+  ...((): DevSeasonalVisibilityCase[] => {
+    const HAPPILY_UUID = "22b78ed9-a692-47cb-b6a4-6d1224ff67e3";
+    const happily = () => getEntertainmentForPark("mk").find((p) => p.name === "Happily Ever After")!;
+    const frozenPlace = () => getEntertainmentForPark("mk").find((p) => p.name === "Frozen Holiday Surprise")!;
+    const at = (d: string) => new Date(`${d}T17:00:00Z`);
+    // A feed that extends past `d` (record on the next day) with nothing on `d`: the confirmed-zero shape.
+    const nextDay = (d: string) => `${d.slice(0, 8)}${String(Number(d.slice(8)) + 1).padStart(2, "0")}T21:00:00-05:00`;
+    const mkZero = (uuid: string, d: string) => mkEntry(uuid, "x", [perf(nextDay(d))], { status: "CLOSED" });
+    const hidden = (uuid: string, name: string, showtimes: ThemeParksShowtime[], d = "2026-11-10", status = "CLOSED") => {
+      const when = at(d);
+      const ents = [mkEntry(uuid, "x", showtimes, { status })];
+      const st = mkShowtimes(ents, when);
+      const all = mkAll(ents, when);
+      const e = all.entries.find((x) => x.id === `curated:mk:${name}`)!;
+      return {
+        ws: isEntertainmentHiddenToday(getEntertainmentForPark("mk").find((p) => p.name === name)!, "WDW", d, st.entries, when),
+        all: applyAllEntertainmentSeasonalVisibility(all.entries, "mk", "WDW", d, false, when).every((x) => x.id !== e.id),
+        allOn: applyAllEntertainmentSeasonalVisibility(all.entries, "mk", "WDW", d, true, when).some((x) => x.id === e.id),
+      };
+    };
+    return [
+      { label: "14.4.1 Waits & Shows + All Entertainment: neutral show hidden only with complete zero-activity evidence (feed extends past today, nothing today)", ok: () => {
+        const h = hidden(HAPPILY_UUID, "Happily Ever After", [perf("2026-11-11T21:00:00-05:00")]);
+        return h.ws && h.all && !h.allOn; // hidden solely for inactivity: the out-of-season toggle must NOT reveal it
+      } },
+      { label: "14.4.1 independence: out-of-season toggle reveals seasonal hides (even when also inactive) but never an inactivity-only hide; event browsing still lists it", ok: () => {
+        const FR = "46a67154-8d90-427a-ad5c-700b41d90966";
+        const off = hidden(FR, "Frozen Holiday Surprise", [perf(nextDay("2026-11-10"))], "2026-11-10"); // off-season AND flagged inactive
+        const season = hidden(FR, "Frozen Holiday Surprise", [perf(nextDay("2026-11-21"))], "2026-11-21"); // in season, inactive only
+        const neutral = hidden(HAPPILY_UUID, "Happily Ever After", [perf("2026-11-11T21:00:00-05:00")]); // neutral, inactive only
+        const offNoEvidence = hidden(FR, "Frozen Holiday Surprise", [], "2026-11-10"); // off-season, no evidence
+        return off.all && off.allOn && season.all && !season.allOn && neutral.all && !neutral.allOn && offNoEvidence.all && offNoEvidence.allOn;
+      } },
+      { label: "14.4.1 empty showtimes, missing entity, failed provider, stale, dropped, provider OPERATING never hide", ok: () => {
+        const when = NOW;
+        const place = happily();
+        const ents = (e: ThemeParksLive["entries"][number][]) => mkShowtimes(e, when).entries;
+        const empty = ents([mkEntry(HAPPILY_UUID, "x", [], { status: "CLOSED" })]);
+        const absent = ents([]);
+        const failed = normalizeParkEntertainmentShowtimes("mk", { ok: false, error: { kind: "timeout", message: "t" } }, when).entries;
+        const stale = normalizeParkEntertainmentShowtimes("mk", { ...(mkLive([mkZero(HAPPILY_UUID, "2026-11-10")], when) as Extract<ThemeParksResult<ThemeParksLive>, { ok: true }>), meta: { origin: "stale", fetchedAt: when.getTime(), etag: null, staleReason: { kind: "http", message: "503", httpStatus: 503 } } }, when).entries;
+        const dropped = ents([mkEntry(HAPPILY_UUID, "x", [perf("2026-11-11T21:00:00-05:00")], { status: "CLOSED", droppedShowtimes: 1 })]);
+        const operating = ents([mkEntry(HAPPILY_UUID, "x", [perf("2026-11-11T21:00:00-05:00")], { status: "OPERATING" })]);
+        const vis = (e: { dwpName: string; performances: unknown[] }[]) => !isEntertainmentHiddenToday(place, "WDW", TODAY_WDW, e, when);
+        return [empty, absent, failed, stale, dropped, operating].every(vis) && !isEntertainmentHiddenToday(place, "WDW", TODAY_WDW, undefined, when) && vis(ents([mkZero(HAPPILY_UUID, "2026-11-10")]) as never) === false;
+      } },
+      { label: "14.4.1 verified performance today (even passed) or operating hours today keeps the show visible", ok: () => {
+        const passed = hidden(HAPPILY_UUID, "Happily Ever After", [perf("2026-11-10T09:00:00-05:00"), perf("2026-11-11T21:00:00-05:00")]);
+        const hours = hidden(HAPPILY_UUID, "Happily Ever After", [perf("2026-11-10T09:00:00-05:00", "Operating", "2026-11-10T17:00:00-05:00"), perf("2026-11-11T21:00:00-05:00")]);
+        return !passed.ws && !passed.all && !hours.ws && !hours.all;
+      } },
+      { label: "14.4.1 seasonal precedence: party night keeps a zero-activity entry visible; in-season (non-party) hides it; off-season still hidden unless performing", ok: () => {
+        const party = hidden("46a67154-8d90-427a-ad5c-700b41d90966", "Frozen Holiday Surprise", [perf(nextDay("2026-11-09"))], "2026-11-09");
+        const season = hidden("46a67154-8d90-427a-ad5c-700b41d90966", "Frozen Holiday Surprise", [perf(nextDay("2026-11-21"))], "2026-11-21");
+        const off = hidden("46a67154-8d90-427a-ad5c-700b41d90966", "Frozen Holiday Surprise", [perf(nextDay("2026-11-10"))], "2026-11-10");
+        const offPerforming = hidden("46a67154-8d90-427a-ad5c-700b41d90966", "Frozen Holiday Surprise", [perf("2026-11-10T20:15:00-05:00"), perf(nextDay("2026-11-10"))], "2026-11-10");
+        return !party.ws && !party.all && season.ws && season.all && off.ws && off.all && !offPerforming.ws && !offPerforming.all &&
+          isEntertainmentConfirmedOutOfSeason(frozenPlace(), "WDW", "2026-11-10", [], NOW) === true;
+      } },
+      { label: "14.4.1 provider-only: unclassified record hidden only with zero-activity evidence; hours/performances/empty keep it; party-night association stays visible", ok: () => {
+        const D = "2026-11-10";
+        const run = (showtimes: ThemeParksShowtime[], d = D, uuid = DRUM_CORPS, name = "Green Army Drum Corps", status = "CLOSED") => {
+          const all = hsAll([hsEntry(uuid, name, showtimes, status)], at(d));
+          const e = byId(all, uuid);
+          return { shown: applyAllEntertainmentSeasonalVisibility([e], "hs", "WDW", d, false, at(d)).length === 1, once: all.entries.filter((x) => x.id === e.id).length === 1 };
+        };
+        const zero = run([perf("2026-11-11T20:00:00-05:00")]);
+        const empty = run([]);
+        const hours = run([perf("2026-11-10T09:00:00-05:00", "Operating", "2026-11-10T17:00:00-05:00"), perf("2026-11-11T20:00:00-05:00")]);
+        const perfToday = run([perf("2026-11-10T20:00:00-05:00"), perf("2026-11-11T20:00:00-05:00")]);
+        // Stitch: Jollywood Nights party night Nov 14 → protected; nothing is "inactive"-hidden there
+        const stitchParty = run([perf("2026-11-15T20:00:00-05:00")], "2026-11-14", JN_STITCH, "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights");
+        return !zero.shown && zero.once && empty.shown && hours.shown && perfToday.shown && stitchParty.shown;
+      } },
+      { label: "14.4.1 no duplicates / no synthesized hiding: ids stay unique after filtering and un-confirmed (synthesized off-season) entries are untouched", ok: () => {
+        const all = mkAll([mkZero(HAPPILY_UUID, "2026-11-10")], NOW);
+        const kept = applyAllEntertainmentSeasonalVisibility(all.entries, "mk", "WDW", TODAY_WDW, false, NOW);
+        const synth = makeOffSeasonEntry(happily(), "mk");
+        return new Set(kept.map((e) => e.id)).size === kept.length && kept.length < all.entries.length &&
+          !isAllEntryConfirmedInactiveToday(synth, "mk", "WDW", TODAY_WDW, NOW) &&
+          applyAllEntertainmentSeasonalVisibility([synth], "mk", "WDW", TODAY_WDW, false, NOW).length === 1;
+      } },
+      { label: "14.4.1 older bodies without the evidence flag are never hidden", ok: () => {
+        const all = mkAll([mkZero(HAPPILY_UUID, "2026-11-10")], NOW);
+        const e = all.entries.find((x) => x.id === "curated:mk:Happily Ever After")!;
+        const legacy = { ...e, showtime: { ...e.showtime, confirmedNoActivityToday: undefined } };
+        return applyAllEntertainmentSeasonalVisibility([legacy], "mk", "WDW", TODAY_WDW, false, NOW).length === 1 &&
+          !isEntertainmentHiddenToday(happily(), "WDW", TODAY_WDW, [{ dwpName: "Happily Ever After", performances: [] }], NOW);
+      } },
+    ];
+  })(),
 ];
 
 export function runDevSeasonalVisibilityCases(): string[] {

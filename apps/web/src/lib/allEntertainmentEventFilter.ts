@@ -428,6 +428,19 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     const i = info("mk", "mnsshp");
     return i.unannouncedText === "Upcoming dates have not been announced." && i.rangeText === null && i.nights === null && i.seasonLabel === null;
   } },
+  // Phase 14.4.1: default mode follows performance-day filtering; event browsing never does
+  { label: "14.4.1 event browsing keeps an associated entry that is confirmed inactive today, while default All hides it (in-season Nov 21)", ok: () => {
+    const NOV21 = new Date("2026-11-21T17:00:00Z");
+    const inactive = { ...mkCur("mk", "Frozen Holiday Surprise"), showtime: { ...mkCur("mk", "Frozen Holiday Surprise").showtime, status: "none_posted" as const, incomplete: false, confirmedNoActivityToday: true } };
+    const browsed = getAllEntertainmentEventEntries([inactive], "mk", "holidays-wdw", NOV21);
+    const byDefault = applyAllEntertainmentSeasonalVisibility([inactive], "mk", "WDW", "2026-11-21", false, NOV21);
+    const unconfirmed = applyAllEntertainmentSeasonalVisibility([{ ...inactive, showtime: { ...inactive.showtime, confirmedNoActivityToday: false } }], "mk", "WDW", "2026-11-21", false, NOV21);
+    return browsed.some((e) => e === inactive) && byDefault.length === 0 && unconfirmed.length === 1 && new Set(browsed.map((e) => e.id)).size === browsed.length;
+  } },
+  { label: "14.4.1 event browsing: confirmed event dates, season info and the information note are unchanged by the evidence flag", ok: () =>
+    info("mk", "mvmcp").rangeText === "Nov 8 – Dec 22, 2026" && info("mk", "mvmcp").nights?.length === 23 && EVENT_INFO_NOTE.includes("Individual performance dates and times may vary") },
+  { label: "14.4.1 reset to default returns to performance-day filtering (event pool off, checkboxes shown again)", ok: () =>
+    resolveEventSelection("mk", resetAllEntertainmentFilters().event, NOW) === "" && showOutOfSeasonToggle("") },
   { label: "14.4D info is null for All Entertainment / stale selections", ok: () => describeAllEntertainmentEvent("mk", "", NOW) === null && describeAllEntertainmentEvent("hs", "mnsshp", NOW) === null },
 ];
 
