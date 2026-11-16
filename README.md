@@ -154,6 +154,7 @@ app code) whenever `db-schema.sql` changes.
 **Daily park-hours refresh** (server-only)
 
 - `CRON_SECRET` — required by `/api/cron/park-hours` (Vercel Cron, 02:00 UTC daily via `apps/web/vercel.json`); the route fails closed (500) when unset. Vercel sends it as `Authorization: Bearer`.
+- `CRON_SECRET` also gates `/api/cron/entertainment-lifecycle` (Phase 14.5C, 03:30 UTC daily): the scheduled entertainment lifecycle monitor, which needs `DATABASE_URL` and the lifecycle tables from `pnpm --filter web run db:migrate` (migrate Production **and** Preview before deploying). Read-only audit feed: `GET /api/catalog/lifecycle-audit` with `x-dwp-catalog-api-key` (`DWP_CATALOG_API_KEY`).
 
 **Ask Tom** (server-only — never expose these as `NEXT_PUBLIC_*`)
 

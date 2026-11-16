@@ -71,6 +71,7 @@ import {
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
 import { isEntertainmentHiddenToday } from "../../lib/seasonalVisibility";
+import { getLifecycleHiddenNames, performingNamesFromShowtimes } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
@@ -967,12 +968,20 @@ export default function WaitTimesPage() {
     [selectedPark],
   );
 
+  // Phase 14.5C lifecycle hiding: reviewed registry decisions (applied immediately, static data) plus the
+  // server-persisted auto-hidden names carried by the showtimes response. Fails open when the list is unknown.
+  const lifecycleHidden = useMemo(
+    () => getLifecycleHiddenNames(selectedPark, showtimes?.lifecycleAutoHidden, performingNamesFromShowtimes(showtimes?.entries)),
+    [selectedPark, showtimes],
+  );
+
   /** Entertainment visible under the shared land filter (drives the section + its jump link). */
   const visibleEntertainment = useMemo(() => {
     const today = getResortLocalDate(selectedResort, displayNow);
     return parkEntertainment.filter(
       (p) =>
         (!selectedLand || p.land === selectedLand) &&
+        !lifecycleHidden.has(p.name) &&
         !isEntertainmentHiddenToday(
           p,
           selectedResort,
@@ -981,7 +990,7 @@ export default function WaitTimesPage() {
           displayNow,
         ),
     );
-  }, [parkEntertainment, selectedLand, selectedResort, displayNow, showtimes]);
+  }, [parkEntertainment, selectedLand, selectedResort, displayNow, showtimes, lifecycleHidden]);
 
   // ThemeParks.wiki attribution is owed whenever its data is presented: a
   // successful response and at least one visible entry the provider was asked about.
@@ -1007,9 +1016,9 @@ export default function WaitTimesPage() {
    */
   const availableLands = useMemo(() => {
     const attractionLands = attractions.map((a) => a.land).filter((l): l is string => !!l);
-    const entertainmentLands = parkEntertainment.map((p) => p.land).filter((l): l is string => !!l);
+    const entertainmentLands = parkEntertainment.filter((p) => !lifecycleHidden.has(p.name)).map((p) => p.land).filter((l): l is string => !!l);
     return [...new Set([...attractionLands, ...entertainmentLands])].sort();
-  }, [attractions, parkEntertainment]);
+  }, [attractions, parkEntertainment, lifecycleHidden]);
 
   // Phase 14.3.1: a variant display name (Monsters After Dark) reverts to the
   // canonical name once the existing park-hours data confirms every session

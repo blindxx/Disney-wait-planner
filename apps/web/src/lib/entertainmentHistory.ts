@@ -148,10 +148,10 @@ export function historyWindow(resort: ResortId, instant: Date, days: number = HI
   return { from: addDaysToLocalDate(to, -(days - 1)) ?? to, to };
 }
 
-const isActive = (d: { showCount: number | null; operatingMinutes: number | null }) =>
+export const isActive = (d: { showCount: number | null; operatingMinutes: number | null }) =>
   (d.showCount ?? 0) > 0 || (d.operatingMinutes ?? 0) > 0;
 
-const isDark = (d: { showCount: number | null; operatingMinutes: number | null; scheduledMinutes: number | null }) =>
+export const isDark = (d: { showCount: number | null; operatingMinutes: number | null; scheduledMinutes: number | null }) =>
   d.showCount === 0 && d.operatingMinutes === 0 && (d.scheduledMinutes ?? 0) > 0;
 
 const emptyCounts = (): DayCounts => ({ classified: 0, performed: 0, dark: 0, unexplainedDark: 0, partyDark: 0, nonPartyPerformed: 0 });

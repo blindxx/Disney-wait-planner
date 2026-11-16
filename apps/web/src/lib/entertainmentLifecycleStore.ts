@@ -1,0 +1,259 @@
+/**
+ * entertainmentLifecycleStore.ts — Phase 14.5C Postgres persistence for the
+ * active entertainment lifecycle (schema: db-schema.sql, verified by
+ * scripts/migrate-db.mjs). Server-only. Pure decisions live in
+ * entertainmentLifecycleDetector.ts; this module only reads/writes rows.
+ *
+ * WRITE side (the scheduled monitor only), always inside ONE transaction that
+ * holds a per-park advisory lock, so two overlapping cron deliveries serialize
+ * (the second reports "busy") instead of interleaving:
+ *  - `upsertObservations`: per (show, resort-local date); a stronger class
+ *    (unknown < silent < inactive < active) replaces a weaker one, never the
+ *    reverse; a repeat of the same class only bumps the counter. So duplicate
+ *    deliveries and late (history backfill) data are idempotent and
+ *    order-independent, and an `active` day can never be downgraded.
+ *  - `writeState` is guarded by `evaluated_local_date`: a delayed run for an
+ *    EARLIER date can never overwrite a newer evaluation.
+ *  - `insertEvent` has a natural key (park, show, type, date): a repeated
+ *    decision is a no-op. Events are the audit trail (see readLifecycleAudit).
+ *
+ * READ side for the entertainment APIs (`getLifecycleAutoHidden`): best-effort,
+ * bounded, cached, and FAIL OPEN — any problem returns `undefined` ("unknown"),
+ * which hides nothing automatic. It reuses the dedicated one-connection pool
+ * (never the auth/planner pool), like parkHoursStore's bounded reads.
+ */
+
+import type { ParkId } from "@disney-wait-planner/shared";
+import { getParkHoursPool } from "./db";
+import {
+  LIFECYCLE_CLASS_RANK,
+  type LifecycleAuditFlag,
+  type LifecycleDayClass,
+  type LifecycleShowState,
+  type PlannedLifecycleEvent,
+  type ShowDayObservation,
+} from "./entertainmentLifecycleDetector";
+import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
+
+// ============================================
+// WRITE SIDE
+// ============================================
+
+/** Per-park transaction-scoped advisory lock. false = another run holds it. */
+export async function tryLifecycleLock(q: Queryable, parkId: ParkId): Promise<boolean> {
+  const res = await q.query("SELECT pg_try_advisory_xact_lock(hashtext($1)) AS ok", [`dwp:entertainment-lifecycle:${parkId}`]);
+  return res.rows[0]?.ok === true;
+}
+
+export async function upsertObservations(q: Queryable, observations: ShowDayObservation[]): Promise<void> {
+  for (const o of observations) {
+    await q.query(
+      `INSERT INTO entertainment_lifecycle_evidence AS e
+         (park_id, show_key, local_date, show_name, day_class, class_rank, basis, performance_count, source, limitations)
+       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10::jsonb)
+       ON CONFLICT (park_id, show_key, local_date) DO UPDATE SET
+         show_name = EXCLUDED.show_name,
+         day_class = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.day_class ELSE e.day_class END,
+         basis = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.basis ELSE e.basis END,
+         source = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.source ELSE e.source END,
+         limitations = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.limitations ELSE e.limitations END,
+         performance_count = CASE
+           WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.performance_count
+           WHEN EXCLUDED.class_rank = e.class_rank THEN GREATEST(e.performance_count, EXCLUDED.performance_count)
+           ELSE e.performance_count END,
+         class_rank = GREATEST(e.class_rank, EXCLUDED.class_rank),
+         observation_count = e.observation_count + 1,
+         last_observed_at = NOW()`,
+      [o.parkId, o.showKey, o.localDate, o.showName, o.dayClass, LIFECYCLE_CLASS_RANK[o.dayClass], o.basis, o.performanceCount, o.source, JSON.stringify(o.limitations)],
+    );
+  }
+}
+
+export interface StoredEvidenceRow { showKey: string; localDate: string; dayClass: LifecycleDayClass; basis: string | null; performanceCount: number }
+
+export async function readEvidence(q: Queryable, parkId: ParkId, from: string, to: string): Promise<StoredEvidenceRow[]> {
+  const res = await q.query(
+    `SELECT show_key, to_char(local_date, 'YYYY-MM-DD') AS d, day_class, basis, performance_count
+     FROM entertainment_lifecycle_evidence
+     WHERE park_id = $1 AND local_date >= $2::date AND local_date <= $3::date`,
+    [parkId, from, to],
+  );
+  return res.rows.map((r) => ({
+    showKey: String(r.show_key), localDate: String(r.d), dayClass: String(r.day_class) as LifecycleDayClass,
+    basis: r.basis == null ? null : String(r.basis), performanceCount: Number(r.performance_count),
+  }));
+}
+
+export interface StoredLifecycleState extends LifecycleShowState {
+  showKey: string;
+  showName: string;
+  hiddenAt: string | null;
+  restoredAt: string | null;
+  silenceFlaggedAt: string | null;
+  inactiveDays: number;
+  silentDays: number;
+  evaluatedLocalDate: string | null;
+}
+
+const iso = (v: unknown): string | null => (v == null ? null : new Date(v as string | Date).toISOString());
+const dateOrNull = (v: unknown): string | null => (v == null ? null : String(v));
+
+export async function readStates(q: Queryable, parkId: ParkId): Promise<Map<string, StoredLifecycleState>> {
+  const res = await q.query(
+    `SELECT show_key, show_name, status,
+            to_char(cycle_reset_date, 'YYYY-MM-DD') AS cycle_reset_date,
+            to_char(last_active_date, 'YYYY-MM-DD') AS last_active_date,
+            to_char(hidden_local_date, 'YYYY-MM-DD') AS hidden_local_date,
+            hidden_at, restored_at, hide_count, restore_count, inactive_days, silent_days,
+            silence_flagged_at, to_char(secondary_evaluated_on, 'YYYY-MM-DD') AS secondary_evaluated_on,
+            audit_flag, to_char(evaluated_local_date, 'YYYY-MM-DD') AS evaluated_local_date
+     FROM entertainment_lifecycle_state WHERE park_id = $1`,
+    [parkId],
+  );
+  const out = new Map<string, StoredLifecycleState>();
+  for (const r of res.rows) {
+    out.set(String(r.show_key), {
+      showKey: String(r.show_key), showName: String(r.show_name),
+      status: r.status === "auto_hidden" ? "auto_hidden" : "visible",
+      cycleResetDate: dateOrNull(r.cycle_reset_date), lastActiveDate: dateOrNull(r.last_active_date),
+      hiddenLocalDate: dateOrNull(r.hidden_local_date), hiddenAt: iso(r.hidden_at), restoredAt: iso(r.restored_at),
+      hideCount: Number(r.hide_count), restoreCount: Number(r.restore_count),
+      inactiveDays: Number(r.inactive_days), silentDays: Number(r.silent_days),
+      silenceFlagged: r.silence_flagged_at != null, silenceFlaggedAt: iso(r.silence_flagged_at),
+      secondaryEvaluatedOn: dateOrNull(r.secondary_evaluated_on),
+      auditFlag: (r.audit_flag as LifecycleAuditFlag | null) ?? null,
+      evaluatedLocalDate: dateOrNull(r.evaluated_local_date),
+    });
+  }
+  return out;
+}
+
+/** Newer-evaluation-wins upsert: a delayed run for an earlier resort-local date never overwrites a later one. */
+export async function writeState(q: Queryable, parkId: ParkId, s: StoredLifecycleState): Promise<boolean> {
+  const res = await q.query(
+    `INSERT INTO entertainment_lifecycle_state AS st
+       (park_id, show_key, show_name, status, cycle_reset_date, last_active_date, hidden_local_date, hidden_at, restored_at,
+        hide_count, restore_count, inactive_days, silent_days, silence_flagged_at, secondary_evaluated_on, audit_flag,
+        evaluated_local_date, updated_at)
+     VALUES ($1, $2, $3, $4, $5::date, $6::date, $7::date, $8::timestamptz, $9::timestamptz,
+             $10, $11, $12, $13, $14::timestamptz, $15::date, $16, $17::date, NOW())
+     ON CONFLICT (park_id, show_key) DO UPDATE SET
+       show_name = EXCLUDED.show_name, status = EXCLUDED.status, cycle_reset_date = EXCLUDED.cycle_reset_date,
+       last_active_date = EXCLUDED.last_active_date, hidden_local_date = EXCLUDED.hidden_local_date,
+       hidden_at = EXCLUDED.hidden_at, restored_at = EXCLUDED.restored_at, hide_count = EXCLUDED.hide_count,
+       restore_count = EXCLUDED.restore_count, inactive_days = EXCLUDED.inactive_days, silent_days = EXCLUDED.silent_days,
+       silence_flagged_at = EXCLUDED.silence_flagged_at, secondary_evaluated_on = EXCLUDED.secondary_evaluated_on,
+       audit_flag = EXCLUDED.audit_flag, evaluated_local_date = EXCLUDED.evaluated_local_date, updated_at = NOW()
+     WHERE st.evaluated_local_date IS NULL OR st.evaluated_local_date <= EXCLUDED.evaluated_local_date`,
+    [
+      parkId, s.showKey, s.showName, s.status, s.cycleResetDate, s.lastActiveDate, s.hiddenLocalDate, s.hiddenAt, s.restoredAt,
+      s.hideCount, s.restoreCount, s.inactiveDays, s.silentDays, s.silenceFlaggedAt, s.secondaryEvaluatedOn, s.auditFlag,
+      s.evaluatedLocalDate,
+    ],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+export async function insertEvent(q: Queryable, parkId: ParkId, showKey: string, showName: string, e: PlannedLifecycleEvent): Promise<void> {
+  await q.query(
+    `INSERT INTO entertainment_lifecycle_events (park_id, show_key, event_type, local_date, show_name, evidence, coverage_limitations)
+     VALUES ($1, $2, $3, $4::date, $5, $6::jsonb, $7::jsonb)
+     ON CONFLICT (park_id, show_key, event_type, local_date) DO NOTHING`,
+    [parkId, showKey, e.type, e.localDate, showName, JSON.stringify(e.evidence), JSON.stringify(e.coverageLimitations)],
+  );
+}
+
+export async function pruneEvidence(q: Queryable, parkId: ParkId, before: string): Promise<void> {
+  await q.query("DELETE FROM entertainment_lifecycle_evidence WHERE park_id = $1 AND local_date < $2::date", [parkId, before]);
+}
+
+// ============================================
+// AUDIT READ (server-key-protected route)
+// ============================================
+
+export interface LifecycleAuditReport {
+  hidden: Array<{ parkId: string; showName: string; hiddenLocalDate: string | null; hiddenAt: string | null; hideCount: number; restoreCount: number; auditFlag: string | null }>;
+  /** Unresolved candidates: flagged states (silence, registry conflict). */
+  flagged: Array<{ parkId: string; showName: string; auditFlag: string; silentDays: number; inactiveDays: number; status: string; silenceFlaggedAt: string | null }>;
+  /** Decisions awaiting the research audit (audit_status = 'unreviewed'), newest first. */
+  unreviewedEvents: Array<{ parkId: string; showName: string; eventType: string; localDate: string; occurredAt: string; evidence: unknown; coverageLimitations: unknown }>;
+}
+
+export async function readLifecycleAudit(q: Queryable, limit = 200): Promise<LifecycleAuditReport> {
+  // Sequential: one client runs one query at a time (pg deprecates overlapping queries).
+  const h = await q.query(`SELECT park_id, show_name, to_char(hidden_local_date, 'YYYY-MM-DD') AS d, hidden_at, hide_count, restore_count, audit_flag
+             FROM entertainment_lifecycle_state WHERE status = 'auto_hidden' ORDER BY hidden_at`);
+  const f = await q.query(`SELECT park_id, show_name, audit_flag, silent_days, inactive_days, status, silence_flagged_at
+             FROM entertainment_lifecycle_state WHERE audit_flag IS NOT NULL ORDER BY park_id, show_name`);
+  const ev = await q.query(`SELECT park_id, show_name, event_type, to_char(local_date, 'YYYY-MM-DD') AS d, occurred_at, evidence, coverage_limitations
+             FROM entertainment_lifecycle_events WHERE audit_status = 'unreviewed' ORDER BY occurred_at DESC LIMIT $1`, [limit]);
+  return {
+    hidden: h.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), hiddenLocalDate: dateOrNull(r.d), hiddenAt: iso(r.hidden_at), hideCount: Number(r.hide_count), restoreCount: Number(r.restore_count), auditFlag: r.audit_flag == null ? null : String(r.audit_flag) })),
+    flagged: f.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), auditFlag: String(r.audit_flag), silentDays: Number(r.silent_days), inactiveDays: Number(r.inactive_days), status: String(r.status), silenceFlaggedAt: iso(r.silence_flagged_at) })),
+    unreviewedEvents: ev.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), eventType: String(r.event_type), localDate: String(r.d), occurredAt: iso(r.occurred_at) ?? "", evidence: r.evidence, coverageLimitations: r.coverage_limitations })),
+  };
+}
+
+// ============================================
+// REQUEST-PATH READ (fail open, cached, bounded)
+// ============================================
+
+const READ_DEADLINE_MS = 1000;
+const CACHE_TTL_MS = 60_000;
+/** A good answer may bridge a database blip for this long; beyond it the list is "unknown" (hides nothing). */
+const STALE_OK_MS = 10 * 60_000;
+const FAILURE_COOLDOWN_MS = 60_000;
+
+let cache: { at: number; byPark: Map<string, string[]> } | null = null;
+let inflight: Promise<void> | null = null;
+let blockedUntil = 0;
+
+export function resetLifecycleReadState(): void { cache = null; inflight = null; blockedUntil = 0; }
+
+async function refresh(clock: () => number, executor: PersistExecutor, deadlineMs: number): Promise<void> {
+  let failed = false;
+  const work = executor
+    .run((q) => q.query("SELECT park_id, show_name FROM entertainment_lifecycle_state WHERE status = 'auto_hidden' ORDER BY park_id, show_name"))
+    .catch(() => { failed = true; return null; });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const res = await Promise.race([work, new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), deadlineMs); })]);
+  if (timer) clearTimeout(timer);
+  if (res === "timeout") { try { executor.abort(); } catch { /* best effort */ } blockedUntil = clock() + FAILURE_COOLDOWN_MS; return; }
+  if (failed || !res) { blockedUntil = clock() + FAILURE_COOLDOWN_MS; return; }
+  const byPark = new Map<string, string[]>();
+  for (const r of res.rows) {
+    const k = String(r.park_id);
+    byPark.set(k, [...(byPark.get(k) ?? []), String(r.show_name)]);
+  }
+  cache = { at: clock(), byPark };
+}
+
+/**
+ * Persisted auto-hidden canonical names for a park, or `undefined` when unknown.
+ * NEVER throws and never blocks past `deadlineMs`: unknown (no DATABASE_URL, DB
+ * down, timeout, cooldown) means "hide nothing automatic" — fail open.
+ */
+export async function getLifecycleAutoHidden(
+  parkId: ParkId,
+  opts: { clock?: () => number; executor?: PersistExecutor; deadlineMs?: number } = {},
+): Promise<string[] | undefined> {
+  try {
+    const clock = opts.clock ?? Date.now;
+    const fresh = cache && clock() - cache.at < CACHE_TTL_MS;
+    if (!fresh && clock() >= blockedUntil) {
+      if (!inflight) {
+        let executor = opts.executor ?? null;
+        if (!executor && process.env.DATABASE_URL) executor = createPoolExecutor(getParkHoursPool());
+        if (executor) {
+          const run = refresh(clock, executor, opts.deadlineMs ?? READ_DEADLINE_MS).catch(() => { blockedUntil = clock() + FAILURE_COOLDOWN_MS; });
+          inflight = run.finally(() => { inflight = null; });
+        }
+      }
+      if (inflight) await inflight;
+    }
+    if (cache && clock() - cache.at < STALE_OK_MS) return cache.byPark.get(parkId) ?? [];
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}

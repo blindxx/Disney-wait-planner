@@ -44,7 +44,10 @@ requires (NextAuth tables, `user_plans`, `user_planner`,
 `user_planner_revision_seq`, `user_planner_writes`, `user_profiles`,
 `park_regular_hours` — durable verified ThemeParks regular park hours,
 written opportunistically by `parkHoursStore.ts`; it has no fallback, so
-migrate before deploy, and failures there never affect `/api/park-hours`).
+migrate before deploy, and failures there never affect `/api/park-hours`;
+`entertainment_lifecycle_evidence` / `entertainment_lifecycle_state` /
+`entertainment_lifecycle_events` — Phase 14.5C lifecycle monitor tables, see
+"Active entertainment lifecycle"; migrate before deploy, readers fail open).
 It's kept safely rerunnable (`CREATE ... IF NOT EXISTS` /
 `ADD COLUMN IF NOT EXISTS`), so fresh setup and migrating an existing
 database both go through the same file — never hand-write a separate
@@ -360,8 +363,9 @@ checks live in `apps/web/src/lib/entertainmentLifecycleRegistry.ts`. It is not
 a second catalog: `ENTERTAINMENT_PLACES` stays the only identity/metadata
 authority, and a record only points at an existing entry by exact canonical
 `(parkId, name)` (key = `entertainmentMappingKey`; duplicates and unknown names
-are rejected). Nothing outside that module imports it in 14.5A: no hiding, UI,
-Smart Entry/My Plans effect, detector or catalog retirement.
+are rejected). Since 14.5C its `hidden` decisions are applied at runtime (only) by
+`entertainmentLifecycleVisibility.ts`; there is still no Smart Entry/My Plans
+effect, registry auto-edit or catalog retirement.
 
 Active vs legacy: the identity may be in the ACTIVE catalog
 (`ENTERTAINMENT_PLACES`) or the LEGACY catalog (read via
@@ -411,6 +415,54 @@ server-key-protected, read-only endpoint (pattern: `/api/catalog/query`) that
 the audit reads alongside the registry; the audit then proposes registry
 changes via a normal commit/PR. Candidates are never auto-promoted and never
 change visibility on their own. Defer tables/endpoints until a detector exists.
+
+## Active entertainment lifecycle (Phase 14.5C)
+
+Server-side automated hiding / resurfacing / re-hiding of ACTIVE regular and
+limited entertainment (identical rules for both). Seasonal/holiday/festival/party
+entries, legacy identities and unmapped shows are never evaluated (no provider
+observation is ever inferred). Modules: `entertainmentLifecycleDetector.ts`
+(pure rules), `entertainmentLifecycleMonitor.ts` (scheduled run),
+`entertainmentLifecycleStore.ts` (Postgres), `entertainmentLifecycleVisibility.ts`
+(the ONE hide-set both pages use), DEV checks in `entertainmentLifecycleDev.ts`.
+
+- **Evidence** = one canonical show (`entertainmentMappingKey`, so provider
+  editions like World of Color – ONE/Happiness! never fork identity) × one
+  resort-local date, class `active` (verified current performance) | `inactive`
+  (existing 14.4.1/14.4.2 `confirmedNoActivityToday` on a healthy park, or a
+  validated history "dark" day) | `silent` (the show's own provider entities
+  published nothing while ≥ 3 other shows publish; never inactivity) | `unknown`
+  (failures, stale/partial/unhealthy, CLOSED/OPERATING alone). Unknown/silent
+  days and elapsed time never count.
+- **Hide**: ≥ 21 distinct inactive days in the rolling 30 resort-local days,
+  counting only days after the latest active-cycle reset (latest active day /
+  restoration). **Silence**: ≥ 10 silent days → audit flag + secondary history
+  evaluation (backfills validated dark/performed days; one cached park-level
+  request); silence alone never hides. **Restore**: a verified active day newer
+  than the cycle reset un-hides and resets the cycle (old inactive evidence
+  cannot re-hide; a later 21-of-30 pattern can). Future-return announcements are
+  never an input. Registry `confirmed` hides are never overridden (a performance
+  only raises a `registry_conflict` flag); `provisional` registry hides and
+  auto-hides are also un-hidden at request time by a performance in the response
+  the page already holds.
+- **Delivery**: `/api/entertainment/{showtimes,all}` attach
+  `lifecycleAutoHidden` (bounded, cached, fetched in parallel, fail-open:
+  absent = unknown = nothing automatic hidden). Pages call
+  `getLifecycleHiddenNames` and apply the set to the normal list, event
+  browsing, synthesized entries and the out-of-season toggle path; no toggle
+  reveals it and no second filtering system exists.
+- **Monitor**: `/api/cron/entertainment-lifecycle` (03:30 UTC, `CRON_SECRET`,
+  fail-closed like park-hours), all six parks, reusing the showtimes service so
+  provider caching/history budgets are unchanged. Idempotent (duplicate/late
+  deliveries safe: strongest class per day wins, newer-evaluation-wins state
+  writes, natural-key events, per-park advisory lock → `busy`).
+- **Audit**: every hide/restore/silence-flag/registry-conflict is an
+  `entertainment_lifecycle_events` row (`audit_status = 'unreviewed'`) with
+  evidence + coverage limitations, readable via `GET /api/catalog/lifecycle-audit`
+  (`x-dwp-catalog-api-key`). No automatic registry edits, catalog retirement or
+  legacy restoration (14.5D legacy comebacks, 14.5E research audit).
+- **Deploy**: run `db:migrate` against Production AND Preview first; the
+  monitor needs the tables (it reports `db_unavailable` otherwise, never hides).
 
 ## Catalog taxonomy
 

@@ -48,6 +48,7 @@ import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
 import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
+import { filterLifecycleHiddenEntries, getLifecycleHiddenNames, performingNamesFromAllEntries } from "../../../lib/entertainmentLifecycleVisibility";
 import {
   describeAllEntertainmentEvent,
   EVENT_INFO_NOTE,
@@ -330,16 +331,24 @@ export default function AllEntertainmentPage() {
   const parkHoursPresented = !!parkHours && describeParkHours(parkHours).presentsProviderData;
   const inventoryPresented = allEntertainmentPresentsProviderData(all);
 
+  // Phase 14.5C lifecycle hiding (registry decisions + server-persisted auto-hidden names): one set,
+  // applied to the live list, event browsing, synthesized entries and the toggle path. No toggle reveals it.
+  const lifecycleHidden = useMemo(
+    () => getLifecycleHiddenNames(selectedPark, all?.lifecycleAutoHidden, performingNamesFromAllEntries(all?.entries)),
+    [selectedPark, all],
+  );
+  const liveEntries = useMemo(() => filterLifecycleHiddenEntries(all?.entries ?? [], lifecycleHidden), [all, lifecycleHidden]);
+
   // When "Show out-of-season entertainment" is ON, synthesize entries for curated
   // shows that are confirmed out-of-season and not already in the live inventory.
   const offSeasonEntries = useMemo<AllEntertainmentEntry[]>(() => {
     if (!showOutOfSeason) return [];
     const today = getResortLocalDate(selectedResort, displayNow);
-    const existingIds = new Set((all?.entries ?? []).map((e) => e.id));
-    return getOffSeasonCuratedEntertainment(selectedPark, today, existingIds, displayNow).map((place) =>
+    const existingIds = new Set(liveEntries.map((e) => e.id));
+    return getOffSeasonCuratedEntertainment(selectedPark, today, existingIds, displayNow, lifecycleHidden).map((place) =>
       makeOffSeasonEntry(place, selectedPark),
     );
-  }, [showOutOfSeason, selectedPark, selectedResort, displayNow, all]);
+  }, [showOutOfSeason, selectedPark, selectedResort, displayNow, liveEntries, lifecycleHidden]);
 
   const today = getResortLocalDate(selectedResort, displayNow);
   // Event options are static per park (registry + associations + confirmed current/upcoming dates); selecting never fetches.
@@ -351,14 +360,14 @@ export default function AllEntertainmentPage() {
   );
   // Specific event: catalog browsing of everything associated (live + synthesized curated), ignoring seasonal hiding.
   const eventPool = useMemo<AllEntertainmentEntry[] | null>(
-    () => (effectiveEvent ? getAllEntertainmentEventEntries(all?.entries ?? [], selectedPark, effectiveEvent, displayNow) : null),
-    [all, selectedPark, effectiveEvent, today], // eslint-disable-line react-hooks/exhaustive-deps
+    () => (effectiveEvent ? getAllEntertainmentEventEntries(liveEntries, selectedPark, effectiveEvent, displayNow, lifecycleHidden) : null),
+    [liveEntries, lifecycleHidden, selectedPark, effectiveEvent, today], // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // Include lands from synthesized off-season entries so the land filter works for them too.
   const lands = useMemo(
-    () => allEntertainmentLands(eventPool ?? [...(all?.entries ?? []), ...offSeasonEntries]),
-    [all, offSeasonEntries, eventPool],
+    () => allEntertainmentLands(eventPool ?? [...liveEntries, ...offSeasonEntries]),
+    [liveEntries, offSeasonEntries, eventPool],
   );
   // A land that no longer exists in the refreshed inventory must not silently hide everything.
   const effectiveLand = lands.includes(selectedLand) ? selectedLand : "";
@@ -379,10 +388,10 @@ export default function AllEntertainmentPage() {
     if (eventPool) {
       return sortAllEntertainment(filterAllEntertainment(eventPool, effectiveEventBrowseFilters(effectiveEvent, { land: effectiveLand, operatingOnly })), displayNow);
     }
-    const sourceEntries = all?.entries ?? [];
+    const sourceEntries = liveEntries;
     // When toggle is OFF, hide confirmed out-of-season entries (curated, and explicitly party-classified provider-only) even if
     // they are present in the provider inventory. Toggle ON restores them.
-    const seasonalBase = applyAllEntertainmentSeasonalVisibility(sourceEntries, selectedPark, selectedResort, today, showOutOfSeason, displayNow);
+    const seasonalBase = applyAllEntertainmentSeasonalVisibility(sourceEntries, selectedPark, selectedResort, today, showOutOfSeason, displayNow, lifecycleHidden);
     const base = filterAllEntertainment(seasonalBase, { land: effectiveLand, operatingOnly });
     // Synthesized off-season entries have no provider status so they never satisfy
     // "Operating only"; exclude them when that filter is active.
@@ -391,7 +400,7 @@ export default function AllEntertainmentPage() {
         ? offSeasonEntries.filter((e) => !effectiveLand || e.land === effectiveLand)
         : [];
     return sortAllEntertainment([...base, ...extra], displayNow);
-  }, [all, eventPool, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort, today]);
+  }, [liveEntries, lifecycleHidden, eventPool, effectiveLand, operatingOnly, displayNow, showOutOfSeason, offSeasonEntries, selectedPark, selectedResort, today]);
 
   return (
     <>

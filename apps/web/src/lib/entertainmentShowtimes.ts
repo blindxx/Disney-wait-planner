@@ -200,7 +200,12 @@ export interface ParkEntertainmentShowtimes {
   /** Typed provider failure when there was no usable data; null otherwise. */
   error: ThemeParksError | null;
   /** Every active curated Entertainment entry for the park. */
-  entries: EntertainmentShowtimeEntry[];
+  entries: EntertainmentShowtimeEntry[];  /**
+   * Phase 14.5C: canonical names the lifecycle monitor has persisted as auto-hidden
+   * (attached by the API route, never by the normalizer). Absent = unknown: nothing
+   * automatic is hidden. Applied via entertainmentLifecycleVisibility.ts only.
+   */
+  lifecycleAutoHidden?: string[];
 }
 
 // ============================================
