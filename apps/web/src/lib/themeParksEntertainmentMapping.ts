@@ -142,7 +142,6 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   unmapped("Believe... in Holiday Magic", "disneyland", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("A Christmas Fantasy Parade", "disneyland", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("Main Street Electrical Parade", "disneyland", NOT_IN_PROVIDER),
-  unmapped("Royal Princess Cavalcade", "disneyland", NOT_IN_PROVIDER),
   // Phase 14.4B: provider publishes this show as two SHOW records by presentation (verified 2026-11-10).
   mapped(
     "Mickey's Mix Magic", "disneyland",
@@ -553,7 +552,7 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
       ids("Disney Jr. Mickey Mouse Clubhouse Live!", "dca") !== ids("Disney Jr. Mickey Mouse Clubhouse Live!", "hs"));
     const stillUnmapped: Array<[string, ParkId]> = [
       ["Wondrous Journeys", "disneyland"], ["Paint the Night", "disneyland"], ["Magic Happens Parade", "disneyland"],
-      ["Main Street Electrical Parade", "disneyland"], ["Royal Princess Cavalcade", "disneyland"],
+      ["Main Street Electrical Parade", "disneyland"],
       ["Believe... in Holiday Magic", "disneyland"], ["A Christmas Fantasy Parade", "disneyland"],
       ["Frightfully Fun Parade", "dca"], ["Mickey's Happy Holidays", "dca"], ["Disney ¡Viva Navidad! Street Party", "dca"],
       ["Candlelight Processional", "epcot"], ["JOYFUL! A Celebration of the Season", "epcot"],

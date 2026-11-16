@@ -120,12 +120,12 @@ export type EntertainmentPlace = {
 export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // ---- Disneyland Park / DCA ----
   // Lifecycle audit note (limited-engagement entries below): "Magic Happens
-  // Parade", "Paint the Night", "Main Street Electrical Parade", "Royal
-  // Princess Cavalcade", and "Mickey's Mix Magic" are not running today, but
+  // Parade", "Paint the Night", "Main Street Electrical Parade", and
+  // "Mickey's Mix Magic" are not running today, but
   // are retained as current/plan-worthy — each has an official announced
   // return (Magic Happens: summer 2027) or a well-established recurring
   // revival pattern (Paint the Night, MSEP) with no evidence of permanent
-  // discontinuation. Royal Princess Cavalcade and Mickey's Mix Magic have
+  // discontinuation. Mickey's Mix Magic has
   // uncertain current status (no confirmed recent run, but also no
   // confirmed end) — kept per "don't guess-remove from schedule absence
   // alone"; flag for re-verification in a future catalog pass. By contrast,
@@ -145,7 +145,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
-  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "limited" },
   { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
   { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
   { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },

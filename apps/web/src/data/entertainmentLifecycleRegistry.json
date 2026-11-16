@@ -10,7 +10,7 @@
         "decision": "hidden",
         "reason": "Official Disneyland page states the parade has concluded for the 2026 season (final performance Aug 20, 2026); recorded proposal only, not applied at runtime."
       },
-      "firstFlagged": "2026-08-21",
+      "firstFlagged": "2026-11-16",
       "lastReviewed": "2026-11-16",
       "providerEvidence": [
         {
@@ -31,6 +31,13 @@
           "retrievedOn": "2026-11-16",
           "claim": "Page reads \"Paint the Night has concluded for the 2026 season.\"",
           "independent": true
+        },
+        {
+          "url": "https://wdwnt.com/2026/06/wondrous-journeys-and-paint-the-night-extended-past-d23-at-disneyland-resort/",
+          "title": "Wondrous Journeys and Paint the Night Extended Past D23 at Disneyland Resort (WDWNT, Jun 2026)",
+          "retrievedOn": "2026-11-16",
+          "claim": "Final scheduled performance of the 2026 run: Aug 20, 2026 (performance date, distinct from firstFlagged, which is when the audit first recorded it). News coverage, not an official notice.",
+          "independent": false
         }
       ],
       "futureReturns": [],
@@ -49,7 +56,7 @@
         "decision": "hidden",
         "reason": "Official Disneyland page states the show has concluded for the 2026 season (final performance Aug 20, 2026); recorded proposal only, not applied at runtime."
       },
-      "firstFlagged": "2026-08-21",
+      "firstFlagged": "2026-11-16",
       "lastReviewed": "2026-11-16",
       "providerEvidence": [
         {
@@ -70,6 +77,13 @@
           "retrievedOn": "2026-11-16",
           "claim": "Page reads \"Wondrous Journeys has concluded for the 2026 season.\"",
           "independent": true
+        },
+        {
+          "url": "https://wdwnt.com/2026/06/wondrous-journeys-and-paint-the-night-extended-past-d23-at-disneyland-resort/",
+          "title": "Wondrous Journeys and Paint the Night Extended Past D23 at Disneyland Resort (WDWNT, Jun 2026)",
+          "retrievedOn": "2026-11-16",
+          "claim": "Final scheduled performance of the 2026 run: Aug 20, 2026 (performance date, distinct from firstFlagged, which is when the audit first recorded it). News coverage, not an official notice.",
+          "independent": false
         }
       ],
       "futureReturns": [],
@@ -223,45 +237,6 @@
       "nextReviewAction": {
         "action": "monitor",
         "note": "Re-check after 21 consecutive inactive days (about Dec 3, 2026) via the future detector test; resolve on an official end or return notice."
-      }
-    },
-    {
-      "parkId": "disneyland",
-      "name": "Royal Princess Cavalcade",
-      "category": "limited",
-      "assessment": "unknown",
-      "visibility": {
-        "decision": "undecided",
-        "reason": "Identity unresolved; no hiding proposed."
-      },
-      "firstFlagged": "2026-11-16",
-      "lastReviewed": "2026-11-16",
-      "providerEvidence": [
-        {
-          "source": "dwp-runtime",
-          "kind": "other",
-          "observedOn": "2026-11-16",
-          "summary": "Not mapped to a ThemeParks entity (NOT_IN_PROVIDER)."
-        }
-      ],
-      "coverageLimitations": [
-        "No ThemeParks.wiki SHOW entity exists for this entry (unmapped), so provider silence is not evidence either way.",
-        "Searches found only Disneyland Paris's 'Disney Princess Cavalcade' (debuted Jul 24, 2026) and Walt Disney World's 'Royal Princess Processional'; no California history under this name."
-      ],
-      "verificationSources": [
-        {
-          "url": "https://disneyland.disney.go.com/entertainment/disneyland/",
-          "title": "Disneyland Park entertainment | Disneyland Resort",
-          "retrievedOn": "2026-11-16",
-          "claim": "Official California listing (retrieved 2026-11-16) has no Royal Princess Cavalcade; it lists 'The Celebrate Happy Cavalcade' (different name) and Storytelling at Royal Theatre / Meet Princesses at Royal Hall.",
-          "independent": true
-        }
-      ],
-      "futureReturns": [],
-      "confirmation": "provisional",
-      "nextReviewAction": {
-        "action": "verify_independently",
-        "note": "Determine whether this catalog identity ever existed at Disneyland (vs. Paris's Disney Princess Cavalcade) and whether it should be retired or renamed; catalog maintenance only."
       }
     }
   ]

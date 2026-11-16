@@ -390,7 +390,7 @@ Rules (enforced by `validateEntertainmentLifecycleRegistry`):
   populated the baseline (Disneyland: Paint the Night, Wondrous Journeys,
   Magic Happens Parade, Main Street Electrical Parade — inactive, hidden
   proposed; Mickey's Mix Magic — monitored, kept visible for the future 21-day
-  detector test; Royal Princess Cavalcade — unresolved identity). Seasonal
+  detector test). Seasonal
   entries such as "Disney on Broadway Concert Series" (associated with the
   Festival of the Arts) never get records.
 
