@@ -212,12 +212,15 @@ export function applyAllEntertainmentSeasonalVisibility(
   today: string,
   showOutOfSeason: boolean,
   instant?: Date,
+  /** Phase 14.5C: lifecycle-hidden canonical names; hidden regardless of the out-of-season toggle. */
+  lifecycleHidden?: ReadonlySet<string>,
 ): AllEntertainmentEntry[] {
   // Two independent reasons to hide. The out-of-season toggle controls ONLY the
   // seasonal one; an entry hidden solely because today's verified schedule confirms
   // no activity is never revealed by it. (A confirmed out-of-season entry is hidden
   // for its season; the toggle reveals it regardless of today's evidence.)
   return entries.filter((e) => {
+    if (e.source === "curated" && lifecycleHidden?.has(e.name)) return false;
     if (isAllEntryConfirmedOutOfSeason(e, parkId, resort, today, instant)) return showOutOfSeason;
     return !isAllEntryConfirmedInactiveToday(e, parkId, resort, today, instant);
   });
@@ -233,6 +236,7 @@ export function applyAllEntertainmentSeasonalVisibility(
  * include confirmed off-season shows absent from the live provider inventory.
  *
  * @param existingIds  IDs already in the live inventory (to avoid duplicates).
+ * @param lifecycleHidden  Phase 14.5C hidden names; excluded here (no toggle reveals them).
  * @param instant      Clock for testing; defaults to new Date().
  */
 export function getOffSeasonCuratedEntertainment(
@@ -240,11 +244,14 @@ export function getOffSeasonCuratedEntertainment(
   today: string,
   existingIds: Set<string>,
   instant?: Date,
+  /** Phase 14.5C: lifecycle-hidden canonical names (never synthesized, toggle ON or not). */
+  lifecycleHidden?: ReadonlySet<string>,
 ): EntertainmentPlace[] {
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   return getEntertainmentForPark(parkId).filter((place) => {
     const id = `curated:${parkId}:${place.name}`;
     if (existingIds.has(id)) return false;
+    if (lifecycleHidden?.has(place.name)) return false;
     return isEntertainmentConfirmedOutOfSeason(place, resort, today, undefined, instant);
   });
 }

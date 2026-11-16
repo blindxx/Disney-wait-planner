@@ -123,6 +123,14 @@ export interface ParkAllEntertainment {
    */
   inventoryIncomplete: boolean;
   entries: AllEntertainmentEntry[];
+  /**
+   * Phase 14.5C: canonical names of shows the lifecycle monitor has persisted as
+   * auto-hidden. Absent = unknown (DB unavailable / older body): nothing automatic is hidden.
+   * Applied via entertainmentLifecycleVisibility.ts only.
+   */
+  lifecycleAutoHidden?: string[];
+  /** Phase 14.5C: registry-hidden names durably overridden by a verified performance (registry record unchanged). */
+  lifecycleRegistryRestored?: string[];
 }
 
 // ============================================

@@ -220,3 +220,100 @@ CREATE TABLE IF NOT EXISTS park_regular_hours (
 );
 
 CREATE INDEX IF NOT EXISTS park_regular_hours_hours_date_idx ON park_regular_hours (hours_date);
+
+-- ============================================================
+-- Phase 14.5C — Active Entertainment Lifecycle (lib/entertainmentLifecycleStore.ts)
+--
+-- Server-side automated hiding/resurfacing of active regular/limited
+-- entertainment. Written ONLY by the scheduled monitor
+-- (/api/cron/entertainment-lifecycle); read by /api/entertainment/{showtimes,all}
+-- and /api/catalog/lifecycle-audit. Failure to read them NEVER hides anything
+-- (readers fail open); there is no other fallback, so migrate before deploy.
+--
+-- show_key = entertainmentMappingKey(park, CANONICAL name) — one row per canonical
+-- show, so provider edition renames (e.g. World of Color – ONE) never fork identity.
+-- ============================================================
+
+-- One row per (show, resort-local date): the strongest class observed that day.
+-- day_class: active | inactive | dormant | silent | unknown. class_rank (unknown 0 <
+-- silent 1 < dormant 2 < inactive 3 < active 4) plus is_final makes upserts
+-- order-independent and idempotent: active never gets replaced; a final row
+-- replaces a provisional one; otherwise the stronger class wins. is_final = a
+-- negative class observed in the resort-local end-of-day window (or active).
+CREATE TABLE IF NOT EXISTS entertainment_lifecycle_evidence (
+  park_id           TEXT        NOT NULL,
+  show_key          TEXT        NOT NULL,
+  local_date        DATE        NOT NULL,
+  show_name         TEXT        NOT NULL,
+  day_class         TEXT        NOT NULL,
+  class_rank        SMALLINT    NOT NULL,
+  is_final          BOOLEAN     NOT NULL DEFAULT TRUE,
+  basis             TEXT,
+  performance_count INTEGER     NOT NULL DEFAULT 0,
+  source            TEXT        NOT NULL,
+  limitations       JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  first_observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_observed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  observation_count INTEGER     NOT NULL DEFAULT 1,
+  PRIMARY KEY (park_id, show_key, local_date),
+  CONSTRAINT entertainment_lifecycle_evidence_class_chk
+    CHECK (day_class IN ('active', 'inactive', 'dormant', 'silent', 'unknown'))
+);
+
+-- Idempotent upgrades for a database that applied the first 14.5C revision.
+ALTER TABLE entertainment_lifecycle_evidence ADD COLUMN IF NOT EXISTS is_final BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE entertainment_lifecycle_evidence DROP CONSTRAINT IF EXISTS entertainment_lifecycle_evidence_class_chk;
+ALTER TABLE entertainment_lifecycle_evidence ADD CONSTRAINT entertainment_lifecycle_evidence_class_chk
+  CHECK (day_class IN ('active', 'inactive', 'dormant', 'silent', 'unknown'));
+
+CREATE INDEX IF NOT EXISTS entertainment_lifecycle_evidence_date_idx
+  ON entertainment_lifecycle_evidence (local_date);
+
+-- Current lifecycle state per canonical show (visibility + active-cycle reset + audit flag).
+CREATE TABLE IF NOT EXISTS entertainment_lifecycle_state (
+  park_id                TEXT        NOT NULL,
+  show_key               TEXT        NOT NULL,
+  show_name              TEXT        NOT NULL,
+  status                 TEXT        NOT NULL DEFAULT 'visible',
+  cycle_reset_date       DATE,
+  last_active_date       DATE,
+  hidden_local_date      DATE,
+  hidden_at              TIMESTAMPTZ,
+  restored_at            TIMESTAMPTZ,
+  hide_count             INTEGER     NOT NULL DEFAULT 0,
+  restore_count          INTEGER     NOT NULL DEFAULT 0,
+  inactive_days          INTEGER     NOT NULL DEFAULT 0,
+  dormant_days           INTEGER     NOT NULL DEFAULT 0,
+  silent_days            INTEGER     NOT NULL DEFAULT 0,
+  silence_flagged_at     TIMESTAMPTZ,
+  registry_restored_at   TIMESTAMPTZ,
+  secondary_evaluated_on DATE,
+  audit_flag             TEXT,
+  evaluated_local_date   DATE,
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (park_id, show_key),
+  CONSTRAINT entertainment_lifecycle_state_status_chk
+    CHECK (status IN ('visible', 'auto_hidden'))
+);
+
+ALTER TABLE entertainment_lifecycle_state ADD COLUMN IF NOT EXISTS dormant_days INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE entertainment_lifecycle_state ADD COLUMN IF NOT EXISTS registry_restored_at TIMESTAMPTZ;
+
+-- Append-only decisions for the later research audit: auto_hide, auto_restore,
+-- silence_flag, registry_restore, registry_conflict. The natural key makes a duplicated cron
+-- delivery a no-op. audit_status is advanced only by the audit (never here).
+CREATE TABLE IF NOT EXISTS entertainment_lifecycle_events (
+  park_id             TEXT        NOT NULL,
+  show_key            TEXT        NOT NULL,
+  event_type          TEXT        NOT NULL,
+  local_date          DATE        NOT NULL,
+  show_name           TEXT        NOT NULL,
+  occurred_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  evidence            JSONB       NOT NULL,
+  coverage_limitations JSONB      NOT NULL DEFAULT '[]'::jsonb,
+  audit_status        TEXT        NOT NULL DEFAULT 'unreviewed',
+  PRIMARY KEY (park_id, show_key, event_type, local_date)
+);
+
+CREATE INDEX IF NOT EXISTS entertainment_lifecycle_events_audit_idx
+  ON entertainment_lifecycle_events (audit_status, occurred_at);

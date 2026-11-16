@@ -213,6 +213,70 @@ const TABLE_CONTRACTS = {
     ],
     primaryKey: ["park_id", "hours_date"],
   },
+  // Phase 14.5C — entertainment lifecycle (lib/entertainmentLifecycleStore.ts).
+  // The store's ON CONFLICT targets require these exact PRIMARY KEYs; `local_date`
+  // and friends are DATEs compared as calendar dates; `limitations`/`evidence`
+  // are JSONB written/read as structured data. The app has no fallback for these
+  // tables (readers fail open, the monitor fails closed), so a partial/incompatible
+  // pre-existing table must fail the migration, never pass it.
+  entertainment_lifecycle_evidence: {
+    columns: [
+      { name: "park_id", dataType: "text", notNull: true },
+      { name: "show_key", dataType: "text", notNull: true },
+      { name: "local_date", dataType: "date", notNull: true },
+      { name: "show_name", dataType: "text", notNull: true },
+      { name: "day_class", dataType: "text", notNull: true },
+      { name: "class_rank", dataType: "smallint", notNull: true },
+      { name: "is_final", dataType: "boolean", notNull: true, hasDefault: true },
+      { name: "basis", dataType: "text", notNull: false },
+      { name: "performance_count", dataType: "integer", notNull: true, hasDefault: true },
+      { name: "source", dataType: "text", notNull: true },
+      { name: "limitations", dataType: "jsonb", notNull: true, hasDefault: true },
+      { name: "first_observed_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "last_observed_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "observation_count", dataType: "integer", notNull: true, hasDefault: true },
+    ],
+    primaryKey: ["park_id", "show_key", "local_date"],
+  },
+  entertainment_lifecycle_state: {
+    columns: [
+      { name: "park_id", dataType: "text", notNull: true },
+      { name: "show_key", dataType: "text", notNull: true },
+      { name: "show_name", dataType: "text", notNull: true },
+      { name: "status", dataType: "text", notNull: true, expectedDefault: { kind: "text", value: "visible" } },
+      { name: "cycle_reset_date", dataType: "date", notNull: false },
+      { name: "last_active_date", dataType: "date", notNull: false },
+      { name: "hidden_local_date", dataType: "date", notNull: false },
+      { name: "hidden_at", dataType: "timestamp with time zone", notNull: false },
+      { name: "restored_at", dataType: "timestamp with time zone", notNull: false },
+      { name: "hide_count", dataType: "integer", notNull: true, expectedDefault: { kind: "numeric", value: 0n } },
+      { name: "restore_count", dataType: "integer", notNull: true, expectedDefault: { kind: "numeric", value: 0n } },
+      { name: "inactive_days", dataType: "integer", notNull: true, expectedDefault: { kind: "numeric", value: 0n } },
+      { name: "dormant_days", dataType: "integer", notNull: true, expectedDefault: { kind: "numeric", value: 0n } },
+      { name: "silent_days", dataType: "integer", notNull: true, expectedDefault: { kind: "numeric", value: 0n } },
+      { name: "silence_flagged_at", dataType: "timestamp with time zone", notNull: false },
+      { name: "registry_restored_at", dataType: "timestamp with time zone", notNull: false },
+      { name: "secondary_evaluated_on", dataType: "date", notNull: false },
+      { name: "audit_flag", dataType: "text", notNull: false },
+      { name: "evaluated_local_date", dataType: "date", notNull: false },
+      { name: "updated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+    ],
+    primaryKey: ["park_id", "show_key"],
+  },
+  entertainment_lifecycle_events: {
+    columns: [
+      { name: "park_id", dataType: "text", notNull: true },
+      { name: "show_key", dataType: "text", notNull: true },
+      { name: "event_type", dataType: "text", notNull: true },
+      { name: "local_date", dataType: "date", notNull: true },
+      { name: "show_name", dataType: "text", notNull: true },
+      { name: "occurred_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "evidence", dataType: "jsonb", notNull: true },
+      { name: "coverage_limitations", dataType: "jsonb", notNull: true, hasDefault: true },
+      { name: "audit_status", dataType: "text", notNull: true, expectedDefault: { kind: "text", value: "unreviewed" } },
+    ],
+    primaryKey: ["park_id", "show_key", "event_type", "local_date"],
+  },
 };
 
 // SH.2.7 — route.ts (`Number(rows[0].revision)`) and syncHelper.ts both

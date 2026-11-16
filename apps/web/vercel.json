@@ -1,5 +1,16 @@
 {
   "crons": [
-    { "path": "/api/cron/park-hours", "schedule": "0 2 * * *" }
+    {
+      "path": "/api/cron/park-hours",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/entertainment-lifecycle?window=wdw",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/entertainment-lifecycle?window=dlr",
+      "schedule": "0 6 * * *"
+    }
   ]
 }

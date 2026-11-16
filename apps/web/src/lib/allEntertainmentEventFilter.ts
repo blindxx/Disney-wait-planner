@@ -200,17 +200,21 @@ export function getAllEntertainmentEventEntries(
   parkId: ParkId,
   eventValue: string,
   instant: Date = new Date(),
+  /** Phase 14.5C: lifecycle-hidden canonical names — excluded from live AND synthesized event browsing. */
+  lifecycleHidden?: ReadonlySet<string>,
 ): AllEntertainmentEntry[] {
   const value = resolveEventSelection(parkId, eventValue, instant);
   if (value === ALL_ENTERTAINMENT_EVENT_ALL) return live;
   const seen = new Set<string>();
   const out: AllEntertainmentEntry[] = [];
   for (const e of live) {
+    if (e.source === "curated" && lifecycleHidden?.has(e.name)) continue;
     if (seen.has(e.id) || !getAllEntryEventIds(e, parkId).includes(value)) continue;
     seen.add(e.id);
     out.push(e);
   }
   for (const place of getEntertainmentForPark(parkId)) {
+    if (lifecycleHidden?.has(place.name)) continue;
     const synth = makeOffSeasonEntry(place, parkId);
     if (seen.has(synth.id) || !getAllEntryEventIds(synth, parkId).includes(value)) continue;
     seen.add(synth.id);

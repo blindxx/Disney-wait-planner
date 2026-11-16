@@ -224,7 +224,7 @@ function isHttpUrl(v: unknown): boolean {
 }
 
 /** Catalog exemption: seasonal/holiday/festival/party offerings never get lifecycle records. */
-function seasonalExemptionReason(place: CatalogPlace): string | null {
+export function seasonalExemptionReason(place: CatalogPlace): string | null {
   if (place.availabilityType === "seasonal") return 'availabilityType "seasonal"';
   if (place.availabilityTheme) return `availabilityTheme "${place.availabilityTheme}"`;
   if (SEASONAL_ENTERTAINMENT_EVENTS[place.name]?.length) return "seasonal event association";
