@@ -386,7 +386,13 @@ Rules (enforced by `validateEntertainmentLifecycleRegistry`):
   `confirmed`; `returning` needs a `futureReturns` entry; a `hidden` decision
   needs a non-active/non-unknown assessment. The visibility decision is
   recorded only, never applied at runtime.
-- Records are never invented: the file ships with `"records": []`.
+- Records are never invented: each needs real source URLs/dates. Phase 14.5B
+  populated the baseline (Disneyland: Paint the Night, Wondrous Journeys,
+  Magic Happens Parade, Main Street Electrical Parade — inactive, hidden
+  proposed; Mickey's Mix Magic — monitored, kept visible for the future 21-day
+  detector test). Seasonal
+  entries such as "Disney on Broadway Concert Series" (associated with the
+  Festival of the Arts) never get records.
 
 **How the recurring audit reads it.** Read the file from `main`
 (`apps/web/src/data/entertainmentLifecycleRegistry.json`). Unresolved records

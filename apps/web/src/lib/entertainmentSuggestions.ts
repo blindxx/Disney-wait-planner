@@ -120,12 +120,12 @@ export type EntertainmentPlace = {
 export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // ---- Disneyland Park / DCA ----
   // Lifecycle audit note (limited-engagement entries below): "Magic Happens
-  // Parade", "Paint the Night", "Main Street Electrical Parade", "Royal
-  // Princess Cavalcade", and "Mickey's Mix Magic" are not running today, but
+  // Parade", "Paint the Night", "Main Street Electrical Parade", and
+  // "Mickey's Mix Magic" are not running today, but
   // are retained as current/plan-worthy — each has an official announced
   // return (Magic Happens: summer 2027) or a well-established recurring
   // revival pattern (Paint the Night, MSEP) with no evidence of permanent
-  // discontinuation. Royal Princess Cavalcade and Mickey's Mix Magic have
+  // discontinuation. Mickey's Mix Magic has
   // uncertain current status (no confirmed recent run, but also no
   // confirmed end) — kept per "don't guess-remove from schedule absence
   // alone"; flag for re-verification in a future catalog pass. By contrast,
@@ -145,7 +145,6 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "A Christmas Fantasy Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Frightfully Fun Parade", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Main Street Electrical Parade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
-  { name: "Royal Princess Cavalcade", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "limited" },
   { name: "Mickey's Mix Magic", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Main Street, U.S.A.", availabilityType: "limited" },
   { name: "Bluey's Best Day Ever!", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
   { name: "Disney Jr. Mickey Mouse Clubhouse Live!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "regular" },
@@ -190,6 +189,9 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "regular" },
   { name: "Candlelight Processional", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "JOYFUL! A Celebration of the Season", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Phase 14.5B: Disney on Broadway Concert Series (America Gardens Theatre) — a festival concert run, associated with the
+  // EPCOT International Festival of the Arts via SEASONAL_ENTERTAINMENT_EVENTS (no availabilityTheme: theme is holiday-only).
+  { name: "Disney on Broadway Concert Series", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal" },
 
   // ---- Hollywood Studios ----
   { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
@@ -382,6 +384,8 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "happy holidays": "mickeys happy holidays",
   "viva navidad": "disney viva navidad street party",
   "viva navidad street party": "disney viva navidad street party",
+  "disney on broadway": "disney on broadway concert series",
+  "broadway concert series": "disney on broadway concert series",
   "woc": "world of color",               // World of Color (DCA)
   "folk": "festival of the lion king",   // Festival of the Lion King (AK) — "fotlk" already existed above
 };
@@ -692,4 +696,8 @@ export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
   { input: "folk", resort: "DLR", expectedKey: null },              // resort-scope: WDW-only
   // "fotlk" already existed — regression check it still resolves unchanged.
   { input: "fotlk", resort: "WDW", expectedKey: "festival of the lion king" },
+  // Phase 14.5B: Disney on Broadway Concert Series (EPCOT, WDW-only)
+  { input: "Disney on Broadway Concert Series", resort: "WDW", expectedKey: "disney on broadway concert series" },
+  { input: "Disney on Broadway", resort: "WDW", expectedKey: "disney on broadway concert series" },
+  { input: "Disney on Broadway", resort: "DLR", expectedKey: null },
 ];

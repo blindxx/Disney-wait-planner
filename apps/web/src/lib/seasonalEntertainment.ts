@@ -116,6 +116,13 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   // EPCOT International Festival of the Holidays (WDW, EPCOT) — park-admission season.
   "Candlelight Processional": [{ eventId: "epcot-festival-of-the-holidays", kind: "season" }],
   "JOYFUL! A Celebration of the Season": [{ eventId: "epcot-festival-of-the-holidays", kind: "season" }],
+  // EPCOT International Festival of the Arts — Disney on Broadway Concert Series. Official run Jan 15–Mar 1, 2027 equals the
+  // festival's 2027 window, so the parent event is reused (no narrower registry event). Three nightly performances at
+  // America Gardens Theatre; no ThemeParks entity exists, so no showtimes are modelled or inferred.
+  "Disney on Broadway Concert Series": [{
+    eventId: "epcot-festival-of-the-arts", kind: "season",
+    note: "Official (Disney Parks Blog, 2026-11-10): nightly Jan 15–Mar 1, 2027, three performances at America Gardens Theatre; rotating performer pairings by date are published but not modelled here.",
+  }],
   // Frightfully Fun Parade (DLR, DCA): Oogie Boogie Bash entertainment. Official
   // 2026 evidence confirms it did NOT return for the 2026 season (replaced by
   // Madame Leota's Swinging Wake), so it reads as confirmed off-season for every
@@ -408,6 +415,25 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "Phase 14.4A: Candlelight Processional demoted Nov 10 (festival starts Nov 27), boosted Dec 1", ok: () =>
     rank("Candlelight Processional", "WDW", "2026-11-10", "epcot") === "off-season" &&
     rank("Candlelight Processional", "WDW", "2026-12-01", "epcot") === "season" },
+  // Phase 14.5B: Disney on Broadway Concert Series (Festival of the Arts, reuses the festival's 2027 window)
+  { label: "Phase 14.5B: Broadway is one season association to the Festival of the Arts (no narrower event added)", ok: () =>
+    SEASONAL_ENTERTAINMENT_EVENTS["Disney on Broadway Concert Series"]?.length === 1 &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Disney on Broadway Concert Series"][0].eventId === "epcot-festival-of-the-arts" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Disney on Broadway Concert Series"][0].kind === "season" &&
+    !getSeasonalEvent("epcot-disney-on-broadway") },
+  { label: "Phase 14.5B: Broadway demoted Nov 20, 2026 (before Jan 15, 2027), boosted Jan 15 / Mar 1, demoted Mar 2, 2027", ok: () =>
+    rank("Disney on Broadway Concert Series", "WDW", "2026-11-20", "epcot") === "off-season" &&
+    rank("Disney on Broadway Concert Series", "WDW", "2027-01-15", "epcot") === "season" &&
+    rank("Disney on Broadway Concert Series", "WDW", "2027-03-01", "epcot") === "season" &&
+    rank("Disney on Broadway Concert Series", "WDW", "2027-03-02", "epcot") === "off-season" },
+  { label: "Phase 14.5B: Broadway is not boosted on another park's day and resolves via its alias", ok: () =>
+    rank("Disney on Broadway Concert Series", "WDW", "2027-01-20", "mk") === "neutral" &&
+    resolveEntertainmentKey("Disney on Broadway", "WDW") === resolveEntertainmentKey("Disney on Broadway Concert Series", "WDW") &&
+    resolveEntertainmentKey("Disney on Broadway Concert Series", "WDW") !== null },
+  { label: "Phase 14.5B: Broadway is a single seasonal EPCOT catalog entry (exempt from lifecycle records)", ok: () =>
+    ENTERTAINMENT_PLACES.filter((p) => p.name === "Disney on Broadway Concert Series").length === 1 &&
+    ENTERTAINMENT_PLACES.find((p) => p.name === "Disney on Broadway Concert Series")?.parkId === "epcot" &&
+    ENTERTAINMENT_PLACES.find((p) => p.name === "Disney on Broadway Concert Series")?.availabilityType === "seasonal" },
   // Phase 14.4A: DLR holiday DCA shows
   { label: "Phase 14.4A: DLR holiday DCA shows are season associations (holidays-dlr)", ok: () =>
     SEASONAL_ENTERTAINMENT_EVENTS["Mickey's Happy Holidays"]?.[0]?.eventId === "holidays-dlr" &&
