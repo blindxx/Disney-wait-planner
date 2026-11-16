@@ -46,7 +46,7 @@ import {
 } from "./entertainmentLifecycleVisibility";
 import { getAllEntertainmentEventEntries } from "./allEntertainmentEventFilter";
 import { makeOffSeasonEntry, getOffSeasonCuratedEntertainment, applyAllEntertainmentSeasonalVisibility, isEntertainmentHiddenToday } from "./seasonalVisibility";
-import type { EntertainmentShowtimeEntry, ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
+import { normalizeParkEntertainmentShowtimes, type EntertainmentShowtimeEntry, type ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 import { ENTERTAINMENT_PLACES, getEntertainmentForPark, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
 import { addDaysToLocalDate } from "./resortTime";
@@ -367,6 +367,30 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
   check("cron: the NEXT UTC hour is only provisional in summer (delayed run fails safe) — WDW 04:00Z EDT, DLR 07:00Z PDT", !isDayEndWindow("WDW", new Date("2026-07-15T04:00:00Z")) && !isDayEndWindow("DLR", new Date("2026-07-15T07:00:00Z")) && !isDayEndWindow("WDW", new Date("2026-03-09T04:00:00Z")));
   check("cron: the old 03:30/06:30 schedule's jitter would have crossed midnight in summer (regression guard for the hour choice)", !isDayEndWindow("WDW", new Date("2026-07-15T04:30:00Z")) && !isDayEndWindow("DLR", new Date("2026-07-15T07:30:00Z")));
   check("cron: each run is a provisional-for-the-other-resort run (WDW 03:00Z is 19:00/20:00 at Disneyland; DLR 06:00Z is the next morning at WDW)", !isDayEndWindow("DLR", new Date("2026-12-15T03:00:00Z")) && !isDayEndWindow("DLR", new Date("2026-07-15T03:00:00Z")) && !isDayEndWindow("WDW", new Date("2026-12-15T06:00:00Z")) && !isDayEndWindow("WDW", new Date("2026-07-15T06:00:00Z")));
+
+  // ---- review fixes: provider-wide coverage + discarded entities ----
+  const cov = (publishedEntities: number, droppedEntities = 0) => ({ providerCoverage: { publishedEntities, droppedEntities, droppedShowtimes: 0 } });
+  const epcotShow = ENTERTAINMENT_PLACES.find((p) => p.parkId === "epcot" && isLifecycleEligible("epcot", p.name) && getEntertainmentProviderMapping(p.name, "epcot")?.disposition === "mapped")!.name;
+  check("coverage: EPCOT (one eligible mapped show) is healthy when the PROVIDER feed has ≥ 3 entities publishing", assessParkHealth(mkPark("epcot", { [epcotShow]: "silent" }, cov(5))).healthy && !assessParkHealth(mkPark("epcot", { [epcotShow]: "silent" })).healthy);
+  check("coverage: provider-wide count below the quorum is still unhealthy (EPCOT with 2 entities; DCA with 2)", !assessParkHealth(mkPark("epcot", { [epcotShow]: "silent" }, cov(2))).healthy && !assessParkHealth(mkPark("dca", {}, cov(2))).healthy && assessParkHealth(mkPark("dca", {}, cov(3))).healthy);
+  check("coverage: EPCOT absence is a silent observation on a provider-healthy feed; unknown on a weak feed", observeParkDay(mkPark("epcot", { [epcotShow]: "silent" }, cov(5)), true).find((o) => o.showName === epcotShow)?.dayClass === "silent" && observeParkDay(mkPark("epcot", { [epcotShow]: "silent" }, cov(1)), true).find((o) => o.showName === epcotShow)?.dayClass === "unknown");
+  check("coverage: error / stale / wrong-day gates still apply on top of provider-wide coverage", !assessParkHealth(mkPark("epcot", {}, { ...cov(9), stale: true })).healthy && !assessParkHealth(mkPark("epcot", {}, { ...cov(9), error: { kind: "timeout", message: "t" } })).healthy && !assessParkHealth(mkPark("epcot", {}, { ...cov(9), fetchedLocalDate: d(-1) })).healthy);
+  const droppedPark = (kind: Parameters<typeof mkEntry>[2]) => mkPark("disneyland", { [MMM]: kind }, cov(6, 1));
+  const clsOf = (st: ParkEntertainmentShowtimes) => observeParkDay(st, true).find((o) => o.showName === MMM)?.dayClass;
+  check("discarded entities: an ABSENT mapped ref is unknown (not silent) when the payload dropped entities", clsOf(droppedPark("silent")) === "unknown" && clsOf(mkPark("disneyland", { [MMM]: "silent" }, cov(6, 0))) === "silent");
+  check("discarded entities: partially absent + CLOSED is unknown too; fully present CLOSED stays dormant; confirmed inactive and active are unaffected", (() => {
+    const e = mkEntry("disneyland", MMM, "dormant"); e.provider = e.provider.map((r, i) => (i === 0 ? { ...r, present: false, status: null } : r)); e.incomplete = true;
+    const mixedPark = { ...mkPark("disneyland", {}, cov(6, 1)), entries: [e, ...mkPark("disneyland", {}).entries.filter((x) => x.dwpName !== MMM)] };
+    return clsOf(mixedPark) === "unknown" && clsOf(droppedPark("dormant")) === "dormant" && clsOf(droppedPark("inactive")) === "inactive" && clsOf(droppedPark("active")) === "active";
+  })());
+  check("discarded entities: the normalizer carries provider-wide coverage and the dropped counts from the live payload", (() => {
+    const t = (id: string) => ({ type: "Performance Time", startTime: `${TODAY}T19:00:00-08:00`, endTime: null });
+    const ent = (id: string, st: ReturnType<typeof t>[]) => ({ entityId: id, name: "x", entityType: "SHOW", parkId: null, externalId: null, status: "OPERATING", lastUpdated: null, showtimes: st, droppedShowtimes: 0 });
+    const live = { ok: true as const, data: { entityId: "p", name: "p", timeZone: null, entries: [ent("a", [t("a")]), ent("b", [t("b")]), ent("c", [t("c")]), ent("d", [])], droppedEntries: 2, droppedShowtimes: 1 }, meta: { origin: "network" as const, fetchedAt: Date.parse(`${TODAY}T21:00:00Z`), etag: null } };
+    const st = normalizeParkEntertainmentShowtimes("epcot", live, new Date(`${TODAY}T21:00:00Z`));
+    const failed = normalizeParkEntertainmentShowtimes("epcot", { ok: false, error: { kind: "timeout", message: "t" } }, new Date(`${TODAY}T21:00:00Z`));
+    return st.providerCoverage?.publishedEntities === 3 && st.providerCoverage.droppedEntities === 2 && st.providerCoverage.droppedShowtimes === 1 && failed.providerCoverage === undefined && assessParkHealth(st).healthy && assessParkHealth(st).absenceReliable === false;
+  })());
   return failures;
 }
 
@@ -806,6 +830,31 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
       const snap = JSON.stringify([...x.x.evidence.entries()].map(([k, r]) => [k, r.day_class, r.is_final]));
       await run1("2026-12-02T03:00:00Z"); await run1("2026-12-02T06:00:00Z");
       check("both runs: re-delivering both runs changes nothing but counters (idempotent)", JSON.stringify([...x.x.evidence.entries()].map(([k, r]) => [k, r.day_class, r.is_final])) === snap && x.x.events.size === 0);
+    }
+
+    // ---- review fixes through the monitor: EPCOT coverage + discarded entities ----
+    {
+      const epcotShow = ENTERTAINMENT_PLACES.find((p) => p.parkId === "epcot" && isLifecycleEligible("epcot", p.name) && getEntertainmentProviderMapping(p.name, "epcot")?.disposition === "mapped")!.name;
+      const epKey = entertainmentMappingKey("epcot", epcotShow);
+      const wdwInstant = (off: number) => new Date(`${addDaysToLocalDate(MONITOR_DAY0, off + 1)}T03:00:00Z`); // 22:00 EST: WDW day-end window
+      const epDrive = async (x: FakeLifecycleDb, n: number, covOf: { publishedEntities: number; droppedEntities: number }, start = 0) => {
+        for (let off = start; off < start + n; off++) {
+          await runEntertainmentLifecycleMonitor({ instant: wdwInstant(off), runDb: async (_p, fn) => fn(x), sleep: async () => {},
+            getShowtimes: async (parkId) => (parkId === "epcot" ? mkPark("epcot", { [epcotShow]: "silent" }, { providerCoverage: { ...covOf, droppedShowtimes: 0 } }, localOf(off)) : mkPark(parkId, {}, { error: { kind: "timeout", message: "t" } }, localOf(off))) });
+        }
+      };
+      const epState = async (x: FakeLifecycleDb) => (await readStates(x, "epcot")).get(epKey);
+      const e1 = new FakeLifecycleDb();
+      await epDrive(e1, 20, { publishedEntities: 6, droppedEntities: 0 });
+      check("EPCOT via monitor: 20 absent days on a provider-healthy feed → visible", (await epState(e1))?.status === "visible" && (await epState(e1))?.dormantDays === 20);
+      await epDrive(e1, 1, { publishedEntities: 6, droppedEntities: 0 }, 20);
+      check("EPCOT via monitor: the 21st absent day hides the show (provider-wide coverage, mapping identity)", (await epState(e1))?.status === "auto_hidden");
+      const e2 = new FakeLifecycleDb();
+      await epDrive(e2, 30, { publishedEntities: 2, droppedEntities: 0 });
+      check("EPCOT via monitor: a weak provider feed (2 entities) never counts absence", (await epState(e2))?.status !== "auto_hidden" && ![...e2.evidence.values()].some((r) => r.day_class === "silent"));
+      const e3 = new FakeLifecycleDb();
+      await epDrive(e3, 30, { publishedEntities: 6, droppedEntities: 1 });
+      check("discarded entities via monitor: 30 days with a malformed/dropped provider entity never hide on absence", (await epState(e3))?.status !== "auto_hidden" && ![...e3.evidence.values()].some((r) => r.day_class === "silent" || r.day_class === "dormant"));
     }
 
     // ---- registry restoration / protection through the monitor ----

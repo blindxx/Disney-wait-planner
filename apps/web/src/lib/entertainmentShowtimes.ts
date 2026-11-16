@@ -206,6 +206,14 @@ export interface ParkEntertainmentShowtimes {
    * automatic is hidden. Applied via entertainmentLifecycleVisibility.ts only.
    */
   lifecycleAutoHidden?: string[];
+  /**
+   * Phase 14.5C review fix: PROVIDER-WIDE coverage of the live payload (not just curated
+   * entries): distinct live entities (any type) with a record overlapping today, and
+   * the entities/showtimes the validation layer discarded. Lets the lifecycle monitor
+   * judge feed health independent of how many curated shows a park has, and refuse to
+   * read a discarded (malformed) entity as genuine absence. Absent on failed fetches.
+   */
+  providerCoverage?: { publishedEntities: number; droppedEntities: number; droppedShowtimes: number };
   /** Phase 14.5C: registry-hidden names durably overridden by a verified performance (registry record unchanged). */
   lifecycleRegistryRestored?: string[];
 }
@@ -541,6 +549,7 @@ export function normalizeParkEntertainmentShowtimes(
       : null,
     error: result.ok ? null : result.error,
     entries,
+    ...(live ? { providerCoverage: { publishedEntities: countEntitiesActiveToday(live, resort, localDate), droppedEntities: live.droppedEntries, droppedShowtimes: live.droppedShowtimes } } : {}),
   };
 }
 

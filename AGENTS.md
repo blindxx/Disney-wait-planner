@@ -436,7 +436,11 @@ observation is ever inferred). Modules: `entertainmentLifecycleDetector.ts`
   entities ABSENT, or empty with another status, while the park is healthy) |
   `unknown` (failures, stale/partial/unhealthy, OPERATING-without-times, dropped
   or unrecognized records, weak coverage, missing history rows). "Healthy" = fresh
-  current non-stale payload with ≥ 3 other shows publishing. Unknown days, outages
+  current non-stale payload with ≥ 3 PROVIDER entities (any type, `providerCoverage.publishedEntities`,
+  the same `countEntitiesActiveToday` the history gate uses) publishing today — so parks
+  with few curated shows (EPCOT, DCA) are judged by the whole feed. If the validation layer
+  discarded any provider entities (`providerCoverage.droppedEntities > 0`), an absent mapped
+  ref is `unknown`, never silent/dormant (a malformed record is not absence). Unknown days, outages
   and elapsed time never count.
 - **Hide**: ≥ 21 distinct resort-local dates in the rolling 30 classed `inactive`
   OR `dormant` (or `silent` — sustained absence from a fresh, healthy feed — once

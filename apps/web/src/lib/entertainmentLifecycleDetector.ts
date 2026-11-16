@@ -185,15 +185,24 @@ export function isMappingIdentityEstablished(
 
 export interface ParkObservationHealth {
   healthy: boolean;
+  /**
+   * False when the validation layer discarded provider entities this run: a mapped
+   * entity missing from the payload may then be a discarded record, not genuine
+   * absence. Absence-based classes (`silent`/`dormant` with an absent ref) are unknown.
+   */
+  absenceReliable?: boolean;
   /** Why not healthy (empty when healthy). */
   limitations: string[];
 }
 
 /**
- * Park-level gate for NEGATIVE evidence (inactive/silent). A fresh, current,
- * non-stale payload with at least `MIN_PUBLISHED_ENTITIES_TODAY` shows already
- * publishing performances proves the provider is serving today's schedules —
- * so one show's absence is about that show, not the feed.
+ * Park-level gate for NEGATIVE evidence (inactive/dormant/silent). A fresh, current,
+ * non-stale payload with at least `MIN_PUBLISHED_ENTITIES_TODAY` PROVIDER entities
+ * (any type, via `providerCoverage` — the same `countEntitiesActiveToday` the
+ * 14.4.2 history gate uses) already publishing today proves the provider is serving
+ * today's schedules, so one show's absence is about that show, not the feed. Parks
+ * with few mapped curated shows (EPCOT, DCA) are judged by the whole feed; only a
+ * payload without coverage metadata falls back to counting curated entries.
  */
 export function assessParkHealth(st: ParkEntertainmentShowtimes): ParkObservationHealth {
   const limitations: string[] = [];
@@ -201,10 +210,11 @@ export function assessParkHealth(st: ParkEntertainmentShowtimes): ParkObservatio
   else {
     if (st.stale) limitations.push("provider payload is stale-if-error");
     if (st.fetchedLocalDate !== st.localDate) limitations.push("provider payload was fetched on a different resort-local day");
-    const published = st.entries.filter((e) => e.performances.length > 0).length;
-    if (published < MIN_PUBLISHED_ENTITIES_TODAY) limitations.push(`park coverage not healthy (${published} shows publishing, need ${MIN_PUBLISHED_ENTITIES_TODAY})`);
+    const published = st.providerCoverage ? st.providerCoverage.publishedEntities : st.entries.filter((e) => e.performances.length > 0).length;
+    if (published < MIN_PUBLISHED_ENTITIES_TODAY) limitations.push(`park coverage not healthy (${published} provider entities publishing, need ${MIN_PUBLISHED_ENTITIES_TODAY})`);
   }
-  return { healthy: limitations.length === 0, limitations };
+  const absenceReliable = !st.providerCoverage || st.providerCoverage.droppedEntities === 0;
+  return { healthy: limitations.length === 0, absenceReliable, limitations };
 }
 
 /**
@@ -235,6 +245,11 @@ export function observeShowDay(entry: EntertainmentShowtimeEntry, localDate: str
     // Incompleteness must be explained by the absence itself; any other cause (dropped records, stale day) is ambiguity.
     (entry.provider.some((r) => !r.present) || !entry.incomplete) &&
     entry.provider.every((r) => !r.present || (r.rawShowtimeCount === 0 && r.droppedShowtimeCount === 0 && r.unrecognizedShowtimeCount === 0 && r.status?.toUpperCase() !== "OPERATING"));
+  // A discarded (malformed) provider entity is indistinguishable from absence: never count an absent ref then.
+  const absenceAmbiguous = health.absenceReliable === false && entry.provider.some((r) => !r.present);
+  if (empty && absenceAmbiguous) {
+    return { ...base, dayClass: "unknown", basis: null, performanceCount: 0, final: dayEnd, limitations: ["provider entities were discarded by validation this run: absence cannot be told from a malformed record"] };
+  }
   if (empty) {
     // Dormant: the entity is in the feed and explicitly CLOSED (identity established by its presence).
     const present = entry.provider.filter((r) => r.present);
