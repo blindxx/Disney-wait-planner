@@ -425,6 +425,24 @@ export function runDevEntertainmentLifecycleRegistryCases(): string[] {
   check("shipped: schemaVersion 1", ENTERTAINMENT_LIFECYCLE_REGISTRY.schemaVersion === 1);
   check("shipped: unresolved records are a subset of the maintained records",
     getUnresolvedLifecycleRecords().every((r) => ENTERTAINMENT_LIFECYCLE_REGISTRY.records.includes(r)));
+  // Phase 14.5B baseline (asserts decisions, not just validity, so edits are deliberate)
+  const rec = (n: string) => ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((r) => r.name === n);
+  check("shipped 14.5B: six baseline records, all active-catalog identities",
+    ENTERTAINMENT_LIFECYCLE_REGISTRY.records.length === 6 && ENTERTAINMENT_LIFECYCLE_REGISTRY.records.every(isEligibleForInactivityDetection));
+  check("shipped 14.5B: Paint the Night / Wondrous Journeys / Magic Happens / MSEP inactive + proposed hidden + confirmed",
+    ["Paint the Night", "Wondrous Journeys", "Magic Happens Parade", "Main Street Electrical Parade"].every((n) => {
+      const r = rec(n); return !!r && r.assessment === "inactive" && r.visibility.decision === "hidden" && r.confirmation === "confirmed";
+    }));
+  check("shipped 14.5B: Magic Happens carries its confirmed summer 2027 return",
+    rec("Magic Happens Parade")?.futureReturns.some((f) => f.confirmed) === true);
+  check("shipped 14.5B: Mickey's Mix Magic stays VISIBLE and provisional (21-day detector reference case)",
+    rec("Mickey's Mix Magic")?.visibility.decision === "visible" && rec("Mickey's Mix Magic")?.confirmation === "provisional" &&
+    rec("Mickey's Mix Magic")?.nextReviewAction.action === "monitor");
+  check("shipped 14.5B: Royal Princess Cavalcade unresolved, no hiding",
+    rec("Royal Princess Cavalcade")?.visibility.decision === "undecided" && rec("Royal Princess Cavalcade")?.nextReviewAction.action === "verify_independently");
+  check("shipped 14.5B: Disney on Broadway has no lifecycle record (seasonal exempt)",
+    !ENTERTAINMENT_LIFECYCLE_REGISTRY.records.some((r) => /broadway/i.test(r.name)) &&
+    kinds(wrap(base({ parkId: "epcot", name: "Disney on Broadway Concert Series", category: "limited" }))).includes("seasonal_exempt"));
   // Empty-state behavior is asserted on an explicit fixture so adding real records never breaks the suite.
   const empty = { schemaVersion: 1, records: [] } as EntertainmentLifecycleRegistry;
   check("empty fixture: validates", validateEntertainmentLifecycleRegistry(empty).length === 0);

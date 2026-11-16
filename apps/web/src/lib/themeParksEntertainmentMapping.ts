@@ -197,6 +197,7 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Luminous The Symphony of Us", "epcot", show("3dbf1ff2-eee0-44a9-8cd9-22bf920e81e9", "Luminous The Symphony of Us")),
   unmapped("Candlelight Processional", "epcot", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("JOYFUL! A Celebration of the Season", "epcot", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  unmapped("Disney on Broadway Concert Series", "epcot", `${NOT_IN_PROVIDER} (Festival of the Arts concert run; EPCOT children verified 2026-11-16, no matching SHOW)`),
 
   // ---- Hollywood Studios ----
   mapped("Fantasmic!", "hs", show("42328c39-76ab-4f03-b862-4206c8d9f7bb", "Fantasmic!")),
@@ -577,8 +578,11 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
     check("14.4B scope: festival concert acts and the Holiday Toy Drummers stay provider-only (not curated, not mapped)",
       ["0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "d6bb186c-382f-4ae6-bc76-fde8f141ed69", "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", "e9c263c4-80dc-4431-bfc9-581a0ff1f578"]
         .every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
-    check("14.4B scope: Mulan's procession / Hurry Home / Disney on Broadway are not catalogued without verified provider identity",
-      !ENTERTAINMENT_PLACES.some((p) => /mulan|hurry home|disney on broadway/i.test(p.name)));
+    check("14.4B scope: Mulan's procession / Hurry Home are not catalogued without verified provider identity",
+      !ENTERTAINMENT_PLACES.some((p) => /mulan|hurry home/i.test(p.name)));
+    check("14.5B scope: Disney on Broadway Concert Series is one catalogued EPCOT entry, unmapped (no provider SHOW), never given an invented UUID",
+      ENTERTAINMENT_PLACES.filter((p) => /disney on broadway/i.test(p.name)).length === 1 &&
+      getThemeParksEntertainmentRefs("Disney on Broadway Concert Series", "epcot").length === 0);
     // Wrong-park drift for a new DCA mapping: the DCA Clubhouse entity appearing under HS is flagged, never remapped.
     const p = JSON.parse(JSON.stringify(perfect)) as typeof perfect;
     const dcaClubhouse = p.dca!.children.find((c) => c.entityId === "8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a")!;

@@ -190,6 +190,9 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Luminous The Symphony of Us", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "regular" },
   { name: "Candlelight Processional", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "JOYFUL! A Celebration of the Season", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Phase 14.5B: Disney on Broadway Concert Series (America Gardens Theatre) — a festival concert run, associated with the
+  // EPCOT International Festival of the Arts via SEASONAL_ENTERTAINMENT_EVENTS (no availabilityTheme: theme is holiday-only).
+  { name: "Disney on Broadway Concert Series", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal" },
 
   // ---- Hollywood Studios ----
   { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
@@ -382,6 +385,8 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "happy holidays": "mickeys happy holidays",
   "viva navidad": "disney viva navidad street party",
   "viva navidad street party": "disney viva navidad street party",
+  "disney on broadway": "disney on broadway concert series",
+  "broadway concert series": "disney on broadway concert series",
   "woc": "world of color",               // World of Color (DCA)
   "folk": "festival of the lion king",   // Festival of the Lion King (AK) — "fotlk" already existed above
 };
@@ -692,4 +697,8 @@ export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
   { input: "folk", resort: "DLR", expectedKey: null },              // resort-scope: WDW-only
   // "fotlk" already existed — regression check it still resolves unchanged.
   { input: "fotlk", resort: "WDW", expectedKey: "festival of the lion king" },
+  // Phase 14.5B: Disney on Broadway Concert Series (EPCOT, WDW-only)
+  { input: "Disney on Broadway Concert Series", resort: "WDW", expectedKey: "disney on broadway concert series" },
+  { input: "Disney on Broadway", resort: "WDW", expectedKey: "disney on broadway concert series" },
+  { input: "Disney on Broadway", resort: "DLR", expectedKey: null },
 ];

@@ -1,4 +1,268 @@
 {
   "schemaVersion": 1,
-  "records": []
+  "records": [
+    {
+      "parkId": "disneyland",
+      "name": "Paint the Night",
+      "category": "limited",
+      "assessment": "inactive",
+      "visibility": {
+        "decision": "hidden",
+        "reason": "Official Disneyland page states the parade has concluded for the 2026 season (final performance Aug 20, 2026); recorded proposal only, not applied at runtime."
+      },
+      "firstFlagged": "2026-08-21",
+      "lastReviewed": "2026-11-16",
+      "providerEvidence": [
+        {
+          "source": "dwp-runtime",
+          "kind": "other",
+          "observedOn": "2026-11-16",
+          "summary": "Not mapped to a ThemeParks entity (NOT_IN_PROVIDER); no provider performance signal exists."
+        }
+      ],
+      "coverageLimitations": [
+        "No ThemeParks.wiki SHOW entity exists for this entry (unmapped), so provider silence is not evidence either way.",
+        "No official statement of permanent discontinuation or a dated 2027 return was found; the show historically returns in seasonal runs."
+      ],
+      "verificationSources": [
+        {
+          "url": "https://disneyland.disney.go.com/entertainment/disneyland/paint-the-night-parade/",
+          "title": "Paint the Night | Disneyland Resort",
+          "retrievedOn": "2026-11-16",
+          "claim": "Page reads \"Paint the Night has concluded for the 2026 season.\"",
+          "independent": true
+        }
+      ],
+      "futureReturns": [],
+      "confirmation": "confirmed",
+      "nextReviewAction": {
+        "action": "monitor",
+        "note": "Watch for a 2027 return announcement; keep catalog identity (recurring-run pattern)."
+      }
+    },
+    {
+      "parkId": "disneyland",
+      "name": "Wondrous Journeys",
+      "category": "regular",
+      "assessment": "inactive",
+      "visibility": {
+        "decision": "hidden",
+        "reason": "Official Disneyland page states the show has concluded for the 2026 season (final performance Aug 20, 2026); recorded proposal only, not applied at runtime."
+      },
+      "firstFlagged": "2026-08-21",
+      "lastReviewed": "2026-11-16",
+      "providerEvidence": [
+        {
+          "source": "dwp-runtime",
+          "kind": "other",
+          "observedOn": "2026-11-16",
+          "summary": "Not mapped to a ThemeParks entity (NOT_IN_PROVIDER); no provider performance signal exists."
+        }
+      ],
+      "coverageLimitations": [
+        "No ThemeParks.wiki SHOW entity exists for this entry (unmapped), so provider silence is not evidence either way.",
+        "Category is regular in the catalog, but the 2026 run was a seasonal return; no official statement of permanent discontinuation or dated 2027 return was found."
+      ],
+      "verificationSources": [
+        {
+          "url": "https://disneyland.disney.go.com/entertainment/wondrous-journeys/",
+          "title": "Wondrous Journeys | Disneyland Resort",
+          "retrievedOn": "2026-11-16",
+          "claim": "Page reads \"Wondrous Journeys has concluded for the 2026 season.\"",
+          "independent": true
+        }
+      ],
+      "futureReturns": [],
+      "confirmation": "confirmed",
+      "nextReviewAction": {
+        "action": "monitor",
+        "note": "The Aug 15, 2026 D23 announcement lists Remember... Dreams Come True (Feb 2027) but not Wondrous Journeys; re-check when the 2027 nighttime lineup is published."
+      }
+    },
+    {
+      "parkId": "disneyland",
+      "name": "Magic Happens Parade",
+      "category": "limited",
+      "assessment": "inactive",
+      "visibility": {
+        "decision": "hidden",
+        "reason": "Daytime parade is not running; official announcement gives a summer 2027 return. Recorded proposal only, not applied at runtime."
+      },
+      "firstFlagged": "2026-11-16",
+      "lastReviewed": "2026-11-16",
+      "providerEvidence": [
+        {
+          "source": "dwp-runtime",
+          "kind": "other",
+          "observedOn": "2026-11-16",
+          "summary": "Not mapped to a ThemeParks entity (NOT_IN_PROVIDER; mapping notes a summer 2027 return)."
+        }
+      ],
+      "coverageLimitations": [
+        "No ThemeParks.wiki SHOW entity exists for this entry (unmapped), so provider silence is not evidence either way.",
+        "Last performance (reported Aug 22, 2024) comes from secondary coverage; only the 2027 return is from an official source."
+      ],
+      "verificationSources": [
+        {
+          "url": "https://disneyparksblog.com/dlr/disneyland-entertainment-2027-fireworks-parade-and-more/",
+          "title": "Beloved Entertainment Returns to Disneyland Resort in 2027 (Disney Parks Blog, Aug 15, 2026)",
+          "retrievedOn": "2026-11-16",
+          "claim": "\"Just in time for summer 2027, the 'Magic Happens' parade will return to Disneyland park.\"",
+          "independent": true
+        }
+      ],
+      "futureReturns": [
+        {
+          "description": "Official announcement: returns to Disneyland park just in time for summer 2027; exact date not published.",
+          "sourceUrl": "https://disneyparksblog.com/dlr/disneyland-entertainment-2027-fireworks-parade-and-more/",
+          "confirmed": true
+        }
+      ],
+      "confirmation": "confirmed",
+      "nextReviewAction": {
+        "action": "re_review_on_date",
+        "dueBy": "2027-05-15",
+        "note": "Confirm the dated return before summer 2027 and resolve this record."
+      }
+    },
+    {
+      "parkId": "disneyland",
+      "name": "Main Street Electrical Parade",
+      "category": "limited",
+      "assessment": "inactive",
+      "visibility": {
+        "decision": "hidden",
+        "reason": "Limited-time 2022 run ended Sept 1, 2022 per Disney Parks Blog and the parade is absent from Disneyland's current official entertainment listing; no return announced. Recorded proposal only."
+      },
+      "firstFlagged": "2026-11-16",
+      "lastReviewed": "2026-11-16",
+      "providerEvidence": [
+        {
+          "source": "dwp-runtime",
+          "kind": "other",
+          "observedOn": "2026-11-16",
+          "summary": "Not mapped to a ThemeParks entity (NOT_IN_PROVIDER)."
+        }
+      ],
+      "coverageLimitations": [
+        "No ThemeParks.wiki SHOW entity exists for this entry (unmapped), so provider silence is not evidence either way.",
+        "Absence from the official listing alone proves nothing; the confirmation rests on the official end-of-run notice plus the absence of any later announced run."
+      ],
+      "verificationSources": [
+        {
+          "url": "https://disneyparksblog.com/dlr/catch-disneyland-forever-fireworks-main-street-electrical-parade-before-their-limited-time-runs-end-sept-1/",
+          "title": "Catch Disneyland Forever Fireworks, Main Street Electrical Parade Before their Limited-Time Runs End Sept. 1 (Disney Parks Blog, Jul 14, 2022)",
+          "retrievedOn": "2026-11-16",
+          "claim": "Limited-time run ended Sept. 1, 2022.",
+          "independent": true
+        },
+        {
+          "url": "https://disneyland.disney.go.com/entertainment/disneyland/",
+          "title": "Disneyland Park entertainment | Disneyland Resort",
+          "retrievedOn": "2026-11-16",
+          "claim": "Current official Disneyland Park entertainment listing (retrieved 2026-11-16) has no Main Street Electrical Parade entry.",
+          "independent": true
+        }
+      ],
+      "futureReturns": [],
+      "confirmation": "confirmed",
+      "nextReviewAction": {
+        "action": "monitor",
+        "note": "Historical revival pattern (2017, 2019, 2022): watch for a future announcement; keep catalog identity."
+      }
+    },
+    {
+      "parkId": "disneyland",
+      "name": "Mickey's Mix Magic",
+      "category": "limited",
+      "assessment": "inactive",
+      "visibility": {
+        "decision": "visible",
+        "reason": "Kept VISIBLE deliberately: not officially confirmed ended, and it is the reference case for the future 21-day inactivity detector test."
+      },
+      "firstFlagged": "2026-11-16",
+      "lastReviewed": "2026-11-16",
+      "providerEvidence": [
+        {
+          "source": "themeparks",
+          "kind": "status_closed",
+          "observedOn": "2026-11-16",
+          "summary": "Both mapped SHOW records report CLOSED with no showtimes today.",
+          "entityId": "d252d547-a3e4-4ae4-b6ea-e8e4b0849512"
+        },
+        {
+          "source": "themeparks",
+          "kind": "status_closed",
+          "observedOn": "2026-11-16",
+          "summary": "Projection-only SHOW record reports CLOSED with no showtimes today.",
+          "entityId": "3178251f-4570-4ebf-ae2f-fb28edc7534f"
+        }
+      ],
+      "coverageLimitations": [
+        "Provider CLOSED/no showtimes could equally be a temporary pause or off-season.",
+        "The reported last performance (Nov 12, 2026) comes from a single third-party tracker, not an official notice; Disneyland's own page still lists the show (\"No performance today\")."
+      ],
+      "verificationSources": [
+        {
+          "url": "https://c.touringplans.com/disneyland/attractions/closing-dates",
+          "title": "Touring Plans — Disneyland closing dates",
+          "retrievedOn": "2026-11-16",
+          "claim": "Third-party tracker lists a Nov 13, 2026 closing date (last performance Nov 12); not an official announcement.",
+          "independent": false
+        },
+        {
+          "url": "https://disneyland.disney.go.com/entertainment/disneyland/mickeys-mix-magic/",
+          "title": "Mickey's Mix Magic | Disneyland Resort",
+          "retrievedOn": "2026-11-16",
+          "claim": "Official page still lists the show with \"No performance today\"; no end notice.",
+          "independent": true
+        }
+      ],
+      "futureReturns": [],
+      "confirmation": "provisional",
+      "nextReviewAction": {
+        "action": "monitor",
+        "note": "Re-check after 21 consecutive inactive days (about Dec 3, 2026) via the future detector test; resolve on an official end or return notice."
+      }
+    },
+    {
+      "parkId": "disneyland",
+      "name": "Royal Princess Cavalcade",
+      "category": "limited",
+      "assessment": "unknown",
+      "visibility": {
+        "decision": "undecided",
+        "reason": "Identity unresolved; no hiding proposed."
+      },
+      "firstFlagged": "2026-11-16",
+      "lastReviewed": "2026-11-16",
+      "providerEvidence": [
+        {
+          "source": "dwp-runtime",
+          "kind": "other",
+          "observedOn": "2026-11-16",
+          "summary": "Not mapped to a ThemeParks entity (NOT_IN_PROVIDER)."
+        }
+      ],
+      "coverageLimitations": [
+        "No ThemeParks.wiki SHOW entity exists for this entry (unmapped), so provider silence is not evidence either way.",
+        "Searches found only Disneyland Paris's 'Disney Princess Cavalcade' (debuted Jul 24, 2026) and Walt Disney World's 'Royal Princess Processional'; no California history under this name."
+      ],
+      "verificationSources": [
+        {
+          "url": "https://disneyland.disney.go.com/entertainment/disneyland/",
+          "title": "Disneyland Park entertainment | Disneyland Resort",
+          "retrievedOn": "2026-11-16",
+          "claim": "Official California listing (retrieved 2026-11-16) has no Royal Princess Cavalcade; it lists 'The Celebrate Happy Cavalcade' (different name) and Storytelling at Royal Theatre / Meet Princesses at Royal Hall.",
+          "independent": true
+        }
+      ],
+      "futureReturns": [],
+      "confirmation": "provisional",
+      "nextReviewAction": {
+        "action": "verify_independently",
+        "note": "Determine whether this catalog identity ever existed at Disneyland (vs. Paris's Disney Princess Cavalcade) and whether it should be retired or renamed; catalog maintenance only."
+      }
+    }
+  ]
 }
