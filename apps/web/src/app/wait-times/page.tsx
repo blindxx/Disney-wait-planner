@@ -971,7 +971,7 @@ export default function WaitTimesPage() {
   // Phase 14.5C lifecycle hiding: reviewed registry decisions (applied immediately, static data) plus the
   // server-persisted auto-hidden names carried by the showtimes response. Fails open when the list is unknown.
   const lifecycleHidden = useMemo(
-    () => getLifecycleHiddenNames(selectedPark, showtimes?.lifecycleAutoHidden, performingNamesFromShowtimes(showtimes?.entries)),
+    () => getLifecycleHiddenNames(selectedPark, showtimes?.lifecycleAutoHidden, performingNamesFromShowtimes(showtimes?.entries), undefined, showtimes?.lifecycleRegistryRestored),
     [selectedPark, showtimes],
   );
 

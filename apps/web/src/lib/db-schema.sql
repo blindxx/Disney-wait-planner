@@ -235,9 +235,11 @@ CREATE INDEX IF NOT EXISTS park_regular_hours_hours_date_idx ON park_regular_hou
 -- ============================================================
 
 -- One row per (show, resort-local date): the strongest class observed that day.
--- day_class: active | inactive | silent | unknown. class_rank (unknown 0 <
--- silent 1 < inactive 2 < active 3) makes upserts order-independent and
--- idempotent: a stronger observation replaces a weaker one, never the reverse.
+-- day_class: active | inactive | dormant | silent | unknown. class_rank (unknown 0 <
+-- silent 1 < dormant 2 < inactive 3 < active 4) plus is_final makes upserts
+-- order-independent and idempotent: active never gets replaced; a final row
+-- replaces a provisional one; otherwise the stronger class wins. is_final = a
+-- negative class observed in the resort-local end-of-day window (or active).
 CREATE TABLE IF NOT EXISTS entertainment_lifecycle_evidence (
   park_id           TEXT        NOT NULL,
   show_key          TEXT        NOT NULL,
@@ -245,6 +247,7 @@ CREATE TABLE IF NOT EXISTS entertainment_lifecycle_evidence (
   show_name         TEXT        NOT NULL,
   day_class         TEXT        NOT NULL,
   class_rank        SMALLINT    NOT NULL,
+  is_final          BOOLEAN     NOT NULL DEFAULT TRUE,
   basis             TEXT,
   performance_count INTEGER     NOT NULL DEFAULT 0,
   source            TEXT        NOT NULL,
@@ -254,8 +257,14 @@ CREATE TABLE IF NOT EXISTS entertainment_lifecycle_evidence (
   observation_count INTEGER     NOT NULL DEFAULT 1,
   PRIMARY KEY (park_id, show_key, local_date),
   CONSTRAINT entertainment_lifecycle_evidence_class_chk
-    CHECK (day_class IN ('active', 'inactive', 'silent', 'unknown'))
+    CHECK (day_class IN ('active', 'inactive', 'dormant', 'silent', 'unknown'))
 );
+
+-- Idempotent upgrades for a database that applied the first 14.5C revision.
+ALTER TABLE entertainment_lifecycle_evidence ADD COLUMN IF NOT EXISTS is_final BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE entertainment_lifecycle_evidence DROP CONSTRAINT IF EXISTS entertainment_lifecycle_evidence_class_chk;
+ALTER TABLE entertainment_lifecycle_evidence ADD CONSTRAINT entertainment_lifecycle_evidence_class_chk
+  CHECK (day_class IN ('active', 'inactive', 'dormant', 'silent', 'unknown'));
 
 CREATE INDEX IF NOT EXISTS entertainment_lifecycle_evidence_date_idx
   ON entertainment_lifecycle_evidence (local_date);
@@ -274,8 +283,10 @@ CREATE TABLE IF NOT EXISTS entertainment_lifecycle_state (
   hide_count             INTEGER     NOT NULL DEFAULT 0,
   restore_count          INTEGER     NOT NULL DEFAULT 0,
   inactive_days          INTEGER     NOT NULL DEFAULT 0,
+  dormant_days           INTEGER     NOT NULL DEFAULT 0,
   silent_days            INTEGER     NOT NULL DEFAULT 0,
   silence_flagged_at     TIMESTAMPTZ,
+  registry_restored_at   TIMESTAMPTZ,
   secondary_evaluated_on DATE,
   audit_flag             TEXT,
   evaluated_local_date   DATE,
@@ -285,8 +296,11 @@ CREATE TABLE IF NOT EXISTS entertainment_lifecycle_state (
     CHECK (status IN ('visible', 'auto_hidden'))
 );
 
+ALTER TABLE entertainment_lifecycle_state ADD COLUMN IF NOT EXISTS dormant_days INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE entertainment_lifecycle_state ADD COLUMN IF NOT EXISTS registry_restored_at TIMESTAMPTZ;
+
 -- Append-only decisions for the later research audit: auto_hide, auto_restore,
--- silence_flag, registry_conflict. The natural key makes a duplicated cron
+-- silence_flag, registry_restore, registry_conflict. The natural key makes a duplicated cron
 -- delivery a no-op. audit_status is advanced only by the audit (never here).
 CREATE TABLE IF NOT EXISTS entertainment_lifecycle_events (
   park_id             TEXT        NOT NULL,

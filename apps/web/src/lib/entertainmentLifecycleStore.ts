@@ -46,41 +46,50 @@ export async function tryLifecycleLock(q: Queryable, parkId: ParkId): Promise<bo
 }
 
 export async function upsertObservations(q: Queryable, observations: ShowDayObservation[]): Promise<void> {
+  // Replacement rule (order-independent, idempotent): an `active` row is never replaced; a new `active` always replaces;
+  // otherwise a FINAL row replaces a provisional one, and between equally-final rows the stronger class wins.
   for (const o of observations) {
     await q.query(
       `INSERT INTO entertainment_lifecycle_evidence AS e
-         (park_id, show_key, local_date, show_name, day_class, class_rank, basis, performance_count, source, limitations)
-       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10::jsonb)
+         (park_id, show_key, local_date, show_name, day_class, class_rank, is_final, basis, performance_count, source, limitations)
+       VALUES ($1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
        ON CONFLICT (park_id, show_key, local_date) DO UPDATE SET
          show_name = EXCLUDED.show_name,
-         day_class = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.day_class ELSE e.day_class END,
-         basis = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.basis ELSE e.basis END,
-         source = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.source ELSE e.source END,
-         limitations = CASE WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.limitations ELSE e.limitations END,
+         day_class = CASE WHEN e.class_rank < 4 AND (EXCLUDED.class_rank = 4 OR (EXCLUDED.is_final AND NOT e.is_final)
+                          OR (EXCLUDED.is_final = e.is_final AND EXCLUDED.class_rank > e.class_rank)) THEN EXCLUDED.day_class ELSE e.day_class END,
+         basis = CASE WHEN e.class_rank < 4 AND (EXCLUDED.class_rank = 4 OR (EXCLUDED.is_final AND NOT e.is_final)
+                      OR (EXCLUDED.is_final = e.is_final AND EXCLUDED.class_rank > e.class_rank)) THEN EXCLUDED.basis ELSE e.basis END,
+         source = CASE WHEN e.class_rank < 4 AND (EXCLUDED.class_rank = 4 OR (EXCLUDED.is_final AND NOT e.is_final)
+                       OR (EXCLUDED.is_final = e.is_final AND EXCLUDED.class_rank > e.class_rank)) THEN EXCLUDED.source ELSE e.source END,
+         limitations = CASE WHEN e.class_rank < 4 AND (EXCLUDED.class_rank = 4 OR (EXCLUDED.is_final AND NOT e.is_final)
+                            OR (EXCLUDED.is_final = e.is_final AND EXCLUDED.class_rank > e.class_rank)) THEN EXCLUDED.limitations ELSE e.limitations END,
          performance_count = CASE
-           WHEN EXCLUDED.class_rank > e.class_rank THEN EXCLUDED.performance_count
-           WHEN EXCLUDED.class_rank = e.class_rank THEN GREATEST(e.performance_count, EXCLUDED.performance_count)
+           WHEN e.class_rank < 4 AND (EXCLUDED.class_rank = 4 OR (EXCLUDED.is_final AND NOT e.is_final)
+                OR (EXCLUDED.is_final = e.is_final AND EXCLUDED.class_rank > e.class_rank)) THEN EXCLUDED.performance_count
+           WHEN e.class_rank = 4 AND EXCLUDED.class_rank = 4 THEN GREATEST(e.performance_count, EXCLUDED.performance_count)
            ELSE e.performance_count END,
-         class_rank = GREATEST(e.class_rank, EXCLUDED.class_rank),
+         class_rank = CASE WHEN e.class_rank < 4 AND (EXCLUDED.class_rank = 4 OR (EXCLUDED.is_final AND NOT e.is_final)
+                           OR (EXCLUDED.is_final = e.is_final AND EXCLUDED.class_rank > e.class_rank)) THEN EXCLUDED.class_rank ELSE e.class_rank END,
+         is_final = e.is_final OR EXCLUDED.is_final,
          observation_count = e.observation_count + 1,
          last_observed_at = NOW()`,
-      [o.parkId, o.showKey, o.localDate, o.showName, o.dayClass, LIFECYCLE_CLASS_RANK[o.dayClass], o.basis, o.performanceCount, o.source, JSON.stringify(o.limitations)],
+      [o.parkId, o.showKey, o.localDate, o.showName, o.dayClass, LIFECYCLE_CLASS_RANK[o.dayClass], o.final, o.basis, o.performanceCount, o.source, JSON.stringify(o.limitations)],
     );
   }
 }
 
-export interface StoredEvidenceRow { showKey: string; localDate: string; dayClass: LifecycleDayClass; basis: string | null; performanceCount: number }
+export interface StoredEvidenceRow { showKey: string; localDate: string; dayClass: LifecycleDayClass; basis: string | null; performanceCount: number; final: boolean }
 
 export async function readEvidence(q: Queryable, parkId: ParkId, from: string, to: string): Promise<StoredEvidenceRow[]> {
   const res = await q.query(
-    `SELECT show_key, to_char(local_date, 'YYYY-MM-DD') AS d, day_class, basis, performance_count
+    `SELECT show_key, to_char(local_date, 'YYYY-MM-DD') AS d, day_class, basis, performance_count, is_final
      FROM entertainment_lifecycle_evidence
      WHERE park_id = $1 AND local_date >= $2::date AND local_date <= $3::date`,
     [parkId, from, to],
   );
   return res.rows.map((r) => ({
     showKey: String(r.show_key), localDate: String(r.d), dayClass: String(r.day_class) as LifecycleDayClass,
-    basis: r.basis == null ? null : String(r.basis), performanceCount: Number(r.performance_count),
+    basis: r.basis == null ? null : String(r.basis), performanceCount: Number(r.performance_count), final: r.is_final !== false,
   }));
 }
 
@@ -90,7 +99,9 @@ export interface StoredLifecycleState extends LifecycleShowState {
   hiddenAt: string | null;
   restoredAt: string | null;
   silenceFlaggedAt: string | null;
+  registryRestoredAt: string | null;
   inactiveDays: number;
+  dormantDays: number;
   silentDays: number;
   evaluatedLocalDate: string | null;
 }
@@ -104,8 +115,8 @@ export async function readStates(q: Queryable, parkId: ParkId): Promise<Map<stri
             to_char(cycle_reset_date, 'YYYY-MM-DD') AS cycle_reset_date,
             to_char(last_active_date, 'YYYY-MM-DD') AS last_active_date,
             to_char(hidden_local_date, 'YYYY-MM-DD') AS hidden_local_date,
-            hidden_at, restored_at, hide_count, restore_count, inactive_days, silent_days,
-            silence_flagged_at, to_char(secondary_evaluated_on, 'YYYY-MM-DD') AS secondary_evaluated_on,
+            hidden_at, restored_at, hide_count, restore_count, inactive_days, dormant_days, silent_days,
+            silence_flagged_at, registry_restored_at, to_char(secondary_evaluated_on, 'YYYY-MM-DD') AS secondary_evaluated_on,
             audit_flag, to_char(evaluated_local_date, 'YYYY-MM-DD') AS evaluated_local_date
      FROM entertainment_lifecycle_state WHERE park_id = $1`,
     [parkId],
@@ -118,7 +129,8 @@ export async function readStates(q: Queryable, parkId: ParkId): Promise<Map<stri
       cycleResetDate: dateOrNull(r.cycle_reset_date), lastActiveDate: dateOrNull(r.last_active_date),
       hiddenLocalDate: dateOrNull(r.hidden_local_date), hiddenAt: iso(r.hidden_at), restoredAt: iso(r.restored_at),
       hideCount: Number(r.hide_count), restoreCount: Number(r.restore_count),
-      inactiveDays: Number(r.inactive_days), silentDays: Number(r.silent_days),
+      inactiveDays: Number(r.inactive_days), dormantDays: Number(r.dormant_days), silentDays: Number(r.silent_days),
+      registryRestored: r.registry_restored_at != null, registryRestoredAt: iso(r.registry_restored_at),
       silenceFlagged: r.silence_flagged_at != null, silenceFlaggedAt: iso(r.silence_flagged_at),
       secondaryEvaluatedOn: dateOrNull(r.secondary_evaluated_on),
       auditFlag: (r.audit_flag as LifecycleAuditFlag | null) ?? null,
@@ -133,22 +145,23 @@ export async function writeState(q: Queryable, parkId: ParkId, s: StoredLifecycl
   const res = await q.query(
     `INSERT INTO entertainment_lifecycle_state AS st
        (park_id, show_key, show_name, status, cycle_reset_date, last_active_date, hidden_local_date, hidden_at, restored_at,
-        hide_count, restore_count, inactive_days, silent_days, silence_flagged_at, secondary_evaluated_on, audit_flag,
-        evaluated_local_date, updated_at)
+        hide_count, restore_count, inactive_days, dormant_days, silent_days, silence_flagged_at, registry_restored_at,
+        secondary_evaluated_on, audit_flag, evaluated_local_date, updated_at)
      VALUES ($1, $2, $3, $4, $5::date, $6::date, $7::date, $8::timestamptz, $9::timestamptz,
-             $10, $11, $12, $13, $14::timestamptz, $15::date, $16, $17::date, NOW())
+             $10, $11, $12, $13, $14, $15::timestamptz, $16::timestamptz, $17::date, $18, $19::date, NOW())
      ON CONFLICT (park_id, show_key) DO UPDATE SET
        show_name = EXCLUDED.show_name, status = EXCLUDED.status, cycle_reset_date = EXCLUDED.cycle_reset_date,
        last_active_date = EXCLUDED.last_active_date, hidden_local_date = EXCLUDED.hidden_local_date,
        hidden_at = EXCLUDED.hidden_at, restored_at = EXCLUDED.restored_at, hide_count = EXCLUDED.hide_count,
-       restore_count = EXCLUDED.restore_count, inactive_days = EXCLUDED.inactive_days, silent_days = EXCLUDED.silent_days,
-       silence_flagged_at = EXCLUDED.silence_flagged_at, secondary_evaluated_on = EXCLUDED.secondary_evaluated_on,
+       restore_count = EXCLUDED.restore_count, inactive_days = EXCLUDED.inactive_days, dormant_days = EXCLUDED.dormant_days,
+       silent_days = EXCLUDED.silent_days, silence_flagged_at = EXCLUDED.silence_flagged_at,
+       registry_restored_at = EXCLUDED.registry_restored_at, secondary_evaluated_on = EXCLUDED.secondary_evaluated_on,
        audit_flag = EXCLUDED.audit_flag, evaluated_local_date = EXCLUDED.evaluated_local_date, updated_at = NOW()
      WHERE st.evaluated_local_date IS NULL OR st.evaluated_local_date <= EXCLUDED.evaluated_local_date`,
     [
       parkId, s.showKey, s.showName, s.status, s.cycleResetDate, s.lastActiveDate, s.hiddenLocalDate, s.hiddenAt, s.restoredAt,
-      s.hideCount, s.restoreCount, s.inactiveDays, s.silentDays, s.silenceFlaggedAt, s.secondaryEvaluatedOn, s.auditFlag,
-      s.evaluatedLocalDate,
+      s.hideCount, s.restoreCount, s.inactiveDays, s.dormantDays, s.silentDays, s.silenceFlaggedAt, s.registryRestoredAt,
+      s.secondaryEvaluatedOn, s.auditFlag, s.evaluatedLocalDate,
     ],
   );
   return (res.rowCount ?? 0) > 0;
@@ -204,7 +217,9 @@ const CACHE_TTL_MS = 60_000;
 const STALE_OK_MS = 10 * 60_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 
-let cache: { at: number; byPark: Map<string, string[]> } | null = null;
+export interface LifecycleVisibilityState { autoHidden: string[]; registryRestored: string[] }
+
+let cache: { at: number; byPark: Map<string, LifecycleVisibilityState> } | null = null;
 let inflight: Promise<void> | null = null;
 let blockedUntil = 0;
 
@@ -213,30 +228,34 @@ export function resetLifecycleReadState(): void { cache = null; inflight = null;
 async function refresh(clock: () => number, executor: PersistExecutor, deadlineMs: number): Promise<void> {
   let failed = false;
   const work = executor
-    .run((q) => q.query("SELECT park_id, show_name FROM entertainment_lifecycle_state WHERE status = 'auto_hidden' ORDER BY park_id, show_name"))
+    .run((q) => q.query("SELECT park_id, show_name, status, (registry_restored_at IS NOT NULL) AS restored FROM entertainment_lifecycle_state WHERE status = 'auto_hidden' OR registry_restored_at IS NOT NULL ORDER BY park_id, show_name"))
     .catch(() => { failed = true; return null; });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const res = await Promise.race([work, new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), deadlineMs); })]);
   if (timer) clearTimeout(timer);
   if (res === "timeout") { try { executor.abort(); } catch { /* best effort */ } blockedUntil = clock() + FAILURE_COOLDOWN_MS; return; }
   if (failed || !res) { blockedUntil = clock() + FAILURE_COOLDOWN_MS; return; }
-  const byPark = new Map<string, string[]>();
+  const byPark = new Map<string, LifecycleVisibilityState>();
   for (const r of res.rows) {
     const k = String(r.park_id);
-    byPark.set(k, [...(byPark.get(k) ?? []), String(r.show_name)]);
+    const cur = byPark.get(k) ?? { autoHidden: [], registryRestored: [] };
+    if (r.status === "auto_hidden") cur.autoHidden.push(String(r.show_name));
+    if (r.restored === true) cur.registryRestored.push(String(r.show_name));
+    byPark.set(k, cur);
   }
   cache = { at: clock(), byPark };
 }
 
 /**
- * Persisted auto-hidden canonical names for a park, or `undefined` when unknown.
- * NEVER throws and never blocks past `deadlineMs`: unknown (no DATABASE_URL, DB
- * down, timeout, cooldown) means "hide nothing automatic" — fail open.
+ * Persisted lifecycle visibility state for a park (auto-hidden names + durably
+ * restored registry hides), or `undefined` when unknown. NEVER throws and never
+ * blocks past `deadlineMs`: unknown (no DATABASE_URL, DB down, timeout, cooldown)
+ * means "hide nothing automatic" — fail open.
  */
-export async function getLifecycleAutoHidden(
+export async function getLifecycleVisibilityState(
   parkId: ParkId,
   opts: { clock?: () => number; executor?: PersistExecutor; deadlineMs?: number } = {},
-): Promise<string[] | undefined> {
+): Promise<LifecycleVisibilityState | undefined> {
   try {
     const clock = opts.clock ?? Date.now;
     const fresh = cache && clock() - cache.at < CACHE_TTL_MS;
@@ -251,9 +270,14 @@ export async function getLifecycleAutoHidden(
       }
       if (inflight) await inflight;
     }
-    if (cache && clock() - cache.at < STALE_OK_MS) return cache.byPark.get(parkId) ?? [];
+    if (cache && clock() - cache.at < STALE_OK_MS) return cache.byPark.get(parkId) ?? { autoHidden: [], registryRestored: [] };
     return undefined;
   } catch {
     return undefined;
   }
+}
+
+/** Auto-hidden names only (unknown → undefined). */
+export async function getLifecycleAutoHidden(parkId: ParkId, opts: Parameters<typeof getLifecycleVisibilityState>[1] = {}): Promise<string[] | undefined> {
+  return (await getLifecycleVisibilityState(parkId, opts))?.autoHidden;
 }

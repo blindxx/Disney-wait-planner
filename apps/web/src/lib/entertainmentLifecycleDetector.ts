@@ -10,8 +10,14 @@
  *   inactive credible provider evidence of zero activity (the existing 14.4.1/
  *            14.4.2 `confirmedNoActivityToday`, from a fresh, complete payload
  *            of a park with healthy coverage) — or a validated history "dark" day;
- *   silent   the show's own provider entities published nothing while the park
- *            as a whole is healthy (show-specific silence). NEVER inactive;
+ *   dormant  (14.5C-fix) a mapped show whose provider entity IS in the fresh,
+ *            healthy park feed with status CLOSED and no records, no performance.
+ *            Counts like `inactive` toward the hide threshold (distinct dates);
+ *   silent   the show's own provider entities are ABSENT (or empty with another
+ *            status) while the park as a whole is healthy. Counts toward the
+ *            10-day silence WARNING; counts toward hiding only once the show's
+ *            identity is established (a verified performance was observed for
+ *            it, so absence is a change, not "never listed");
  *   unknown  everything else (failures, stale/partial data, CLOSED alone, an
  *            unhealthy park). Never counts toward anything.
  * Unmapped shows produce NO observation (a nonexistent provider observation is
@@ -19,22 +25,29 @@
  *
  * Rules (identical for `regular` and `limited`; seasonal/holiday/festival/party
  * entries and legacy/unknown identities are never evaluated):
- *   HIDE      ≥ 21 distinct inactive dates in the rolling 30 resort-local days
- *             ending today, counting only dates AFTER the latest active-cycle
- *             reset (the latest active day / restoration). Dates need not be
- *             consecutive; active days before the window never matter.
- *   SILENCE   ≥ 10 distinct silent dates after the reset → audit flag + a
- *             secondary evaluation request (history backfill). Silence alone
- *             never hides; only inactive days (e.g. history-"dark" backfill) do.
+ *   HIDE      ≥ 21 distinct dates classed inactive OR dormant (OR silent, with
+ *             identity established) in the rolling 30 resort-local days ending
+ *             today, counting only dates AFTER the latest active-cycle reset
+ *             (the latest active day / restoration). A date is one class, so
+ *             "distinct" is by construction; dates need not be consecutive.
+ *   SILENCE   ≥ 10 distinct silent/dormant dates after the reset → audit flag + a
+ *             secondary evaluation request (history backfill). Unknown/incomplete
+ *             days, missing history rows, weak coverage and outages never count.
+ *   FINALITY  negative classes count only when the observation was made in the
+ *             resort-local END-OF-DAY window (`isDayEndWindow`, ≥ 22:00): an
+ *             earlier observation of a still-running day is provisional and is
+ *             replaced by a later in-window one. Active days count immediately.
  *   RESTORE   an auto-hidden show gets a verified active observation newer than
  *             the cycle reset it was hidden under → visible again, cycle reset
  *             to that active day, so older inactive evidence can never re-hide
  *             it; a later 21-of-30 pattern can. A future-return announcement is
  *             not evidence and is never an input here.
- *   Registry (reviewed) decisions are never overwritten: a `confirmed` hidden
- *   record is left alone (a performance only raises an audit flag); a
- *   `provisional` hidden record is restorable at request time (see
- *   entertainmentLifecycleVisibility.ts) and also flagged.
+ *   Registry (reviewed) hides are RESTORABLE by a verified performance, even when
+ *   confirmed (inactive/suspended/returning): the registry record is never edited;
+ *   the restoration is persisted (`registryRestored`) with a `registry_restore`
+ *   audit event + `registry_conflict` flag, the cycle resets, and later 21-of-30
+ *   inactivity can hide again. A `discontinued` record is LOCKED: a performance
+ *   only raises an audit flag. Legacy identities are never evaluated.
  *
  * Identity: keyed by `entertainmentMappingKey(parkId, canonical name)`; a
  * provider edition/variant name (World of Color – ONE / Happiness!) resolves to
@@ -47,10 +60,10 @@ import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { MIN_PUBLISHED_ENTITIES_TODAY, isActive, isDark } from "./entertainmentHistory";
 import type { ParkHistoryEvidence } from "./entertainmentHistory";
 import type { EntertainmentShowtimeEntry, ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
-import { seasonalExemptionReason } from "./entertainmentLifecycleRegistry";
+import { ENTERTAINMENT_LIFECYCLE_REGISTRY, lifecycleRecordKey, seasonalExemptionReason, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { PARK_TO_RESORT } from "./parkMetadata";
-import { addDaysToLocalDate } from "./resortTime";
+import { RESORT_TIME_ZONES, addDaysToLocalDate } from "./resortTime";
 import { entertainmentMappingKey } from "./themeParksEntertainmentMapping";
 import type { ThemeParksHistoryDaily, ThemeParksResult } from "./themeParksApi";
 
@@ -64,9 +77,23 @@ export const LIFECYCLE_SILENCE_FLAG_DAYS = 10;
 /** Evidence older than this may be pruned (cycle reset dates survive in state). */
 export const LIFECYCLE_RETENTION_DAYS = 90;
 
-export type LifecycleDayClass = "active" | "inactive" | "silent" | "unknown";
-/** Order-independent precedence: a stronger observation replaces a weaker one, never the reverse. */
-export const LIFECYCLE_CLASS_RANK: Record<LifecycleDayClass, number> = { unknown: 0, silent: 1, inactive: 2, active: 3 };
+export type LifecycleDayClass = "active" | "inactive" | "dormant" | "silent" | "unknown";
+/** Precedence within the same finality: a stronger observation replaces a weaker one, never the reverse. */
+export const LIFECYCLE_CLASS_RANK: Record<LifecycleDayClass, number> = { unknown: 0, silent: 1, dormant: 2, inactive: 3, active: 4 };
+
+/** Resort-local hour from which a day's NEGATIVE observation may be final (see header, FINALITY). */
+export const LIFECYCLE_DAY_END_HOUR = 22;
+
+/** Resort-local hour (0-23) of `instant`. DST-correct (Intl, IANA zone). */
+export function resortLocalHour(resort: ResortId, instant: Date): number {
+  const h = new Intl.DateTimeFormat("en-US", { timeZone: RESORT_TIME_ZONES[resort], hour: "numeric", hourCycle: "h23" }).formatToParts(instant).find((x) => x.type === "hour")?.value;
+  return Number(h ?? "0") % 24;
+}
+
+/** True when `instant` is in the resort-local end-of-day window [22:00, 24:00): negatives observed now may be final. */
+export function isDayEndWindow(resort: ResortId, instant: Date): boolean {
+  return resortLocalHour(resort, instant) >= LIFECYCLE_DAY_END_HOUR;
+}
 
 export type LifecycleObservationSource = "live" | "history_backfill";
 
@@ -80,6 +107,8 @@ export interface ShowDayObservation {
   basis: string | null;
   performanceCount: number;
   source: LifecycleObservationSource;
+  /** Counts toward negative thresholds: active rows always; negatives only when observed in the day-end window. */
+  final: boolean;
   /** Why the observation cannot stand alone / why it is not stronger (audit). */
   limitations: string[];
 }
@@ -147,45 +176,55 @@ export function assessParkHealth(st: ParkEntertainmentShowtimes): ParkObservatio
 /**
  * Classify one catalog entry's day. Pure. `null` = no observation (unmapped /
  * not eligible): nothing is inferred for a show with no provider mapping.
+ * `dayEnd` = the observation was made in the resort-local end-of-day window; a
+ * negative class observed earlier is provisional (`final: false`) and never counts.
  */
-export function observeShowDay(entry: EntertainmentShowtimeEntry, localDate: string, health: ParkObservationHealth): ShowDayObservation | null {
+export function observeShowDay(entry: EntertainmentShowtimeEntry, localDate: string, health: ParkObservationHealth, dayEnd = true): ShowDayObservation | null {
   const resolved = resolveLifecycleShow(entry.parkId, entry.dwpName);
   if (!resolved || !isLifecycleEligiblePlace(resolved.place) || entry.status === "unmapped") return null;
   const base = { parkId: entry.parkId, showKey: resolved.showKey, showName: resolved.place.name, localDate, source: "live" as const };
+  const partial = dayEnd ? [] : ["observed before the resort-local end-of-day window: provisional, never counted"];
 
   if (entry.performances.length > 0) {
-    return { ...base, dayClass: "active", basis: "live_performance", performanceCount: entry.performances.length, limitations: [] };
+    return { ...base, dayClass: "active", basis: "live_performance", performanceCount: entry.performances.length, final: true, limitations: [] };
   }
+  const negative = (dayClass: LifecycleDayClass, basis: string, limitations: string[]): ShowDayObservation =>
+    ({ ...base, dayClass, basis, performanceCount: 0, final: dayEnd, limitations: [...limitations, ...partial] });
   if (entry.confirmedNoActivityToday === true && health.healthy) {
-    return { ...base, dayClass: "inactive", basis: entry.inactivityBasis ?? "confirmed_no_activity", performanceCount: 0, limitations: ["provider evidence only; not independently verified"] };
+    return negative("inactive", entry.inactivityBasis ?? "confirmed_no_activity", ["provider evidence only; not independently verified"]);
   }
-  // Show-specific silence: every mapped entity absent (or present with no records at all)
-  // while the rest of the park is healthy. Ambiguous records (dropped/unrecognized/OPERATING) never qualify.
-  const silent =
+  // Provider emptiness on a fresh, healthy park feed. Ambiguous records (dropped/unrecognized/OPERATING) never qualify.
+  const empty =
     health.healthy &&
     entry.provider.length > 0 &&
     entry.unrecognizedTypes.length === 0 &&
     // Incompleteness must be explained by the absence itself; any other cause (dropped records, stale day) is ambiguity.
     (entry.provider.some((r) => !r.present) || !entry.incomplete) &&
     entry.provider.every((r) => !r.present || (r.rawShowtimeCount === 0 && r.droppedShowtimeCount === 0 && r.unrecognizedShowtimeCount === 0 && r.status?.toUpperCase() !== "OPERATING"));
-  if (silent) {
-    return { ...base, dayClass: "silent", basis: "provider_silence", performanceCount: 0, limitations: ["silence is not inactivity: the provider may simply not list this show"] };
+  if (empty) {
+    // Dormant: the entity is in the feed and explicitly CLOSED (identity established by its presence).
+    const present = entry.provider.filter((r) => r.present);
+    if (present.length > 0 && present.every((r) => r.status?.toUpperCase() === "CLOSED")) {
+      return negative("dormant", "provider_closed", ["provider CLOSED with no performance on a healthy feed; counts only across ≥ 21 distinct days"]);
+    }
+    return negative("silent", "provider_silence", ["silence is not inactivity: the provider may simply not list this show; counts toward hiding only once identity is established"]);
   }
   return {
     ...base,
     dayClass: "unknown",
     basis: null,
     performanceCount: 0,
+    final: dayEnd,
     limitations: health.healthy ? [`no credible evidence (status ${entry.status}${entry.incomplete ? ", incomplete" : ""})`] : health.limitations,
   };
 }
 
 /** Observations for every eligible, mapped catalog show of the park. */
-export function observeParkDay(st: ParkEntertainmentShowtimes): ShowDayObservation[] {
+export function observeParkDay(st: ParkEntertainmentShowtimes, dayEnd = true): ShowDayObservation[] {
   const health = assessParkHealth(st);
   const out: ShowDayObservation[] = [];
   for (const e of st.entries) {
-    const o = observeShowDay(e, st.localDate, health);
+    const o = observeShowDay(e, st.localDate, health, dayEnd);
     if (o) out.push(o);
   }
   return out;
@@ -226,6 +265,7 @@ export function historyBackfillObservations(args: {
       basis: performed ? "history_performed" : "history_dark",
       performanceCount: 0,
       source: "history_backfill",
+      final: true, // a validated, completed prior day
       limitations: ["ThemeParks history is a change log; day validated by park-level coverage gates only"],
     });
   }
@@ -238,7 +278,7 @@ export function historyBackfillObservations(args: {
 
 export type LifecycleStatus = "visible" | "auto_hidden";
 export type LifecycleAuditFlag = "provider_silence" | "registry_conflict";
-export type LifecycleEventType = "auto_hide" | "auto_restore" | "silence_flag" | "registry_conflict";
+export type LifecycleEventType = "auto_hide" | "auto_restore" | "silence_flag" | "registry_conflict" | "registry_restore";
 
 export interface LifecycleShowState {
   status: LifecycleStatus;
@@ -250,14 +290,25 @@ export interface LifecycleShowState {
   silenceFlagged: boolean;
   secondaryEvaluatedOn: string | null;
   auditFlag: LifecycleAuditFlag | null;
+  /** A verified performance overrode a reviewed registry hide (persisted; the registry record itself is never edited). */
+  registryRestored: boolean;
 }
 
 export const EMPTY_LIFECYCLE_STATE: LifecycleShowState = {
   status: "visible", cycleResetDate: null, lastActiveDate: null, hiddenLocalDate: null,
-  hideCount: 0, restoreCount: 0, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null,
+  hideCount: 0, restoreCount: 0, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, registryRestored: false,
 };
 
-export type RegistryHideKind = "none" | "confirmed" | "provisional";
+/** none = no registry hide; restorable = hidden, assessment ≠ discontinued; locked = hidden + discontinued. */
+export type RegistryHideKind = "none" | "restorable" | "locked";
+
+/** Reviewed registry hide kind for a canonical show (never changed here). */
+export function registryHideKind(parkId: ParkId, name: string, registry: EntertainmentLifecycleRegistry = ENTERTAINMENT_LIFECYCLE_REGISTRY): RegistryHideKind {
+  const key = entertainmentMappingKey(parkId, name);
+  const r = registry.records.find((x) => lifecycleRecordKey(x) === key);
+  if (!r || r.visibility.decision !== "hidden") return "none";
+  return r.assessment === "discontinued" ? "locked" : "restorable";
+}
 
 export interface PlannedLifecycleEvent {
   type: LifecycleEventType;
@@ -268,7 +319,11 @@ export interface PlannedLifecycleEvent {
 
 export interface LifecycleEvaluation {
   state: LifecycleShowState;
+  /** Verified inactive days after the reset (final only). */
   inactiveDays: number;
+  /** Dormant days (+ silent days once identity is established) after the reset (final only). */
+  dormantDays: number;
+  /** Silent + dormant days after the reset (final only): drives the silence warning. */
   silentDays: number;
   events: PlannedLifecycleEvent[];
   /** Silence threshold met and a history backfill has not yet been tried today. */
@@ -278,68 +333,107 @@ export interface LifecycleEvaluation {
 
 const COVERAGE_LIMITATIONS = [
   "provider evidence only: ThemeParks.wiki/Queue-Times observations are never independent confirmation",
-  "missing history, empty schedules, CLOSED status and elapsed time are never counted as inactivity",
+  "missing history, empty schedules, unknown/partial data and elapsed time are never counted as inactivity",
   "an automatic hide is provisional until the scheduled research audit verifies it",
 ];
 
+export interface LifecycleObservationInput {
+  localDate: string;
+  dayClass: LifecycleDayClass;
+  basis?: string | null;
+  performanceCount?: number;
+  /** Defaults to true (stored rows written before the finality column). */
+  final?: boolean;
+}
+
 /**
  * Pure evaluation of one show. `observations` are the stored per-date classes
- * (any order, any duplicates: the strongest class per date wins).
+ * (any order, any duplicates: the strongest class per date wins; callers store
+ * one row per date). Negative classes count only when `final`.
  */
 export function evaluateShowLifecycle(input: {
   today: string;
-  observations: Array<{ localDate: string; dayClass: LifecycleDayClass; basis?: string | null; performanceCount?: number }>;
+  observations: LifecycleObservationInput[];
   state: LifecycleShowState | null;
   eligible: boolean;
   registryHide: RegistryHideKind;
 }): LifecycleEvaluation {
-  const { today, eligible, registryHide } = input;
+  const { today, eligible } = input;
   const prev = input.state ?? EMPTY_LIFECYCLE_STATE;
   const next: LifecycleShowState = { ...prev };
   const events: PlannedLifecycleEvent[] = [];
   const windowStart = addDaysToLocalDate(today, -(LIFECYCLE_WINDOW_DAYS - 1)) ?? today;
 
-  const best = new Map<string, { cls: LifecycleDayClass; basis: string | null; perf: number }>();
+  const best = new Map<string, { cls: LifecycleDayClass; basis: string | null; perf: number; final: boolean }>();
   for (const o of input.observations) {
     if (o.localDate > today) continue; // never a future date
     const cur = best.get(o.localDate);
-    if (!cur || LIFECYCLE_CLASS_RANK[o.dayClass] > LIFECYCLE_CLASS_RANK[cur.cls]) best.set(o.localDate, { cls: o.dayClass, basis: o.basis ?? null, perf: o.performanceCount ?? 0 });
+    const final = o.final !== false;
+    // active beats everything; otherwise a final row beats a provisional one; then the stronger class.
+    const better = !cur || (o.dayClass === "active" && cur.cls !== "active") ||
+      (cur.cls !== "active" && ((final && !cur.final) || (final === cur.final && LIFECYCLE_CLASS_RANK[o.dayClass] > LIFECYCLE_CLASS_RANK[cur.cls])));
+    if (better) best.set(o.localDate, { cls: o.dayClass, basis: o.basis ?? null, perf: o.performanceCount ?? 0, final: o.dayClass === "active" ? true : final });
   }
   let lastActive: string | null = prev.lastActiveDate;
   for (const [d, v] of best) if (v.cls === "active" && (!lastActive || d > lastActive)) lastActive = d;
+  // Identity is established once a verified performance was ever observed for the show (survives evidence pruning via state).
+  const identityEstablished = lastActive !== null;
 
+  const countAfterReset = (match: (v: { cls: LifecycleDayClass; final: boolean }) => boolean): string[] => {
+    const reset = next.cycleResetDate;
+    const out: string[] = [];
+    for (const [d, v] of best) if (v.final && match(v) && d >= windowStart && (!reset || d > reset)) out.push(d);
+    return out.sort();
+  };
+  const inactiveDates = () => countAfterReset((v) => v.cls === "inactive");
+  const dormantDates = () => countAfterReset((v) => v.cls === "dormant" || (v.cls === "silent" && identityEstablished));
+  const silentDates = () => countAfterReset((v) => v.cls === "silent" || v.cls === "dormant");
   const result = (): LifecycleEvaluation => ({
     state: next,
-    inactiveDays: countAfterReset("inactive"),
-    silentDays: countAfterReset("silent"),
+    inactiveDays: inactiveDates().length,
+    dormantDays: dormantDates().length,
+    silentDays: silentDates().length,
     events,
     needsSecondary: false,
     changed: JSON.stringify(next) !== JSON.stringify(prev),
   });
-  const countAfterReset = (cls: LifecycleDayClass): number => {
-    const reset = next.cycleResetDate;
-    let n = 0;
-    for (const [d, v] of best) if (v.cls === cls && d >= windowStart && (!reset || d > reset)) n++;
-    return n;
-  };
 
   next.lastActiveDate = lastActive;
   if (!eligible) return result(); // legacy / seasonal / unknown: never evaluated, never auto-resurfaced
 
   // A verified active day newer than the reset this cycle is running under.
   const newActive = lastActive !== null && (prev.cycleResetDate === null || lastActive > prev.cycleResetDate);
+  const activeEvidence = lastActive ? { activeDate: lastActive, performanceCount: best.get(lastActive)?.perf ?? 0, basis: best.get(lastActive)?.basis ?? null } : {};
 
-  if (registryHide === "confirmed" || registryHide === "provisional") {
-    // Reviewed registry decision: never overwritten, no automatic decisions of our own.
-    if (newActive && lastActive === today) {
-      if (next.auditFlag !== "registry_conflict") events.push({
-        type: "registry_conflict", localDate: today,
-        evidence: { activeDate: lastActive, registryDecision: `hidden (${registryHide})`, performanceCount: best.get(today)?.perf ?? 0 },
-        coverageLimitations: [...COVERAGE_LIMITATIONS, "the registry decision was NOT changed; the audit must review it"],
-      });
-      next.auditFlag = "registry_conflict";
+  // Reviewed registry hide that has not been overridden yet.
+  if (input.registryHide !== "none" && !prev.registryRestored) {
+    if (input.registryHide === "locked") {
+      // Discontinued: never restored automatically; a performance only raises an audit flag.
+      if (newActive && lastActive === today) {
+        if (next.auditFlag !== "registry_conflict") events.push({
+          type: "registry_conflict", localDate: today,
+          evidence: { ...activeEvidence, registryDecision: "hidden (discontinued)", action: "flag_only" },
+          coverageLimitations: [...COVERAGE_LIMITATIONS, "the registry decision was NOT changed; discontinued records are never auto-restored"],
+        });
+        next.auditFlag = "registry_conflict";
+      }
+      return result();
     }
-    return result();
+    // Restorable (inactive/suspended/returning): a verified current performance overrides the hide.
+    if (newActive && lastActive) {
+      next.registryRestored = true;
+      next.status = "visible";
+      next.cycleResetDate = lastActive;
+      next.auditFlag = "registry_conflict";
+      next.silenceFlagged = false;
+      next.secondaryEvaluatedOn = null;
+      events.push({
+        type: "registry_restore", localDate: today,
+        evidence: { ...activeEvidence, registryDecision: "hidden (restorable)", action: "restored_on_verified_performance", previousCycleReset: prev.cycleResetDate },
+        coverageLimitations: [...COVERAGE_LIMITATIONS, "the registry record was NOT edited; the audit must review and update it"],
+      });
+    }
+    return result(); // still registry-hidden (no automatic decisions of our own), or just restored with a fresh cycle
   }
 
   if (prev.status === "auto_hidden") {
@@ -349,10 +443,10 @@ export function evaluateShowLifecycle(input: {
       next.restoreCount = prev.restoreCount + 1;
       next.silenceFlagged = false;
       next.secondaryEvaluatedOn = null;
-      next.auditFlag = null;
+      next.auditFlag = prev.registryRestored ? "registry_conflict" : null;
       events.push({
         type: "auto_restore", localDate: today,
-        evidence: { activeDate: lastActive, hiddenLocalDate: prev.hiddenLocalDate, performanceCount: best.get(lastActive)?.perf ?? 0, basis: best.get(lastActive)?.basis ?? null, previousCycleReset: prev.cycleResetDate },
+        evidence: { ...activeEvidence, hiddenLocalDate: prev.hiddenLocalDate, previousCycleReset: prev.cycleResetDate },
         coverageLimitations: COVERAGE_LIMITATIONS,
       });
     }
@@ -363,34 +457,38 @@ export function evaluateShowLifecycle(input: {
   if (newActive && lastActive) {
     next.cycleResetDate = lastActive;
     if (next.silenceFlagged) { next.silenceFlagged = false; next.secondaryEvaluatedOn = null; }
-    if (next.auditFlag === "provider_silence" || next.auditFlag === "registry_conflict") next.auditFlag = null;
+    if (next.auditFlag === "provider_silence") next.auditFlag = null;
   }
-  const inactive = countAfterReset("inactive");
-  const silent = countAfterReset("silent");
-  if (inactive >= LIFECYCLE_MIN_INACTIVE_DAYS) {
-    const inactiveDates = [...best].filter(([d, v]) => v.cls === "inactive" && d >= windowStart && (!next.cycleResetDate || d > next.cycleResetDate)).map(([d]) => d).sort();
+  const inactive = inactiveDates();
+  const dormant = dormantDates();
+  const silent = silentDates();
+  const counted = inactive.length + dormant.length; // distinct by construction: one class per date
+  if (counted >= LIFECYCLE_MIN_INACTIVE_DAYS) {
     const bases: Record<string, number> = {};
-    for (const [d, v] of best) if (inactiveDates.includes(d)) bases[v.basis ?? "unspecified"] = (bases[v.basis ?? "unspecified"] ?? 0) + 1;
+    for (const d of [...inactive, ...dormant]) { const b = best.get(d)!; const k = `${b.cls}:${b.basis ?? "unspecified"}`; bases[k] = (bases[k] ?? 0) + 1; }
     next.status = "auto_hidden";
     next.hiddenLocalDate = today;
     next.hideCount = prev.hideCount + 1;
-    next.auditFlag = null;
+    next.auditFlag = prev.registryRestored ? "registry_conflict" : null;
     events.push({
       type: "auto_hide", localDate: today,
-      evidence: { windowStart, windowEnd: today, inactiveDays: inactive, threshold: LIFECYCLE_MIN_INACTIVE_DAYS, inactiveDates, bases, silentDays: silent, cycleResetDate: next.cycleResetDate, activeDaysSinceReset: 0 },
+      evidence: {
+        windowStart, windowEnd: today, countedDays: counted, inactiveDays: inactive.length, dormantDays: dormant.length, threshold: LIFECYCLE_MIN_INACTIVE_DAYS,
+        inactiveDates: inactive, dormantDates: dormant, identityEstablished, bases, silentDays: silent.length, cycleResetDate: next.cycleResetDate, activeDaysSinceReset: 0,
+      },
       coverageLimitations: COVERAGE_LIMITATIONS,
     });
     return result();
   }
   let needsSecondary = false;
-  if (silent >= LIFECYCLE_SILENCE_FLAG_DAYS) {
+  if (silent.length >= LIFECYCLE_SILENCE_FLAG_DAYS) {
     if (!next.silenceFlagged) {
       next.silenceFlagged = true;
-      next.auditFlag = "provider_silence";
+      if (next.auditFlag !== "registry_conflict") next.auditFlag = "provider_silence";
       events.push({
         type: "silence_flag", localDate: today,
-        evidence: { windowStart, windowEnd: today, silentDays: silent, threshold: LIFECYCLE_SILENCE_FLAG_DAYS, inactiveDays: inactive, cycleResetDate: next.cycleResetDate },
-        coverageLimitations: [...COVERAGE_LIMITATIONS, "show-specific provider silence cannot hide a show; a secondary history evaluation was requested"],
+        evidence: { windowStart, windowEnd: today, silentDays: silent.length, threshold: LIFECYCLE_SILENCE_FLAG_DAYS, inactiveDays: inactive.length, dormantDays: dormant.length, identityEstablished, cycleResetDate: next.cycleResetDate },
+        coverageLimitations: [...COVERAGE_LIMITATIONS, "provider silence alone cannot hide a show; a secondary history evaluation was requested"],
       });
     }
     needsSecondary = next.secondaryEvaluatedOn !== today;

@@ -22,18 +22,22 @@ import {
   assessParkHealth,
   evaluateShowLifecycle,
   historyBackfillObservations,
+  isDayEndWindow,
   isLifecycleEligible,
   observeParkDay,
+  registryHideKind,
+  resortLocalHour,
+  type RegistryHideKind,
   observeShowDay,
   resolveLifecycleShow,
   type LifecycleDayClass,
   type LifecycleShowState,
 } from "./entertainmentLifecycleDetector";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
-import { LIFECYCLE_PARK_IDS, registryHideKind, runEntertainmentLifecycleMonitor, type LifecycleMonitorOptions } from "./entertainmentLifecycleMonitor";
+import { LIFECYCLE_PARK_IDS, runEntertainmentLifecycleMonitor, type LifecycleMonitorOptions } from "./entertainmentLifecycleMonitor";
 import {
   getLifecycleAutoHidden, insertEvent, readEvidence, readLifecycleAudit, readStates, resetLifecycleReadState,
-  tryLifecycleLock, upsertObservations, writeState,
+  tryLifecycleLock, upsertObservations, writeState, getLifecycleVisibilityState,
 } from "./entertainmentLifecycleStore";
 import {
   filterLifecycleHiddenEntries, getLifecycleHiddenNames, getRegistryHiddenNames, performingNamesFromAllEntries, performingNamesFromShowtimes,
@@ -49,22 +53,22 @@ import { entertainmentMappingKey, getEntertainmentProviderMapping } from "./them
 const TODAY = "2026-12-10";
 const d = (offset: number) => addDaysToLocalDate(TODAY, offset)!;
 
-type Obs = { localDate: string; dayClass: LifecycleDayClass };
+type Obs = { localDate: string; dayClass: LifecycleDayClass; final?: boolean; performanceCount?: number };
 const run = (cls: LifecycleDayClass, from: number, to: number): Obs[] => {
   const out: Obs[] = [];
   for (let o = from; o <= to; o++) out.push({ localDate: d(o), dayClass: cls });
   return out;
 };
-const evalShow = (observations: Obs[], state: LifecycleShowState | null = null, extra: { eligible?: boolean; registryHide?: "none" | "confirmed" | "provisional"; today?: string } = {}) =>
+const evalShow = (observations: Obs[], state: LifecycleShowState | null = null, extra: { eligible?: boolean; registryHide?: RegistryHideKind; today?: string } = {}) =>
   evaluateShowLifecycle({ today: extra.today ?? TODAY, observations, state, eligible: extra.eligible ?? true, registryHide: extra.registryHide ?? "none" });
 const hiddenState = (over: Partial<LifecycleShowState> = {}): LifecycleShowState =>
-  ({ status: "auto_hidden", cycleResetDate: null, lastActiveDate: null, hiddenLocalDate: d(-1), hideCount: 1, restoreCount: 0, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, ...over });
+  ({ status: "auto_hidden", cycleResetDate: null, lastActiveDate: null, hiddenLocalDate: d(-1), hideCount: 1, restoreCount: 0, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, registryRestored: false, ...over });
 
 // ---------- entry fixtures (ParkEntertainmentShowtimes level) ----------
 const perf = (n: number) => Array.from({ length: n }, (_, i) => ({ startTime: `${TODAY}T${19 + i}:00:00-05:00`, endTime: null, localTime: "7:00 PM", type: "Performance Time", passed: false }));
 const ref = (id: string, over: Partial<EntertainmentShowtimeEntry["provider"][number]> = {}) =>
   ({ entityId: id, present: true, status: "CLOSED", lastUpdated: null, rawShowtimeCount: 0, excludedShowtimeCount: 0, droppedShowtimeCount: 0, unrecognizedShowtimeCount: 0, ...over });
-function mkEntry(parkId: ParkId, name: string, kind: "active" | "inactive" | "silent" | "unknown" | "silent_present" | "operating_empty" | "unmapped"): EntertainmentShowtimeEntry {
+function mkEntry(parkId: ParkId, name: string, kind: "active" | "inactive" | "silent" | "dormant" | "unknown" | "silent_present" | "operating_empty" | "unmapped"): EntertainmentShowtimeEntry {
   const base = { dwpName: name, parkId, fetchedLocalDate: TODAY, unrecognizedTypes: [] as string[], message: null };
   const m = getEntertainmentProviderMapping(name, parkId);
   const ids = (m && m.disposition === "mapped" ? m.provider : []).map((r) => r.entityId);
@@ -73,7 +77,8 @@ function mkEntry(parkId: ParkId, name: string, kind: "active" | "inactive" | "si
     case "active": return { ...base, status: "upcoming", performances: perf(2), incomplete: false, provider: refs({ rawShowtimeCount: 2, status: "OPERATING" }), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
     case "inactive": return { ...base, status: "none_posted", performances: [], incomplete: false, provider: refs({}), confirmedNoActivityToday: true, inactivityBasis: "forward_horizon" } as unknown as EntertainmentShowtimeEntry;
     case "silent": return { ...base, status: "unavailable", performances: [], incomplete: true, provider: refs({ present: false, status: null }), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
-    case "silent_present": return { ...base, status: "none_posted", performances: [], incomplete: false, provider: refs({}), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
+    case "dormant": return { ...base, status: "none_posted", performances: [], incomplete: false, provider: refs({ status: "CLOSED" }), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
+    case "silent_present": return { ...base, status: "none_posted", performances: [], incomplete: false, provider: refs({ status: null }), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
     case "operating_empty": return { ...base, status: "none_posted", performances: [], incomplete: false, provider: refs({ status: "OPERATING" }), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
     case "unmapped": return { ...base, status: "unmapped", performances: [], incomplete: false, provider: [], confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
     default: return { ...base, status: "unavailable", performances: [], incomplete: true, provider: refs({}), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
@@ -152,9 +157,26 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
   check("a future return announcement is not an input: no observations ⇒ a hidden show stays hidden", evalShow([], hid).state.status === "auto_hidden");
 
   // ---- registry / eligibility ----
-  check("confirmed registry hide: 30 inactive days produce no automatic event or state change", (() => { const e = evalShow(run("inactive", -29, 0), null, { registryHide: "confirmed" }); return e.events.length === 0 && e.state.status === "visible"; })());
-  check("confirmed registry hide + performance today: audit conflict flag, registry decision untouched", (() => { const e = evalShow([{ localDate: TODAY, dayClass: "active" }], null, { registryHide: "confirmed" }); return e.events[0]?.type === "registry_conflict" && e.state.auditFlag === "registry_conflict" && e.state.status === "visible"; })());
-  check("registry conflict raised once", (() => { const first = evalShow([{ localDate: TODAY, dayClass: "active" }], null, { registryHide: "provisional" }); return evalShow([{ localDate: TODAY, dayClass: "active" }], first.state, { registryHide: "provisional" }).events.length === 0; })());
+  check("registry-hidden (not yet restored): 30 inactive days produce no automatic event or state change", (() => { const e = evalShow(run("inactive", -29, 0), null, { registryHide: "restorable" }); return e.events.length === 0 && e.state.status === "visible" && !e.state.registryRestored; })());
+  check("registry-hidden + discontinued (locked) + performance today: audit conflict flag only, never restored", (() => { const e = evalShow([{ localDate: TODAY, dayClass: "active" }], null, { registryHide: "locked" }); return e.events.length === 1 && e.events[0].type === "registry_conflict" && e.state.auditFlag === "registry_conflict" && !e.state.registryRestored; })());
+  check("locked conflict raised once", (() => { const first = evalShow([{ localDate: TODAY, dayClass: "active" }], null, { registryHide: "locked" }); return evalShow([{ localDate: TODAY, dayClass: "active" }], first.state, { registryHide: "locked" }).events.length === 0; })());
+  // ---- registry restoration (confirmed or not): verified performance restores a restorable registry hide ----
+  const regRestore = evalShow([...run("inactive", -10, -1), { localDate: TODAY, dayClass: "active", performanceCount: 2 }], null, { registryHide: "restorable" });
+  check("registry restoration: verified performance restores an inactive/suspended registry hide, persisted + audited (registry_restore + conflict flag), cycle reset",
+    regRestore.state.registryRestored && regRestore.state.cycleResetDate === TODAY && regRestore.state.auditFlag === "registry_conflict" &&
+    regRestore.events.length === 1 && regRestore.events[0].type === "registry_restore" && regRestore.events[0].coverageLimitations.some((l) => /NOT edited/.test(l)));
+  check("registry restoration: only performances newer than the reset restore (no performance → stays registry-hidden, no events)", evalShow(run("inactive", -10, 0), null, { registryHide: "restorable" }).events.length === 0);
+  check("registry restoration: after restoring, old inactive days cannot re-hide; a later 21-of-30 pattern can (normal lifecycle)", (() => {
+    const st = regRestore.state;
+    const mid = evalShow([...run("inactive", -10, -1), { localDate: TODAY, dayClass: "active" }, ...run("inactive", 1, 20)], st, { registryHide: "restorable", today: d(20) });
+    const re = evalShow([...run("inactive", -10, -1), { localDate: TODAY, dayClass: "active" }, ...run("inactive", 1, 21)], st, { registryHide: "restorable", today: d(21) });
+    return mid.state.status === "visible" && re.state.status === "auto_hidden" && re.state.registryRestored && re.events[0].type === "auto_hide";
+  })());
+  check("registry restoration: re-hidden then performing again → auto_restore (registry override stays recorded)", (() => {
+    const re = evalShow([...run("inactive", 1, 21)], { ...regRestore.state, cycleResetDate: TODAY }, { registryHide: "restorable", today: d(21) });
+    const back = evalShow([...run("inactive", 1, 21), { localDate: d(22), dayClass: "active" }], re.state, { registryHide: "restorable", today: d(22) });
+    return back.state.status === "visible" && back.state.registryRestored && back.events[0].type === "auto_restore";
+  })());
   check("ineligible (legacy/seasonal/unknown) identities are never evaluated or auto-resurfaced", (() => {
     const e = evalShow(run("inactive", -29, 0), null, { eligible: false });
     const h = evalShow([{ localDate: TODAY, dayClass: "active" }], hid, { eligible: false });
@@ -171,7 +193,7 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
     evalShow(run("inactive", -20, 0)).state.status === "auto_hidden");
   check("Mickey's Mix Magic is ACTIVE-catalog eligible and mapped with two provider refs (not registry-hidden)", isLifecycleEligible("disneyland", MMM) && registryHideKind("disneyland", MMM) === "none" &&
     (getEntertainmentProviderMapping(MMM, "disneyland") as { provider: unknown[] }).provider.length === 2);
-  check("the four reviewed registry hides are confirmed hides", ["Paint the Night", "Wondrous Journeys", "Magic Happens Parade", "Main Street Electrical Parade"].every((n) => registryHideKind("disneyland", n) === "confirmed"));
+  check("the four reviewed registry hides are restorable (inactive assessment, none discontinued)", ["Paint the Night", "Wondrous Journeys", "Magic Happens Parade", "Main Street Electrical Parade"].every((n) => registryHideKind("disneyland", n) === "restorable"));
 
   // ---- World of Color canonical identity ----
   const woc = resolveLifecycleShow("dca", "World of Color");
@@ -199,7 +221,14 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
   check("classify: confirmedNoActivityToday on an UNHEALTHY park → unknown", cls(mkEntry("disneyland", MMM, "inactive"), bad) === "unknown");
   check("classify: absent provider entities on a healthy park → silent (never inactive)", cls(mkEntry("disneyland", MMM, "silent")) === "silent");
   check("classify: absent entities on an unhealthy park → unknown", cls(mkEntry("disneyland", MMM, "silent"), bad) === "unknown");
-  check("classify: present with no showtimes at all (not confirmed) → silent only when healthy", cls(mkEntry("disneyland", MMM, "silent_present")) === "silent" && cls(mkEntry("disneyland", MMM, "silent_present"), bad) === "unknown");
+  check("classify: present, no status/records, healthy → silent; unhealthy → unknown", cls(mkEntry("disneyland", MMM, "silent_present")) === "silent" && cls(mkEntry("disneyland", MMM, "silent_present"), bad) === "unknown");
+  check("classify: present + CLOSED + no performance on a healthy feed → dormant (basis provider_closed); unhealthy → unknown", (() => { const o = observeShowDay(mkEntry("disneyland", MMM, "dormant"), TODAY, healthy); return o?.dayClass === "dormant" && o.basis === "provider_closed" && o.final && cls(mkEntry("disneyland", MMM, "dormant"), bad) === "unknown"; })());
+  check("classify: CLOSED with showtimes/dropped/unrecognized records is not dormant", (() => { const e = mkEntry("disneyland", MMM, "dormant"); e.provider = e.provider.map((r) => ({ ...r, rawShowtimeCount: 1 })); const f = mkEntry("disneyland", MMM, "dormant"); f.provider = f.provider.map((r) => ({ ...r, droppedShowtimeCount: 1 })); return cls(e) === "unknown" && cls(f) === "unknown"; })());
+  check("classify: one entity absent + one CLOSED → dormant; all absent → silent", (() => { const e = mkEntry("disneyland", MMM, "dormant"); e.provider = e.provider.map((r, i) => (i === 0 ? { ...r, present: false, status: null } : r)); e.incomplete = true; return cls(e) === "dormant" && cls(mkEntry("disneyland", MMM, "silent")) === "silent"; })());
+  check("classify: negatives observed before the day-end window are provisional (final=false); active is always final", (() => {
+    const early = (k: Parameters<typeof mkEntry>[2]) => observeShowDay(mkEntry("disneyland", MMM, k), TODAY, healthy, false);
+    return early("inactive")?.final === false && early("dormant")?.final === false && early("silent")?.final === false && early("active")?.final === true;
+  })());
   check("classify: provider OPERATING with no times is ambiguous → unknown (CLOSED/OPERATING alone never qualify)", cls(mkEntry("disneyland", MMM, "operating_empty")) === "unknown");
   check("classify: incomplete/unavailable with refs present → unknown", cls(mkEntry("disneyland", MMM, "unknown")) === "unknown");
   check("classify: unmapped shows produce NO observation (nothing inferred)", observeShowDay(mkEntry("disneyland", "Paint the Night", "unmapped"), TODAY, healthy) === null);
@@ -241,6 +270,64 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
     const e = evalShow([...silent, ...dark]);
     return dark.length >= 1 && (dark.length >= 21 ? e.state.status === "auto_hidden" : e.state.status === "visible");
   })());
+
+  // ---- provider dormancy (14.5C fix): dormant + verified-inactive days combine toward 21-of-30 ----
+  let dv = evalShow(run("dormant", -19, 0));
+  check("dormancy: 20 dormant days do NOT hide", dv.state.status === "visible" && dv.dormantDays === 20);
+  dv = evalShow(run("dormant", -20, 0));
+  check("dormancy: 21 dormant days hide provisionally with durable evidence (dormantDates, bases, limitations)", dv.state.status === "auto_hidden" && dv.events.length === 1 && dv.events[0].type === "auto_hide" &&
+    (dv.events[0].evidence as { dormantDates: string[]; dormantDays: number }).dormantDays === 21 && (dv.events[0].evidence as { dormantDates: string[] }).dormantDates.length === 21 &&
+    ((dv.events[0].evidence as { bases: Record<string, number> }).bases["dormant:unspecified"] ?? 0) === 21 && dv.events[0].coverageLimitations.length >= 2);
+  const mixed = (i: number, dd: number) => [...run("inactive", -(i + dd - 1), -dd), ...run("dormant", -(dd - 1), 0)];
+  check("mixed evidence: 11 inactive + 10 dormant distinct days hide (21)", evalShow(mixed(11, 10)).state.status === "auto_hidden" && evalShow(mixed(11, 10)).events[0].type === "auto_hide");
+  check("mixed evidence: 11 inactive + 9 dormant (20) do not hide", evalShow(mixed(11, 9)).state.status === "visible");
+  check("mixed evidence: unknown days between never count (10+10 with 10 unknown gap → no hide)", evalShow([...run("inactive", -29, -20), ...run("unknown", -19, -10), ...run("dormant", -9, 0)]).state.status === "visible");
+  check("mixed evidence: a date is one class, so overlapping rows never double count (21 days stay 21)", evalShow([...run("inactive", -20, 0), ...run("dormant", -20, 0)]).events[0].type === "auto_hide" && (evalShow([...run("inactive", -19, 0), ...run("dormant", -19, 0)]).state.status === "visible"));
+  check("dormancy: unknown/missing days alone (CLOSED unconfirmed, outage, weak coverage) never hide", evalShow(run("unknown", -29, 0)).state.status === "visible");
+  check("dormancy: silent (absent) days do NOT hide when identity was never established", (() => { const e = evalShow(run("silent", -29, 0)); return e.state.status === "visible" && e.dormantDays === 0 && e.state.auditFlag === "provider_silence"; })());
+  check("dormancy: silent (absent) days hide once a verified performance was ever observed (identity established)", (() => {
+    const e = evalShow([{ localDate: d(-29), dayClass: "active" }, ...run("silent", -20, 0)]);
+    return e.state.status === "auto_hidden" && (e.events[0].evidence as { identityEstablished: boolean }).identityEstablished === true;
+  })());
+  check("dormancy: persisted lastActiveDate also establishes identity after evidence pruning", evalShow(run("silent", -20, 0), { ...hiddenState(), status: "visible", hiddenLocalDate: null, hideCount: 0, lastActiveDate: d(-80), cycleResetDate: d(-80) }).state.status === "auto_hidden");
+  check("silence warning stays at 10 days: 9 dormant → none; 10 dormant → flag + secondary", evalShow(run("dormant", -8, 0)).events.length === 0 && (() => { const e = evalShow(run("dormant", -9, 0)); return e.events[0]?.type === "silence_flag" && e.needsSecondary && e.state.status === "visible"; })());
+  check("dormancy: an active day resets the cycle (21 dormant then performing → visible, no hide)", (() => { const e = evalShow([...run("dormant", -21, -1), { localDate: d(0), dayClass: "active" }]); return e.state.status === "visible" && e.dormantDays === 0; })());
+  check("dormancy: hidden by dormancy → verified performance restores, then 21 new inactive/dormant days re-hide", (() => {
+    const h = evalShow(run("dormant", -20, 0)).state;
+    const r = evalShow([...run("dormant", -20, -1), { localDate: d(0), dayClass: "active" }], h);
+    const re = evalShow([...run("dormant", -20, -1), { localDate: d(0), dayClass: "active" }, ...run("inactive", 1, 11), ...run("dormant", 12, 21)], r.state, { today: d(21) });
+    return r.state.status === "visible" && r.events[0].type === "auto_restore" && re.state.status === "auto_hidden" && re.state.hideCount === 2;
+  })());
+  check("dormancy: exempt/ineligible identities (seasonal, legacy) are never hidden by dormancy", evalShow(run("dormant", -29, 0), null, { eligible: false }).state.status === "visible" && !isLifecycleEligible("disneyland", "Halloween Screams"));
+  check("dormancy: World of Color variant observations share the canonical key (dormant under any edition name)", (() => {
+    const e = { ...mkEntry("dca", "World of Color", "dormant"), dwpName: "World of Color: Happiness!" };
+    const o = observeShowDay(e, TODAY, { healthy: true, limitations: [] });
+    return o?.dayClass === "dormant" && o.showKey === entertainmentMappingKey("dca", "World of Color");
+  })());
+
+  // ---- day boundaries / finality ----
+  check("finality: 21 PROVISIONAL (partial-day) inactive days never hide", (() => { const e = evalShow(run("inactive", -29, 0).map((o) => ({ ...o, final: false }))); return e.state.status === "visible" && e.inactiveDays === 0; })());
+  check("finality: a final row replaces a provisional one for the same date and then counts", (() => {
+    const obsList = [...run("inactive", -20, 0).map((o) => ({ ...o, final: false })), ...run("dormant", -20, 0)]; // final dormant rows override provisional inactive
+    const e = evalShow(obsList);
+    return e.state.status === "auto_hidden" && e.dormantDays === 21;
+  })());
+  check("finality: a provisional negative never overrides a final one; active is immediate even if provisional elsewhere", (() => {
+    const e = evalShow([{ localDate: d(0), dayClass: "inactive", final: true }, { localDate: d(0), dayClass: "dormant", final: false }]);
+    const act = evalShow([...run("inactive", -20, -1), { localDate: d(0), dayClass: "active", final: false }], hiddenState());
+    return e.inactiveDays === 1 && e.dormantDays === 0 && act.state.status === "visible";
+  })());
+  check("finality: 21 final days with the current day provisional → 20 count, no hide (completed days only)", evalShow([...run("inactive", -20, -1), { localDate: d(0), dayClass: "inactive", final: false }]).state.status === "visible");
+  const WDW = "WDW" as const, DLR = "DLR" as const;
+  const hrs = (resort: "WDW" | "DLR", iso: string) => resortLocalHour(resort, new Date(iso));
+  check("timezone: Disneyland 03:30Z (the old schedule) is 19:30 PST / 20:30 PDT — NOT final", hrs(DLR, "2026-12-10T03:30:00Z") === 19 && hrs(DLR, "2026-07-10T03:30:00Z") === 20 && !isDayEndWindow(DLR, new Date("2026-12-10T03:30:00Z")) && !isDayEndWindow(DLR, new Date("2026-07-10T03:30:00Z")));
+  check("timezone: Disneyland 06:30Z is 22:30 PST / 23:30 PDT — final window", isDayEndWindow(DLR, new Date("2026-12-10T06:30:00Z")) && isDayEndWindow(DLR, new Date("2026-07-10T06:30:00Z")));
+  check("timezone: WDW 03:30Z is 22:30 EST / 23:30 EDT — final window; WDW 06:30Z is the next local morning — not final", isDayEndWindow(WDW, new Date("2026-12-10T03:30:00Z")) && isDayEndWindow(WDW, new Date("2026-07-10T03:30:00Z")) && !isDayEndWindow(WDW, new Date("2026-12-10T06:30:00Z")) && !isDayEndWindow(WDW, new Date("2026-07-10T06:30:00Z")));
+  check("timezone: DST transitions keep both cron instants inside their window (spring forward + fall back)", [
+    ["WDW", "2026-03-09T03:30:00Z"], ["WDW", "2026-11-02T03:30:00Z"], ["WDW", "2026-03-08T03:30:00Z"], ["WDW", "2026-11-01T03:30:00Z"],
+    ["DLR", "2026-03-09T06:30:00Z"], ["DLR", "2026-11-02T06:30:00Z"], ["DLR", "2026-03-08T06:30:00Z"], ["DLR", "2026-11-01T06:30:00Z"],
+  ].every(([r, t]) => isDayEndWindow(r as "WDW" | "DLR", new Date(t))));
+  check("timezone: window is [22:00, 24:00) local — 21:59 no, 22:00 yes, 23:59 yes, 00:00 no", !isDayEndWindow(DLR, new Date("2026-12-10T05:59:00Z")) && isDayEndWindow(DLR, new Date("2026-12-10T06:00:00Z")) && isDayEndWindow(DLR, new Date("2026-12-10T07:59:00Z")) && !isDayEndWindow(DLR, new Date("2026-12-10T08:00:00Z")));
   return failures;
 }
 
@@ -267,10 +354,19 @@ export function runDevEntertainmentLifecycleVisibilityCases(): string[] {
   check("auto-hidden names for ineligible identities are ignored (legacy, seasonal, unknown, wrong park)",
     getLifecycleHiddenNames("disneyland", [getLegacyEntertainmentPlaces().find((p) => p.parkId === "disneyland")?.name ?? "x", "Halloween Screams", "No Such Show", "World of Color"]).size === 4);
   check("verified current performance un-hides an auto-hidden show immediately", !getLifecycleHiddenNames("disneyland", [MMM], new Set([MMM])).has(MMM));
-  check("a performance does NOT override a CONFIRMED registry hide", getLifecycleHiddenNames("disneyland", [], new Set(["Paint the Night"])).has("Paint the Night"));
-  const provisionalRegistry = { schemaVersion: 1, records: ENTERTAINMENT_LIFECYCLE_REGISTRY.records.map((r) => (r.name === "Paint the Night" ? { ...r, confirmation: "provisional" as const, nextReviewAction: { action: "monitor" as const } } : r)) } as EntertainmentLifecycleRegistry;
-  check("a performance DOES un-hide a provisional registry hide (runtime only)", !getLifecycleHiddenNames("disneyland", [], new Set(["Paint the Night"]), provisionalRegistry).has("Paint the Night") && getLifecycleHiddenNames("disneyland", [], null, provisionalRegistry).has("Paint the Night"));
-  check("registry hide excludes legacy identities", getRegistryHiddenNames("disneyland", { schemaVersion: 1, records: [{ ...ENTERTAINMENT_LIFECYCLE_REGISTRY.records[0], name: getLegacyEntertainmentPlaces().find((p) => p.parkId === "disneyland")!.name }] } as EntertainmentLifecycleRegistry).confirmed.size === 0);
+  const withAssessment = (name: string, assessment: "inactive" | "suspended" | "discontinued" | "returning") =>
+    ({ schemaVersion: 1, records: ENTERTAINMENT_LIFECYCLE_REGISTRY.records.map((r) => (r.name === name ? { ...r, assessment } : r)) }) as EntertainmentLifecycleRegistry;
+  check("registry restoration: a CONFIRMED inactive registry hide is overridden by a verified performance (record untouched)",
+    ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((r) => r.name === "Paint the Night")!.confirmation === "confirmed" &&
+    !getLifecycleHiddenNames("disneyland", [], new Set(["Paint the Night"])).has("Paint the Night") && getLifecycleHiddenNames("disneyland", [], null).has("Paint the Night") &&
+    ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((r) => r.name === "Paint the Night")!.visibility.decision === "hidden");
+  check("registry restoration: suspended/returning assessments are restorable too", ["suspended", "returning", "inactive"].every((a) => !getLifecycleHiddenNames("disneyland", [], new Set(["Paint the Night"]), withAssessment("Paint the Night", a as "inactive")).has("Paint the Night")));
+  const discontinued = withAssessment("Paint the Night", "discontinued");
+  check("registry protection: a DISCONTINUED registry hide is never overridden by a performance or a restored marker", getLifecycleHiddenNames("disneyland", [], new Set(["Paint the Night"]), discontinued, ["Paint the Night"]).has("Paint the Night"));
+  check("durable registry restoration: a persisted override un-hides without a performance in the response", !getLifecycleHiddenNames("disneyland", [], null, undefined, ["Paint the Night"]).has("Paint the Night") && getLifecycleHiddenNames("disneyland", [], null, undefined, []).has("Paint the Night"));
+  check("durable restoration then auto re-hide: auto-hidden wins over the registry override", getLifecycleHiddenNames("disneyland", ["Paint the Night"], null, undefined, ["Paint the Night"]).has("Paint the Night"));
+  check("an auto-hidden entry for a discontinued registry record stays hidden even while performing (locked)", getLifecycleHiddenNames("disneyland", ["Paint the Night"], new Set(["Paint the Night"]), discontinued).has("Paint the Night"));
+  check("registry hide excludes legacy identities", getRegistryHiddenNames("disneyland", { schemaVersion: 1, records: [{ ...ENTERTAINMENT_LIFECYCLE_REGISTRY.records[0], name: getLegacyEntertainmentPlaces().find((p) => p.parkId === "disneyland")!.name }] } as EntertainmentLifecycleRegistry).restorable.size === 0);
 
   // ---- Waits & Shows path (curated catalog list + the existing today-rules) ----
   const dlShows = getEntertainmentForPark("disneyland");
@@ -309,6 +405,18 @@ export function runDevEntertainmentLifecycleVisibilityCases(): string[] {
   }
   check("All Entertainment performing set uses curated entries only", performingNamesFromAllEntries([{ source: "curated", name: MMM, showtime: { performances: [1] } }, { source: "provider_only", name: "X", showtime: { performances: [1] } }]).has(MMM) && !performingNamesFromAllEntries([{ source: "provider_only", name: "X", showtime: { performances: [1] } }]).has("X"));
   check("an All Entertainment entry performing now overrides an auto hide (same response)", !getLifecycleHiddenNames("disneyland", [MMM], performingNamesFromAllEntries([{ source: "curated", name: MMM, showtime: { performances: [1] } }])).has(MMM));
+
+  // ---- registry restoration across both page paths + toggle ----
+  const pn = getEntertainmentForPark("disneyland").find((p) => p.name === "Paint the Night")!;
+  const pnEntry = makeOffSeasonEntry(pn, "disneyland");
+  const restoredSet = getLifecycleHiddenNames("disneyland", [], null, undefined, ["Paint the Night"]);
+  for (const toggle of [false, true]) {
+    check(`All Entertainment (toggle ${toggle ? "ON" : "OFF"}): hidden registry show absent; a durably restored one is shown`,
+      !applyAllEntertainmentSeasonalVisibility([pnEntry], "disneyland", "DLR", DL_TODAY, toggle, NOW, getLifecycleHiddenNames("disneyland")).length &&
+      applyAllEntertainmentSeasonalVisibility([pnEntry], "disneyland", "DLR", DL_TODAY, toggle, NOW, restoredSet).length === 1);
+  }
+  check("Waits & Shows: a durably restored registry show is in the visible list; discontinued stays out", getEntertainmentForPark("disneyland").filter((p) => !restoredSet.has(p.name)).some((p) => p.name === "Paint the Night"));
+  check("dormancy-hidden show uses the same set on both paths (auto-hidden name → hidden; performing in the response → visible)", getLifecycleHiddenNames("disneyland", ["Fantasmic!"]).has("Fantasmic!") && !getLifecycleHiddenNames("disneyland", ["Fantasmic!"], performingNamesFromShowtimes([{ dwpName: "Fantasmic!", performances: [1] }])).has("Fantasmic!"));
   return failures;
 }
 
@@ -317,7 +425,6 @@ export function runDevEntertainmentLifecycleVisibilityCases(): string[] {
 // ============================================
 
 type Row = Record<string, unknown>;
-const RANK: Record<string, number> = { unknown: 0, silent: 1, inactive: 2, active: 3 };
 
 /** Minimal in-memory interpreter for exactly the statements the store issues; mirrors their SQL semantics. */
 class FakeLifecycleDb implements Queryable {
@@ -333,28 +440,29 @@ class FakeLifecycleDb implements Queryable {
     const t = text.replace(/\s+/g, " ");
     if (t.includes("pg_try_advisory_xact_lock")) return { rowCount: 1, rows: [{ ok: !this.lockHeld }] };
     if (t.startsWith("INSERT INTO entertainment_lifecycle_evidence")) {
-      const [park, key, date, name, cls, rank, basis, pc, source, lim] = v as [string, string, string, string, string, number, string | null, number, string, string];
+      const [park, key, date, name, cls, rank, fin, basis, pc, source, lim] = v as [string, string, string, string, string, number, boolean, string | null, number, string, string];
       const k = `${park}|${key}|${date}`;
       const e = this.evidence.get(k);
-      if (!e) this.evidence.set(k, { park_id: park, show_key: key, d: date, show_name: name, day_class: cls, class_rank: rank, basis, performance_count: pc, source, limitations: lim, observation_count: 1 });
+      if (!e) this.evidence.set(k, { park_id: park, show_key: key, d: date, show_name: name, day_class: cls, class_rank: rank, is_final: fin, basis, performance_count: pc, source, limitations: lim, observation_count: 1 });
       else {
-        const up = rank > (e.class_rank as number);
-        this.evidence.set(k, { ...e, show_name: name, day_class: up ? cls : e.day_class, basis: up ? basis : e.basis, source: up ? source : e.source, limitations: up ? lim : e.limitations,
-          performance_count: up ? pc : rank === e.class_rank ? Math.max(e.performance_count as number, pc) : e.performance_count, class_rank: Math.max(e.class_rank as number, rank), observation_count: (e.observation_count as number) + 1 });
+        const er = e.class_rank as number, ef = e.is_final as boolean;
+        const take = er < 4 && (rank === 4 || (fin && !ef) || (fin === ef && rank > er)); // mirrors the SQL CASE
+        this.evidence.set(k, { ...e, show_name: name, day_class: take ? cls : e.day_class, basis: take ? basis : e.basis, source: take ? source : e.source, limitations: take ? lim : e.limitations,
+          performance_count: take ? pc : er === 4 && rank === 4 ? Math.max(e.performance_count as number, pc) : e.performance_count, class_rank: take ? rank : er, is_final: ef || fin, observation_count: (e.observation_count as number) + 1 });
       }
       return { rowCount: 1, rows: [] };
     }
     if (t.startsWith("SELECT show_key, to_char(local_date")) {
       const [park, from, to] = v as string[];
-      return { rowCount: 0, rows: [...this.evidence.values()].filter((r) => r.park_id === park && (r.d as string) >= from && (r.d as string) <= to).map((r) => ({ show_key: r.show_key, d: r.d, day_class: r.day_class, basis: r.basis, performance_count: r.performance_count })) };
+      return { rowCount: 0, rows: [...this.evidence.values()].filter((r) => r.park_id === park && (r.d as string) >= from && (r.d as string) <= to).map((r) => ({ show_key: r.show_key, d: r.d, day_class: r.day_class, basis: r.basis, performance_count: r.performance_count, is_final: r.is_final })) };
     }
     if (t.startsWith("SELECT show_key, show_name, status")) return { rowCount: 0, rows: [...this.states.values()].filter((r) => r.park_id === v[0]) };
     if (t.startsWith("INSERT INTO entertainment_lifecycle_state")) {
-      const [park, key, name, status, reset, lastActive, hiddenDate, hiddenAt, restoredAt, hc, rc, id, sd, flaggedAt, secOn, flag, evalDate] = v as (string | number | null)[];
+      const [park, key, name, status, reset, lastActive, hiddenDate, hiddenAt, restoredAt, hc, rc, id, dd, sd, flaggedAt, regAt, secOn, flag, evalDate] = v as (string | number | null)[];
       const k = `${park}|${key}`;
       const cur = this.states.get(k);
       if (cur && cur.evaluated_local_date && (cur.evaluated_local_date as string) > (evalDate as string)) return { rowCount: 0, rows: [] };
-      this.states.set(k, { park_id: park, show_key: key, show_name: name, status, cycle_reset_date: reset, last_active_date: lastActive, hidden_local_date: hiddenDate, hidden_at: hiddenAt, restored_at: restoredAt, hide_count: hc, restore_count: rc, inactive_days: id, silent_days: sd, silence_flagged_at: flaggedAt, secondary_evaluated_on: secOn, audit_flag: flag, evaluated_local_date: evalDate });
+      this.states.set(k, { park_id: park, show_key: key, show_name: name, status, cycle_reset_date: reset, last_active_date: lastActive, hidden_local_date: hiddenDate, hidden_at: hiddenAt, restored_at: restoredAt, hide_count: hc, restore_count: rc, inactive_days: id, dormant_days: dd, silent_days: sd, silence_flagged_at: flaggedAt, registry_restored_at: regAt, secondary_evaluated_on: secOn, audit_flag: flag, evaluated_local_date: evalDate });
       return { rowCount: 1, rows: [] };
     }
     if (t.startsWith("INSERT INTO entertainment_lifecycle_events")) {
@@ -369,12 +477,13 @@ class FakeLifecycleDb implements Queryable {
       for (const [k, r] of this.evidence) if (r.park_id === park && (r.d as string) < before) this.evidence.delete(k);
       return { rowCount: 0, rows: [] };
     }
-    if (t.includes("WHERE status = 'auto_hidden' ORDER BY park_id")) return { rowCount: 0, rows: [...this.states.values()].filter((r) => r.status === "auto_hidden").map((r) => ({ park_id: r.park_id, show_name: r.show_name })) };
+    if (t.includes("registry_restored_at IS NOT NULL) AS restored")) return { rowCount: 0, rows: [...this.states.values()].filter((r) => r.status === "auto_hidden" || r.registry_restored_at != null).map((r) => ({ park_id: r.park_id, show_name: r.show_name, status: r.status, restored: r.registry_restored_at != null })) };
     throw new Error(`FakeLifecycleDb: unhandled SQL: ${t.slice(0, 80)}`);
   }
 }
 const MONITOR_DAY0 = "2026-12-01"; // resort-local date of the first simulated run (Disneyland/DCA)
-const instantFor = (offsetDays: number) => new Date(Date.parse(`${addDaysToLocalDate(MONITOR_DAY0, offsetDays)}T03:30:00Z`) + 24 * 3600_000 - 1); // 03:30Z next UTC day ≈ evening local
+// 06:30Z of the next UTC day = 22:30 PST on the Disneyland resort-local date (inside the day-end window ⇒ negatives are FINAL).
+const instantFor = (offsetDays: number) => new Date(`${addDaysToLocalDate(MONITOR_DAY0, offsetDays + 1)}T06:30:00Z`);
 
 export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool): Promise<string[]> {
   const failures: string[] = [];
@@ -384,16 +493,17 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
   const mmmKey = entertainmentMappingKey(PARK, MMM);
 
   /** One scenario driver: simulated days; per-day kind for Mickey's Mix Magic; other parks' provider fails unless `allParks`. */
-  async function drive(runDb: LifecycleMonitorOptions["runDb"], days: Array<Parameters<typeof mkEntry>[2] | "provider_down">, startOffset = 0, history?: LifecycleMonitorOptions["getHistory"]) {
+  async function drive(runDb: LifecycleMonitorOptions["runDb"], days: Array<Parameters<typeof mkEntry>[2] | "provider_down" | "stale">, startOffset = 0, history?: LifecycleMonitorOptions["getHistory"], opts: { instantOf?: (off: number) => Date; registry?: EntertainmentLifecycleRegistry } = {}) {
     const reports = [];
     for (let i = 0; i < days.length; i++) {
       const off = startOffset + i;
       const kind = days[i];
       const date = localOf(off);
       reports.push(await runEntertainmentLifecycleMonitor({
-        instant: instantFor(off), runDb, sleep: async () => {}, getHistory: history,
+        instant: (opts.instantOf ?? instantFor)(off), runDb, sleep: async () => {}, getHistory: history, registry: opts.registry,
         getShowtimes: async (parkId) => {
           if (parkId !== PARK || kind === "provider_down") return mkPark(parkId, {}, { error: { kind: "timeout", message: "t" } }, date);
+          if (kind === "stale") return mkPark(parkId, { [MMM]: "dormant" }, { stale: true }, date);
           return mkPark(parkId, { [MMM]: kind }, {}, date);
         },
       }));
@@ -438,7 +548,7 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
     // late stronger data upgrades weaker same-day rows, never the reverse
     check("evidence precedence: active > inactive > silent > unknown, never downgraded", await (async () => {
       const q = new FakeLifecycleDb();
-      const o = (cls: LifecycleDayClass) => ({ parkId: PARK, showKey: mmmKey, showName: MMM, localDate: TODAY, dayClass: cls, basis: cls, performanceCount: cls === "active" ? 2 : 0, source: "live" as const, limitations: [] });
+      const o = (cls: LifecycleDayClass) => ({ parkId: PARK, showKey: mmmKey, showName: MMM, localDate: TODAY, dayClass: cls, basis: cls, performanceCount: cls === "active" ? 2 : 0, source: "live" as const, final: true, limitations: [] });
       await upsertObservations(q, [o("unknown"), o("silent"), o("inactive")]);
       let row = (await readEvidence(q, PARK, TODAY, TODAY))[0];
       const ok1 = row.dayClass === "inactive";
@@ -536,13 +646,111 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
     // writeState guard / events natural key
     check("writeState: an earlier evaluation date is rejected; events natural key dedupes", await (async () => {
       const q = new FakeLifecycleDb();
-      const s = { status: "visible" as const, cycleResetDate: null, lastActiveDate: null, hiddenLocalDate: null, hideCount: 0, restoreCount: 0, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, showKey: mmmKey, showName: MMM, hiddenAt: null, restoredAt: null, silenceFlaggedAt: null, inactiveDays: 0, silentDays: 0, evaluatedLocalDate: "2026-12-05" };
+      const s = { status: "visible" as const, cycleResetDate: null, lastActiveDate: null, hiddenLocalDate: null, hideCount: 0, restoreCount: 0, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, showKey: mmmKey, showName: MMM, hiddenAt: null, restoredAt: null, silenceFlaggedAt: null, registryRestored: false, registryRestoredAt: null, inactiveDays: 0, dormantDays: 0, silentDays: 0, evaluatedLocalDate: "2026-12-05" };
       const a = await writeState(q, PARK, s);
       const b = await writeState(q, PARK, { ...s, evaluatedLocalDate: "2026-12-01" });
       await insertEvent(q, PARK, mmmKey, MMM, { type: "auto_hide", localDate: TODAY, evidence: {}, coverageLimitations: [] });
       await insertEvent(q, PARK, mmmKey, MMM, { type: "auto_hide", localDate: TODAY, evidence: {}, coverageLimitations: [] });
       return a && !b && q.events.size === 1;
     })());
+
+    // ---- 14.5C fixes: dormancy through the monitor ----
+    const mk = () => { const x = new FakeLifecycleDb(); return { x, runDb: (async (_p, fn) => fn(x)) as LifecycleMonitorOptions["runDb"] }; };
+    {
+      const a = mk();
+      await drive(a.runDb, Array(20).fill("dormant"));
+      check("monitor dormancy: 20 verified dormant days (fresh healthy feed, CLOSED, no performance) → visible", (await stateOf(a.x))?.status === "visible" && (await stateOf(a.x))?.dormantDays === 20);
+      await drive(a.runDb, ["dormant"], 20);
+      st = await stateOf(a.x);
+      const he = [...a.x.events.values()].find((e) => e.event_type === "auto_hide");
+      check("monitor dormancy: 21st dormant day hides provisionally with durable evidence + audit event", st?.status === "auto_hidden" && !!he && (he.evidence as { dormantDays: number }).dormantDays === 21 && he.audit_status === "unreviewed");
+      check("monitor dormancy: dormant rows are stored with class 'dormant' and basis provider_closed", [...a.x.evidence.values()].some((r) => r.day_class === "dormant" && r.basis === "provider_closed" && r.is_final === true));
+
+      const b = mk();
+      await drive(b.runDb, [...Array(11).fill("inactive"), ...Array(10).fill("dormant")]);
+      check("monitor mixed evidence: 11 inactive + 10 dormant distinct days hide", (await stateOf(b.x))?.status === "auto_hidden");
+      const c = mk();
+      await drive(c.runDb, [...Array(11).fill("inactive"), ...Array(9).fill("dormant")]);
+      check("monitor mixed evidence: 20 combined days do not hide", (await stateOf(c.x))?.status === "visible");
+
+      const o = mk();
+      await drive(o.runDb, [...Array(12).fill("dormant"), ...Array(10).fill("provider_down"), ...Array(9).fill("dormant")]);
+      check("monitor outage: provider outage days are not evidence — 21 dormant days spread over 31 (20 in window) do not hide", (await stateOf(o.x))?.status === "visible");
+      const sth = mk();
+      await drive(sth.runDb, Array(30).fill("stale"));
+      check("monitor weak data: stale-if-error feeds never count (30 days of 'dormant' on stale data → nothing)", (await stateOf(sth.x))?.status !== "auto_hidden" && ![...sth.x.evidence.values()].some((r) => r.day_class === "dormant"));
+      const op = mk();
+      await drive(op.runDb, Array(30).fill("operating_empty"));
+      check("monitor weak data: provider OPERATING with no times is ambiguous — never counted", (await stateOf(op.x))?.status !== "auto_hidden");
+
+      // restore + re-hide on dormancy
+      await drive(a.runDb, ["active"], 21);
+      check("monitor dormancy: verified performance restores and resets the cycle", (await stateOf(a.x))?.status === "visible" && (await stateOf(a.x))?.cycleResetDate === localOf(21));
+      await drive(a.runDb, Array(20).fill("dormant"), 22);
+      check("monitor dormancy: 20 post-return dormant days do not re-hide", (await stateOf(a.x))?.status === "visible");
+      await drive(a.runDb, ["inactive"], 42);
+      check("monitor dormancy: 21st combined post-return day re-hides (hide_count 2)", (await stateOf(a.x))?.status === "auto_hidden" && (await stateOf(a.x))?.hideCount === 2);
+    }
+
+    // ---- day boundaries through the monitor ----
+    {
+      // 03:30Z of the NEXT UTC day = 19:30 PST local on the Disneyland date: partial day, provisional.
+      const early = (off: number) => new Date(`${addDaysToLocalDate(MONITOR_DAY0, off + 1)}T03:30:00Z`);
+      const t = mk();
+      const reps2 = await drive(t.runDb, Array(25).fill("inactive"), 0, undefined, { instantOf: early });
+      const dl = reps2[0]!.parks.find((p) => p.parkId === PARK)!;
+      check("boundary: the 03:30Z run is NOT inside Disneyland's day-end window (dayEnd=false) but IS inside WDW's", dl.dayEnd === false && reps2[0]!.parks.find((p) => p.parkId === "mk")!.dayEnd === true);
+      check("boundary: 25 days of partial-day (provisional) Disneyland negatives never hide", (await stateOf(t.x)) === undefined || ((await stateOf(t.x))?.status === "visible" && (await stateOf(t.x))?.inactiveDays === 0));
+      check("boundary: provisional rows are stored non-final", [...t.x.evidence.values()].every((r) => r.day_class === "active" || r.is_final === false));
+      // completed-day reconciliation: each date's own in-window run (same resort-local date) finalizes its provisional row
+      const t2 = mk();
+      for (let off = 0; off < 20; off++) { await drive(t2.runDb, ["inactive"], off, undefined, { instantOf: early }); await drive(t2.runDb, ["inactive"], off); }
+      check("boundary: dates reconciled by their own in-window run are counted (20 → visible)", (await stateOf(t2.x))?.inactiveDays === 20 && (await stateOf(t2.x))?.status === "visible" && [...t2.x.evidence.values()].every((r) => r.is_final === true));
+      await drive(t2.runDb, ["inactive"], 20, undefined, { instantOf: early });
+      check("boundary: the 21st date is only provisional until its in-window run (still visible)", (await stateOf(t2.x))?.status === "visible");
+      await drive(t2.runDb, ["inactive"], 20);
+      check("boundary: the 21st date finalized → hides", (await stateOf(t2.x))?.status === "auto_hidden");
+      // a performance during a partial day restores immediately (active is always final)
+      await drive(t2.runDb, ["active"], 21, undefined, { instantOf: early });
+      check("boundary: a verified performance observed in a partial day restores immediately", (await stateOf(t2.x))?.status === "visible");
+      // a provisional negative never downgrades/overrides a final active, and a final replaces a provisional
+      const rows = [...t2.x.evidence.values()].filter((r) => r.show_key === mmmKey);
+      check("boundary: active rows are final", rows.filter((r) => r.day_class === "active").every((r) => r.is_final === true));
+    }
+
+    // ---- registry restoration / protection through the monitor ----
+    {
+      const reg = (assessment: "inactive" | "discontinued", confirmation: "confirmed" | "provisional" = "confirmed") => ({ schemaVersion: 1, records: [{ ...ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((r) => r.name === MMM)!, assessment, confirmation, visibility: { decision: "hidden", reason: "test" } }] }) as unknown as EntertainmentLifecycleRegistry;
+      const r1 = mk();
+      await drive(r1.runDb, Array(3).fill("inactive"), 0, undefined, { registry: reg("inactive") });
+      check("registry hide + inactive observations: nothing decided automatically", (await stateOf(r1.x))?.status === "visible" && !(await stateOf(r1.x))?.registryRestored && r1.x.events.size === 0);
+      resetLifecycleReadState();
+      let vs = await getLifecycleVisibilityState(PARK, { executor: { run: (fn) => fn(r1.x), abort() {} } as PersistExecutor });
+      check("registry hide not restored: persisted state lists nothing (registry hide stands)", !!vs && vs.registryRestored.length === 0 && getLifecycleHiddenNames(PARK, vs.autoHidden, null, reg("inactive"), vs.registryRestored).has(MMM));
+      const rep = await drive(r1.runDb, ["active"], 3, undefined, { registry: reg("inactive") });
+      st = await stateOf(r1.x);
+      check("registry restoration: a verified performance restores a CONFIRMED inactive registry hide, durably", st?.status === "visible" && st.registryRestored === true && st.cycleResetDate === localOf(3) && rep[0]!.parks.find((p) => p.parkId === PARK)!.registryRestored.includes(MMM));
+      check("registry restoration: audited as registry_restore with coverage limitations and the registry record unchanged", [...r1.x.events.values()].some((e) => e.event_type === "registry_restore" && (e.coverage_limitations as string[]).some((l) => /NOT edited/.test(l))) && st?.auditFlag === "registry_conflict");
+      resetLifecycleReadState();
+      vs = await getLifecycleVisibilityState(PARK, { executor: { run: (fn) => fn(r1.x), abort() {} } as PersistExecutor });
+      check("registry restoration: persisted override un-hides on the shared set (both pages), even with no performance in the response", !!vs && vs.registryRestored.includes(MMM) && !getLifecycleHiddenNames(PARK, vs.autoHidden, null, reg("inactive"), vs.registryRestored).has(MMM));
+      await drive(r1.runDb, Array(20).fill("inactive"), 4, undefined, { registry: reg("inactive") });
+      check("registry restoration: 20 later inactive days do not re-hide", (await stateOf(r1.x))?.status === "visible");
+      await drive(r1.runDb, ["dormant"], 24, undefined, { registry: reg("inactive") });
+      st = await stateOf(r1.x);
+      resetLifecycleReadState();
+      vs = await getLifecycleVisibilityState(PARK, { executor: { run: (fn) => fn(r1.x), abort() {} } as PersistExecutor });
+      check("registry restoration: later 21-of-30 inactivity re-hides; the shared set hides it again", st?.status === "auto_hidden" && !!vs && getLifecycleHiddenNames(PARK, vs.autoHidden, null, reg("inactive"), vs.registryRestored).has(MMM));
+
+      const r2 = mk();
+      await drive(r2.runDb, ["active"], 0, undefined, { registry: reg("discontinued") });
+      st = await stateOf(r2.x);
+      check("registry protection: a DISCONTINUED record is never auto-restored (conflict event only)", st?.registryRestored !== true && [...r2.x.events.values()].every((e) => e.event_type === "registry_conflict") && r2.x.events.size === 1);
+      const r3 = mk();
+      await drive(r3.runDb, Array(25).fill("dormant"), 0, undefined, { registry: reg("inactive") });
+      check("registry hide: 25 dormant days produce no auto_hide (already registry-hidden)", ![...r3.x.events.values()].some((e) => e.event_type === "auto_hide"));
+      check("legacy protection: no lifecycle rows are ever written for a legacy/unknown identity", ![...r1.x.states.values(), ...r2.x.states.values(), ...r3.x.states.values()].some((r) => getLegacyEntertainmentPlaces().some((l) => l.name === r.show_name)));
+    }
   }
 
   // ============ real Postgres (optional) ============
@@ -573,11 +781,32 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
       check("real db: verified performance restores + resets cycle", st?.status === "visible" && st.cycleResetDate === localOf(21));
       // precedence in real SQL
       await exec().run(async (q) => {
-        const o = (cls: LifecycleDayClass) => ({ parkId: PARK, showKey: "disneyland:precedence-probe", showName: "Probe", localDate: TODAY, dayClass: cls, basis: cls, performanceCount: cls === "active" ? 3 : 0, source: "live" as const, limitations: ["x"] });
+        const o = (cls: LifecycleDayClass) => ({ parkId: PARK, showKey: "disneyland:precedence-probe", showName: "Probe", localDate: TODAY, dayClass: cls, basis: cls, performanceCount: cls === "active" ? 3 : 0, source: "live" as const, final: true, limitations: ["x"] });
         await upsertObservations(q, [o("unknown"), o("inactive"), o("silent"), o("active"), o("inactive")]);
       });
       const probe = await exec().run((q) => readEvidence(q, PARK, TODAY, TODAY));
       check("real db: evidence precedence (active survives later weaker rows; performance count kept)", probe.some((r) => r.showKey === "disneyland:precedence-probe" && r.dayClass === "active" && r.performanceCount === 3));
+      // finality + dormant precedence in real SQL (CHECK constraint accepts 'dormant')
+      await exec().run(async (q) => {
+        const o = (cls: LifecycleDayClass, fin: boolean) => ({ parkId: PARK, showKey: "disneyland:final-probe", showName: "Probe", localDate: TODAY, dayClass: cls, basis: cls, performanceCount: cls === "active" ? 2 : 0, source: "live" as const, final: fin, limitations: [] as string[] });
+        await upsertObservations(q, [o("inactive", false)]);
+        await upsertObservations(q, [o("dormant", true)]);
+        await upsertObservations(q, [o("inactive", false)]);
+      });
+      const fp = (await exec().run((q) => readEvidence(q, PARK, TODAY, TODAY))).find((r) => r.showKey === "disneyland:final-probe");
+      check("real db: a FINAL dormant row replaces a provisional inactive one and a later provisional row cannot undo it", fp?.dayClass === "dormant" && fp.final === true);
+      await exec().run(async (q) => { await upsertObservations(q, [{ parkId: PARK, showKey: "disneyland:final-probe", showName: "Probe", localDate: TODAY, dayClass: "active", basis: "a", performanceCount: 1, source: "live", final: true, limitations: [] }]);
+        await upsertObservations(q, [{ parkId: PARK, showKey: "disneyland:final-probe", showName: "Probe", localDate: TODAY, dayClass: "inactive", basis: "i", performanceCount: 0, source: "live", final: true, limitations: [] }]); });
+      check("real db: active is never replaced by a later final negative", (await exec().run((q) => readEvidence(q, PARK, TODAY, TODAY))).find((r) => r.showKey === "disneyland:final-probe")?.dayClass === "active");
+      // registry restoration + dormancy durable in real Postgres
+      const regRec = { schemaVersion: 1, records: [{ ...ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((r) => r.name === MMM)!, assessment: "inactive", confirmation: "confirmed", visibility: { decision: "hidden", reason: "test" } }] } as unknown as EntertainmentLifecycleRegistry;
+      await drive(runDb, ["active"], 40, undefined, { registry: regRec });
+      st = await exec().run((q) => stateOf(q));
+      const vsReal = await exec().run(async (q) => (await q.query("SELECT show_name FROM entertainment_lifecycle_state WHERE registry_restored_at IS NOT NULL")).rows.map((r) => String(r.show_name)));
+      check("real db: registry restoration persisted (registry_restored_at) and audited", st?.registryRestored === true && vsReal.includes(MMM) && (await exec().run((q) => readLifecycleAudit(q))).unreviewedEvents.some((e) => e.eventType === "registry_restore"));
+      await drive(runDb, Array(21).fill("dormant"), 41, undefined, { registry: regRec });
+      st = await exec().run((q) => stateOf(q));
+      check("real db: 21 dormant days after the registry restoration hide the show again", st?.status === "auto_hidden" && st.dormantDays === 21);
       // advisory lock: second transaction cannot take it while the first holds it
       let release: () => void = () => {};
       const gate = new Promise<void>((r) => { release = r; });

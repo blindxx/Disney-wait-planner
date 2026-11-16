@@ -5,18 +5,19 @@
  * persisted auto-hidden names to the entertainment API bodies
  * (`lifecycleAutoHidden`), and both pages call this same function.
  *
- * Hidden = (reviewed registry `hidden` decisions) ∪ (persisted `auto_hidden`
- * names), restricted to ACTIVE, eligible catalog identities. Unknown, legacy
+ * Hidden = (reviewed registry `hidden` decisions, minus durably restored ones)
+ * ∪ (persisted `auto_hidden` names), restricted to ACTIVE, eligible catalog identities. Unknown, legacy
  * and seasonal names can never be hidden here (and legacy shows are not in the
  * active lists to begin with — nothing here can bring one back).
  *
  * Verified current performance (`performing`, taken from the SAME response the
- * page already holds) un-hides provisionally hidden shows immediately, without
- * waiting for the next monitor run: auto-hidden ones, and registry records that
- * are still `provisional`. A `confirmed` registry hide is a reviewed decision
- * and is never overridden here. No filtering system of its own: the pages apply
- * the returned set on top of the existing seasonal/performance-day rules, and
- * the All Entertainment synthesized/event/toggle paths take it as a parameter.
+ * page already holds) un-hides auto-hidden shows AND registry-hidden shows whose
+ * assessment is not `discontinued` immediately, without waiting for the next
+ * monitor run (the monitor persists the restoration, `registryRestored`, and
+ * flags it for audit; the registry record is never edited). A `discontinued`
+ * registry hide is locked and never overridden. No filtering system of its own:
+ * the pages apply the returned set on top of the existing seasonal/performance-day
+ * rules, and the All Entertainment synthesized/event/toggle paths take it as a parameter.
  *
  * Fail open: a missing/undefined `autoHidden` (DB down, older body) hides
  * nothing automatic; registry decisions still apply (static bundled data).
@@ -36,38 +37,47 @@ export function performingNamesFromAllEntries(entries: ReadonlyArray<{ source: s
   return new Set((entries ?? []).filter((e) => e.source === "curated" && e.showtime.performances.length > 0).map((e) => e.name));
 }
 
-/** Registry `hidden` decisions for active, eligible identities of the park. */
+/**
+ * Registry `hidden` decisions for active, eligible identities of the park.
+ * `restorable` (assessment ≠ discontinued) may be overridden by verified
+ * activity; `locked` (discontinued) never is.
+ */
 export function getRegistryHiddenNames(
   parkId: ParkId,
   registry: EntertainmentLifecycleRegistry = ENTERTAINMENT_LIFECYCLE_REGISTRY,
-): { confirmed: Set<string>; provisional: Set<string> } {
-  const confirmed = new Set<string>();
-  const provisional = new Set<string>();
+): { restorable: Set<string>; locked: Set<string> } {
+  const restorable = new Set<string>();
+  const locked = new Set<string>();
   for (const r of registry.records) {
     if (r.parkId !== parkId || r.visibility.decision !== "hidden") continue;
     if (getLifecycleCatalogState(r) !== "active" || !isLifecycleEligible(r.parkId, r.name)) continue;
-    (r.confirmation === "confirmed" ? confirmed : provisional).add(r.name);
+    (r.assessment === "discontinued" ? locked : restorable).add(r.name);
   }
-  return { confirmed, provisional };
+  return { restorable, locked };
 }
 
 /**
- * Canonical names to hide for `parkId`. `autoHidden` = persisted auto-hidden
- * names from the API body (undefined = unknown → nothing automatic hidden).
+ * Canonical names to hide for `parkId`.
+ *  - `autoHidden`: persisted auto-hidden names from the API body (undefined = unknown → none).
+ *  - `performing`: names with verified performances in the SAME response (immediate un-hide).
+ *  - `registryRestored`: names whose registry hide was durably overridden by the monitor
+ *    (undefined = unknown → the registry hide stands unless `performing` overrides it).
  */
 export function getLifecycleHiddenNames(
   parkId: ParkId,
   autoHidden?: readonly string[] | null,
   performing?: ReadonlySet<string> | null,
   registry: EntertainmentLifecycleRegistry = ENTERTAINMENT_LIFECYCLE_REGISTRY,
+  registryRestored?: readonly string[] | null,
 ): Set<string> {
   const hidden = new Set<string>();
   const reg = getRegistryHiddenNames(parkId, registry);
-  for (const n of reg.confirmed) hidden.add(n);
-  for (const n of reg.provisional) if (!performing?.has(n)) hidden.add(n);
+  const restored = new Set(Array.isArray(registryRestored) ? registryRestored : []);
+  for (const n of reg.locked) hidden.add(n);
+  for (const n of reg.restorable) if (!performing?.has(n) && !restored.has(n)) hidden.add(n);
   if (Array.isArray(autoHidden)) {
     for (const n of autoHidden) {
-      if (typeof n === "string" && isLifecycleEligible(parkId, n) && !performing?.has(n) && !reg.confirmed.has(n)) hidden.add(n);
+      if (typeof n === "string" && isLifecycleEligible(parkId, n) && !performing?.has(n) && !reg.locked.has(n)) hidden.add(n);
     }
   }
   return hidden;

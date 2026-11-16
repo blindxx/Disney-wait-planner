@@ -129,6 +129,8 @@ export interface ParkAllEntertainment {
    * Applied via entertainmentLifecycleVisibility.ts only.
    */
   lifecycleAutoHidden?: string[];
+  /** Phase 14.5C: registry-hidden names durably overridden by a verified performance (registry record unchanged). */
+  lifecycleRegistryRestored?: string[];
 }
 
 // ============================================

@@ -388,8 +388,9 @@ Rules (enforced by `validateEntertainmentLifecycleRegistry`):
   (missing history/empty schedules alone prove nothing). `confirmed` needs a
   verification source with `independent: true`; `discontinued` requires
   `confirmed`; `returning` needs a `futureReturns` entry; a `hidden` decision
-  needs a non-active/non-unknown assessment. The visibility decision is
-  recorded only, never applied at runtime.
+  needs a non-active/non-unknown assessment. Since 14.5C the decision is applied
+  at runtime (restorable by verified performance unless `discontinued`; see
+  "Active entertainment lifecycle").
 - Records are never invented: each needs real source URLs/dates. Phase 14.5B
   populated the baseline (Disneyland: Paint the Night, Wondrous Journeys,
   Magic Happens Parade, Main Street Electrical Parade — inactive, hidden
@@ -430,39 +431,61 @@ observation is ever inferred). Modules: `entertainmentLifecycleDetector.ts`
   editions like World of Color – ONE/Happiness! never fork identity) × one
   resort-local date, class `active` (verified current performance) | `inactive`
   (existing 14.4.1/14.4.2 `confirmedNoActivityToday` on a healthy park, or a
-  validated history "dark" day) | `silent` (the show's own provider entities
-  published nothing while ≥ 3 other shows publish; never inactivity) | `unknown`
-  (failures, stale/partial/unhealthy, CLOSED/OPERATING alone). Unknown/silent
-  days and elapsed time never count.
-- **Hide**: ≥ 21 distinct inactive days in the rolling 30 resort-local days,
-  counting only days after the latest active-cycle reset (latest active day /
-  restoration). **Silence**: ≥ 10 silent days → audit flag + secondary history
-  evaluation (backfills validated dark/performed days; one cached park-level
-  request); silence alone never hides. **Restore**: a verified active day newer
-  than the cycle reset un-hides and resets the cycle (old inactive evidence
-  cannot re-hide; a later 21-of-30 pattern can). Future-return announcements are
-  never an input. Registry `confirmed` hides are never overridden (a performance
-  only raises a `registry_conflict` flag); `provisional` registry hides and
-  auto-hides are also un-hidden at request time by a performance in the response
-  the page already holds.
-- **Delivery**: `/api/entertainment/{showtimes,all}` attach
-  `lifecycleAutoHidden` (bounded, cached, fetched in parallel, fail-open:
-  absent = unknown = nothing automatic hidden). Pages call
-  `getLifecycleHiddenNames` and apply the set to the normal list, event
-  browsing, synthesized entries and the out-of-season toggle path; no toggle
-  reveals it and no second filtering system exists.
-- **Monitor**: `/api/cron/entertainment-lifecycle` (03:30 UTC, `CRON_SECRET`,
-  fail-closed like park-hours), all six parks, reusing the showtimes service so
-  provider caching/history budgets are unchanged. Idempotent (duplicate/late
-  deliveries safe: strongest class per day wins, newer-evaluation-wins state
-  writes, natural-key events, per-park advisory lock → `busy`).
-- **Audit**: every hide/restore/silence-flag/registry-conflict is an
-  `entertainment_lifecycle_events` row (`audit_status = 'unreviewed'`) with
-  evidence + coverage limitations, readable via `GET /api/catalog/lifecycle-audit`
+  validated history "dark" day) | `dormant` (mapped show's entity IS in the fresh,
+  healthy feed with status CLOSED, no records, no performance) | `silent` (all
+  entities ABSENT, or empty with another status, while the park is healthy) |
+  `unknown` (failures, stale/partial/unhealthy, OPERATING-without-times, dropped
+  or unrecognized records, weak coverage, missing history rows). "Healthy" = fresh
+  current non-stale payload with ≥ 3 other shows publishing. Unknown days, outages
+  and elapsed time never count.
+- **Hide**: ≥ 21 distinct resort-local dates in the rolling 30 classed `inactive`
+  OR `dormant` (or `silent`, only once identity is established — a verified
+  performance was ever observed for the show, kept in `last_active_date`), counting
+  only dates after the latest active-cycle reset. A date has one class, so mixed
+  evidence never double counts. The hide is provisional, with a durable `auto_hide`
+  event (dates, bases, coverage limitations). **Silence warning** (unchanged
+  threshold): ≥ 10 silent/dormant days → audit flag + secondary history evaluation
+  (backfills validated dark/performed days; one cached park-level request); silence
+  alone never hides. **Restore**: a verified active day newer than the cycle reset
+  un-hides and resets the cycle (old evidence cannot re-hide; a later 21-of-30
+  pattern can). Future-return announcements are never an input.
+- **Registry**: a reviewed `hidden` decision is RESTORABLE by a verified
+  performance when the assessment is not `discontinued` (inactive/suspended/
+  returning), even if `confirmed`: the monitor persists `registry_restored_at`
+  (+ `registry_restore` event, `registry_conflict` flag, cycle reset) and
+  the registry JSON is never edited; the audit decides. After that the show follows
+  the normal lifecycle (can be auto re-hidden). `discontinued` is locked (a
+  performance only raises a `registry_conflict` event); legacy and seasonal
+  identities are never evaluated or restored. Requests also un-hide immediately on
+  a performance in the response the page already holds.
+- **Day boundaries**: a day's NEGATIVE observation is final only when made in the
+  resort-local window [22:00, 24:00) (`isDayEndWindow`, DST-safe via Intl); an
+  earlier one is stored provisional (`is_final = false`) and never counts. A final
+  row replaces a provisional one; `active` is always final and never replaced.
+  Cron therefore runs twice daily (each run covers all six parks; a park's rows
+  are final only in ITS window): 03:30 UTC (WDW 22:30 EST/23:30 EDT) and 06:30 UTC
+  (Disneyland Resort 22:30 PST/23:30 PDT). Completed-day reconciliation = each date
+  is finalized by its own in-window run; provisional rows are never promoted later.
+- **Delivery**: `/api/entertainment/{showtimes,all}` attach `lifecycleAutoHidden`
+  and `lifecycleRegistryRestored` (bounded, cached, fetched in parallel, fail-open:
+  absent = unknown = nothing automatic hidden, registry hides stand). Pages call
+  `getLifecycleHiddenNames` and apply the set to the normal list, event browsing,
+  synthesized entries and the out-of-season toggle path; no toggle reveals it and
+  no second filtering system exists.
+- **Monitor**: `/api/cron/entertainment-lifecycle` (`CRON_SECRET`, fail-closed like
+  park-hours), reusing the showtimes service so provider caching/history budgets
+  are unchanged (twice-daily runs add at most the same cached live calls). Idempotent
+  (duplicate/late deliveries safe: newer-evaluation-wins state writes, natural-key
+  events, per-park advisory lock → `busy`).
+- **Audit**: every hide/restore/silence-flag/registry restore or conflict is an
+  `entertainment_lifecycle_events` row (`audit_status = 'unreviewed'`) with evidence
+  + coverage limitations, readable via `GET /api/catalog/lifecycle-audit`
   (`x-dwp-catalog-api-key`). No automatic registry edits, catalog retirement or
   legacy restoration (14.5D legacy comebacks, 14.5E research audit).
-- **Deploy**: run `db:migrate` against Production AND Preview first; the
-  monitor needs the tables (it reports `db_unavailable` otherwise, never hides).
+- **Deploy**: run `db:migrate` against Production AND Preview first (it also upgrades
+  a database that applied the first 14.5C revision: `is_final`, `dormant_days`,
+  `registry_restored_at`, widened `day_class` check); the monitor needs the tables
+  (it reports `db_unavailable` otherwise, never hides).
 
 ## Catalog taxonomy
 

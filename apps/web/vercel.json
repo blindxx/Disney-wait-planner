@@ -5,8 +5,12 @@
       "schedule": "0 2 * * *"
     },
     {
-      "path": "/api/cron/entertainment-lifecycle",
+      "path": "/api/cron/entertainment-lifecycle?window=wdw",
       "schedule": "30 3 * * *"
+    },
+    {
+      "path": "/api/cron/entertainment-lifecycle?window=dlr",
+      "schedule": "30 6 * * *"
     }
   ]
 }

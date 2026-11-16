@@ -334,7 +334,7 @@ export default function AllEntertainmentPage() {
   // Phase 14.5C lifecycle hiding (registry decisions + server-persisted auto-hidden names): one set,
   // applied to the live list, event browsing, synthesized entries and the toggle path. No toggle reveals it.
   const lifecycleHidden = useMemo(
-    () => getLifecycleHiddenNames(selectedPark, all?.lifecycleAutoHidden, performingNamesFromAllEntries(all?.entries)),
+    () => getLifecycleHiddenNames(selectedPark, all?.lifecycleAutoHidden, performingNamesFromAllEntries(all?.entries), undefined, all?.lifecycleRegistryRestored),
     [selectedPark, all],
   );
   const liveEntries = useMemo(() => filterLifecycleHiddenEntries(all?.entries ?? [], lifecycleHidden), [all, lifecycleHidden]);

@@ -29,15 +29,16 @@
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
-import { ENTERTAINMENT_LIFECYCLE_REGISTRY, lifecycleRecordKey } from "./entertainmentLifecycleRegistry";
+import { ENTERTAINMENT_LIFECYCLE_REGISTRY, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
 import {
   EMPTY_LIFECYCLE_STATE,
   LIFECYCLE_RETENTION_DAYS,
   evaluateShowLifecycle,
   historyBackfillObservations,
+  isDayEndWindow,
   isLifecycleEligiblePlace,
   observeParkDay,
-  type RegistryHideKind,
+  registryHideKind,
   type ShowDayObservation,
 } from "./entertainmentLifecycleDetector";
 import {
@@ -77,11 +78,14 @@ export interface ParkLifecycleResult {
   parkId: ParkId;
   status: ParkLifecycleStatus;
   observed: number;
-  classes: { active: number; inactive: number; silent: number; unknown: number };
+  classes: { active: number; inactive: number; dormant: number; silent: number; unknown: number };
   hidden: string[];
   restored: string[];
   silenceFlagged: string[];
   registryConflicts: string[];
+  registryRestored: string[];
+  /** Observations were made in the resort-local end-of-day window (negatives are final and count). */
+  dayEnd: boolean;
   secondary: "none" | "done" | "history_unavailable";
 }
 
@@ -103,21 +107,15 @@ export interface LifecycleMonitorOptions {
   getShowtimes?: (parkId: ParkId, instant: Date, captureHistory: GetHistory | undefined) => Promise<ParkEntertainmentShowtimes>;
   getHistory?: GetHistory;
   getHistoryAccess?: GetHistoryAccess;
+  /** Registry used for reviewed hide decisions (default: the shipped registry). */
+  registry?: EntertainmentLifecycleRegistry;
   runDb?: RunDb;
   sleep?: (ms: number) => Promise<void>;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Reviewed registry hide kind for a canonical show (never changed here). */
-export function registryHideKind(parkId: ParkId, name: string): RegistryHideKind {
-  const key = entertainmentMappingKey(parkId, name);
-  const r = ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((x) => lifecycleRecordKey(x) === key);
-  if (!r || r.visibility.decision !== "hidden") return "none";
-  return r.confirmation === "confirmed" ? "confirmed" : "provisional";
-}
-
-interface ApplyResult { hidden: string[]; restored: string[]; silenceFlagged: string[]; registryConflicts: string[]; needsSecondary: Array<{ showKey: string; showName: string }> }
+interface ApplyResult { hidden: string[]; restored: string[]; silenceFlagged: string[]; registryConflicts: string[]; registryRestored: string[]; needsSecondary: Array<{ showKey: string; showName: string }> }
 
 /**
  * One locked transaction body: persist observations, evaluate every eligible
@@ -132,8 +130,9 @@ async function evaluateAndPersist(
   now: Date,
   observations: ShowDayObservation[],
   markSecondary: ReadonlySet<string>,
+  registry: EntertainmentLifecycleRegistry,
 ): Promise<ApplyResult> {
-  const res: ApplyResult = { hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], needsSecondary: [] };
+  const res: ApplyResult = { hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], needsSecondary: [] };
   await upsertObservations(q, observations);
   const rows = await readEvidence(q, parkId, addDaysToLocalDate(today, -(LIFECYCLE_RETENTION_DAYS - 1)) ?? today, today);
   const states = await readStates(q, parkId);
@@ -152,7 +151,7 @@ async function evaluateAndPersist(
       observations: obs,
       state: prev ? { ...EMPTY_LIFECYCLE_STATE, ...prev } : null,
       eligible: true,
-      registryHide: registryHideKind(parkId, place.name),
+      registryHide: registryHideKind(parkId, place.name, registry),
     });
     const s = ev.state;
     const hasType = (t: string) => ev.events.some((e) => e.type === t);
@@ -161,9 +160,11 @@ async function evaluateAndPersist(
       showKey, showName: place.name,
       hiddenAt: hasType("auto_hide") ? nowIso : prev?.hiddenAt ?? null,
       restoredAt: hasType("auto_restore") ? nowIso : prev?.restoredAt ?? null,
+      registryRestoredAt: s.registryRestored ? prev?.registryRestoredAt ?? nowIso : null,
       silenceFlaggedAt: !s.silenceFlagged ? null : hasType("silence_flag") ? nowIso : prev?.silenceFlaggedAt ?? nowIso,
       secondaryEvaluatedOn: markSecondary.has(showKey) && s.silenceFlagged ? today : s.secondaryEvaluatedOn,
       inactiveDays: ev.inactiveDays,
+      dormantDays: ev.dormantDays,
       silentDays: ev.silentDays,
       evaluatedLocalDate: today,
     };
@@ -174,6 +175,7 @@ async function evaluateAndPersist(
       if (e.type === "auto_hide") res.hidden.push(place.name);
       else if (e.type === "auto_restore") res.restored.push(place.name);
       else if (e.type === "silence_flag") res.silenceFlagged.push(place.name);
+      else if (e.type === "registry_restore") res.registryRestored.push(place.name);
       else res.registryConflicts.push(place.name);
     }
     if (ev.needsSecondary) res.needsSecondary.push({ showKey, showName: place.name });
@@ -221,6 +223,7 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
     const budgetMs = options.budgetMs ?? LIFECYCLE_BUDGET_MS;
     const sleep = options.sleep ?? defaultSleep;
     const runDb = options.runDb ?? defaultRunDb(sleep);
+    const registry = options.registry ?? ENTERTAINMENT_LIFECYCLE_REGISTRY;
     const providerDeadlineMs = options.providerDeadlineMs ?? LIFECYCLE_PROVIDER_DEADLINE_MS;
     const histories = new Map<ParkId, ThemeParksResult<ThemeParksHistoryDaily>>();
     const getShowtimes = options.getShowtimes ?? ((parkId: ParkId, at: Date, capture: GetHistory | undefined) =>
@@ -249,16 +252,17 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
     for (let i = 0; i < LIFECYCLE_PARK_IDS.length; i++) {
       const parkId = LIFECYCLE_PARK_IDS[i];
       const st = fetched[i];
-      const base: ParkLifecycleResult = { parkId, status: "ok", observed: 0, classes: { active: 0, inactive: 0, silent: 0, unknown: 0 }, hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], secondary: "none" };
+      const base: ParkLifecycleResult = { parkId, status: "ok", observed: 0, classes: { active: 0, inactive: 0, dormant: 0, silent: 0, unknown: 0 }, hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], dayEnd: false, secondary: "none" };
+      base.dayEnd = isDayEndWindow(PARK_TO_RESORT[parkId] as ResortId, instant);
       if (Date.now() - startedMs > budgetMs) { parks.push({ ...base, status: "skipped_deadline" }); continue; }
       if (!st || st.error) { parks.push({ ...base, status: "provider_unavailable" }); continue; }
-      const observations = observeParkDay(st);
+      const observations = observeParkDay(st, base.dayEnd);
       for (const o of observations) base.classes[o.dayClass]++;
       base.observed = observations.length;
       try {
-        const applied = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, observations, new Set()));
+        const applied = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, observations, new Set(), registry));
         base.hidden.push(...applied.hidden); base.restored.push(...applied.restored);
-        base.silenceFlagged.push(...applied.silenceFlagged); base.registryConflicts.push(...applied.registryConflicts);
+        base.silenceFlagged.push(...applied.silenceFlagged); base.registryConflicts.push(...applied.registryConflicts); base.registryRestored.push(...applied.registryRestored);
 
         if (applied.needsSecondary.length > 0 && Date.now() - startedMs <= budgetMs) {
           const hist = histories.get(parkId) ?? await fetchParkHistoryWithin(LIFECYCLE_HISTORY_DEADLINE_MS, parkId, instant, options.getHistory, options.getHistoryAccess);
@@ -274,9 +278,9 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
           base.secondary = evidence?.usable ? "done" : "history_unavailable";
           // Re-evaluate only when history was usable; an unusable window changes nothing and is retried next run.
           if (evidence?.usable) {
-            const again = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, backfill, new Set(applied.needsSecondary.map((s) => s.showKey))));
+            const again = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, backfill, new Set(applied.needsSecondary.map((s) => s.showKey)), registry));
             base.hidden.push(...again.hidden); base.restored.push(...again.restored);
-            base.silenceFlagged.push(...again.silenceFlagged); base.registryConflicts.push(...again.registryConflicts);
+            base.silenceFlagged.push(...again.silenceFlagged); base.registryConflicts.push(...again.registryConflicts); base.registryRestored.push(...again.registryRestored);
           }
         }
         parks.push(base);
