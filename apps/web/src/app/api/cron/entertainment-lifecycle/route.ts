@@ -2,9 +2,12 @@
  * GET /api/cron/entertainment-lifecycle — Phase 14.5C scheduled lifecycle monitor.
  *
  * Invoked by Vercel Cron (apps/web/vercel.json) TWICE daily, each run covering all
- * six parks: 03:30 UTC lands in the resort-local end-of-day window (22:00–24:00,
- * DST-safe) for Walt Disney World (22:30 EST / 23:30 EDT), 06:30 UTC for
- * Disneyland Resort (22:30 PST / 23:30 PDT). A park's negative observations only
+ * six parks: 03:00 UTC (WDW) and 06:00 UTC (Disneyland Resort). Vercel Hobby may
+ * run a cron anywhere within its scheduled HOUR, so each run lands in the
+ * resort-local end-of-day window [22:00, 24:00) for the whole hour across DST:
+ * WDW 03:00–03:59Z = 22:00–22:59 EST / 23:00–23:59 EDT; DLR 06:00–06:59Z =
+ * 22:00–22:59 PST / 23:00–23:59 PDT. A run delayed past its hour is simply
+ * provisional (fail-safe), never wrongly final. A park's negative observations only
  * count as final when made in ITS window (the other run's are provisional), so a
  * partial resort-local day is never final negative evidence. Sends
  * `Authorization: Bearer $CRON_SECRET`. Same fail-CLOSED auth as

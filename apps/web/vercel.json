@@ -6,11 +6,11 @@
     },
     {
       "path": "/api/cron/entertainment-lifecycle?window=wdw",
-      "schedule": "30 3 * * *"
+      "schedule": "0 3 * * *"
     },
     {
       "path": "/api/cron/entertainment-lifecycle?window=dlr",
-      "schedule": "30 6 * * *"
+      "schedule": "0 6 * * *"
     }
   ]
 }

@@ -1,7 +1,7 @@
 /**
  * entertainmentLifecycleMonitor.ts — Phase 14.5C scheduled lifecycle monitor.
  * Server-only. Driven by Vercel Cron via /api/cron/entertainment-lifecycle
- * (03:30 UTC daily), independent of page traffic.
+ * (03:00 and 06:00 UTC), independent of page traffic.
  *
  * Per run, for each of the six parks (the single maintained park list):
  *  1. FETCH (all parks concurrently, per-park deadline): the SAME showtimes
@@ -37,6 +37,7 @@ import {
   historyBackfillObservations,
   isDayEndWindow,
   isLifecycleEligiblePlace,
+  isMappingIdentityEstablished,
   observeParkDay,
   registryHideKind,
   type ShowDayObservation,
@@ -66,6 +67,8 @@ import type { ThemeParksHistoryDaily, ThemeParksResult } from "./themeParksApi";
 /** Every supported park — derived from the single maintained park list. */
 export const LIFECYCLE_PARK_IDS = Object.keys(PARK_LABELS) as ParkId[];
 
+/** Route path the Vercel crons target (apps/web/vercel.json adds a `?window=` query to keep the two entries distinct). */
+export const LIFECYCLE_CRON_PATH = "/api/cron/entertainment-lifecycle";
 export const LIFECYCLE_PROVIDER_DEADLINE_MS = 20_000;
 export const LIFECYCLE_HISTORY_DEADLINE_MS = 8_000;
 export const LIFECYCLE_BUDGET_MS = 45_000;
@@ -152,6 +155,7 @@ async function evaluateAndPersist(
       state: prev ? { ...EMPTY_LIFECYCLE_STATE, ...prev } : null,
       eligible: true,
       registryHide: registryHideKind(parkId, place.name, registry),
+      mappingEstablished: isMappingIdentityEstablished(parkId, place.name),
     });
     const s = ev.state;
     const hasType = (t: string) => ev.events.some((e) => e.type === t);

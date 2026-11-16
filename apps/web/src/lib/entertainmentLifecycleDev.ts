@@ -14,6 +14,7 @@
  */
 
 import type { ParkId } from "@disney-wait-planner/shared";
+import vercelConfig from "../../vercel.json";
 import type { Pool } from "pg";
 import { devHistoryFixture, buildParkHistoryEvidence } from "./entertainmentHistory";
 import {
@@ -24,6 +25,7 @@ import {
   historyBackfillObservations,
   isDayEndWindow,
   isLifecycleEligible,
+  isMappingIdentityEstablished,
   observeParkDay,
   registryHideKind,
   resortLocalHour,
@@ -34,7 +36,7 @@ import {
   type LifecycleShowState,
 } from "./entertainmentLifecycleDetector";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
-import { LIFECYCLE_PARK_IDS, runEntertainmentLifecycleMonitor, type LifecycleMonitorOptions } from "./entertainmentLifecycleMonitor";
+import { LIFECYCLE_CRON_PATH, LIFECYCLE_PARK_IDS, runEntertainmentLifecycleMonitor, type LifecycleMonitorOptions } from "./entertainmentLifecycleMonitor";
 import {
   getLifecycleAutoHidden, insertEvent, readEvidence, readLifecycleAudit, readStates, resetLifecycleReadState,
   tryLifecycleLock, upsertObservations, writeState, getLifecycleVisibilityState,
@@ -328,6 +330,43 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
     ["DLR", "2026-03-09T06:30:00Z"], ["DLR", "2026-11-02T06:30:00Z"], ["DLR", "2026-03-08T06:30:00Z"], ["DLR", "2026-11-01T06:30:00Z"],
   ].every(([r, t]) => isDayEndWindow(r as "WDW" | "DLR", new Date(t))));
   check("timezone: window is [22:00, 24:00) local — 21:59 no, 22:00 yes, 23:59 yes, 00:00 no", !isDayEndWindow(DLR, new Date("2026-12-10T05:59:00Z")) && isDayEndWindow(DLR, new Date("2026-12-10T06:00:00Z")) && isDayEndWindow(DLR, new Date("2026-12-10T07:59:00Z")) && !isDayEndWindow(DLR, new Date("2026-12-10T08:00:00Z")));
+
+  // ---- already-stale shows: validated-mapping identity ----
+  const mapOf = (...e: Array<{ n: string; ids: string[] | null }>) => e.map((x) => (x.ids ? { dwpName: x.n, parkId: "disneyland" as ParkId, disposition: "mapped" as const, provider: x.ids.map((id) => ({ entityId: id, entityType: "SHOW" as const, providerName: x.n })) } : { dwpName: x.n, parkId: "disneyland" as ParkId, disposition: "unmapped" as const, reason: "r" })) as unknown as Parameters<typeof isMappingIdentityEstablished>[2];
+  const U1 = "11111111-1111-4111-8111-111111111111", U2 = "22222222-2222-4222-8222-222222222222";
+  check("mapping identity: a shipped mapped show (Mickey's Mix Magic, World of Color) is established; unmapped/legacy/unknown are not",
+    isMappingIdentityEstablished("disneyland", MMM) && isMappingIdentityEstablished("dca", "World of Color") && !isMappingIdentityEstablished("disneyland", "Paint the Night") && !isMappingIdentityEstablished("disneyland", "No Such Show"));
+  check("mapping identity: every shipped mapped entry passes (no ambiguity in the maintained mapping)", ENTERTAINMENT_PLACES.every((p) => { const m = getEntertainmentProviderMapping(p.name, p.parkId as ParkId); return !m || m.disposition !== "mapped" || isMappingIdentityEstablished(p.parkId as ParkId, p.name); }));
+  check("mapping ambiguity: a provider id shared by two entries establishes neither", (() => { const m = mapOf({ n: "Fantasmic!", ids: [U1] }, { n: MMM, ids: [U1, U2] }); return !isMappingIdentityEstablished("disneyland", "Fantasmic!", m) && !isMappingIdentityEstablished("disneyland", MMM, m); })());
+  check("mapping ambiguity: duplicate refs inside one entry, empty refs, malformed UUID → not established", !isMappingIdentityEstablished("disneyland", MMM, mapOf({ n: MMM, ids: [U1, U1] })) && !isMappingIdentityEstablished("disneyland", MMM, mapOf({ n: MMM, ids: [] })) && !isMappingIdentityEstablished("disneyland", MMM, mapOf({ n: MMM, ids: ["NOT-A-UUID"] })));
+  check("mapping ambiguity: an intentionally unmapped entry never establishes identity", !isMappingIdentityEstablished("disneyland", MMM, mapOf({ n: MMM, ids: null })));
+  check("mapping: a clean custom mapping establishes it", isMappingIdentityEstablished("disneyland", MMM, mapOf({ n: MMM, ids: [U1] })));
+  const mapped = (obsList: Obs[], established: boolean, st: LifecycleShowState | null = null) => evaluateShowLifecycle({ today: TODAY, observations: obsList, state: st, eligible: true, registryHide: "none", mappingEstablished: established });
+  check("stale show: 20 healthy-feed absent days with a validated mapping do not hide (flag only)", (() => { const e = mapped(run("silent", -19, 0), true); return e.state.status === "visible" && e.dormantDays === 20 && e.state.auditFlag === "provider_silence"; })());
+  check("stale show: 21 absent days with a validated mapping hide (no performance ever observed), identityBasis validated_mapping", (() => { const e = mapped(run("silent", -20, 0), true); return e.state.status === "auto_hidden" && e.events[0].type === "auto_hide" && (e.events[0].evidence as { identityBasis: string }).identityBasis === "validated_mapping" && e.state.lastActiveDate === null; })());
+  check("stale show: the same 21 absent days WITHOUT a validated mapping never hide", mapped(run("silent", -29, 0), false).state.status === "visible");
+  check("stale show: a performance identity still wins the basis label", (mapped([{ localDate: d(-29), dayClass: "active" }, ...run("silent", -20, 0)], true).events[0].evidence as { identityBasis: string }).identityBasis === "performance");
+  check("stale show: unknown days between absent days never count (11 + gap + 10 → no hide)", mapped([...run("silent", -29, -19), ...run("unknown", -18, -9), ...run("silent", -8, 0)], true).state.status === "visible");
+  check("stale show: absent + dormant + inactive combine by distinct date (7 each = 21)", mapped([...run("silent", -20, -14), ...run("dormant", -13, -7), ...run("inactive", -6, 0)], true).state.status === "auto_hidden");
+  check("stale show: restore/reset/re-hide on the mapping basis", (() => {
+    const h = mapped(run("silent", -20, 0), true).state;
+    const r = mapped([...run("silent", -20, -1), { localDate: d(0), dayClass: "active" }], true, h);
+    const re = evaluateShowLifecycle({ today: d(21), observations: [{ localDate: d(0), dayClass: "active" }, ...run("silent", 1, 21)], state: r.state, eligible: true, registryHide: "none", mappingEstablished: true });
+    return r.state.status === "visible" && r.events[0].type === "auto_restore" && re.state.status === "auto_hidden" && re.state.hideCount === 2;
+  })());
+  check("stale show: seasonal/legacy identities stay exempt even with a mapping", !isLifecycleEligible("disneyland", "Halloween Screams") && evaluateShowLifecycle({ today: TODAY, observations: run("silent", -29, 0), state: null, eligible: false, registryHide: "none", mappingEstablished: true }).state.status === "visible");
+
+  // ---- Vercel cron registration + delayed-cron / DST boundaries ----
+  const crons = (vercelConfig as { crons: Array<{ path: string; schedule: string }> }).crons;
+  const lc = crons.filter((c) => c.path.startsWith(LIFECYCLE_CRON_PATH));
+  check("cron: exactly two lifecycle crons, distinct paths, schedules 0 3 * * * (WDW) and 0 6 * * * (DLR)", lc.length === 2 && new Set(lc.map((c) => c.path)).size === 2 && lc.some((c) => c.schedule === "0 3 * * *") && lc.some((c) => c.schedule === "0 6 * * *"));
+  check("cron: lifecycle paths target the real route (with a window query only); park-hours cron untouched", lc.every((c) => /^\/api\/cron\/entertainment-lifecycle(\?window=(wdw|dlr))?$/.test(c.path)) && crons.some((c) => c.path === "/api/cron/park-hours" && c.schedule === "0 2 * * *"));
+  const dstDates = ["2026-01-15", "2026-03-07", "2026-03-08", "2026-03-09", "2026-07-15", "2026-10-31", "2026-11-01", "2026-11-02", "2026-12-15"];
+  const hourOk = (resort: "WDW" | "DLR", hour: string, date: string) => Array.from({ length: 60 }, (_, m) => isDayEndWindow(resort, new Date(`${date}T${hour}:${String(m).padStart(2, "0")}:00Z`))).every(Boolean);
+  check("cron: any minute within the 03:00Z hour is final for WDW and within 06:00Z for DLR on every DST-relevant date", dstDates.every((dt) => hourOk("WDW", "03", dt) && hourOk("DLR", "06", dt)));
+  check("cron: the NEXT UTC hour is only provisional in summer (delayed run fails safe) — WDW 04:00Z EDT, DLR 07:00Z PDT", !isDayEndWindow("WDW", new Date("2026-07-15T04:00:00Z")) && !isDayEndWindow("DLR", new Date("2026-07-15T07:00:00Z")) && !isDayEndWindow("WDW", new Date("2026-03-09T04:00:00Z")));
+  check("cron: the old 03:30/06:30 schedule's jitter would have crossed midnight in summer (regression guard for the hour choice)", !isDayEndWindow("WDW", new Date("2026-07-15T04:30:00Z")) && !isDayEndWindow("DLR", new Date("2026-07-15T07:30:00Z")));
+  check("cron: each run is a provisional-for-the-other-resort run (WDW 03:00Z is 19:00/20:00 at Disneyland; DLR 06:00Z is the next morning at WDW)", !isDayEndWindow("DLR", new Date("2026-12-15T03:00:00Z")) && !isDayEndWindow("DLR", new Date("2026-07-15T03:00:00Z")) && !isDayEndWindow("WDW", new Date("2026-12-15T06:00:00Z")) && !isDayEndWindow("WDW", new Date("2026-07-15T06:00:00Z")));
   return failures;
 }
 
@@ -493,7 +532,7 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
   const mmmKey = entertainmentMappingKey(PARK, MMM);
 
   /** One scenario driver: simulated days; per-day kind for Mickey's Mix Magic; other parks' provider fails unless `allParks`. */
-  async function drive(runDb: LifecycleMonitorOptions["runDb"], days: Array<Parameters<typeof mkEntry>[2] | "provider_down" | "stale">, startOffset = 0, history?: LifecycleMonitorOptions["getHistory"], opts: { instantOf?: (off: number) => Date; registry?: EntertainmentLifecycleRegistry } = {}) {
+  async function drive(runDb: LifecycleMonitorOptions["runDb"], days: Array<Parameters<typeof mkEntry>[2] | "provider_down" | "stale" | "silent_weak">, startOffset = 0, history?: LifecycleMonitorOptions["getHistory"], opts: { instantOf?: (off: number) => Date; registry?: EntertainmentLifecycleRegistry } = {}) {
     const reports = [];
     for (let i = 0; i < days.length; i++) {
       const off = startOffset + i;
@@ -503,6 +542,7 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
         instant: (opts.instantOf ?? instantFor)(off), runDb, sleep: async () => {}, getHistory: history, registry: opts.registry,
         getShowtimes: async (parkId) => {
           if (parkId !== PARK || kind === "provider_down") return mkPark(parkId, {}, { error: { kind: "timeout", message: "t" } }, date);
+          if (kind === "silent_weak") return mkPark(parkId, { ...Object.fromEntries(getEntertainmentForPark(parkId).map((p) => [p.name, "unknown" as const])), [MMM]: "silent" }, {}, date);
           if (kind === "stale") return mkPark(parkId, { [MMM]: "dormant" }, { stale: true }, date);
           return mkPark(parkId, { [MMM]: kind }, {}, date);
         },
@@ -593,8 +633,11 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
     st = await stateOf(db3);
     check("monitor: 10th silent day → audit flag, still visible, flagged event persisted", st?.status === "visible" && st.auditFlag === "provider_silence" && [...db3.events.values()].some((e) => e.event_type === "silence_flag"));
     check("monitor: secondary evaluation with unusable history changes nothing and is reported", reps[0]!.parks.find((p) => p.parkId === PARK)!.secondary === "history_unavailable" && st?.status === "visible");
-    await drive(async (_p, fn) => fn(db3), Array(25).fill("silent"), 10, getHistory);
-    check("monitor: 35 silent days never hide the show", (await stateOf(db3))?.status === "visible");
+    await drive(async (_p, fn) => fn(db3), Array(10).fill("silent"), 10, getHistory);
+    check("monitor: 20 days of healthy-feed absence of a validated-mapping show → flagged, still visible", (await stateOf(db3))?.status === "visible" && (await stateOf(db3))?.dormantDays === 20);
+    await drive(async (_p, fn) => fn(db3), ["silent"], 20, getHistory);
+    check("monitor: the 21st absent day hides a never-observed but validated-mapping show (identity via mapping, durable evidence)", (await stateOf(db3))?.status === "auto_hidden" &&
+      ((): boolean => { const e = [...db3.events.values()].find((x) => x.event_type === "auto_hide"); return !!e && (e.evidence as { identityBasis: string }).identityBasis === "validated_mapping" && (e.evidence as { dormantDays: number }).dormantDays === 21; })());
 
     // concurrency: busy lock
     const db4 = new FakeLifecycleDb(); db4.lockHeld = true;
@@ -716,6 +759,53 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
       // a provisional negative never downgrades/overrides a final active, and a final replaces a provisional
       const rows = [...t2.x.evidence.values()].filter((r) => r.show_key === mmmKey);
       check("boundary: active rows are final", rows.filter((r) => r.day_class === "active").every((r) => r.is_final === true));
+    }
+
+    // ---- already-stale shows: identity via validated mapping ----
+    {
+      const a = mk();
+      await drive(a.runDb, Array(20).fill("silent"));
+      check("stale show: 20 absent days on healthy feeds (never observed performing) → visible", (await stateOf(a.x))?.status === "visible" && (await stateOf(a.x))?.lastActiveDate == null);
+      await drive(a.runDb, ["silent"], 20);
+      check("stale show: 21 absent days hide it without any recorded performance", (await stateOf(a.x))?.status === "auto_hidden" && (await stateOf(a.x))?.lastActiveDate == null);
+      await drive(a.runDb, ["active"], 21);
+      check("stale show: a later verified performance restores and resets the cycle", (await stateOf(a.x))?.status === "visible" && (await stateOf(a.x))?.cycleResetDate === localOf(21));
+      await drive(a.runDb, Array(20).fill("silent"), 22);
+      check("stale show: 20 post-return absent days do not re-hide; the 21st does", (await stateOf(a.x))?.status === "visible" && (await (async () => { await drive(a.runDb, ["silent"], 42); return (await stateOf(a.x))?.status === "auto_hidden"; })()));
+      const w = mk();
+      await drive(w.runDb, Array(30).fill("silent_weak"));
+      check("stale show: weak park coverage (<3 shows publishing) never counts absence", (await stateOf(w.x))?.status !== "auto_hidden" && ![...w.x.evidence.values()].some((r) => r.day_class === "silent"));
+      const gap = mk();
+      await drive(gap.runDb, [...Array(12).fill("silent"), ...Array(10).fill("provider_down"), ...Array(9).fill("silent")]);
+      check("stale show: provider outage days are gaps, not absence (21 absent days spread over 31 → 20 in window → visible)", (await stateOf(gap.x))?.status === "visible");
+      const stale = mk();
+      await drive(stale.runDb, Array(30).fill("stale"));
+      check("stale show: stale-if-error feeds never count as absence", (await stateOf(stale.x))?.status !== "auto_hidden");
+      const unk = mk();
+      await drive(unk.runDb, [...Array(11).fill("silent"), ...Array(10).fill("unknown"), ...Array(10).fill("silent")]);
+      check("stale show: unknown/incomplete days between absent days never count", (await stateOf(unk.x))?.status !== "auto_hidden");
+      const prov = mk();
+      await drive(prov.runDb, Array(25).fill("silent"), 0, undefined, { instantOf: (off) => new Date(`${addDaysToLocalDate(MONITOR_DAY0, off + 1)}T03:00:00Z`) });
+      check("stale show: absence observed before the Disneyland day-end window is provisional and never hides", (await stateOf(prov.x))?.status !== "auto_hidden");
+    }
+
+    // ---- both resort runs: idempotent and provider-safe ----
+    {
+      const x = mk();
+      const calls: string[] = [];
+      const run1 = async (iso: string) => runEntertainmentLifecycleMonitor({
+        instant: new Date(iso), runDb: x.runDb, sleep: async () => {},
+        getShowtimes: async (parkId) => { calls.push(parkId); return mkPark(parkId, { [MMM]: "silent" }, {}, parkId === "disneyland" || parkId === "dca" ? "2026-12-01" : "2026-12-01"); },
+      });
+      const wdw = await run1("2026-12-02T03:00:00Z"); // 22:00 EST Dec 1 (WDW final) / 19:00 PST (Disneyland provisional)
+      const dlr = await run1("2026-12-02T06:00:00Z"); // 22:00 PST Dec 1 (Disneyland final)
+      check("both runs: one provider fetch per park per run (6 + 6), none extra", calls.length === 12 && LIFECYCLE_PARK_IDS.every((p) => calls.filter((c) => c === p).length === 2));
+      check("both runs: finality is per resort (WDW run: mk final, disneyland provisional; DLR run: disneyland final)", wdw!.parks.find((p) => p.parkId === "mk")!.dayEnd && !wdw!.parks.find((p) => p.parkId === "disneyland")!.dayEnd && dlr!.parks.find((p) => p.parkId === "disneyland")!.dayEnd && !dlr!.parks.find((p) => p.parkId === "mk")!.dayEnd);
+      const row = x.x.evidence.get(`${PARK}|${mmmKey}|2026-12-01`);
+      check("both runs: the provisional Disneyland row from the WDW run is finalized by the DLR run (one row, observation_count 2)", row?.is_final === true && row.observation_count === 2 && x.x.evidence.size >= 1);
+      const snap = JSON.stringify([...x.x.evidence.entries()].map(([k, r]) => [k, r.day_class, r.is_final]));
+      await run1("2026-12-02T03:00:00Z"); await run1("2026-12-02T06:00:00Z");
+      check("both runs: re-delivering both runs changes nothing but counters (idempotent)", JSON.stringify([...x.x.evidence.entries()].map(([k, r]) => [k, r.day_class, r.is_final])) === snap && x.x.events.size === 0);
     }
 
     // ---- registry restoration / protection through the monitor ----

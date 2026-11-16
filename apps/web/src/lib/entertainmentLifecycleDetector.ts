@@ -16,8 +16,10 @@
  *   silent   the show's own provider entities are ABSENT (or empty with another
  *            status) while the park as a whole is healthy. Counts toward the
  *            10-day silence WARNING; counts toward hiding only once the show's
- *            identity is established (a verified performance was observed for
- *            it, so absence is a change, not "never listed");
+ *            identity is established: a verified performance was observed for it
+ *            OR its canonical provider mapping is validated (`isMappingIdentityEstablished`:
+ *            mapped, unambiguous, structurally valid) — so an already-stale catalog
+ *            show is hideable without a performance recorded since deployment;
  *   unknown  everything else (failures, stale/partial data, CLOSED alone, an
  *            unhealthy park). Never counts toward anything.
  * Unmapped shows produce NO observation (a nonexistent provider observation is
@@ -64,7 +66,12 @@ import { ENTERTAINMENT_LIFECYCLE_REGISTRY, lifecycleRecordKey, seasonalExemption
 import { ENTERTAINMENT_PLACES, resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { RESORT_TIME_ZONES, addDaysToLocalDate } from "./resortTime";
-import { entertainmentMappingKey } from "./themeParksEntertainmentMapping";
+import {
+  THEMEPARKS_ENTERTAINMENT_MAPPING,
+  entertainmentMappingKey,
+  validateEntertainmentMappingStructure,
+  type EntertainmentProviderMapping,
+} from "./themeParksEntertainmentMapping";
 import type { ThemeParksHistoryDaily, ThemeParksResult } from "./themeParksApi";
 
 // ============================================
@@ -143,6 +150,33 @@ export function isLifecycleEligiblePlace(place: CatalogPlace): boolean {
 export function isLifecycleEligible(parkId: ParkId, name: string): boolean {
   const place = ENTERTAINMENT_PLACES.find((p) => p.parkId === parkId && p.name === name);
   return !!place && isLifecycleEligiblePlace(place);
+}
+
+/**
+ * Identity via a VALIDATED existing canonical provider mapping (no prior performance
+ * needed): the show is `mapped` with ≥ 1 ref, its key has no structural finding in the
+ * maintained mapping validator (duplicate/orphan/invalid UUID/empty refs), and every
+ * ref id is owned by exactly this one entry (no shared/ambiguous entity). Unmapped,
+ * ambiguous or malformed mappings never establish identity. Static data only — it
+ * cannot prove the provider still lists the entity (that is what the healthy-feed
+ * absence evidence measures).
+ */
+export function isMappingIdentityEstablished(
+  parkId: ParkId,
+  name: string,
+  mapping: EntertainmentProviderMapping[] = THEMEPARKS_ENTERTAINMENT_MAPPING,
+): boolean {
+  const key = entertainmentMappingKey(parkId, name);
+  const m = mapping.find((x) => entertainmentMappingKey(x.parkId, x.dwpName) === key);
+  if (!m || m.disposition !== "mapped" || m.provider.length === 0) return false;
+  if (validateEntertainmentMappingStructure(mapping).some((f) => f.key === key)) return false;
+  const ids = m.provider.map((r) => r.entityId.toLowerCase());
+  if (new Set(ids).size !== ids.length) return false;
+  for (const other of mapping) {
+    if (other === m || other.disposition !== "mapped") continue;
+    if (other.provider.some((r) => ids.includes(r.entityId.toLowerCase()))) return false;
+  }
+  return true;
 }
 
 // ============================================
@@ -357,6 +391,8 @@ export function evaluateShowLifecycle(input: {
   state: LifecycleShowState | null;
   eligible: boolean;
   registryHide: RegistryHideKind;
+  /** The show's canonical provider mapping is validated (`isMappingIdentityEstablished`): absence on a healthy feed may count without a prior performance. */
+  mappingEstablished?: boolean;
 }): LifecycleEvaluation {
   const { today, eligible } = input;
   const prev = input.state ?? EMPTY_LIFECYCLE_STATE;
@@ -376,8 +412,9 @@ export function evaluateShowLifecycle(input: {
   }
   let lastActive: string | null = prev.lastActiveDate;
   for (const [d, v] of best) if (v.cls === "active" && (!lastActive || d > lastActive)) lastActive = d;
-  // Identity is established once a verified performance was ever observed for the show (survives evidence pruning via state).
-  const identityEstablished = lastActive !== null;
+  // Identity: a verified performance was ever observed (persisted in state), OR the canonical provider mapping is validated.
+  const identityBasis: "performance" | "validated_mapping" | null = lastActive !== null ? "performance" : input.mappingEstablished ? "validated_mapping" : null;
+  const identityEstablished = identityBasis !== null;
 
   const countAfterReset = (match: (v: { cls: LifecycleDayClass; final: boolean }) => boolean): string[] => {
     const reset = next.cycleResetDate;
@@ -474,7 +511,7 @@ export function evaluateShowLifecycle(input: {
       type: "auto_hide", localDate: today,
       evidence: {
         windowStart, windowEnd: today, countedDays: counted, inactiveDays: inactive.length, dormantDays: dormant.length, threshold: LIFECYCLE_MIN_INACTIVE_DAYS,
-        inactiveDates: inactive, dormantDates: dormant, identityEstablished, bases, silentDays: silent.length, cycleResetDate: next.cycleResetDate, activeDaysSinceReset: 0,
+        inactiveDates: inactive, dormantDates: dormant, identityEstablished, identityBasis, bases, silentDays: silent.length, cycleResetDate: next.cycleResetDate, activeDaysSinceReset: 0,
       },
       coverageLimitations: COVERAGE_LIMITATIONS,
     });
@@ -487,7 +524,7 @@ export function evaluateShowLifecycle(input: {
       if (next.auditFlag !== "registry_conflict") next.auditFlag = "provider_silence";
       events.push({
         type: "silence_flag", localDate: today,
-        evidence: { windowStart, windowEnd: today, silentDays: silent.length, threshold: LIFECYCLE_SILENCE_FLAG_DAYS, inactiveDays: inactive.length, dormantDays: dormant.length, identityEstablished, cycleResetDate: next.cycleResetDate },
+        evidence: { windowStart, windowEnd: today, silentDays: silent.length, threshold: LIFECYCLE_SILENCE_FLAG_DAYS, inactiveDays: inactive.length, dormantDays: dormant.length, identityEstablished, identityBasis, cycleResetDate: next.cycleResetDate },
         coverageLimitations: [...COVERAGE_LIMITATIONS, "provider silence alone cannot hide a show; a secondary history evaluation was requested"],
       });
     }

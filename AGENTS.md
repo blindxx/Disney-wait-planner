@@ -439,8 +439,12 @@ observation is ever inferred). Modules: `entertainmentLifecycleDetector.ts`
   current non-stale payload with ≥ 3 other shows publishing. Unknown days, outages
   and elapsed time never count.
 - **Hide**: ≥ 21 distinct resort-local dates in the rolling 30 classed `inactive`
-  OR `dormant` (or `silent`, only once identity is established — a verified
-  performance was ever observed for the show, kept in `last_active_date`), counting
+  OR `dormant` (or `silent` — sustained absence from a fresh, healthy feed — once
+  identity is established: a verified performance was ever observed, kept in
+  `last_active_date`, OR the show's canonical provider mapping is validated via
+  `isMappingIdentityEstablished`: mapped, structurally valid, every ref owned only
+  by that entry; unmapped/ambiguous mappings never qualify, so an already-stale
+  catalog show is hideable without a post-deploy performance), counting
   only dates after the latest active-cycle reset. A date has one class, so mixed
   evidence never double counts. The hide is provisional, with a durable `auto_hide`
   event (dates, bases, coverage limitations). **Silence warning** (unchanged
@@ -463,8 +467,10 @@ observation is ever inferred). Modules: `entertainmentLifecycleDetector.ts`
   earlier one is stored provisional (`is_final = false`) and never counts. A final
   row replaces a provisional one; `active` is always final and never replaced.
   Cron therefore runs twice daily (each run covers all six parks; a park's rows
-  are final only in ITS window): 03:30 UTC (WDW 22:30 EST/23:30 EDT) and 06:30 UTC
-  (Disneyland Resort 22:30 PST/23:30 PDT). Completed-day reconciliation = each date
+  are final only in ITS window): 03:00 UTC (WDW) and 06:00 UTC
+  (Disneyland Resort) — Vercel Hobby may fire anywhere within the scheduled hour,
+  and each full hour stays inside [22:00, 24:00) local across DST (WDW 22:xx EST /
+  23:xx EDT; DLR 22:xx PST / 23:xx PDT); a run delayed past its hour is provisional. Completed-day reconciliation = each date
   is finalized by its own in-window run; provisional rows are never promoted later.
 - **Delivery**: `/api/entertainment/{showtimes,all}` attach `lifecycleAutoHidden`
   and `lifecycleRegistryRestored` (bounded, cached, fetched in parallel, fail-open:
