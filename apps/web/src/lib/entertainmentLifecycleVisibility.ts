@@ -23,9 +23,10 @@
  * nothing automatic; registry decisions still apply (static bundled data).
  */
 
-import type { ParkId } from "@disney-wait-planner/shared";
+import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, getLifecycleCatalogState, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
 import { isLifecycleEligible } from "./entertainmentLifecycleDetector";
+import { getResortLocalDate } from "./resortTime";
 
 /** Names of curated shows with verified performances in the given showtime entries. */
 export function performingNamesFromShowtimes(entries: ReadonlyArray<{ dwpName: string; performances: unknown[] }> | null | undefined): Set<string> {
@@ -87,4 +88,65 @@ export function getLifecycleHiddenNames(
 export function filterLifecycleHiddenEntries<T extends { source: string; name: string }>(entries: readonly T[], hidden: ReadonlySet<string>): T[] {
   if (hidden.size === 0) return entries.slice();
   return entries.filter((e) => !(e.source === "curated" && hidden.has(e.name)));
+}
+
+// ============================================
+// Refresh-resilient evidence (Waits & Shows flicker fix)
+// ============================================
+
+/**
+ * Hide evidence (names only — never performances) from the last showtimes response that
+ * carried it, scoped to one park and one resort-local day. A transient refresh failure (or a
+ * body without the lifecycle fields) must not fail the hide set open and briefly resurface
+ * hidden shows; retained names are never a performance schedule and are never shown as current.
+ */
+export interface RetainedLifecycleEvidence {
+  parkId: ParkId;
+  resort: ResortId;
+  localDate: string;
+  autoHidden?: string[];
+  registryRestored?: string[];
+}
+
+type EvidenceResponse = {
+  parkId: ParkId;
+  resort: RetainedLifecycleEvidence["resort"];
+  localDate: string;
+  error?: unknown;
+  lifecycleAutoHidden?: string[];
+  lifecycleRegistryRestored?: string[];
+} | null | undefined;
+
+/**
+ * Next retained evidence after a response for `parkId`. A healthy response that carries the
+ * auto-hidden list replaces the evidence (so a legitimately restored show resurfaces at once).
+ * The lifecycle arrays are read independently of the provider, so a provider-error body that carries
+ * them is still authoritative. A failed request (no body) or a body without the list keeps the previous evidence only for the SAME park;
+ * evidence from another park is dropped. (Same-day validity is enforced at use by
+ * `activeRetainedEvidence`.)
+ */
+export function nextRetainedLifecycleEvidence(
+  prev: RetainedLifecycleEvidence | null,
+  parkId: ParkId,
+  response: EvidenceResponse,
+): RetainedLifecycleEvidence | null {
+  const kept = prev && prev.parkId === parkId ? prev : null;
+  if (!response || response.parkId !== parkId || !Array.isArray(response.lifecycleAutoHidden)) return kept;
+  return {
+    parkId,
+    resort: response.resort,
+    localDate: response.localDate,
+    autoHidden: response.lifecycleAutoHidden.slice(),
+    ...(Array.isArray(response.lifecycleRegistryRestored) ? { registryRestored: response.lifecycleRegistryRestored.slice() } : {}),
+  };
+}
+
+/** Retained evidence usable now: same park and still the same resort-local day, else null. */
+export function activeRetainedEvidence(
+  retained: RetainedLifecycleEvidence | null,
+  parkId: ParkId,
+  instant: Date,
+): RetainedLifecycleEvidence | null {
+  if (!retained || retained.parkId !== parkId) return null;
+  return retained.localDate === getResortLocalDate(retained.resort, instant) ? retained : null;
 }

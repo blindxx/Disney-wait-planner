@@ -145,6 +145,70 @@ export function isEntertainmentConfirmedInactiveToday(
   return rank !== "party-night";
 }
 
+// --------------------------------------------
+// Same-day inactivity retention across refresh uncertainty (PR #210 follow-up)
+// --------------------------------------------
+//
+// `confirmedNoActivityToday` can be history-dependent (14.4.2): when the bounded history request
+// times out / is budget-limited / fails on a later refresh, the same show comes back unconfirmed
+// (`historyCandidate`, or `unavailable` on a live failure) and would briefly reappear. The page
+// therefore retains, per park + resort-local day, the names last CONFIRMED inactive, and applies
+// them only while the current entry is UNCERTAIN. Names only: never a schedule or performance.
+
+/** Retained confirmed-inactive names for one park and one resort-local day. */
+export interface RetainedInactivity {
+  parkId: ParkId;
+  resort: ResortId;
+  localDate: string;
+  names: string[];
+}
+
+type InactivityEntry = { dwpName: string; performances: unknown[]; status?: string; incomplete?: boolean; historyCandidate?: boolean; confirmedNoActivityToday?: boolean };
+type InactivityResponse = { parkId: ParkId; resort: ResortId; localDate: string; error?: unknown; stale?: boolean; entries: InactivityEntry[] } | null | undefined;
+
+/**
+ * Uncertain = the response cannot say either way for this entry: provider error / stale payload,
+ * live failure (`unavailable`), incomplete data, or a history-pending candidate. Missing/partial
+ * data is NEVER proof of inactivity — it only fails to refute a retained confirmation. A clean
+ * entry that is not confirmed inactive (activity, operating hours, history veto) is authoritative.
+ */
+function isUncertainEntry(r: { error?: unknown; stale?: boolean }, e: InactivityEntry): boolean {
+  return !!r.error || r.stale === true || e.status === "unavailable" || e.incomplete === true || e.historyCandidate === true;
+}
+
+/** Next retained set after a response for `parkId` (reducer; pure). */
+export function nextRetainedInactivity(prev: RetainedInactivity | null, parkId: ParkId, r: InactivityResponse): RetainedInactivity | null {
+  if (!r || r.parkId !== parkId || !Array.isArray(r.entries) || typeof r.localDate !== "string") return prev && prev.parkId === parkId ? prev : null;
+  const base = prev && prev.parkId === parkId && prev.localDate === r.localDate ? new Set(prev.names) : new Set<string>();
+  for (const e of r.entries) {
+    if (e.performances.length > 0) base.delete(e.dwpName); // verified activity overrides
+    else if (e.confirmedNoActivityToday === true) base.add(e.dwpName); // fresh authoritative confirmation
+    else if (!isUncertainEntry(r, e)) base.delete(e.dwpName); // fresh authoritative "not inactive"
+    // uncertain: keep whatever was retained
+  }
+  return { parkId, resort: r.resort, localDate: r.localDate, names: [...base] };
+}
+
+/**
+ * Entries to feed the existing hide rule: uncertain, performance-free entries whose name was
+ * retained for this park + same resort-local day are flagged confirmed-inactive. Everything else
+ * passes through untouched; the existing rule (incl. the party-night exception) still decides.
+ */
+export function applyRetainedInactivity<T extends InactivityEntry>(
+  response: { parkId: ParkId; resort: ResortId; localDate: string; error?: unknown; stale?: boolean; entries: T[] } | null | undefined,
+  retained: RetainedInactivity | null,
+  parkId: ParkId,
+  instant: Date,
+): T[] | undefined {
+  if (!response) return undefined;
+  if (!retained || retained.parkId !== parkId || retained.localDate !== getResortLocalDate(retained.resort, instant) || retained.localDate !== response.localDate) return response.entries;
+  const names = new Set(retained.names);
+  if (names.size === 0) return response.entries;
+  return response.entries.map((e) =>
+    names.has(e.dwpName) && e.performances.length === 0 && e.confirmedNoActivityToday !== true && isUncertainEntry(response, e) ? { ...e, confirmedNoActivityToday: true } : e,
+  );
+}
+
 /** Waits & Shows rule: hidden when confirmed out-of-season OR confirmed inactive today. */
 export function isEntertainmentHiddenToday(
   place: EntertainmentPlace,
