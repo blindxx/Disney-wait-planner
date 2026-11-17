@@ -70,7 +70,7 @@ import {
   type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
-import { isEntertainmentHiddenToday, partitionPartyEntertainment } from "../../lib/seasonalVisibility";
+import { applyRetainedInactivity, isEntertainmentHiddenToday, nextRetainedInactivity, partitionPartyEntertainment, type RetainedInactivity } from "../../lib/seasonalVisibility";
 import { activeRetainedEvidence, getLifecycleHiddenNames, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
@@ -859,6 +859,8 @@ export default function WaitTimesPage() {
   const [showtimesRaw, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
   // Lifecycle hide evidence (names only) retained across transient refresh failures for the same
   // park + resort-local day, so hidden shows do not flicker back (see entertainmentLifecycleVisibility.ts).
+  // Same-day confirmed-inactive names (seasonalVisibility.ts), same lifecycle as the lifecycle evidence.
+  const [retainedInactivity, setRetainedInactivity] = useState<RetainedInactivity | null>(null);
   const [retainedLifecycle, setRetainedLifecycle] = useState<RetainedLifecycleEvidence | null>(null);
   useEffect(() => {
     // Wait for stored park hydration so the first request uses the real park.
@@ -877,10 +879,12 @@ export default function WaitTimesPage() {
           const resolved = resolveShowtimesResponse(selectedPark, body);
           setShowtimes(resolved);
           setRetainedLifecycle((prev) => nextRetainedLifecycleEvidence(prev, selectedPark, resolved));
+          setRetainedInactivity((prev) => nextRetainedInactivity(prev, selectedPark, resolved));
         });
     };
     setShowtimes(null);
     setRetainedLifecycle((prev) => (prev && prev.parkId === selectedPark ? prev : null));
+    setRetainedInactivity((prev) => (prev && prev.parkId === selectedPark ? prev : null));
     load();
     // Same page-level triggers as the Queue-Times refresh above (Phase 6.3):
     // refresh when the tab returns to visible, plus a guarded 120 s interval
@@ -1003,6 +1007,7 @@ export default function WaitTimesPage() {
   /** Entertainment visible under the shared land filter (drives the section + its jump link). */
   const visibleEntertainment = useMemo(() => {
     const today = getResortLocalDate(selectedResort, displayNow);
+    const inactivityEntries = applyRetainedInactivity(showtimes, retainedInactivity, selectedPark, displayNow);
     return parkEntertainment.filter(
       (p) =>
         (!selectedLand || p.land === selectedLand) &&
@@ -1011,11 +1016,11 @@ export default function WaitTimesPage() {
           p,
           selectedResort,
           today,
-          showtimes?.entries,
+          inactivityEntries,
           displayNow,
         ),
     );
-  }, [parkEntertainment, selectedLand, selectedResort, displayNow, showtimes, lifecycleHidden]);
+  }, [parkEntertainment, selectedLand, selectedResort, selectedPark, displayNow, showtimes, lifecycleHidden, retainedInactivity]);
 
   // PR #209 follow-up: on a confirmed party date, visible curated shows explicitly associated with that party
   // (registry + resort-local date, never showtimes/names) group into Party Entertainment; the rest stay regular.

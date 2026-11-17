@@ -46,8 +46,9 @@ import {
   filterLifecycleHiddenEntries, getLifecycleHiddenNames, getRegistryHiddenNames, performingNamesFromAllEntries, performingNamesFromShowtimes,
 } from "./entertainmentLifecycleVisibility";
 import { getAllEntertainmentEventEntries } from "./allEntertainmentEventFilter";
-import { makeOffSeasonEntry, getOffSeasonCuratedEntertainment, applyAllEntertainmentSeasonalVisibility, isEntertainmentHiddenToday } from "./seasonalVisibility";
+import { makeOffSeasonEntry, getOffSeasonCuratedEntertainment, applyAllEntertainmentSeasonalVisibility, isEntertainmentHiddenToday, nextRetainedInactivity, applyRetainedInactivity, type RetainedInactivity } from "./seasonalVisibility";
 import { normalizeParkEntertainmentShowtimes, resolveShowtimesResponse, type EntertainmentShowtimeEntry, type ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
+import { getSeasonalEntertainmentRank } from "./seasonalEntertainment";
 import { ENTERTAINMENT_PLACES, getEntertainmentForPark, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
 import { addDaysToLocalDate } from "./resortTime";
@@ -1038,5 +1039,67 @@ export function runDevLifecycleRefreshEvidenceCases(): string[] {
   const dlrFail = resolveShowtimesResponse("disneyland", null, NOW);
   check("retained registryRestored keeps a restored registry show visible across a failure", !hiddenFor("disneyland" as never, dlrFail, restoredEv).has("Paint the Night") && hiddenFor("disneyland" as never, dlrFail, restoredEv).has("Wondrous Journeys"));
   check("first load (no evidence) fails open for auto-hide but registry hides stand", getLifecycleHiddenNames("disneyland", undefined, null, undefined, undefined).has("Paint the Night"));
+  return failures;
+}
+
+/**
+ * Same-day inactivity retention across refresh uncertainty (history timeout / provider failure).
+ * Run manually: [] = all pass.
+ */
+export function runDevInactivityRetentionCases(): string[] {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const NOW = new Date("2026-12-10T20:00:00Z"); // 3 PM EST, WDW
+  const HEA = "Happily Ever After";
+  const place = getEntertainmentForPark("mk").find((p) => p.name === HEA)!;
+  type E = { dwpName: string; performances: unknown[]; status?: string; incomplete?: boolean; historyCandidate?: boolean; confirmedNoActivityToday?: boolean };
+  const resp = (e: Partial<E>, extra: Record<string, unknown> = {}, localDate = "2026-12-10") =>
+    ({ parkId: "mk", resort: "WDW", localDate, error: null, stale: false, entries: [{ dwpName: HEA, performances: [], status: "none_posted", incomplete: false, ...e }], ...extra }) as unknown as ParkEntertainmentShowtimes;
+  const confirmed = resp({ confirmedNoActivityToday: true });
+  const historyTimedOut = resp({ historyCandidate: true, confirmedNoActivityToday: false });
+  const failed = resp({ status: "unavailable", incomplete: true }, { error: { kind: "network", message: "x" } });
+  const hidden = (r: ParkEntertainmentShowtimes, ev: RetainedInactivity | null, at = NOW, park: "mk" | "epcot" = "mk") =>
+    isEntertainmentHiddenToday(place, "WDW", "2026-12-10", applyRetainedInactivity(r as never, ev, park, at), at);
+
+  const ev1 = nextRetainedInactivity(null, "mk", confirmed);
+  check("confirmed response retains the name", !!ev1 && ev1.names.includes(HEA));
+  check("baseline: confirmed → hidden", hidden(confirmed, ev1));
+  check("root cause: history-timeout response alone reappears (no retention)", !hidden(historyTimedOut, null));
+  const ev2 = nextRetainedInactivity(ev1, "mk", historyTimedOut);
+  check("uncertain (history timeout) keeps retained name and stays hidden", ev2!.names.includes(HEA) && hidden(historyTimedOut, ev2));
+  const ev3 = nextRetainedInactivity(ev2, "mk", failed);
+  check("provider failure keeps retained name and stays hidden", ev3!.names.includes(HEA) && hidden(failed, ev3));
+  check("confirmed → uncertain → confirmed stays hidden throughout and re-confirms", hidden(confirmed, nextRetainedInactivity(ev3, "mk", confirmed)));
+  let ev = ev1;
+  for (let i = 0; i < 5; i++) ev = nextRetainedInactivity(ev, "mk", i % 2 ? failed : historyTimedOut);
+  check("repeated uncertain refreshes keep hiding", hidden(failed, ev) && hidden(historyTimedOut, ev));
+
+  // first load / never confirmed
+  check("first load fail-open: no retained evidence → uncertain entry visible", !hidden(historyTimedOut, null) && !hidden(failed, null));
+  check("uncertain response never creates evidence", nextRetainedInactivity(null, "mk", historyTimedOut)!.names.length === 0 && nextRetainedInactivity(null, "mk", failed)!.names.length === 0);
+
+  // genuine resurfacing
+  const performing = resp({ performances: [{ startTime: "2026-12-10T22:00:00-05:00" }], status: "upcoming" });
+  check("verified performance overrides retained inactivity immediately", !hidden(performing, ev));
+  check("performance clears retained name", !nextRetainedInactivity(ev, "mk", performing)!.names.includes(HEA));
+  const operating = resp({ confirmedNoActivityToday: false });
+  check("fresh authoritative not-inactive (clean, not a history candidate) replaces retained", !hidden(operating, ev) && !nextRetainedInactivity(ev, "mk", operating)!.names.includes(HEA));
+  check("a following failure does not re-hide after genuine resurfacing", !hidden(failed, nextRetainedInactivity(nextRetainedInactivity(ev, "mk", operating), "mk", failed)));
+  check("stale payload is uncertain, not proof", hidden(resp({ confirmedNoActivityToday: false }, { stale: true }), ev));
+
+  // park / date
+  check("park change drops retained names", nextRetainedInactivity(ev, "epcot", failed) === null && !hidden(failed, ev, NOW, "epcot"));
+  check("other-park/null responses never adopt or erase same-park evidence", nextRetainedInactivity(ev, "mk", null) === ev && nextRetainedInactivity(ev, "mk", { ...confirmed, parkId: "epcot" } as never) === ev);
+  const midnight = new Date("2026-12-11T05:00:00Z");
+  check("resort-local midnight invalidates retained inactivity (fails open)", !hidden(historyTimedOut, ev, midnight) && hidden(historyTimedOut, ev, new Date("2026-12-11T04:59:00Z")));
+  check("new-day response does not inherit yesterday's names", nextRetainedInactivity(ev, "mk", resp({ historyCandidate: true }, {}, "2026-12-11"))!.names.length === 0);
+
+  // party night keeps visible even if retained
+  const partyPlace = getEntertainmentForPark("mk").find((p) => getSeasonalEntertainmentRank(p.name, { resort: "WDW", date: "2026-12-10", parkId: "mk", instant: NOW }) === "party-night");
+  if (partyPlace) {
+    const pr = { ...historyTimedOut, entries: [{ ...historyTimedOut.entries[0], dwpName: partyPlace.name }] } as ParkEntertainmentShowtimes;
+    const pev = { parkId: "mk", resort: "WDW", localDate: "2026-12-10", names: [partyPlace.name] } as RetainedInactivity;
+    check("party-night exception preserved with retained inactivity", !isEntertainmentHiddenToday(partyPlace, "WDW", "2026-12-10", applyRetainedInactivity(pr as never, pev, "mk", NOW), NOW));
+  }
   return failures;
 }
