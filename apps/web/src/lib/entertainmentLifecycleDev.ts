@@ -1020,6 +1020,12 @@ export function runDevLifecycleRefreshEvidenceCases(): string[] {
   check("legitimate resurfacing: a later healthy response with an empty list replaces evidence and un-hides", !hiddenFor("mk", okMk([]), ev).has(HEA));
   check("after resurfacing a following failure does not re-hide", !hiddenFor("mk", failedMk, nextRetainedLifecycleEvidence(ev, "mk", failedMk)).has(HEA));
 
+  // lifecycle arrays are independent of provider errors (route reads them separately)
+  const providerErrWithList = { ...okMk([]), error: { kind: "network", message: "x" } } as unknown as ParkEntertainmentShowtimes;
+  const evErr = nextRetainedLifecycleEvidence(ev1, "mk", providerErrWithList);
+  check("provider-error body carrying lifecycle arrays replaces retained evidence", !!evErr && evErr !== ev1 && evErr.autoHidden?.length === 0);
+  check("…so a following network failure does not resurrect the old hide", !hiddenFor("mk", failedMk, nextRetainedLifecycleEvidence(evErr, "mk", failedMk)).has(HEA));
+
   // park / date transitions
   check("park change drops retained evidence", nextRetainedLifecycleEvidence(ev1, "epcot", failedMk) === null && activeRetainedEvidence(ev1, "epcot", NOW) === null);
   check("park switch back after a failed epcot refresh does not resurrect mk evidence", nextRetainedLifecycleEvidence(nextRetainedLifecycleEvidence(ev1, "epcot", failedMk), "mk", failedMk) === null);

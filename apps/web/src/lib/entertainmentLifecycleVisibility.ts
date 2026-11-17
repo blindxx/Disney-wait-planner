@@ -120,7 +120,8 @@ type EvidenceResponse = {
 /**
  * Next retained evidence after a response for `parkId`. A healthy response that carries the
  * auto-hidden list replaces the evidence (so a legitimately restored show resurfaces at once).
- * A failure or a body without the list keeps the previous evidence only for the SAME park;
+ * The lifecycle arrays are read independently of the provider, so a provider-error body that carries
+ * them is still authoritative. A failed request (no body) or a body without the list keeps the previous evidence only for the SAME park;
  * evidence from another park is dropped. (Same-day validity is enforced at use by
  * `activeRetainedEvidence`.)
  */
@@ -130,7 +131,7 @@ export function nextRetainedLifecycleEvidence(
   response: EvidenceResponse,
 ): RetainedLifecycleEvidence | null {
   const kept = prev && prev.parkId === parkId ? prev : null;
-  if (!response || response.error || response.parkId !== parkId || !Array.isArray(response.lifecycleAutoHidden)) return kept;
+  if (!response || response.parkId !== parkId || !Array.isArray(response.lifecycleAutoHidden)) return kept;
   return {
     parkId,
     resort: response.resort,
