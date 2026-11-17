@@ -77,6 +77,8 @@ import {
   describeEventMeet,
   eventMeetsForDisplay,
   eventMeetsPresentQueueTimes,
+  eventOfferingsSectionState,
+  EVENT_OFFERINGS_UNAVAILABLE_MESSAGE,
   eventMeetsSectionState,
   resolveEventMeetsResponse,
   type EventMeetEntry,
@@ -998,10 +1000,12 @@ export default function WaitTimesPage() {
   // in the curated catalog), and never shown from another park/day.
   const eventMeets = !selectedLand ? eventMeetsForDisplay(eventMeetsRaw, selectedPark, displayNow) : null;
   const eventMeetsState = eventMeetsSectionState(eventMeets);
+  const eventOfferingsState = eventOfferingsSectionState(eventMeets);
   // Queue-Times attribution is owed whenever its data is displayed, including meet waits/status shown while LIVE_ENABLED is off.
   const queueTimesPresented = LIVE_ENABLED || eventMeetsPresentQueueTimes(eventMeets);
   const showtimesPresented =
     eventMeetsState === "list" ||
+    eventOfferingsState === "list" ||
     !!showtimes &&
     !showtimes.error &&
     showtimes.entries.some(
@@ -1361,6 +1365,33 @@ export default function WaitTimesPage() {
               </p>
               <div className="entertainment-grid">
                 {eventMeets.entries.map((m) => (
+                  <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
+                ))}
+              </div>
+            </>)}
+          </div>
+        )}
+
+        {/* ---- Party entertainment (Phase 14.5D): verified non-meet event offerings, confirmed party dates only ---- */}
+        {eventOfferingsState !== "hidden" && eventMeets && (
+          <div style={{ marginTop: "20px" }}>
+            <h2
+              id="party-entertainment"
+              className="wait-section"
+              style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}
+            >
+              Party Entertainment
+            </h2>
+            {eventOfferingsState === "unavailable" ? (
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", marginBottom: "10px" }}>
+                {EVENT_OFFERINGS_UNAVAILABLE_MESSAGE}
+              </p>
+            ) : (<>
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
+                Dance parties and acts offered only at tonight&apos;s ticketed party. Listed all day; times as published.
+              </p>
+              <div className="entertainment-grid">
+                {eventMeets.offerings.map((m) => (
                   <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
                 ))}
               </div>

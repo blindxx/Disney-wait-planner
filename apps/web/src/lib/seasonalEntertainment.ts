@@ -268,6 +268,11 @@ export const SEASONAL_PROVIDER_ONLY_EVENTS: SeasonalProviderEntertainmentAssocia
   partyOnly("mk", "6d3b1129-b34c-4b44-bba2-0e1790fef705", "Meet Santa Jack and Sally at Mickey’s Very Merry Christmas Party", "mvmcp"),
   partyOnly("mk", "418c2111-36d4-4f07-86b2-8058014a263c", "Join Santa Claus at Mickey's Very Merry Christmas Party", "mvmcp"),
   partyOnly("mk", "8b8cb0ec-10a3-41d9-b5cb-81ea8db14370", "Character Greetings at Mickey's Very Merry Christmas Party", "mvmcp"),
+  // Phase 14.5D: provider SHOW records whose own names carry the party (ThemeParks children verified 2026-11-17, with
+  // Special Ticketed Event times on party nights). Stitchmas! is the 2026 Tomorrowland dance party; Reindeer Wranglers
+  // is the party's Frontierland-area act. Neither has a DWP catalog entry, so they surface only via eventExclusiveMeets.ts.
+  partyOnly("mk", "4514beed-faa9-4847-bc77-34f9c6b1f619", "Stitchmas! at Mickey's Very Merry Christmas Party", "mvmcp"),
+  partyOnly("mk", "6d45026b-0761-4b6d-8902-50905aa82da2", "Reindeer Wranglers at Mickey's Very Merry Christmas Party", "mvmcp"),
   // Disney Jollywood Nights (WDW, Hollywood Studios)
   partyOnly("hs", "ae7db7da-a3d9-443b-b4a6-d3c4a2b66121", "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", "jollywood-nights"),
   partyOnly("hs", "dc332105-e524-4dca-9a47-df672f8472fd", "Character Greetings at Disney Jollywood Nights", "jollywood-nights"),
