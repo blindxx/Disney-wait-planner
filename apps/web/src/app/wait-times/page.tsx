@@ -71,7 +71,7 @@ import {
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
 import { isEntertainmentHiddenToday, partitionPartyEntertainment } from "../../lib/seasonalVisibility";
-import { getLifecycleHiddenNames, performingNamesFromShowtimes } from "../../lib/entertainmentLifecycleVisibility";
+import { activeRetainedEvidence, getLifecycleHiddenNames, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
@@ -857,6 +857,9 @@ export default function WaitTimesPage() {
   // data from a previous resort-local day. The `cancelled` flag drops
   // responses for a park that is no longer selected.
   const [showtimesRaw, setShowtimes] = useState<ParkEntertainmentShowtimes | null>(null);
+  // Lifecycle hide evidence (names only) retained across transient refresh failures for the same
+  // park + resort-local day, so hidden shows do not flicker back (see entertainmentLifecycleVisibility.ts).
+  const [retainedLifecycle, setRetainedLifecycle] = useState<RetainedLifecycleEvidence | null>(null);
   useEffect(() => {
     // Wait for stored park hydration so the first request uses the real park.
     if (!ready) return;
@@ -869,9 +872,15 @@ export default function WaitTimesPage() {
       fetch(`/api/entertainment/showtimes?parkId=${encodeURIComponent(selectedPark)}`, { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null)
-        .then((body) => { if (!cancelled && token === latestRequest) setShowtimes(resolveShowtimesResponse(selectedPark, body)); });
+        .then((body) => {
+          if (cancelled || token !== latestRequest) return;
+          const resolved = resolveShowtimesResponse(selectedPark, body);
+          setShowtimes(resolved);
+          setRetainedLifecycle((prev) => nextRetainedLifecycleEvidence(prev, selectedPark, resolved));
+        });
     };
     setShowtimes(null);
+    setRetainedLifecycle((prev) => (prev && prev.parkId === selectedPark ? prev : null));
     load();
     // Same page-level triggers as the Queue-Times refresh above (Phase 6.3):
     // refresh when the tab returns to visible, plus a guarded 120 s interval
@@ -976,8 +985,19 @@ export default function WaitTimesPage() {
   // Phase 14.5C lifecycle hiding: reviewed registry decisions (applied immediately, static data) plus the
   // server-persisted auto-hidden names carried by the showtimes response. Fails open when the list is unknown.
   const lifecycleHidden = useMemo(
-    () => getLifecycleHiddenNames(selectedPark, showtimes?.lifecycleAutoHidden, performingNamesFromShowtimes(showtimes?.entries), undefined, showtimes?.lifecycleRegistryRestored),
-    [selectedPark, showtimes],
+    () => {
+      // Current response evidence wins; when it carries none (failed/unavailable refresh), fall back to
+      // same-park, same-resort-day retained names. Performances are never retained.
+      const retained = activeRetainedEvidence(retainedLifecycle, selectedPark, displayNow);
+      return getLifecycleHiddenNames(
+        selectedPark,
+        showtimes?.lifecycleAutoHidden ?? retained?.autoHidden,
+        performingNamesFromShowtimes(showtimes?.entries),
+        undefined,
+        showtimes?.lifecycleRegistryRestored ?? retained?.registryRestored,
+      );
+    },
+    [selectedPark, showtimes, retainedLifecycle, displayNow],
   );
 
   /** Entertainment visible under the shared land filter (drives the section + its jump link). */

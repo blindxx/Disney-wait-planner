@@ -42,11 +42,12 @@ import {
   tryLifecycleLock, upsertObservations, writeState, getLifecycleVisibilityState,
 } from "./entertainmentLifecycleStore";
 import {
+  activeRetainedEvidence, nextRetainedLifecycleEvidence, type RetainedLifecycleEvidence,
   filterLifecycleHiddenEntries, getLifecycleHiddenNames, getRegistryHiddenNames, performingNamesFromAllEntries, performingNamesFromShowtimes,
 } from "./entertainmentLifecycleVisibility";
 import { getAllEntertainmentEventEntries } from "./allEntertainmentEventFilter";
 import { makeOffSeasonEntry, getOffSeasonCuratedEntertainment, applyAllEntertainmentSeasonalVisibility, isEntertainmentHiddenToday } from "./seasonalVisibility";
-import { normalizeParkEntertainmentShowtimes, type EntertainmentShowtimeEntry, type ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
+import { normalizeParkEntertainmentShowtimes, resolveShowtimesResponse, type EntertainmentShowtimeEntry, type ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 import { ENTERTAINMENT_PLACES, getEntertainmentForPark, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
 import { addDaysToLocalDate } from "./resortTime";
@@ -977,5 +978,59 @@ export function runDevEntertainmentLifecycleRegistryApplicationCases(): string[]
     const hidden = getLifecycleHiddenNames(r.parkId).has(r.name);
     if ((r.visibility.decision === "hidden") !== hidden) failures.push(`registry application: ${r.name} decision=${r.visibility.decision} but hidden=${hidden}`);
   }
+  return failures;
+}
+
+/**
+ * Waits & Shows refresh-flicker regression (page keeps same-park/same-day hide evidence across failed
+ * refreshes). Mirrors the page's reducer + hide-set derivation. Run manually: [] = all pass.
+ */
+export function runDevLifecycleRefreshEvidenceCases(): string[] {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const NOW = new Date("2026-12-10T20:00:00Z"); // 3 PM EST, WDW
+  const HEA = "Happily Ever After";
+  const okMk = (autoHidden?: string[], restored?: string[], localDate = "2026-12-10"): ParkEntertainmentShowtimes =>
+    ({ parkId: "mk", resort: "WDW", localDate, error: null, entries: [], ...(autoHidden ? { lifecycleAutoHidden: autoHidden } : {}), ...(restored ? { lifecycleRegistryRestored: restored } : {}) }) as unknown as ParkEntertainmentShowtimes;
+  const failedMk = resolveShowtimesResponse("mk", null, NOW);
+  // The page's derivation: current response evidence, else retained.
+  const hiddenFor = (park: "mk" | "epcot", resp: ParkEntertainmentShowtimes | null, ev: RetainedLifecycleEvidence | null, at = NOW) => {
+    const r = activeRetainedEvidence(ev, park, at);
+    return getLifecycleHiddenNames(park, resp?.lifecycleAutoHidden ?? r?.autoHidden, performingNamesFromShowtimes(resp?.entries), undefined, resp?.lifecycleRegistryRestored ?? r?.registryRestored);
+  };
+
+  const ev1 = nextRetainedLifecycleEvidence(null, "mk", okMk([HEA]));
+  check("success carrying the list is retained", !!ev1 && ev1.autoHidden?.[0] === HEA && ev1.localDate === "2026-12-10");
+  check("baseline: hidden from the successful response", hiddenFor("mk", okMk([HEA]), ev1).has(HEA));
+  check("root cause: without retention a failed refresh fails open (show reappears)", !hiddenFor("mk", failedMk, null).has(HEA));
+  const evAfterFail = nextRetainedLifecycleEvidence(ev1, "mk", failedMk);
+  check("failed refresh keeps the evidence", evAfterFail === ev1);
+  check("failed refresh: show stays hidden (no flicker)", hiddenFor("mk", failedMk, evAfterFail).has(HEA));
+  check("failed refresh: performances are not retained (unavailable response has no performing names)", performingNamesFromShowtimes(failedMk.entries).size === 0);
+  check("success without lifecycle fields (DB unavailable) keeps evidence", nextRetainedLifecycleEvidence(ev1, "mk", okMk()) === ev1 && hiddenFor("mk", okMk(), ev1).has(HEA));
+  check("null/other-park response keeps same-park evidence and never adopts a foreign body",
+    nextRetainedLifecycleEvidence(ev1, "mk", null) === ev1 && nextRetainedLifecycleEvidence(ev1, "mk", { ...okMk([]), parkId: "epcot" } as unknown as ParkEntertainmentShowtimes) === ev1);
+
+  // overlapping requests: only the latest request's response is applied (page token guard), so the
+  // reducer sees them in latest-wins order; a later success replaces, a later failure keeps.
+  let ev: RetainedLifecycleEvidence | null = null;
+  for (const r of [okMk([HEA]), failedMk, failedMk]) ev = nextRetainedLifecycleEvidence(ev, "mk", r);
+  check("success → fail → fail sequence keeps hiding", hiddenFor("mk", failedMk, ev).has(HEA));
+  ev = nextRetainedLifecycleEvidence(ev, "mk", okMk([]));
+  check("legitimate resurfacing: a later healthy response with an empty list replaces evidence and un-hides", !hiddenFor("mk", okMk([]), ev).has(HEA));
+  check("after resurfacing a following failure does not re-hide", !hiddenFor("mk", failedMk, nextRetainedLifecycleEvidence(ev, "mk", failedMk)).has(HEA));
+
+  // park / date transitions
+  check("park change drops retained evidence", nextRetainedLifecycleEvidence(ev1, "epcot", failedMk) === null && activeRetainedEvidence(ev1, "epcot", NOW) === null);
+  check("park switch back after a failed epcot refresh does not resurrect mk evidence", nextRetainedLifecycleEvidence(nextRetainedLifecycleEvidence(ev1, "epcot", failedMk), "mk", failedMk) === null);
+  check("same resort-local day: evidence active", activeRetainedEvidence(ev1, "mk", new Date("2026-12-11T04:59:00Z")) === ev1); // 11:59 PM EST
+  check("resort-local midnight invalidates retained evidence", activeRetainedEvidence(ev1, "mk", new Date("2026-12-11T05:00:00Z")) === null);
+  check("day rollover with a failed refresh fails open (never stale evidence on a new day)", !hiddenFor("mk", failedMk, ev1, new Date("2026-12-11T05:30:00Z")).has(HEA));
+
+  // registry decisions preserved
+  const restoredEv = nextRetainedLifecycleEvidence(null, "disneyland", { parkId: "disneyland", resort: "DLR", localDate: "2026-12-10", error: null, entries: [], lifecycleAutoHidden: [], lifecycleRegistryRestored: ["Paint the Night"] } as unknown as ParkEntertainmentShowtimes);
+  const dlrFail = resolveShowtimesResponse("disneyland", null, NOW);
+  check("retained registryRestored keeps a restored registry show visible across a failure", !hiddenFor("disneyland" as never, dlrFail, restoredEv).has("Paint the Night") && hiddenFor("disneyland" as never, dlrFail, restoredEv).has("Wondrous Journeys"));
+  check("first load (no evidence) fails open for auto-hide but registry hides stand", getLifecycleHiddenNames("disneyland", undefined, null, undefined, undefined).has("Paint the Night"));
   return failures;
 }
