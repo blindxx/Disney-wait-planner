@@ -38,6 +38,19 @@
  *
  * Provider limitations are recorded in the registry `note`s.
  *
+ * Phase 14.5D — non-meet event offerings. The same registry also lists verified
+ * event-specific NON-meet records (`kind: "entertainment"`: dance parties,
+ * roaming/stage acts — provider SHOW records whose own names carry the party and
+ * that have no DWP catalog entry; curated party shows such as parades, fireworks
+ * and stage shows already reach Waits & Shows through the catalog + mapping and
+ * must never be registered here: no duplicates). Identity, date gating, windows,
+ * name guard, failure semantics and attribution are IDENTICAL to meets; they are
+ * returned separately as `offerings` and shown in their own "Party Entertainment"
+ * section so "Party Character Meets" keeps its meaning. Confirmed offerings whose
+ * provider record does not exist (out of season, or never published) live in
+ * `PENDING_EVENT_OFFERINGS` — evidence/next-season verification notes only, never
+ * rendered, never carrying a provider id.
+ *
  * DEV checks: `runDevEventExclusiveMeetCases()` (run manually from Node).
  */
 
@@ -47,7 +60,11 @@ import { MAX_OPERATING_INTERVAL_MS, PARTIAL_SHOWTIMES_NOTE } from "./entertainme
 import { QUEUE_TIMES_PARK_MAP } from "./liveWaitApi";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { addDaysToLocalDate, getResortLocalDate } from "./resortTime";
+import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
 import { SEASONAL_PROVIDER_ONLY_EVENTS, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
+import { getPartyNightEventIds, getSeasonalEvent } from "./seasonalEvents";
+import { normalizeParkHours, type ParkHours } from "./parkHours";
+import { resolveDwpEntertainmentFromThemeParksId } from "./themeParksEntertainmentMapping";
 import { isAllEntryConfirmedInactiveToday } from "./seasonalVisibility";
 import type { ThemeParksError, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 
@@ -63,8 +80,12 @@ export type EventExclusiveMeet = {
   providerName: string;
   /** Exact Queue-Times ride id + expected name for the same physical meet, when one exists. */
   queueTimes?: { rideId: number; name: string };
+  /** "meet" (default) → Party Character Meets; "entertainment" → Party Entertainment (Phase 14.5D). */
+  kind?: "meet" | "entertainment";
   note?: string;
 };
+
+export const isEventMeet = (m: { kind?: "meet" | "entertainment" }): boolean => (m.kind ?? "meet") === "meet";
 
 /**
  * Verified 2026-11-10 against ThemeParks.wiki park children/live and
@@ -89,7 +110,29 @@ export const EVENT_EXCLUSIVE_MEETS: EventExclusiveMeet[] = [
   {
     parkId: "hs", entityId: "ae7db7da-a3d9-443b-b4a6-d3c4a2b66121",
     providerName: "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights",
-    note: "No Queue-Times record (the Celebrity Spotlight row there is the ordinary Olaf meet, never substituted).",
+    queueTimes: { rideId: 15402, name: "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights" },
+    note: "Phase 14.5D: Queue-Times now publishes an event-specific row (id 15402, exact name verified 2026-11-17). The ordinary Olaf row at Celebrity Spotlight (6703) is never substituted.",
+  },
+  // ---- Phase 14.5D: non-meet event offerings (provider SHOW records, no DWP catalog entry; verified 2026-11-17) ----
+  {
+    parkId: "mk", entityId: "4514beed-faa9-4847-bc77-34f9c6b1f619", kind: "entertainment",
+    providerName: "Stitchmas! at Mickey's Very Merry Christmas Party",
+    note: "2026 Tomorrowland dance party (Cosmic Ray's Starlight Café per secondary coverage). Provider publishes a Special Ticketed Event window (7:00 PM–midnight) → shown as operating hours. No Queue-Times record.",
+  },
+  {
+    parkId: "mk", entityId: "6d45026b-0761-4b6d-8902-50905aa82da2", kind: "entertainment",
+    providerName: "Reindeer Wranglers at Mickey's Very Merry Christmas Party",
+    note: "Provider publishes discrete party-night performance times (start == end). Venue differs between secondary sources and is not asserted. No Queue-Times record.",
+  },
+  {
+    parkId: "hs", entityId: "71da34dd-a27e-4db5-aef3-f880ef939f98", kind: "entertainment",
+    providerName: "Pixar Disco at Disney Jollywood Nights",
+    note: "Pixar Plaza dance party (Disney Parks Blog 2026-10-06 names Pixar Disco). Provider times are published only when posted; none are invented.",
+  },
+  {
+    parkId: "hs", entityId: "74b46a33-ec93-4222-a3d5-d8372b1498e9", kind: "entertainment",
+    providerName: "Grand Avenue Dance Party at Disney Jollywood Nights",
+    note: "Party association rests on the provider record's own name (not named on the Disney Parks Blog lineup page); no schedule is invented.",
   },
 ];
 
@@ -98,7 +141,7 @@ export function getEventExclusiveMeetsForPark(parkId: ParkId): EventExclusiveMee
 }
 
 /**
- * Meets whose party is CONFIRMED on `localDate` (resort-local "YYYY-MM-DD").
+ * Registered offerings (meets AND, since 14.5D, non-meet entertainment) whose party is CONFIRMED on `localDate` (resort-local "YYYY-MM-DD").
  * Registry-only: provider data never decides visibility.
  */
 export function getConfirmedPartyMeets(parkId: ParkId, localDate: string, instant: Date = new Date()): EventExclusiveMeet[] {
@@ -106,6 +149,224 @@ export function getConfirmedPartyMeets(parkId: ParkId, localDate: string, instan
   return getEventExclusiveMeetsForPark(parkId).filter(
     (m) => getSeasonalProviderEntertainmentRank(parkId, m.entityId, { resort, date: localDate, parkId, instant }) === "party-night",
   );
+}
+
+// ============================================
+// PENDING / UNRESOLVED EVENT OFFERINGS (Phase 14.5D) — evidence ledger, NEVER rendered
+// ============================================
+
+export type PendingOfferingStatus =
+  /** Confirmed for the season, but its provider record is not published right now (out of season); awaits next-season UUID verification. */
+  | "pending_mapping"
+  /** Event is running/confirmed but the provider publishes no record for it (searched); cannot be surfaced without fabricating a card. */
+  | "no_provider_record"
+  /** Existence/return/replacement for the season is not confirmed by sufficient evidence. */
+  | "unresolved"
+  /** Confirmed but deliberately not listed (ordinary/umbrella/dining or other out-of-scope offering). */
+  | "excluded";
+
+export type PendingOfferingEvidence = {
+  label: string;
+  url: string;
+  /** "official" = Disney-published (Disney Parks Blog / disney.go.com); "secondary" = third-party coverage. */
+  tier: "official" | "secondary";
+  published?: string;
+};
+
+export type PendingEventOffering = {
+  /** `SEASONAL_EVENTS` id (seasonalEventData.ts). */
+  eventId: string;
+  parkId: ParkId;
+  seasonYear: number;
+  /** Name as the best evidence gives it (may differ from the eventual provider name). */
+  name: string;
+  category: "show" | "music" | "roaming" | "meet" | "dance-party" | "experience" | "dining-adjacent";
+  status: PendingOfferingStatus;
+  /** What is and is not established. */
+  reason: string;
+  evidence: PendingOfferingEvidence[];
+  /** What the maintainer must verify before this can become a registered offering (never auto-promoted). */
+  nextVerification: string;
+};
+// Deliberately no provider-id field: a record gets an `entityId` only in EVENT_EXCLUSIVE_MEETS, after the exact
+// park-parented ThemeParks SHOW record is observed and its identity verified. Historical UUIDs are never carried over.
+
+const DPB_WDW = "https://disneyparksblog.com/wdw";
+const MNSSHP_DPB: PendingOfferingEvidence = { label: "Disney Parks Blog — 2026 Mickey's Not-So-Scary Halloween Party Dates", url: `${DPB_WDW}/mickeys-not-so-scary-halloween-party-dates-teaser-treats/`, tier: "official", published: "2026-08-03" };
+const MVMCP_DPB: PendingOfferingEvidence = { label: "Disney Parks Blog — Mickey's Very Merry Christmas Party 2026 Dates and Festive Details", url: `${DPB_WDW}/mickeys-very-merry-christmas-party-dates-and-festive-details/`, tier: "official", published: "2026-10-06" };
+const JN_DPB: PendingOfferingEvidence = { label: "Disney Parks Blog — Disney Jollywood Nights dates, tickets and more", url: `${DPB_WDW}/disney-jollywood-nights-dates-tickets-and-more/`, tier: "official", published: "2026-10-06" };
+const NEXT_WDW_MAPPING = "When the provider republishes the event's SHOW records, find the exact park-parented record, confirm its name/identity against the official lineup, then register it (no historical UUID reuse without that check).";
+
+export const PENDING_EVENT_OFFERINGS: PendingEventOffering[] = [
+  // ── Mickey's Not-So-Scary Halloween Party (MK, 2026; out of season — provider records absent) ──
+  {
+    eventId: "mnsshp", parkId: "mk", seasonYear: 2026, name: "Captain Jack's Buccaneer Bash", category: "roaming", status: "pending_mapping",
+    reason: "New 2026 interactive pirate offering outside Tortuga Tavern, Adventureland (7 PM–midnight). Not named on the Aug 3 Disney Parks Blog page; the Disney description is relayed by secondary coverage only, so the exact official name/format needs confirmation. No provider record exists out of season.",
+    evidence: [
+      { label: "Disney Dining — Captain Jack's Buccaneer Bash debuts tonight", url: "https://www.disneydining.com/captain-jacks-buccaneer-bash-debuts-tonight-at-magic-kingdom-replacing-a-halloween-party-staple-el1/", tier: "secondary", published: "2026-08-07" },
+      { label: "BlogMickey — Captain Jack Sparrow headlines a new Not-So-Scary offering", url: "https://blogmickey.com/2026/06/captain-jack-sparrow-headlines-a-new-not-so-scary-offering/", tier: "secondary", published: "2026-06" },
+    ],
+    nextVerification: `Confirm the official name on Disney's 2027 event page (or Disney Parks Blog) and whether it returns. ${NEXT_WDW_MAPPING}`,
+  },
+  {
+    eventId: "mnsshp", parkId: "mk", seasonYear: 2026, name: "Rusty Cutlass (pirate band)", category: "music", status: "unresolved",
+    reason: "Performed in Adventureland at the party in 2023–2025 (secondary coverage). No source confirms a 2026 appearance; the 2026 Captain Jack's Buccaneer Bash mentions only an unnamed \"salty pirate band\" and no source states the band was replaced or is the same act. Do not assume it returned or was dropped; it is a third-party act whose confirmation may trail Disney's own announcements.",
+    evidence: [
+      { label: "WDWNT — Rusty Cutlass Pirate Band returns (2024)", url: "https://wdwnt.com/2024/08/rusty-cutlass-pirate-band-halloween-party-2024/", tier: "secondary", published: "2024-08" },
+      { label: "Disney Dining — Captain Jack's Buccaneer Bash (relationship to Rusty Cutlass not stated)", url: "https://www.disneydining.com/captain-jacks-buccaneer-bash-debuts-tonight-at-magic-kingdom-replacing-a-halloween-party-staple-el1/", tier: "secondary", published: "2026-08-07" },
+    ],
+    nextVerification: "Treat as historical until an official or first-hand 2027 source names the band; if it reappears, verify its provider record exactly and record the relationship to Captain Jack's Buccaneer Bash explicitly (replacement vs. coexistence).",
+  },
+  {
+    eventId: "mnsshp", parkId: "mk", seasonYear: 2026, name: "Stitch's Masquerade (dance party with Stitch, Lilo and Angel)", category: "dance-party", status: "pending_mapping",
+    reason: "New 2026 dance party at Rockettower Plaza Stage, Tomorrowland. The official Disney Parks Blog calls it \"Stitch's ever-changing dance party\" (no formal title); secondary coverage titles it \"A Masquerade with Stitch\" / Masquerade Party with Stitch. The provider name is unknown; no provider record exists out of season.",
+    evidence: [
+      MNSSHP_DPB,
+      { label: "WDWNT — New & returning entertainment confirmed for 2026 MNSSHP", url: "https://wdwnt.com/2026/04/entertainment-confirmed-2026-mickeys-not-so-scary-halloween-party/", tier: "secondary", published: "2026-04-28" },
+    ],
+    nextVerification: `Settle the official/provider title before registering. ${NEXT_WDW_MAPPING}`,
+  },
+  {
+    eventId: "mnsshp", parkId: "mk", seasonYear: 2026, name: "Cadaver Dans", category: "music", status: "pending_mapping",
+    reason: "Returning singing group (official DPB; image caption places them in Frontierland — venue not asserted in text).",
+    evidence: [MNSSHP_DPB], nextVerification: NEXT_WDW_MAPPING,
+  },
+  {
+    eventId: "mnsshp", parkId: "mk", seasonYear: 2026, name: "Roaming Headless Horseman, witches and Disney Villains", category: "roaming", status: "unresolved",
+    reason: "Official DPB describes street encounters (Headless Horseman, \"a witch or three\", Disney Villains \"new and returning\") without names, locations or times; providers typically do not publish roaming acts as records.",
+    evidence: [MNSSHP_DPB], nextVerification: "Only register a roaming act if the provider publishes an individually identifiable record with posted times/hours; otherwise leave it as official-lineup information only.",
+  },
+  {
+    eventId: "mnsshp", parkId: "mk", seasonYear: 2026, name: "Meet Jack Skellington and Sally (Halloween)", category: "meet", status: "pending_mapping",
+    reason: "Exclusive meet-and-greet at character stops (official DPB). No current provider record to revalidate (see EVENT_EXCLUSIVE_MEETS notes).",
+    evidence: [MNSSHP_DPB], nextVerification: `${NEXT_WDW_MAPPING} Also check for a distinct Queue-Times row (exact id + name).`,
+  },
+  // ── Oogie Boogie Bash (DCA, 2026; out of season) ──
+  {
+    eventId: "oogie-boogie-bash", parkId: "dca", seasonYear: 2026, name: "Villains Grove (Redwood Creek Challenge Trail)", category: "experience", status: "unresolved",
+    reason: "Walk-through villain-themed trail expected to return (Disney Tourist Blog, Dec 2025 pre-announcement) and described in later coverage; Disney's own 2026 page was not retrievable, so official confirmation, venue and hours are not established. Provider record unknown.",
+    evidence: [{ label: "Disney Tourist Blog — 2026 Oogie Boogie Bash dates & details", url: "https://www.disneytouristblog.com/2026-oogie-boogie-bash-halloween-party-dates-details/", tier: "secondary", published: "2025-12-02" }],
+    nextVerification: "Confirm on Disneyland's official 2027 Oogie Boogie Bash page; register only if the provider publishes an identifiable record.",
+  },
+  {
+    eventId: "oogie-boogie-bash", parkId: "dca", seasonYear: 2026, name: "Villain Treat Trails and villain/character meets (incl. Yzma debut)", category: "meet", status: "unresolved",
+    reason: "Trail-based villain encounters are described by secondary coverage (counts and rosters disagree between sources). Individual stationary meets are not established as provider-identifiable records.",
+    evidence: [{ label: "WDWinfo — Oogie Boogie Bash 2026: new parade, characters and more", url: "https://www.wdwinfo.com/news-stories/disneyland-news/oogie-boogie-bash-2026-new-parade-characters-and-more/", tier: "secondary" }],
+    nextVerification: "Use Disneyland's official roster; register only exact, individually identifiable provider/Queue-Times records (umbrella trail records are excluded like 'Character Greetings').",
+  },
+  {
+    eventId: "oogie-boogie-bash", parkId: "dca", seasonYear: 2026, name: "Frightfully Fun Parade", category: "show", status: "excluded",
+    reason: "Confirmed NOT part of the 2026 party (replaced by Madame Leota's Swinging Wake, already catalogued and mapped). Existing absence record in SEASONAL_ENTERTAINMENT_EVENTS applies; not discontinuation evidence for 2027+.",
+    evidence: [{ label: "WDWinfo — Oogie Boogie Bash 2026 (replacement of the parade)", url: "https://www.wdwinfo.com/news-stories/disneyland-news/oogie-boogie-bash-2026-new-parade-characters-and-more/", tier: "secondary" }],
+    nextVerification: "Re-check the 2027 lineup before changing the 2026 absence record (it is scoped to season 2026 only).",
+  },
+  // ── Mickey's Very Merry Christmas Party (MK, 2026; in season, no provider record found) ──
+  {
+    eventId: "mvmcp", parkId: "mk", seasonYear: 2026, name: "Dance Parties in the Park", category: "dance-party", status: "no_provider_record",
+    reason: "Generic official listing (holiday friends and event DJs in various locations). The provider publishes no matching individual record (searched 2026-11-17); Stitchmas! (registered) is the only named dance party record.",
+    evidence: [MVMCP_DPB], nextVerification: "Re-scan the MK provider children during the season; register any new exact party-named SHOW record.",
+  },
+  {
+    eventId: "mvmcp", parkId: "mk", seasonYear: 2026, name: "Santa's Christmas Carnival (Storybook Circus)", category: "experience", status: "no_provider_record",
+    reason: "Official DPB lists a Santa meet with crafts and characters near Dumbo/Barnstormer. No provider SHOW record found (the \"Join Santa Claus\" record is registered separately).",
+    evidence: [MVMCP_DPB], nextVerification: "Check provider children for a distinct Carnival record; confirm it is not the already-registered Join Santa Claus record before adding.",
+  },
+  {
+    eventId: "mvmcp", parkId: "mk", seasonYear: 2026, name: "Party character greetings (Anna & Elsa at Princess Fairytale Hall; Mickey & Minnie holiday attire at Town Square Theater)", category: "meet", status: "excluded",
+    reason: "Official DPB lists them as party greetings, but the provider only publishes the umbrella \"Character Greetings at …\" record (never registered) and the ordinary Princess Fairytale Hall / Town Square meets exist outside the party.",
+    evidence: [MVMCP_DPB], nextVerification: "Register only if an event-specific, individually identifiable provider record appears.",
+  },
+  // ── Disney Jollywood Nights (HS, 2026; in season) ──
+  {
+    eventId: "jollywood-nights", parkId: "hs", seasonYear: 2026, name: "Twilight Soirée at the Tip Top Club (live holiday music)", category: "music", status: "no_provider_record",
+    reason: "Official DPB: 1930s-style celebration with live holiday music in the Hollywood Tower Hotel courtyard. No matching provider record in HS children (2026-11-17).",
+    evidence: [JN_DPB], nextVerification: "Re-scan HS children during the season for an exact party-named record.",
+  },
+  {
+    eventId: "jollywood-nights", parkId: "hs", seasonYear: 2026, name: "Checkin' It Twice Lounge (live DJ, Animation Courtyard)", category: "dining-adjacent", status: "no_provider_record",
+    reason: "New beverage lounge with a live DJ (official DPB). Primarily a food/beverage venue; no provider record in HS children.",
+    evidence: [JN_DPB], nextVerification: "Re-scan HS children; classify as entertainment only if the provider publishes it as a SHOW with times.",
+  },
+  {
+    eventId: "jollywood-nights", parkId: "hs", seasonYear: 2026, name: "Jazzy Holidays at The Hollywood Brown Derby", category: "dining-adjacent", status: "excluded",
+    reason: "Reservation-based adult dining with live music (official DPB) — a dining offering, not Waits & Shows entertainment.",
+    evidence: [JN_DPB], nextVerification: "None unless the provider publishes it as a SHOW with posted times.",
+  },
+  {
+    eventId: "jollywood-nights", parkId: "hs", seasonYear: 2026, name: "Event character greetings (Phineas & Ferb, Powerline, Rescue Rangers, Santa Stitch, Mandalorian & Grogu, Chewbacca, Lotso, Partysaurus Rex, Bing Bong, Duffy, Scrooge, etc.)", category: "meet", status: "excluded",
+    reason: "Official DPB lists characters without locations/times. The provider publishes only the umbrella \"Character Greetings at Disney Jollywood Nights\" record (never registered) plus the individually identifiable Stitch meet (registered).",
+    evidence: [JN_DPB], nextVerification: "Register another meet only if the provider publishes an exact, event-named, individually identifiable record.",
+  },
+];
+
+export function getPendingEventOfferings(eventId?: string): PendingEventOffering[] {
+  return eventId ? PENDING_EVENT_OFFERINGS.filter((o) => o.eventId === eventId) : PENDING_EVENT_OFFERINGS;
+}
+
+// ============================================
+// SECTION ORDER (PR #209 follow-up) — pure, client-safe
+// ============================================
+
+export type PartySectionOrder = "regular-first" | "party-first";
+
+export interface PartySectionOrderResult {
+  order: PartySectionOrder;
+  /** Why this order (diagnostic/tests): `before_start` / `at_or_after_start` apply only on confirmed party dates. */
+  reason: "no_party" | "start_unavailable" | "start_ambiguous" | "before_start" | "at_or_after_start";
+}
+
+/**
+ * Provider schedule window that marks a ticketed party's own hours. The provider
+ * labels it with this exact description (same label `interpretMeetShowtimes`
+ * keys on); Early Entry and other TICKETED_EVENT windows are different
+ * descriptions and never count.
+ */
+function partyStartMs(parkHours: ParkHours | null, parkId: ParkId, localDate: string): number | "ambiguous" | null {
+  if (!parkHours || parkHours.parkId !== parkId || parkHours.localDate !== localDate) return null;
+  const windows = parkHours.additional.filter(
+    (w) => w.type === "TICKETED_EVENT" && (w.description ?? "").trim() === SPECIAL_TICKETED_EVENT && w.date === localDate,
+  );
+  if (windows.length === 0) return null;
+  const starts = new Set<number>();
+  for (const w of windows) {
+    const open = Date.parse(w.openingTime);
+    const close = Date.parse(w.closingTime);
+    // A window with an unparseable start, or an end that is not after the start, is not a trustworthy event window.
+    if (!Number.isFinite(open) || !Number.isFinite(close) || close <= open) return "ambiguous";
+    starts.add(open);
+  }
+  return starts.size === 1 ? [...starts][0] : "ambiguous";
+}
+
+/**
+ * Waits & Shows section order. Only a CONFIRMED ticketed party for this park on
+ * the resort-local date (registry, `getPartyNightEventIds`) can reorder; the
+ * start is the provider's own "Special Ticketed Event" window for that date
+ * (park-hours data the page already holds) — no hardcoded hours. At/after the
+ * start: Party Entertainment, Party Character Meets, Entertainment. Before the
+ * start, on non-party dates, or when the start is missing/ambiguous: the
+ * deterministic regular-first order (Entertainment, Party Entertainment, Party
+ * Character Meets). Ordering never hides or alters any section.
+ */
+export function getPartySectionOrder(parkId: ParkId, parkHours: ParkHours | null, instant: Date): PartySectionOrderResult {
+  const resort = PARK_TO_RESORT[parkId] as ResortId;
+  const localDate = getResortLocalDate(resort, instant);
+  if (getPartyNightEventIds(parkId, localDate).length === 0) return { order: "regular-first", reason: "no_party" };
+  const start = partyStartMs(parkHours, parkId, localDate);
+  if (start === null) return { order: "regular-first", reason: "start_unavailable" };
+  if (start === "ambiguous") return { order: "regular-first", reason: "start_ambiguous" };
+  return instant.getTime() >= start
+    ? { order: "party-first", reason: "at_or_after_start" }
+    : { order: "regular-first", reason: "before_start" };
+}
+
+export type EntertainmentSectionKey = "party-entertainment" | "party-meets" | "entertainment";
+
+/** The three Waits & Shows entertainment sections in render order — always all three, each exactly once (nothing is hidden by ordering). */
+export function entertainmentSectionKeys(order: PartySectionOrder): EntertainmentSectionKey[] {
+  return order === "party-first"
+    ? ["party-entertainment", "party-meets", "entertainment"]
+    : ["entertainment", "party-entertainment", "party-meets"];
 }
 
 // ============================================
@@ -143,7 +404,13 @@ export interface ParkEventMeets {
   error: ThemeParksError | null;
   /** ThemeParks payload is a stale-if-error copy. */
   stale: boolean;
+  /** Verified character meets (Party Character Meets). */
   entries: EventMeetEntry[];
+  /** Phase 14.5D: verified non-meet event offerings (Party Entertainment). */
+  offerings: EventMeetEntry[];
+  /** Registered meets / non-meet offerings CONFIRMED for this date (registry) — gate each section independently of provider results. */
+  confirmedMeets: number;
+  confirmedOfferings: number;
 }
 
 export type QueueTimesFetch =
@@ -310,7 +577,10 @@ export function buildParkEventMeets(
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const localDate = getResortLocalDate(resort, instant);
   const confirmed = getConfirmedPartyMeets(parkId, localDate, instant);
-  const base: ParkEventMeets = { parkId, resort, localDate, partyDate: confirmed.length > 0, error: null, stale: false, entries: [] };
+  const base: ParkEventMeets = {
+    parkId, resort, localDate, partyDate: confirmed.length > 0, error: null, stale: false, entries: [], offerings: [],
+    confirmedMeets: confirmed.filter(isEventMeet).length, confirmedOfferings: confirmed.filter((m) => !isEventMeet(m)).length,
+  };
   if (confirmed.length === 0 || !tp) return base;
   if (!tp.ok) return { ...base, error: tp.error };
 
@@ -319,6 +589,7 @@ export function buildParkEventMeets(
   const payloadCurrent = all.fetchedLocalDate === localDate;
   const seen = new Set<string>();
   const entries: EventMeetEntry[] = [];
+  const offerings: EventMeetEntry[] = [];
   for (const meet of confirmed) {
     if (seen.has(meet.entityId)) continue; // one card per physical meet
     const schedule = all.entries.find((e) => e.id === `provider:${meet.entityId}`);
@@ -329,7 +600,7 @@ export function buildParkEventMeets(
     // other meets are unaffected.
     if (!meetNameMatches(meet.providerName, schedule.name)) continue;
     seen.add(meet.entityId);
-    entries.push({
+    (isEventMeet(meet) ? entries : offerings).push({
       id: `event-meet:${parkId}:${meet.entityId}`,
       parkId,
       entityId: meet.entityId,
@@ -339,7 +610,7 @@ export function buildParkEventMeets(
       schedule,
     });
   }
-  return { ...base, stale: all.stale, entries };
+  return { ...base, stale: all.stale, entries, offerings };
 }
 
 // ============================================
@@ -388,21 +659,39 @@ export const EVENT_MEETS_UNAVAILABLE_MESSAGE = "Party character meets are unavai
 
 /** Whether the section shows at all (confirmed party date AND something to say). */
 export function eventMeetsSectionState(data: ParkEventMeets | null): "hidden" | "list" | "unavailable" {
-  if (!data || !data.partyDate) return "hidden";
+  if (!data || !data.partyDate || data.confirmedMeets === 0) return "hidden";
   if (data.error) return "unavailable";
   return data.entries.length > 0 ? "list" : "hidden";
 }
 
+/** Section copy when a party is confirmed but ThemeParks identity could not be verified (Party Entertainment). */
+export const EVENT_OFFERINGS_UNAVAILABLE_MESSAGE = "Party entertainment is unavailable right now.";
+
+/** Party Entertainment section (Phase 14.5D): same gating/failure semantics as the meets section, for non-meet offerings. */
+export function eventOfferingsSectionState(data: ParkEventMeets | null): "hidden" | "list" | "unavailable" {
+  if (!data || !data.partyDate || data.confirmedOfferings === 0) return "hidden";
+  if (data.error) return "unavailable";
+  return data.offerings.length > 0 ? "list" : "hidden";
+}
+
 /** Whether the displayed list shows any Queue-Times-derived data (a live wait or Queue-Times open/closed status) — attribution is owed. */
 export function eventMeetsPresentQueueTimes(data: ParkEventMeets | null): boolean {
-  return eventMeetsSectionState(data) === "list" && !!data && data.entries.some((e) => e.wait.state === "live" || e.wait.state === "closed");
+  if (!data) return false;
+  const shown = [...(eventMeetsSectionState(data) === "list" ? data.entries : []), ...(eventOfferingsSectionState(data) === "list" ? data.offerings : [])];
+  return shown.some((e) => e.wait.state === "live" || e.wait.state === "closed");
 }
 
 /** Browser-side: fetched body → state; failure/wrong shape degrades to hidden (nothing retained or fabricated). */
 export function resolveEventMeetsResponse(parkId: ParkId, body: unknown): ParkEventMeets | null {
   const d = body as Partial<ParkEventMeets> | null;
   if (!d || typeof d !== "object" || d.parkId !== parkId || !Array.isArray(d.entries) || typeof d.localDate !== "string" || typeof d.partyDate !== "boolean") return null;
-  return d as ParkEventMeets;
+  // Older/partial bodies (pre-14.5D) lack the offering fields: treat as meets-only, never as an offerings failure.
+  return {
+    ...(d as ParkEventMeets),
+    offerings: Array.isArray(d.offerings) ? d.offerings : [],
+    confirmedMeets: typeof d.confirmedMeets === "number" ? d.confirmedMeets : (d.partyDate ? 1 : 0),
+    confirmedOfferings: typeof d.confirmedOfferings === "number" ? d.confirmedOfferings : 0,
+  };
 }
 
 /** Data computed for a previous resort-local day, or another park, is never shown as today's. */
@@ -465,7 +754,7 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
     !EVENT_EXCLUSIVE_MEETS.some((m) => /character greetings/i.test(m.providerName) || m.entityId === GREETINGS_ID || m.queueTimes?.rideId === 146) &&
     EVENT_EXCLUSIVE_MEETS.every((m) => /christmas party|jollywood nights/i.test(m.providerName)) },
   { label: "registry: verified candidates are exactly Santa Jack & Sally, Join Santa Claus (MK), Stitch (HS)", ok: () =>
-    EVENT_EXCLUSIVE_MEETS.map((m) => `${m.parkId}:${m.entityId}`).sort().join() === [`mk:${JS_ID}`, `mk:${SANTA_ID}`, `hs:${STITCH_ID}`].sort().join() },
+    EVENT_EXCLUSIVE_MEETS.filter(isEventMeet).map((m) => `${m.parkId}:${m.entityId}`).sort().join() === [`mk:${JS_ID}`, `mk:${SANTA_ID}`, `hs:${STITCH_ID}`].sort().join() },
   // Confirmed party vs non-party dates; entire-day visibility
   { label: "party date, hours before party (8 AM): meets listed", ok: () => build(MVMCP_MORNING).entries.map((e) => e.entityId).sort().join() === [JS_ID, SANTA_ID].sort().join() },
   { label: "party date evening: still listed", ok: () => build(MVMCP_EVENING, tpOk(MK, mkEntries("OPERATING")), null).entries.length === 2 },
@@ -719,6 +1008,251 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
       { label: "14.4.1 provider failure / stale handling unchanged: failure → unavailable section; stale payload flagged", ok: () =>
         eventMeetsSectionState(buildParkEventMeets("mk", { ok: false, error: { kind: "network", message: "n" } }, null, MVMCP_MORNING)) === "unavailable" },
     ];
+  })(),
+  // ── Phase 14.5D: non-meet event offerings, pending ledger ──
+  ...(() => {
+    const STITCHMAS = "4514beed-faa9-4847-bc77-34f9c6b1f619";
+    const WRANGLERS = "6d45026b-0761-4b6d-8902-50905aa82da2";
+    const DISCO = "71da34dd-a27e-4db5-aef3-f880ef939f98";
+    const GRAND = "74b46a33-ec93-4222-a3d5-d8372b1498e9";
+    const STITCHMAS_NAME = "Stitchmas! at Mickey's Very Merry Christmas Party";
+    const WRANGLERS_NAME = "Reindeer Wranglers at Mickey's Very Merry Christmas Party";
+    const DISCO_NAME = "Pixar Disco at Disney Jollywood Nights";
+    const GRAND_NAME = "Grand Avenue Dance Party at Disney Jollywood Nights";
+    const mkAll = (status = "OPERATING", extra: ReturnType<typeof tpEntry>[] = []) => [
+      ...mkEntries(status),
+      tpEntry(STITCHMAS, STITCHMAS_NAME, MK, status, [{ type: "Special Ticketed Event", startTime: "2026-11-12T19:00:00-05:00", endTime: "2026-11-13T00:00:00-05:00" }]),
+      tpEntry(WRANGLERS, WRANGLERS_NAME, MK, status, [
+        { type: "Special Ticketed Event", startTime: "2026-11-12T19:15:00-05:00", endTime: "2026-11-12T19:15:00-05:00" },
+        { type: "Special Ticketed Event", startTime: "2026-11-12T20:05:00-05:00", endTime: "2026-11-12T20:05:00-05:00" },
+      ]),
+      ...extra,
+    ];
+    const hsAll = (status = "CLOSED") => [
+      tpEntry(STITCH_ID, "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", HS, status),
+      tpEntry(DISCO, DISCO_NAME, HS, status),
+      tpEntry(GRAND, GRAND_NAME, HS, status),
+      tpEntry("dc332105-e524-4dca-9a47-df672f8472fd", "Character Greetings at Disney Jollywood Nights", HS, status),
+    ];
+    const offIds = (r: ParkEventMeets) => r.offerings.map((e) => e.entityId).sort().join();
+    const registered = EVENT_EXCLUSIVE_MEETS.filter((m) => !isEventMeet(m));
+    return [
+      { label: "14.5D registry: non-meet offerings are exactly Stitchmas!, Reindeer Wranglers (MK) and Pixar Disco, Grand Avenue Dance Party (HS)", ok: () =>
+        registered.map((m) => `${m.parkId}:${m.entityId}`).sort().join() === [`mk:${STITCHMAS}`, `mk:${WRANGLERS}`, `hs:${DISCO}`, `hs:${GRAND}`].sort().join() },
+      { label: "14.5D no duplicates: no registered record is also a curated/mapped Entertainment entry (parade, fireworks, stage shows stay curated-only)", ok: () =>
+        EVENT_EXCLUSIVE_MEETS.every((m) => resolveDwpEntertainmentFromThemeParksId(m.entityId) === null) },
+      { label: "14.5D no duplicates: no registered provider name equals a curated catalog name at its park", ok: () =>
+        EVENT_EXCLUSIVE_MEETS.every((m) => !ENTERTAINMENT_PLACES.some((p) => p.parkId === m.parkId && meetNameMatches(p.name, m.providerName))) },
+      { label: "14.5D MVMCP party night: Stitchmas! and Reindeer Wranglers listed as Party Entertainment, meets stay in Party Character Meets (no cross-listing)", ok: () => {
+        const r = build(MVMCP_MORNING, tpOk(MK, mkAll()), null);
+        return offIds(r) === [STITCHMAS, WRANGLERS].sort().join() && r.entries.map((e) => e.entityId).sort().join() === [JS_ID, SANTA_ID].sort().join() &&
+          r.confirmedMeets === 2 && r.confirmedOfferings === 2 && eventOfferingsSectionState(r) === "list" && eventMeetsSectionState(r) === "list";
+      } },
+      { label: "14.5D Stitchmas! window shows as operating hours; Reindeer Wranglers shows its posted performance times only", ok: () => {
+        const r = build(MVMCP_MORNING, tpOk(MK, mkAll()), null);
+        const st = describeEventMeet(r.offerings.find((e) => e.entityId === STITCHMAS)!, MVMCP_MORNING).scheduleText;
+        const rw = describeEventMeet(r.offerings.find((e) => e.entityId === WRANGLERS)!, MVMCP_MORNING).scheduleText;
+        return st === "Operating hours: 7:00 PM–12:00 AM" && !!rw && rw.includes("7:15 PM") && rw.includes("8:05 PM") && !/Operating hours/.test(rw);
+      } },
+      { label: "14.5D no invented times/waits: offerings without posted times say none posted; no Queue-Times wait for them", ok: () => {
+        const r = build(JN_MORNING, tpOk(HS, hsAll()), { ok: true, body: qtBody([{ id: 6703, name: "Meet Olaf at Celebrity Spotlight", is_open: true, wait_time: 30, last_updated: new Date(JN_MORNING.getTime() - 60_000).toISOString() }]) }, "hs");
+        const d = r.offerings.find((e) => e.entityId === DISCO)!;
+        const v = describeEventMeet(d, JN_MORNING);
+        return v.scheduleText === "No showtimes posted" && v.waitText === null && v.waitNote === null && d.wait.state === "unavailable";
+      } },
+      { label: "14.5D Jollywood night (Nov 14): Pixar Disco + Grand Avenue Dance Party listed; umbrella Character Greetings never; Stitch stays a meet", ok: () => {
+        const r = build(JN_MORNING, tpOk(HS, hsAll()), null, "hs");
+        return offIds(r) === [DISCO, GRAND].sort().join() && r.entries.map((e) => e.entityId).join() === STITCH_ID &&
+          !r.offerings.concat(r.entries).some((e) => e.entityId === "dc332105-e524-4dca-9a47-df672f8472fd");
+      } },
+      { label: "14.5D Stitch meet: exact Queue-Times row 15402 supplies its wait; ordinary Olaf row (6703) is never substituted", ok: () => {
+        const row = (id: number, name: string, wait: number) => ({ id, name, is_open: true, wait_time: wait, last_updated: new Date(JN_MORNING.getTime() - 60_000).toISOString() });
+        const live = build(JN_MORNING, tpOk(HS, hsAll("OPERATING")), { ok: true, body: qtBody([row(6703, "Meet Olaf at Celebrity Spotlight", 30), row(15402, "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", 15)]) }, "hs").entries[0];
+        const olafOnly = build(JN_MORNING, tpOk(HS, hsAll("OPERATING")), { ok: true, body: qtBody([row(6703, "Meet Olaf at Celebrity Spotlight", 30)]) }, "hs").entries[0];
+        const renamed = build(JN_MORNING, tpOk(HS, hsAll("OPERATING")), { ok: true, body: qtBody([row(15402, "Meet Olaf at Celebrity Spotlight", 30)]) }, "hs").entries[0];
+        return live.wait.state === "live" && describeEventMeet(live, JN_MORNING).waitText === "Wait: 15 min" &&
+          olafOnly.wait.state === "unavailable" && describeEventMeet(olafOnly, JN_MORNING).waitText === null &&
+          renamed.wait.state === "unavailable" && describeEventMeet(renamed, JN_MORNING).waitText === null;
+      } },
+      { label: "14.5D non-party dates in season (Nov 10 MVMCP-off, Nov 13 Jollywood-off): no offerings, nothing fetched", ok: () => {
+        const a = build(NON_PARTY, tpOk(MK, mkAll()), null);
+        const b = build(at("2026-11-13T15:00:00Z"), tpOk(HS, hsAll()), null, "hs");
+        return !a.partyDate && a.offerings.length === 0 && eventOfferingsSectionState(a) === "hidden" && !b.partyDate && b.offerings.length === 0 && eventOfferingsSectionState(b) === "hidden" &&
+          buildParkEventMeets("mk", null, null, NON_PARTY).offerings.length === 0;
+      } },
+      { label: "14.5D season boundaries: MVMCP first night (Nov 8) listed, day before (Nov 7) not; last night (Dec 22) listed, Dec 23 not", ok: () => {
+        const n = (iso: string) => build(at(iso), tpOk(MK, mkAll()), null).offerings.length;
+        return n("2026-11-08T15:00:00Z") === 2 && n("2026-11-07T15:00:00Z") === 0 && n("2026-12-22T15:00:00Z") === 2 && n("2026-12-23T15:00:00Z") === 0;
+      } },
+      { label: "14.5D out-of-season events (MNSSHP Aug–Oct, OBB) and unannounced 2027: no offerings even when the provider still publishes records", ok: () => {
+        const mnsshp = build(at("2026-10-15T15:00:00Z"), tpOk(MK, mkAll()), null);
+        const next = build(at("2027-11-12T15:00:00Z"), tpOk(MK, mkAll()), null);
+        const dca = buildParkEventMeets("dca", tpOk("x", []), null, at("2026-10-15T20:00:00Z"));
+        return !mnsshp.partyDate && mnsshp.offerings.length === 0 && !next.partyDate && next.offerings.length === 0 && !dca.partyDate && dca.offerings.length === 0 && dca.confirmedOfferings === 0;
+      } },
+      { label: "14.5D cross-park isolation: MK offerings never on HS and vice versa; parks with no registered events stay empty", ok: () => {
+        const hsOnMk = build(MVMCP_MORNING, tpOk(HS, [...hsAll(), tpEntry(STITCHMAS, STITCHMAS_NAME, HS, "OPERATING")]), null, "hs");
+        const mkOnJn = build(JN_MORNING, tpOk(MK, mkAll()), null, "mk");
+        return hsOnMk.offerings.length === 0 && mkOnJn.offerings.length === 0 &&
+          (["epcot", "ak", "disneyland", "dca"] as ParkId[]).every((p) => { const r = buildParkEventMeets(p, tpOk(MK, mkAll()), null, MVMCP_MORNING); return !r.partyDate && r.offerings.length === 0; });
+      } },
+      { label: "14.5D provider failure on a party date: offerings section is 'unavailable' (not absence), meets section too; no cards", ok: () => {
+        const r = buildParkEventMeets("mk", { ok: false, error: { kind: "timeout", message: "t" } }, null, MVMCP_MORNING);
+        return eventOfferingsSectionState(r) === "unavailable" && eventMeetsSectionState(r) === "unavailable" && r.offerings.length === 0 && r.entries.length === 0;
+      } },
+      { label: "14.5D absence (record not in the live payload) lists nothing and is not an error; present records still listed", ok: () => {
+        const r = build(MVMCP_MORNING, tpOk(MK, mkEntries()), null);
+        return r.offerings.length === 0 && r.error === null && eventOfferingsSectionState(r) === "hidden" && r.entries.length === 2;
+      } },
+      { label: "14.5D mapping change: a registered UUID whose name changed (different offering) is omitted, others unaffected", ok: () => {
+        const changed = mkAll().map((e) => (e.entityId === STITCHMAS ? { ...e, name: "Jingle Jam at Mickey's Very Merry Christmas Party" } : e));
+        const r = build(MVMCP_MORNING, tpOk(MK, changed), null);
+        return offIds(r) === WRANGLERS;
+      } },
+      { label: "14.5D no fuzzy matching: an unregistered provider record with a similar/party name is never listed", ok: () => {
+        const sneaky = mkAll("OPERATING", [
+          tpEntry("11111111-2222-4333-8444-555555555555", "Stitchmas! at Mickey's Very Merry Christmas Party", MK, "OPERATING"),
+          tpEntry("11111111-2222-4333-8444-666666666666", "Holiday Dance Party at Mickey's Very Merry Christmas Party", MK, "OPERATING"),
+        ]);
+        return offIds(build(MVMCP_MORNING, tpOk(MK, sneaky), null)) === [STITCHMAS, WRANGLERS].sort().join();
+      } },
+      { label: "14.5D no duplicate cards across sections/ids, and curated party shows (Merriest, parade, fireworks) never appear here", ok: () => {
+        const curated = [
+          tpEntry("767b8357-ce52-4e09-810f-30ee81f8136c", "Mickey's Most Merriest Celebration at Mickey's Very Merry Christmas Party", MK, "OPERATING"),
+          tpEntry("bb28947d-a747-44f0-ac71-1fa8188f4cee", "Minnie's Wonderful Christmastime Fireworks at Mickey's Very Merry Christmas Party", MK, "OPERATING"),
+        ];
+        const r = build(MVMCP_MORNING, tpOk(MK, mkAll("OPERATING", [...curated, ...mkAll()])), null);
+        const ids = [...r.entries, ...r.offerings].map((e) => e.id);
+        return new Set(ids).size === ids.length && !ids.some((i) => /767b8357|bb28947d/.test(i));
+      } },
+      { label: "14.5D registered offerings keep the party gating independent of provider status (CLOSED/OPERATING both listed all day)", ok: () =>
+        build(MVMCP_MORNING, tpOk(MK, mkAll("CLOSED")), null).offerings.length === 2 && build(MVMCP_EVENING, tpOk(MK, mkAll("OPERATING")), null).offerings.length === 2 },
+      { label: "14.5D normal-day exclusions unchanged: offerings are never visible/hidden via the curated or provider-only seasonal rules (party-night rank only)", ok: () =>
+        EVENT_EXCLUSIVE_MEETS.every((m) => getSeasonalProviderEntertainmentRank(m.parkId, m.entityId, { resort: PARK_TO_RESORT[m.parkId] as ResortId, date: "2026-11-10", parkId: m.parkId, instant: NON_PARTY }) !== "party-night") },
+      { label: "14.5D response compat: pre-14.5D body (no offerings fields) resolves as meets-only; offerings section hidden; unavailable state stays meets-only", ok: () => {
+        const old = { parkId: "mk", resort: "WDW", localDate: "2026-11-12", partyDate: true, error: null, stale: false, entries: [] };
+        const r = resolveEventMeetsResponse("mk", old)!;
+        const failed = resolveEventMeetsResponse("mk", { ...old, error: { kind: "timeout", message: "t" } })!;
+        return r.offerings.length === 0 && eventOfferingsSectionState(r) === "hidden" && eventOfferingsSectionState(failed) === "hidden" && eventMeetsSectionState(failed) === "unavailable";
+      } },
+      { label: "14.5D attribution: Queue-Times attribution counts offerings' shown data only when present", ok: () => {
+        const r = build(JN_MORNING, tpOk(HS, hsAll("OPERATING")), { ok: true, body: qtBody([{ id: 15402, name: "Meet Stitch at Celebrity Spotlight at Disney Jollywood Nights", is_open: true, wait_time: 5, last_updated: new Date(JN_MORNING.getTime() - 60_000).toISOString() }]) }, "hs");
+        const none = build(MVMCP_MORNING, tpOk(MK, mkAll()), null);
+        return eventMeetsPresentQueueTimes(r) && !eventMeetsPresentQueueTimes(none);
+      } },
+      // Pending ledger
+      { label: "14.5D pending ledger: every record references a registered event and one of its parks, with evidence and next-verification text", ok: () =>
+        PENDING_EVENT_OFFERINGS.every((o) => { const e = getSeasonalEvent(o.eventId); return !!e && e.parkIds.includes(o.parkId) && o.evidence.length > 0 && o.reason.trim() !== "" && o.nextVerification.trim() !== ""; }) },
+      { label: "14.5D pending ledger: never carries provider ids and is never rendered (no UUID-shaped field/text, absent from every built result)", ok: () => {
+        const uuid = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+        const ledgerClean = PENDING_EVENT_OFFERINGS.every((o) => !("entityId" in o) && !uuid.test(JSON.stringify(o)));
+        const r = build(MVMCP_MORNING, tpOk(MK, mkAll("OPERATING", [tpEntry("99999999-aaaa-4bbb-8ccc-dddddddddddd", "Santa's Christmas Carnival", MK, "OPERATING")])), null);
+        return ledgerClean && ![...r.entries, ...r.offerings].some((e) => /carnival/i.test(e.name));
+      } },
+      { label: "14.5D pending ledger: evidence is tiered honestly — 'official' only for Disney-owned domains, https URLs, secondary otherwise", ok: () =>
+        PENDING_EVENT_OFFERINGS.every((o) => o.evidence.every((ev) => /^https:\/\//.test(ev.url) &&
+          (ev.tier === "official" ? /^https:\/\/(disneyparksblog\.com|[a-z.]*disney\.go\.com)\//.test(ev.url) : ev.tier === "secondary"))) },
+      { label: "14.5D pending ledger: unique (event, park, season, name); mandatory cases present with the right status (Captain Jack's, Rusty Cutlass unresolved, Stitch's Masquerade, MVMCP/Jollywood gaps)", ok: () => {
+        const keys = PENDING_EVENT_OFFERINGS.map((o) => `${o.eventId}|${o.parkId}|${o.seasonYear}|${o.name}`);
+        const by = (re: RegExp) => PENDING_EVENT_OFFERINGS.find((o) => re.test(o.name));
+        return new Set(keys).size === keys.length &&
+          by(/Captain Jack/)?.status === "pending_mapping" && by(/Rusty Cutlass/)?.status === "unresolved" && by(/Stitch's Masquerade/)?.status === "pending_mapping" &&
+          getPendingEventOfferings("mvmcp").length > 0 && getPendingEventOfferings("jollywood-nights").length > 0 && getPendingEventOfferings("oogie-boogie-bash").length > 0;
+      } },
+      { label: "14.5D pending ledger: out-of-season pending items are not discontinuation evidence (no 'discontinued' status exists) and Rusty Cutlass makes no replacement claim", ok: () =>
+        PENDING_EVENT_OFFERINGS.every((o) => (["pending_mapping", "no_provider_record", "unresolved", "excluded"] as string[]).includes(o.status)) &&
+        !/was replaced by|replaced by Captain/i.test(PENDING_EVENT_OFFERINGS.find((o) => /Rusty Cutlass/.test(o.name))!.reason) },
+    ] as DevEventMeetCase[];
+  })(),
+  // ── PR #209 follow-up: dynamic section order ──
+  ...(() => {
+    type SE = Parameters<typeof normalizeParkHours>[1]["primary"];
+    const sched = (parkId: ParkId, entries: { date: string; type: string; description: string | null; openingTime: string; closingTime: string }[], tz: string): SE =>
+      ({ ok: true, data: { entityId: "x", name: "Park", timeZone: tz, entries: entries.map((e) => ({ ...e, lastUpdated: null })), parks: [], droppedEntries: 0 }, meta: { origin: "network", fetchedAt: 0, etag: null } }) as SE;
+    const ev = (date: string, open: string, close: string, desc: string | null = "Special Ticketed Event") =>
+      ({ date, type: "TICKETED_EVENT", description: desc, openingTime: open, closingTime: close });
+    const opw = (date: string, open: string, close: string) => ({ date, type: "OPERATING", description: null, openingTime: open, closingTime: close });
+    const hoursAt = (parkId: ParkId, when: Date, entries: Parameters<typeof sched>[1], tz = parkId === "disneyland" || parkId === "dca" ? "America/Los_Angeles" : "America/New_York") =>
+      normalizeParkHours(parkId, { primary: sched(parkId, entries, tz) }, when);
+    const ord = (parkId: ParkId, h: ParkHours | null, when: Date) => getPartySectionOrder(parkId, h, when);
+    const T = (iso: string) => new Date(iso);
+    // MVMCP Nov 17 (EST): 7:00 PM event window straight from the provider schedule shape observed 2026-11-17.
+    const mvmcpEntries = [ev("2026-11-17", "2026-11-17T08:30:00-05:00", "2026-11-17T09:00:00-05:00", "Early Entry"), opw("2026-11-17", "2026-11-17T09:00:00-05:00", "2026-11-17T18:00:00-05:00"), ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")];
+    const hMk = (when: Date, entries = mvmcpEntries) => hoursAt("mk", when, entries);
+    return [
+      { label: "14.5D order MVMCP Nov 17: regular-first until the 7:00 PM start, party-first at 7:00:00 PM and after (resort-local)", ok: () => {
+        const at = (iso: string) => ord("mk", hMk(T(iso)), T(iso));
+        return at("2026-11-17T14:00:00Z").order === "regular-first" && at("2026-11-17T14:00:00Z").reason === "before_start" && // 9 AM
+          at("2026-11-17T23:59:59Z").order === "regular-first" && // 6:59:59 PM EST
+          at("2026-11-18T00:00:00Z").order === "party-first" && at("2026-11-18T00:00:00Z").reason === "at_or_after_start" && // 7:00:00 PM
+          at("2026-11-18T04:59:00Z").order === "party-first"; // 11:59 PM
+      } },
+      { label: "14.5D order uses the provider's start, not hardcoded hours: Jollywood Nights (7:30 PM) flips at 7:30; a different published start (6:00 PM) flips at 6:00", ok: () => {
+        const jn = (iso: string) => ord("hs", hoursAt("hs", T(iso), [ev("2026-11-14", "2026-11-14T19:30:00-05:00", "2026-11-15T00:30:00-05:00")]), T(iso));
+        const early = (iso: string) => ord("hs", hoursAt("hs", T(iso), [ev("2026-11-14", "2026-11-14T18:00:00-05:00", "2026-11-15T00:00:00-05:00")]), T(iso));
+        return jn("2026-11-15T00:29:59Z").order === "regular-first" && jn("2026-11-15T00:30:00Z").order === "party-first" &&
+          early("2026-11-14T22:59:59Z").order === "regular-first" && early("2026-11-14T23:00:00Z").order === "party-first";
+      } },
+      { label: "14.5D order MNSSHP (MK, EDT, Oct 13) and Oogie Boogie Bash (DCA, PDT, Oct 13) follow each event's own published start", ok: () => {
+        const mn = (iso: string) => ord("mk", hoursAt("mk", T(iso), [ev("2026-10-13", "2026-10-13T19:00:00-04:00", "2026-10-14T00:00:00-04:00")]), T(iso));
+        const obb = (iso: string) => ord("dca", hoursAt("dca", T(iso), [ev("2026-10-13", "2026-10-13T18:00:00-07:00", "2026-10-14T00:00:00-07:00")]), T(iso));
+        return mn("2026-10-13T22:59:59Z").order === "regular-first" && mn("2026-10-13T23:00:00Z").order === "party-first" &&
+          obb("2026-10-14T00:59:59Z").order === "regular-first" && obb("2026-10-14T01:00:00Z").order === "party-first";
+      } },
+      { label: "14.5D order only on confirmed party dates: a Special Ticketed Event window on a non-party date (Nov 10 MK, Nov 13 HS) never reorders; no_party", ok: () => {
+        const a = ord("mk", hoursAt("mk", T("2026-11-11T02:00:00Z"), [ev("2026-11-10", "2026-11-10T19:00:00-05:00", "2026-11-11T00:00:00-05:00")]), T("2026-11-11T00:30:00Z")); // Nov 10 7:30 PM
+        const b = ord("hs", hoursAt("hs", T("2026-11-14T02:00:00Z"), [ev("2026-11-13", "2026-11-13T19:30:00-05:00", "2026-11-14T00:30:00-05:00")]), T("2026-11-14T01:00:00Z"));
+        return a.order === "regular-first" && a.reason === "no_party" && b.order === "regular-first" && b.reason === "no_party";
+      } },
+      { label: "14.5D order parks without a registered party (EPCOT/AK/Disneyland) and other parks' parties never reorder", ok: () => {
+        const t = T("2026-11-18T01:00:00Z");
+        return (["epcot", "ak", "disneyland"] as ParkId[]).every((p) => ord(p, hMk(t), t).reason === "no_party") && ord("hs", hMk(t), t).reason === "no_party";
+      } },
+      { label: "14.5D order missing/ambiguous start stays regular-first: no window, Early Entry only, null/failed/other-park/other-day hours, unparseable/reversed window, two different starts", ok: () => {
+        const t = T("2026-11-18T01:00:00Z"); // 8 PM EST Nov 17
+        const base = [opw("2026-11-17", "2026-11-17T09:00:00-05:00", "2026-11-17T18:00:00-05:00")];
+        const none = ord("mk", hoursAt("mk", t, base), t);
+        const early = ord("mk", hoursAt("mk", t, [...base, ev("2026-11-17", "2026-11-17T08:30:00-05:00", "2026-11-17T09:00:00-05:00", "Early Entry")]), t);
+        const nullH = ord("mk", null, t);
+        const failed = ord("mk", normalizeParkHours("mk", { primary: { ok: false, error: { kind: "timeout", message: "t" } } }, t), t);
+        const otherPark = ord("mk", hoursAt("hs", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")]), t);
+        const otherDay = ord("mk", hMk(T("2026-11-16T17:00:00Z"), [ev("2026-11-16", "2026-11-16T19:00:00-05:00", "2026-11-17T00:00:00-05:00")]), t);
+        // Malformed provider entries are dropped by the ThemeParks validation layer before normalization; corrupt a valid window afterwards to prove the defensive path.
+        const valid = hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")]);
+        const bad = ord("mk", { ...valid, additional: valid.additional.map((w) => ({ ...w, openingTime: "not-a-time" })) }, t);
+        const reversed = ord("mk", hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-17T18:00:00-05:00")]), t);
+        const two = ord("mk", hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00"), ev("2026-11-17", "2026-11-17T21:00:00-05:00", "2026-11-18T00:00:00-05:00")]), t);
+        const same = ord("mk", hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00"), ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")]), t);
+        return [none, early, nullH, failed, otherPark, otherDay].every((r) => r.order === "regular-first" && r.reason === "start_unavailable") &&
+          [bad, reversed, two].every((r) => r.order === "regular-first" && r.reason === "start_ambiguous") &&
+          same.order === "party-first"; // identical duplicate windows are not ambiguous
+      } },
+      { label: "14.5D order resort-local midnight: party day 00:00 is before start (regular-first); Nov 17 party running past midnight is the NEXT date (non-party) → regular-first; DLR Oct 31 23:59:59 PDT party-first, 00:00 Nov 1 no_party", ok: () => {
+        const mid = ord("mk", hMk(T("2026-11-17T05:00:00Z")), T("2026-11-17T05:00:00Z")); // Nov 17 00:00 EST
+        const past = ord("mk", hMk(T("2026-11-18T05:30:00Z")), T("2026-11-18T05:30:00Z")); // Nov 18 00:30 EST; provider data is for Nov 17
+        const obbEntries = [ev("2026-10-31", "2026-10-31T18:00:00-07:00", "2026-11-01T00:00:00-07:00")];
+        const late = ord("dca", hoursAt("dca", T("2026-11-01T06:59:59Z"), obbEntries), T("2026-11-01T06:59:59Z")); // Oct 31 23:59:59 PDT
+        const roll = ord("dca", hoursAt("dca", T("2026-11-01T07:00:00Z"), obbEntries), T("2026-11-01T07:00:00Z")); // Nov 1 00:00 PDT
+        return mid.order === "regular-first" && mid.reason === "before_start" && past.order === "regular-first" && late.order === "party-first" && roll.reason === "no_party";
+      } },
+      { label: "14.5D order DST: comparison uses the provider's offset-aware instants — the same 7:00 PM local start flips at 23:00Z in EDT and 00:00Z in EST, never by browser zone", ok: () => {
+        const edt = (iso: string) => ord("mk", hoursAt("mk", T(iso), [ev("2026-10-29", "2026-10-29T19:00:00-04:00", "2026-10-30T00:00:00-04:00")]), T(iso));
+        const est = (iso: string) => ord("mk", hMk(T(iso)), T(iso));
+        return edt("2026-10-29T22:59:59Z").order === "regular-first" && edt("2026-10-29T23:00:00Z").order === "party-first" &&
+          est("2026-11-17T23:59:59Z").order === "regular-first" && est("2026-11-18T00:00:00Z").order === "party-first";
+      } },
+      { label: "14.5D order automatic: successive ticks of one park-hours payload flip exactly once at the start (no refetch needed) and stay flipped", ok: () => {
+        const h = hMk(T("2026-11-17T20:00:00Z"));
+        const orders = ["2026-11-17T23:58:00Z", "2026-11-17T23:59:45Z", "2026-11-18T00:00:00Z", "2026-11-18T00:00:15Z", "2026-11-18T03:00:00Z"].map((iso) => ord("mk", h, T(iso)).order);
+        return orders.join() === ["regular-first", "regular-first", "party-first", "party-first", "party-first"].join();
+      } },
+      { label: "14.5D order section keys: always the same three sections, each exactly once, in the specified order for both modes", ok: () => {
+        const before = entertainmentSectionKeys("regular-first");
+        const after = entertainmentSectionKeys("party-first");
+        return before.join() === "entertainment,party-entertainment,party-meets" && after.join() === "party-entertainment,party-meets,entertainment" &&
+          new Set(before).size === 3 && [...before].sort().join() === [...after].sort().join();
+      } },
+    ] as DevEventMeetCase[];
   })(),
 ];
 

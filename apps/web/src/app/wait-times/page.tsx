@@ -26,7 +26,7 @@ Reviewers should verify that:
  *   Desktop — 3-column grid, wider container, tighter density
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   type AttractionWait,
@@ -70,13 +70,18 @@ import {
   type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
-import { isEntertainmentHiddenToday } from "../../lib/seasonalVisibility";
+import { isEntertainmentHiddenToday, partitionPartyEntertainment } from "../../lib/seasonalVisibility";
 import { getLifecycleHiddenNames, performingNamesFromShowtimes } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
   eventMeetsForDisplay,
   eventMeetsPresentQueueTimes,
+  eventOfferingsSectionState,
+  getPartySectionOrder,
+  entertainmentSectionKeys,
+  type EntertainmentSectionKey,
+  EVENT_OFFERINGS_UNAVAILABLE_MESSAGE,
   eventMeetsSectionState,
   resolveEventMeetsResponse,
   type EventMeetEntry,
@@ -992,16 +997,25 @@ export default function WaitTimesPage() {
     );
   }, [parkEntertainment, selectedLand, selectedResort, displayNow, showtimes, lifecycleHidden]);
 
+  // PR #209 follow-up: on a confirmed party date, visible curated shows explicitly associated with that party
+  // (registry + resort-local date, never showtimes/names) group into Party Entertainment; the rest stay regular.
+  const { party: partyCurated, regular: regularEntertainment } = useMemo(
+    () => partitionPartyEntertainment(visibleEntertainment, selectedResort, getResortLocalDate(selectedResort, displayNow), displayNow),
+    [visibleEntertainment, selectedResort, displayNow],
+  );
+
   // ThemeParks.wiki attribution is owed whenever its data is presented: a
   // successful response and at least one visible entry the provider was asked about.
   // Phase 14.4C: party meets are hidden under a land filter (their land is not
   // in the curated catalog), and never shown from another park/day.
   const eventMeets = !selectedLand ? eventMeetsForDisplay(eventMeetsRaw, selectedPark, displayNow) : null;
   const eventMeetsState = eventMeetsSectionState(eventMeets);
+  const eventOfferingsState = eventOfferingsSectionState(eventMeets);
   // Queue-Times attribution is owed whenever its data is displayed, including meet waits/status shown while LIVE_ENABLED is off.
   const queueTimesPresented = LIVE_ENABLED || eventMeetsPresentQueueTimes(eventMeets);
   const showtimesPresented =
     eventMeetsState === "list" ||
+    eventOfferingsState === "list" ||
     !!showtimes &&
     !showtimes.error &&
     showtimes.entries.some(
@@ -1057,6 +1071,135 @@ export default function WaitTimesPage() {
     return results;
   }, [displayAttractions, operatingOnly, selectedLand, sortBy]);
 
+  // PR #209 follow-up: Waits & Shows section order on confirmed ticketed-event dates. Before the event's own
+  // scheduled start (provider "Special Ticketed Event" window, resort-local) the regular list leads; from the start
+  // on, the party sections lead. Recomputed on every `displayNow` tick, so it reorders without a reload.
+  const partyOrder = getPartySectionOrder(selectedPark, parkHours, displayNow).order;
+  const partyMeetsSection = (
+    eventMeetsState !== "hidden" && eventMeets && (
+          <div style={{ marginTop: "20px" }}>
+            <h2
+              id="party-meets"
+              className="wait-section"
+              style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}
+            >
+              Party Character Meets
+            </h2>
+            {eventMeetsState === "unavailable" ? (
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", marginBottom: "10px" }}>
+                {EVENT_MEETS_UNAVAILABLE_MESSAGE}
+              </p>
+            ) : (<>
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
+                Meets available only at tonight&apos;s ticketed party. Listed all day; most open at party start.
+              </p>
+              <div className="entertainment-grid">
+                {eventMeets.entries.map((m) => (
+                  <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
+                ))}
+              </div>
+            </>)}
+          </div>
+        )
+  );
+  const partyEntertainmentSection = (
+    (partyCurated.length > 0 || (eventOfferingsState !== "hidden" && !!eventMeets)) && (
+          <div style={{ marginTop: "20px" }}>
+            <h2
+              id="party-entertainment"
+              className="wait-section"
+              style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}
+            >
+              Party Entertainment
+            </h2>
+            {eventOfferingsState === "unavailable" && (
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", marginBottom: "10px" }}>
+                {EVENT_OFFERINGS_UNAVAILABLE_MESSAGE}
+              </p>
+            )}
+            {(partyCurated.length > 0 || eventOfferingsState === "list") && (<>
+              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
+                Shows, dance parties and acts at tonight&apos;s ticketed party. Listed all day; times as published.
+              </p>
+              <div className="entertainment-grid">
+                {partyCurated.map((show) => (
+                  <EntertainmentCard
+                    key={show.name}
+                    entertainment={show}
+                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    stale={showtimes?.stale}
+                    now={displayNow}
+                  />
+                ))}
+                {eventOfferingsState === "list" && eventMeets?.offerings.map((m) => (
+                  <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
+                ))}
+              </div>
+            </>)}
+          </div>
+        )
+  );
+  const regularEntertainmentSection = (
+    (() => {
+          const entertainment = regularEntertainment;
+          const section = waitsEntertainmentSectionState(entertainment.length);
+          return (
+            <div style={{ marginTop: "20px" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "4px", marginBottom: "2px" }}>
+                <h2
+                  id="entertainment"
+                  className="wait-section"
+                  style={{
+                    fontSize: "16px",
+                    fontWeight: 700,
+                    color: "var(--text-strong)",
+                    margin: 0,
+                  }}
+                >
+                  Entertainment
+                </h2>
+                {/* Phase 12.11 — hidden All Entertainment page; always reachable, even when a land filter leaves no curated shows. */}
+                {section.showLink && (
+                  <Link
+                    href={allEntertainmentHref(selectedPark)}
+                    style={{ fontSize: "13px", color: "var(--status-info)" }}
+                  >
+                    View All Entertainment &rarr;
+                  </Link>
+                )}
+              </div>
+              {section.showGrid && (<>
+              <p
+                style={{
+                  fontSize: "12px",
+                  color: "var(--text-faint)",
+                  marginTop: 0,
+                  marginBottom: "10px",
+                }}
+              >
+                Entertainment and showtimes for this park.
+              </p>
+              <div className="entertainment-grid">
+                {entertainment.map((show) => (
+                  <EntertainmentCard
+                    key={show.name}
+                    entertainment={show}
+                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    stale={showtimes?.stale}
+                    now={displayNow}
+                  />
+                ))}
+              </div>
+              </>)}
+            </div>
+          );
+        })()
+  );
+  const sectionNodes: Record<EntertainmentSectionKey, React.ReactNode> = {
+    "party-entertainment": partyEntertainmentSection,
+    "party-meets": partyMeetsSection,
+    "entertainment": regularEntertainmentSection,
+  };
   return (
     <>
       {/* Responsive styles — must be CSS (not inline) for media queries */}
@@ -1341,89 +1484,9 @@ export default function WaitTimesPage() {
           </div>
         )}
 
-        {/* ---- Party character meets (Phase 14.4C): confirmed party dates only ---- */}
-        {eventMeetsState !== "hidden" && eventMeets && (
-          <div style={{ marginTop: "20px" }}>
-            <h2
-              id="party-meets"
-              className="wait-section"
-              style={{ fontSize: "16px", fontWeight: 700, color: "var(--text-strong)", margin: 0 }}
-            >
-              Party Character Meets
-            </h2>
-            {eventMeetsState === "unavailable" ? (
-              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", marginBottom: "10px" }}>
-                {EVENT_MEETS_UNAVAILABLE_MESSAGE}
-              </p>
-            ) : (<>
-              <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
-                Meets available only at tonight&apos;s ticketed party. Listed all day; most open at party start.
-              </p>
-              <div className="entertainment-grid">
-                {eventMeets.entries.map((m) => (
-                  <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
-                ))}
-              </div>
-            </>)}
-          </div>
-        )}
-
-        {/* ---- Entertainment ---- */}
-        {(() => {
-          const entertainment = visibleEntertainment;
-          const section = waitsEntertainmentSectionState(entertainment.length);
-          return (
-            <div style={{ marginTop: "20px" }}>
-              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", flexWrap: "wrap", gap: "4px", marginBottom: "2px" }}>
-                <h2
-                  id="entertainment"
-                  className="wait-section"
-                  style={{
-                    fontSize: "16px",
-                    fontWeight: 700,
-                    color: "var(--text-strong)",
-                    margin: 0,
-                  }}
-                >
-                  Entertainment
-                </h2>
-                {/* Phase 12.11 — hidden All Entertainment page; always reachable, even when a land filter leaves no curated shows. */}
-                {section.showLink && (
-                  <Link
-                    href={allEntertainmentHref(selectedPark)}
-                    style={{ fontSize: "13px", color: "var(--status-info)" }}
-                  >
-                    View All Entertainment &rarr;
-                  </Link>
-                )}
-              </div>
-              {section.showGrid && (<>
-              <p
-                style={{
-                  fontSize: "12px",
-                  color: "var(--text-faint)",
-                  marginTop: 0,
-                  marginBottom: "10px",
-                }}
-              >
-                Entertainment and showtimes for this park.
-              </p>
-              <div className="entertainment-grid">
-                {entertainment.map((show) => (
-                  <EntertainmentCard
-                    key={show.name}
-                    entertainment={show}
-                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
-                    stale={showtimes?.stale}
-                    now={displayNow}
-                  />
-                ))}
-              </div>
-              </>)}
-            </div>
-          );
-        })()}
-
+        {entertainmentSectionKeys(partyOrder).map((k) => (
+          <Fragment key={k}>{sectionNodes[k]}</Fragment>
+        ))}
         {/* ---- Planned Closures (Refurbishments) ---- */}
         {(() => {
           const now = new Date();

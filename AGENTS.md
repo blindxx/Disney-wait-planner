@@ -303,6 +303,56 @@ registered. Providers are only called on confirmed party dates
 (`/api/entertainment/event-meets`). DEV checks:
 `runDevEventExclusiveMeetCases()`, `runDevEventExclusiveMeetsServiceCases()`.
 
+### Non-meet event offerings (Phase 14.5D)
+
+`EVENT_EXCLUSIVE_MEETS` also lists verified event-specific NON-meet records
+(`kind: "entertainment"`: Stitchmas!, Reindeer Wranglers, Pixar Disco, Grand
+Avenue Dance Party) — provider SHOW records whose own names carry the party and
+that have no DWP catalog entry. Same identity rule (park + exact ThemeParks UUID,
+`meetNameMatches` guard, party association in `SEASONAL_PROVIDER_ONLY_EVENTS`),
+same date gating (confirmed party day only, registry-decided), same failure
+semantics, same window/performance interpretation. They return as
+`ParkEventMeets.offerings` (plus `confirmedMeets` / `confirmedOfferings`) and
+render in a separate "Party Entertainment" section on Waits & Shows; "Party
+Character Meets" is unchanged. Rules:
+- Curated party shows (parades, fireworks, stage shows) reach Waits & Shows via
+  the catalog + mapping and MUST NOT be registered here (a DEV case rejects any
+  registered UUID that resolves to a catalog mapping). Grouping: on a confirmed
+  party date the page moves the already-visible curated shows whose explicit
+  `SEASONAL_ENTERTAINMENT_EVENTS` party association is confirmed today
+  (`partitionPartyEntertainment`, `seasonalVisibility.ts`; "party-night" rank)
+  into "Party Entertainment" beside the registered provider-only offerings;
+  all others stay in regular "Entertainment". Each show appears exactly once;
+  membership is never inferred from showtimes, names or park hours; a
+  dual-association show (Frozen Holiday Surprise: Holidays season + MVMCP) is
+  party only on a confirmed MVMCP date. The partition runs AFTER seasonal /
+  inactivity / lifecycle filtering and never re-decides visibility.
+- Never register umbrella "Character Greetings" records, ordinary/roaming
+  meets, dining venues, or names matched fuzzily; never carry over a historical
+  UUID without verifying the live record's identity (a renamed record is omitted).
+- Confirmed offerings with no usable provider record (out of season, or never
+  published) go in `PENDING_EVENT_OFFERINGS`: status (`pending_mapping` /
+  `no_provider_record` / `unresolved` / `excluded`), tiered evidence
+  (`official` = Disney-owned domains only), and next-season verification. It has
+  no provider-id field, is never rendered (no static placeholder cards) and is
+  not discontinuation evidence; provider absence out of season proves nothing.
+- Section order (`getPartySectionOrder`, `entertainmentSectionKeys`): all three
+  sections always render, each once. On a confirmed party date (registry,
+  `getPartyNightEventIds`) the order flips from regular-first (Entertainment,
+  Party Entertainment, Party Character Meets) to party-first (Party
+  Entertainment, Party Character Meets, Entertainment) at the event's own start
+  — the provider park-hours `TICKETED_EVENT` window described exactly "Special
+  Ticketed Event" for that resort-local date (Early Entry never counts), compared
+  as offset-aware instants; no hardcoded party hours. Missing/ambiguous start
+  (no window, different starts, invalid window, other park/day payload),
+  non-party dates and parks without a party stay regular-first. The page
+  recomputes on its existing `displayNow` tick, so no reload or refetch is needed.
+- A Queue-Times wait is shown only for an exact registered id with matching
+  name (Stitch meet: 15402); ordinary rows are never substituted.
+- Old API bodies without the new fields resolve as meets-only
+  (`resolveEventMeetsResponse`). Smart Entry, planner catalogs, ordinary-day
+  filtering and the lifecycle monitor are unaffected.
+
 ## Performance-day filtering (Phase 14.4.1)
 
 Waits & Shows and default All Entertainment hide an entry for not performing
