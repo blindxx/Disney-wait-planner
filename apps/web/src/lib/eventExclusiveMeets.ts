@@ -62,7 +62,8 @@ import { PARK_TO_RESORT } from "./parkMetadata";
 import { addDaysToLocalDate, getResortLocalDate } from "./resortTime";
 import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
 import { SEASONAL_PROVIDER_ONLY_EVENTS, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
-import { getSeasonalEvent } from "./seasonalEvents";
+import { getPartyNightEventIds, getSeasonalEvent } from "./seasonalEvents";
+import { normalizeParkHours, type ParkHours } from "./parkHours";
 import { resolveDwpEntertainmentFromThemeParksId } from "./themeParksEntertainmentMapping";
 import { isAllEntryConfirmedInactiveToday } from "./seasonalVisibility";
 import type { ThemeParksError, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
@@ -300,6 +301,72 @@ export const PENDING_EVENT_OFFERINGS: PendingEventOffering[] = [
 
 export function getPendingEventOfferings(eventId?: string): PendingEventOffering[] {
   return eventId ? PENDING_EVENT_OFFERINGS.filter((o) => o.eventId === eventId) : PENDING_EVENT_OFFERINGS;
+}
+
+// ============================================
+// SECTION ORDER (PR #209 follow-up) — pure, client-safe
+// ============================================
+
+export type PartySectionOrder = "regular-first" | "party-first";
+
+export interface PartySectionOrderResult {
+  order: PartySectionOrder;
+  /** Why this order (diagnostic/tests): `before_start` / `at_or_after_start` apply only on confirmed party dates. */
+  reason: "no_party" | "start_unavailable" | "start_ambiguous" | "before_start" | "at_or_after_start";
+}
+
+/**
+ * Provider schedule window that marks a ticketed party's own hours. The provider
+ * labels it with this exact description (same label `interpretMeetShowtimes`
+ * keys on); Early Entry and other TICKETED_EVENT windows are different
+ * descriptions and never count.
+ */
+function partyStartMs(parkHours: ParkHours | null, parkId: ParkId, localDate: string): number | "ambiguous" | null {
+  if (!parkHours || parkHours.parkId !== parkId || parkHours.localDate !== localDate) return null;
+  const windows = parkHours.additional.filter(
+    (w) => w.type === "TICKETED_EVENT" && (w.description ?? "").trim() === SPECIAL_TICKETED_EVENT && w.date === localDate,
+  );
+  if (windows.length === 0) return null;
+  const starts = new Set<number>();
+  for (const w of windows) {
+    const open = Date.parse(w.openingTime);
+    const close = Date.parse(w.closingTime);
+    // A window with an unparseable start, or an end that is not after the start, is not a trustworthy event window.
+    if (!Number.isFinite(open) || !Number.isFinite(close) || close <= open) return "ambiguous";
+    starts.add(open);
+  }
+  return starts.size === 1 ? [...starts][0] : "ambiguous";
+}
+
+/**
+ * Waits & Shows section order. Only a CONFIRMED ticketed party for this park on
+ * the resort-local date (registry, `getPartyNightEventIds`) can reorder; the
+ * start is the provider's own "Special Ticketed Event" window for that date
+ * (park-hours data the page already holds) — no hardcoded hours. At/after the
+ * start: Party Entertainment, Party Character Meets, Entertainment. Before the
+ * start, on non-party dates, or when the start is missing/ambiguous: the
+ * deterministic regular-first order (Entertainment, Party Entertainment, Party
+ * Character Meets). Ordering never hides or alters any section.
+ */
+export function getPartySectionOrder(parkId: ParkId, parkHours: ParkHours | null, instant: Date): PartySectionOrderResult {
+  const resort = PARK_TO_RESORT[parkId] as ResortId;
+  const localDate = getResortLocalDate(resort, instant);
+  if (getPartyNightEventIds(parkId, localDate).length === 0) return { order: "regular-first", reason: "no_party" };
+  const start = partyStartMs(parkHours, parkId, localDate);
+  if (start === null) return { order: "regular-first", reason: "start_unavailable" };
+  if (start === "ambiguous") return { order: "regular-first", reason: "start_ambiguous" };
+  return instant.getTime() >= start
+    ? { order: "party-first", reason: "at_or_after_start" }
+    : { order: "regular-first", reason: "before_start" };
+}
+
+export type EntertainmentSectionKey = "party-entertainment" | "party-meets" | "entertainment";
+
+/** The three Waits & Shows entertainment sections in render order — always all three, each exactly once (nothing is hidden by ordering). */
+export function entertainmentSectionKeys(order: PartySectionOrder): EntertainmentSectionKey[] {
+  return order === "party-first"
+    ? ["party-entertainment", "party-meets", "entertainment"]
+    : ["entertainment", "party-entertainment", "party-meets"];
 }
 
 // ============================================
@@ -1095,6 +1162,96 @@ export const DEV_EVENT_MEET_CASES: DevEventMeetCase[] = [
       { label: "14.5D pending ledger: out-of-season pending items are not discontinuation evidence (no 'discontinued' status exists) and Rusty Cutlass makes no replacement claim", ok: () =>
         PENDING_EVENT_OFFERINGS.every((o) => (["pending_mapping", "no_provider_record", "unresolved", "excluded"] as string[]).includes(o.status)) &&
         !/was replaced by|replaced by Captain/i.test(PENDING_EVENT_OFFERINGS.find((o) => /Rusty Cutlass/.test(o.name))!.reason) },
+    ] as DevEventMeetCase[];
+  })(),
+  // ── PR #209 follow-up: dynamic section order ──
+  ...(() => {
+    type SE = Parameters<typeof normalizeParkHours>[1]["primary"];
+    const sched = (parkId: ParkId, entries: { date: string; type: string; description: string | null; openingTime: string; closingTime: string }[], tz: string): SE =>
+      ({ ok: true, data: { entityId: "x", name: "Park", timeZone: tz, entries: entries.map((e) => ({ ...e, lastUpdated: null })), parks: [], droppedEntries: 0 }, meta: { origin: "network", fetchedAt: 0, etag: null } }) as SE;
+    const ev = (date: string, open: string, close: string, desc: string | null = "Special Ticketed Event") =>
+      ({ date, type: "TICKETED_EVENT", description: desc, openingTime: open, closingTime: close });
+    const opw = (date: string, open: string, close: string) => ({ date, type: "OPERATING", description: null, openingTime: open, closingTime: close });
+    const hoursAt = (parkId: ParkId, when: Date, entries: Parameters<typeof sched>[1], tz = parkId === "disneyland" || parkId === "dca" ? "America/Los_Angeles" : "America/New_York") =>
+      normalizeParkHours(parkId, { primary: sched(parkId, entries, tz) }, when);
+    const ord = (parkId: ParkId, h: ParkHours | null, when: Date) => getPartySectionOrder(parkId, h, when);
+    const T = (iso: string) => new Date(iso);
+    // MVMCP Nov 17 (EST): 7:00 PM event window straight from the provider schedule shape observed 2026-11-17.
+    const mvmcpEntries = [ev("2026-11-17", "2026-11-17T08:30:00-05:00", "2026-11-17T09:00:00-05:00", "Early Entry"), opw("2026-11-17", "2026-11-17T09:00:00-05:00", "2026-11-17T18:00:00-05:00"), ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")];
+    const hMk = (when: Date, entries = mvmcpEntries) => hoursAt("mk", when, entries);
+    return [
+      { label: "14.5D order MVMCP Nov 17: regular-first until the 7:00 PM start, party-first at 7:00:00 PM and after (resort-local)", ok: () => {
+        const at = (iso: string) => ord("mk", hMk(T(iso)), T(iso));
+        return at("2026-11-17T14:00:00Z").order === "regular-first" && at("2026-11-17T14:00:00Z").reason === "before_start" && // 9 AM
+          at("2026-11-17T23:59:59Z").order === "regular-first" && // 6:59:59 PM EST
+          at("2026-11-18T00:00:00Z").order === "party-first" && at("2026-11-18T00:00:00Z").reason === "at_or_after_start" && // 7:00:00 PM
+          at("2026-11-18T04:59:00Z").order === "party-first"; // 11:59 PM
+      } },
+      { label: "14.5D order uses the provider's start, not hardcoded hours: Jollywood Nights (7:30 PM) flips at 7:30; a different published start (6:00 PM) flips at 6:00", ok: () => {
+        const jn = (iso: string) => ord("hs", hoursAt("hs", T(iso), [ev("2026-11-14", "2026-11-14T19:30:00-05:00", "2026-11-15T00:30:00-05:00")]), T(iso));
+        const early = (iso: string) => ord("hs", hoursAt("hs", T(iso), [ev("2026-11-14", "2026-11-14T18:00:00-05:00", "2026-11-15T00:00:00-05:00")]), T(iso));
+        return jn("2026-11-15T00:29:59Z").order === "regular-first" && jn("2026-11-15T00:30:00Z").order === "party-first" &&
+          early("2026-11-14T22:59:59Z").order === "regular-first" && early("2026-11-14T23:00:00Z").order === "party-first";
+      } },
+      { label: "14.5D order MNSSHP (MK, EDT, Oct 13) and Oogie Boogie Bash (DCA, PDT, Oct 13) follow each event's own published start", ok: () => {
+        const mn = (iso: string) => ord("mk", hoursAt("mk", T(iso), [ev("2026-10-13", "2026-10-13T19:00:00-04:00", "2026-10-14T00:00:00-04:00")]), T(iso));
+        const obb = (iso: string) => ord("dca", hoursAt("dca", T(iso), [ev("2026-10-13", "2026-10-13T18:00:00-07:00", "2026-10-14T00:00:00-07:00")]), T(iso));
+        return mn("2026-10-13T22:59:59Z").order === "regular-first" && mn("2026-10-13T23:00:00Z").order === "party-first" &&
+          obb("2026-10-14T00:59:59Z").order === "regular-first" && obb("2026-10-14T01:00:00Z").order === "party-first";
+      } },
+      { label: "14.5D order only on confirmed party dates: a Special Ticketed Event window on a non-party date (Nov 10 MK, Nov 13 HS) never reorders; no_party", ok: () => {
+        const a = ord("mk", hoursAt("mk", T("2026-11-11T02:00:00Z"), [ev("2026-11-10", "2026-11-10T19:00:00-05:00", "2026-11-11T00:00:00-05:00")]), T("2026-11-11T00:30:00Z")); // Nov 10 7:30 PM
+        const b = ord("hs", hoursAt("hs", T("2026-11-14T02:00:00Z"), [ev("2026-11-13", "2026-11-13T19:30:00-05:00", "2026-11-14T00:30:00-05:00")]), T("2026-11-14T01:00:00Z"));
+        return a.order === "regular-first" && a.reason === "no_party" && b.order === "regular-first" && b.reason === "no_party";
+      } },
+      { label: "14.5D order parks without a registered party (EPCOT/AK/Disneyland) and other parks' parties never reorder", ok: () => {
+        const t = T("2026-11-18T01:00:00Z");
+        return (["epcot", "ak", "disneyland"] as ParkId[]).every((p) => ord(p, hMk(t), t).reason === "no_party") && ord("hs", hMk(t), t).reason === "no_party";
+      } },
+      { label: "14.5D order missing/ambiguous start stays regular-first: no window, Early Entry only, null/failed/other-park/other-day hours, unparseable/reversed window, two different starts", ok: () => {
+        const t = T("2026-11-18T01:00:00Z"); // 8 PM EST Nov 17
+        const base = [opw("2026-11-17", "2026-11-17T09:00:00-05:00", "2026-11-17T18:00:00-05:00")];
+        const none = ord("mk", hoursAt("mk", t, base), t);
+        const early = ord("mk", hoursAt("mk", t, [...base, ev("2026-11-17", "2026-11-17T08:30:00-05:00", "2026-11-17T09:00:00-05:00", "Early Entry")]), t);
+        const nullH = ord("mk", null, t);
+        const failed = ord("mk", normalizeParkHours("mk", { primary: { ok: false, error: { kind: "timeout", message: "t" } } }, t), t);
+        const otherPark = ord("mk", hoursAt("hs", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")]), t);
+        const otherDay = ord("mk", hMk(T("2026-11-16T17:00:00Z"), [ev("2026-11-16", "2026-11-16T19:00:00-05:00", "2026-11-17T00:00:00-05:00")]), t);
+        // Malformed provider entries are dropped by the ThemeParks validation layer before normalization; corrupt a valid window afterwards to prove the defensive path.
+        const valid = hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")]);
+        const bad = ord("mk", { ...valid, additional: valid.additional.map((w) => ({ ...w, openingTime: "not-a-time" })) }, t);
+        const reversed = ord("mk", hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-17T18:00:00-05:00")]), t);
+        const two = ord("mk", hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00"), ev("2026-11-17", "2026-11-17T21:00:00-05:00", "2026-11-18T00:00:00-05:00")]), t);
+        const same = ord("mk", hoursAt("mk", t, [ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00"), ev("2026-11-17", "2026-11-17T19:00:00-05:00", "2026-11-18T00:00:00-05:00")]), t);
+        return [none, early, nullH, failed, otherPark, otherDay].every((r) => r.order === "regular-first" && r.reason === "start_unavailable") &&
+          [bad, reversed, two].every((r) => r.order === "regular-first" && r.reason === "start_ambiguous") &&
+          same.order === "party-first"; // identical duplicate windows are not ambiguous
+      } },
+      { label: "14.5D order resort-local midnight: party day 00:00 is before start (regular-first); Nov 17 party running past midnight is the NEXT date (non-party) → regular-first; DLR Oct 31 23:59:59 PDT party-first, 00:00 Nov 1 no_party", ok: () => {
+        const mid = ord("mk", hMk(T("2026-11-17T05:00:00Z")), T("2026-11-17T05:00:00Z")); // Nov 17 00:00 EST
+        const past = ord("mk", hMk(T("2026-11-18T05:30:00Z")), T("2026-11-18T05:30:00Z")); // Nov 18 00:30 EST; provider data is for Nov 17
+        const obbEntries = [ev("2026-10-31", "2026-10-31T18:00:00-07:00", "2026-11-01T00:00:00-07:00")];
+        const late = ord("dca", hoursAt("dca", T("2026-11-01T06:59:59Z"), obbEntries), T("2026-11-01T06:59:59Z")); // Oct 31 23:59:59 PDT
+        const roll = ord("dca", hoursAt("dca", T("2026-11-01T07:00:00Z"), obbEntries), T("2026-11-01T07:00:00Z")); // Nov 1 00:00 PDT
+        return mid.order === "regular-first" && mid.reason === "before_start" && past.order === "regular-first" && late.order === "party-first" && roll.reason === "no_party";
+      } },
+      { label: "14.5D order DST: comparison uses the provider's offset-aware instants — the same 7:00 PM local start flips at 23:00Z in EDT and 00:00Z in EST, never by browser zone", ok: () => {
+        const edt = (iso: string) => ord("mk", hoursAt("mk", T(iso), [ev("2026-10-29", "2026-10-29T19:00:00-04:00", "2026-10-30T00:00:00-04:00")]), T(iso));
+        const est = (iso: string) => ord("mk", hMk(T(iso)), T(iso));
+        return edt("2026-10-29T22:59:59Z").order === "regular-first" && edt("2026-10-29T23:00:00Z").order === "party-first" &&
+          est("2026-11-17T23:59:59Z").order === "regular-first" && est("2026-11-18T00:00:00Z").order === "party-first";
+      } },
+      { label: "14.5D order automatic: successive ticks of one park-hours payload flip exactly once at the start (no refetch needed) and stay flipped", ok: () => {
+        const h = hMk(T("2026-11-17T20:00:00Z"));
+        const orders = ["2026-11-17T23:58:00Z", "2026-11-17T23:59:45Z", "2026-11-18T00:00:00Z", "2026-11-18T00:00:15Z", "2026-11-18T03:00:00Z"].map((iso) => ord("mk", h, T(iso)).order);
+        return orders.join() === ["regular-first", "regular-first", "party-first", "party-first", "party-first"].join();
+      } },
+      { label: "14.5D order section keys: always the same three sections, each exactly once, in the specified order for both modes", ok: () => {
+        const before = entertainmentSectionKeys("regular-first");
+        const after = entertainmentSectionKeys("party-first");
+        return before.join() === "entertainment,party-entertainment,party-meets" && after.join() === "party-entertainment,party-meets,entertainment" &&
+          new Set(before).size === 3 && [...before].sort().join() === [...after].sort().join();
+      } },
     ] as DevEventMeetCase[];
   })(),
 ];

@@ -336,6 +336,17 @@ Character Meets" is unchanged. Rules:
   (`official` = Disney-owned domains only), and next-season verification. It has
   no provider-id field, is never rendered (no static placeholder cards) and is
   not discontinuation evidence; provider absence out of season proves nothing.
+- Section order (`getPartySectionOrder`, `entertainmentSectionKeys`): all three
+  sections always render, each once. On a confirmed party date (registry,
+  `getPartyNightEventIds`) the order flips from regular-first (Entertainment,
+  Party Entertainment, Party Character Meets) to party-first (Party
+  Entertainment, Party Character Meets, Entertainment) at the event's own start
+  — the provider park-hours `TICKETED_EVENT` window described exactly "Special
+  Ticketed Event" for that resort-local date (Early Entry never counts), compared
+  as offset-aware instants; no hardcoded party hours. Missing/ambiguous start
+  (no window, different starts, invalid window, other park/day payload),
+  non-party dates and parks without a party stay regular-first. The page
+  recomputes on its existing `displayNow` tick, so no reload or refetch is needed.
 - A Queue-Times wait is shown only for an exact registered id with matching
   name (Stitch meet: 15402); ordinary rows are never substituted.
 - Old API bodies without the new fields resolve as meets-only
