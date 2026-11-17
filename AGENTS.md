@@ -317,7 +317,16 @@ render in a separate "Party Entertainment" section on Waits & Shows; "Party
 Character Meets" is unchanged. Rules:
 - Curated party shows (parades, fireworks, stage shows) reach Waits & Shows via
   the catalog + mapping and MUST NOT be registered here (a DEV case rejects any
-  registered UUID that resolves to a catalog mapping).
+  registered UUID that resolves to a catalog mapping). Grouping: on a confirmed
+  party date the page moves the already-visible curated shows whose explicit
+  `SEASONAL_ENTERTAINMENT_EVENTS` party association is confirmed today
+  (`partitionPartyEntertainment`, `seasonalVisibility.ts`; "party-night" rank)
+  into "Party Entertainment" beside the registered provider-only offerings;
+  all others stay in regular "Entertainment". Each show appears exactly once;
+  membership is never inferred from showtimes, names or park hours; a
+  dual-association show (Frozen Holiday Surprise: Holidays season + MVMCP) is
+  party only on a confirmed MVMCP date. The partition runs AFTER seasonal /
+  inactivity / lifecycle filtering and never re-decides visibility.
 - Never register umbrella "Character Greetings" records, ordinary/roaming
   meets, dining venues, or names matched fuzzily; never carry over a historical
   UUID without verifying the live record's identity (a renamed record is omitted).

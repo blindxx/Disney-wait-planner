@@ -86,6 +86,37 @@ export function isEntertainmentConfirmedOutOfSeason(
 }
 
 // ============================================
+// PARTY GROUPING (PR #209 follow-up)
+// ============================================
+
+/**
+ * Waits & Shows grouping of the already-visible curated list: entries whose
+ * EXPLICIT registry association is a separately ticketed party that is
+ * CONFIRMED on `today` ("party-night" rank, resort-local date, park-qualified)
+ * move to "Party Entertainment"; everything else stays regular. Membership
+ * comes only from `SEASONAL_ENTERTAINMENT_EVENTS` + the dated event registry —
+ * never from showtimes, names or park hours. A dual-association show (Frozen
+ * Holiday Surprise: Holidays at WDW season + MVMCP party) is party only on a
+ * confirmed party date and regular otherwise. Pure partition: each input entry
+ * lands in exactly one list, order preserved; visibility rules (seasonal,
+ * inactivity, lifecycle) are applied BEFORE this and never re-decided here.
+ */
+export function partitionPartyEntertainment<T extends EntertainmentPlace>(
+  places: readonly T[],
+  resort: ResortId,
+  today: string,
+  instant?: Date,
+): { party: T[]; regular: T[] } {
+  const party: T[] = [];
+  const regular: T[] = [];
+  for (const p of places) {
+    const rank = getSeasonalEntertainmentRank(p.name, { resort, date: today, parkId: p.parkId, instant: instant ?? new Date() });
+    (rank === "party-night" ? party : regular).push(p);
+  }
+  return { party, regular };
+}
+
+// ============================================
 // PERFORMANCE-DAY VISIBILITY (Phase 14.4.1)
 // ============================================
 
@@ -917,6 +948,68 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
           !isEntertainmentHiddenToday(happily(), "WDW", TODAY_WDW, [{ dwpName: "Happily Ever After", performances: [] }], NOW);
       } },
     ];
+  })(),
+  // ── PR #209 follow-up: party grouping ──
+  ...(() => {
+    const MK = getEntertainmentForPark("mk");
+    const HS = getEntertainmentForPark("hs");
+    const DCA = getEntertainmentForPark("dca");
+    const names = (xs: readonly { name: string }[]) => xs.map((x) => x.name).sort().join("|");
+    const at = (iso: string) => new Date(iso);
+    const split = (places: typeof MK, resort: ResortId, d: string, iso: string) => partitionPartyEntertainment(places, resort, d, at(iso));
+    const MVMCP_NIGHT = "2026-11-17"; // confirmed MVMCP night
+    return [
+      { label: "party grouping MVMCP Nov 17: parade, fireworks, Most Merriest, Frozen Holiday Surprise are party; Festival of Fantasy / Adventure Friends / Happily Ever After stay regular", ok: () => {
+        const { party, regular } = split(MK, "WDW", MVMCP_NIGHT, "2026-11-17T17:00:00Z");
+        const p = new Set(party.map((x) => x.name));
+        const r = new Set(regular.map((x) => x.name));
+        return ["Mickey's Once Upon a Christmastime Parade", "Minnie's Wonderful Christmastime Fireworks", "Mickey's Most Merriest Celebration", "Frozen Holiday Surprise"].every((n) => p.has(n)) &&
+          ["Festival of Fantasy Parade", "Disney Adventure Friends Cavalcade", "Happily Ever After"].every((n) => r.has(n) && !p.has(n));
+      } },
+      { label: "party grouping: each entry exactly once (disjoint, union = input, order kept) on party, non-party and unknown dates", ok: () =>
+        [["2026-11-17", "2026-11-17T17:00:00Z"], ["2026-11-10", "2026-11-10T17:00:00Z"], ["2027-11-12", "2027-11-12T17:00:00Z"], ["2026-10-15", "2026-10-15T17:00:00Z"]].every(([d, iso]) => {
+          const { party, regular } = split(MK, "WDW", d, iso);
+          return party.length + regular.length === MK.length && new Set([...party, ...regular]).size === MK.length &&
+            names([...party, ...regular]) === names(MK) && regular.every((x, i, a) => i === 0 || MK.indexOf(a[i - 1]) < MK.indexOf(x));
+        }) },
+      { label: "party grouping non-party date (Nov 10, in Holidays season): dual-association Frozen Holiday Surprise stays regular; no party-only show is party", ok: () => {
+        const { party, regular } = split(MK, "WDW", "2026-11-10", "2026-11-10T17:00:00Z");
+        return party.length === 0 && regular.some((x) => x.name === "Frozen Holiday Surprise");
+      } },
+      { label: "party grouping season/date boundaries: MVMCP first night Nov 8 party, Nov 7 not; last night Dec 22 party, Dec 23 not; unannounced 2027 not", ok: () => {
+        const has = (d: string) => split(MK, "WDW", d, `${d}T17:00:00Z`).party.some((x) => x.name === "Mickey's Most Merriest Celebration");
+        return has("2026-11-08") && !has("2026-11-07") && has("2026-12-22") && !has("2026-12-23") && !has("2027-11-12");
+      } },
+      { label: "party grouping MNSSHP (Aug–Oct): Spelltacular, Boo-To-You parade and fireworks party on an event night, regular on a non-night; Christmas shows never party then", ok: () => {
+        const night = split(MK, "WDW", "2026-10-13", "2026-10-13T17:00:00Z").party.map((x) => x.name);
+        const off = split(MK, "WDW", "2026-10-14", "2026-10-14T17:00:00Z").party;
+        return ["Hocus Pocus Villain Spelltacular", "Mickey's Boo-To-You Halloween Parade", "Disney's Not-So-Spooky Spectacular"].every((n) => night.includes(n)) &&
+          !night.includes("Mickey's Most Merriest Celebration") && off.length === 0;
+      } },
+      { label: "party grouping Jollywood Nights Nov 14: its four shows are party at Hollywood Studios; Nov 13 none; MK shows unaffected there", ok: () => {
+        const night = split(HS, "WDW", "2026-11-14", "2026-11-14T17:00:00Z").party.map((x) => x.name);
+        const off = split(HS, "WDW", "2026-11-13", "2026-11-13T17:00:00Z").party;
+        return ["Disney Holidays in Hollywood", "Glisten!", "Jingle Bell, Jingle BAM!"].every((n) => night.includes(n)) && night.length === 4 && off.length === 0 &&
+          split(MK, "WDW", "2026-11-14", "2026-11-14T17:00:00Z").party.length === 0;
+      } },
+      { label: "party grouping Oogie Boogie Bash (DLR): Madame Leota's Swinging Wake party on OBB nights only; Halloween Time season shows stay regular; Frightfully Fun Parade never party", ok: () => {
+        const night = split(DCA, "DLR", "2026-10-13", "2026-10-13T20:00:00Z");
+        const off = split(DCA, "DLR", "2026-10-12", "2026-10-12T20:00:00Z");
+        const leota = "Madame Leota's Swinging Wake – A Haunted Mansion Street Party";
+        return night.party.some((x) => x.name === leota) && !night.party.some((x) => x.name === "Frightfully Fun Parade") && !off.party.some((x) => x.name === leota) &&
+          night.regular.every((x) => x.name !== leota);
+      } },
+      { label: "party grouping isolation: a different resort/park or a non-ticketed festival date never groups (EPCOT Festival of the Holidays season shows stay regular)", ok: () => {
+        const epcot = split(getEntertainmentForPark("epcot"), "WDW", "2026-11-28", "2026-11-28T17:00:00Z");
+        const dl = split(getEntertainmentForPark("disneyland"), "DLR", "2026-11-17", "2026-11-17T20:00:00Z");
+        return epcot.party.length === 0 && dl.party.length === 0 && split(MK, "DLR", MVMCP_NIGHT, "2026-11-17T17:00:00Z").party.length === 0;
+      } },
+      { label: "party grouping preserves visibility rules: partition input is the post-filter list, so a hidden show never reappears", ok: () => {
+        const filtered = MK.filter((p) => p.name !== "Mickey's Most Merriest Celebration");
+        const { party, regular } = partitionPartyEntertainment(filtered, "WDW", MVMCP_NIGHT, at("2026-11-17T17:00:00Z"));
+        return ![...party, ...regular].some((x) => x.name === "Mickey's Most Merriest Celebration") && party.length + regular.length === filtered.length;
+      } },
+    ] as DevSeasonalVisibilityCase[];
   })(),
 ];
 

@@ -70,7 +70,7 @@ import {
   type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
-import { isEntertainmentHiddenToday } from "../../lib/seasonalVisibility";
+import { isEntertainmentHiddenToday, partitionPartyEntertainment } from "../../lib/seasonalVisibility";
 import { getLifecycleHiddenNames, performingNamesFromShowtimes } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
@@ -994,6 +994,13 @@ export default function WaitTimesPage() {
     );
   }, [parkEntertainment, selectedLand, selectedResort, displayNow, showtimes, lifecycleHidden]);
 
+  // PR #209 follow-up: on a confirmed party date, visible curated shows explicitly associated with that party
+  // (registry + resort-local date, never showtimes/names) group into Party Entertainment; the rest stay regular.
+  const { party: partyCurated, regular: regularEntertainment } = useMemo(
+    () => partitionPartyEntertainment(visibleEntertainment, selectedResort, getResortLocalDate(selectedResort, displayNow), displayNow),
+    [visibleEntertainment, selectedResort, displayNow],
+  );
+
   // ThemeParks.wiki attribution is owed whenever its data is presented: a
   // successful response and at least one visible entry the provider was asked about.
   // Phase 14.4C: party meets are hidden under a land filter (their land is not
@@ -1373,7 +1380,7 @@ export default function WaitTimesPage() {
         )}
 
         {/* ---- Party entertainment (Phase 14.5D): verified non-meet event offerings, confirmed party dates only ---- */}
-        {eventOfferingsState !== "hidden" && eventMeets && (
+        {(partyCurated.length > 0 || (eventOfferingsState !== "hidden" && !!eventMeets)) && (
           <div style={{ marginTop: "20px" }}>
             <h2
               id="party-entertainment"
@@ -1382,16 +1389,26 @@ export default function WaitTimesPage() {
             >
               Party Entertainment
             </h2>
-            {eventOfferingsState === "unavailable" ? (
+            {eventOfferingsState === "unavailable" && (
               <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: "2px", marginBottom: "10px" }}>
                 {EVENT_OFFERINGS_UNAVAILABLE_MESSAGE}
               </p>
-            ) : (<>
+            )}
+            {(partyCurated.length > 0 || eventOfferingsState === "list") && (<>
               <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
-                Dance parties and acts offered only at tonight&apos;s ticketed party. Listed all day; times as published.
+                Shows, dance parties and acts at tonight&apos;s ticketed party. Listed all day; times as published.
               </p>
               <div className="entertainment-grid">
-                {eventMeets.offerings.map((m) => (
+                {partyCurated.map((show) => (
+                  <EntertainmentCard
+                    key={show.name}
+                    entertainment={show}
+                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    stale={showtimes?.stale}
+                    now={displayNow}
+                  />
+                ))}
+                {eventOfferingsState === "list" && eventMeets?.offerings.map((m) => (
                   <EventMeetCard key={m.id} meet={m} stale={eventMeets.stale} now={displayNow} />
                 ))}
               </div>
@@ -1401,7 +1418,7 @@ export default function WaitTimesPage() {
 
         {/* ---- Entertainment ---- */}
         {(() => {
-          const entertainment = visibleEntertainment;
+          const entertainment = regularEntertainment;
           const section = waitsEntertainmentSectionState(entertainment.length);
           return (
             <div style={{ marginTop: "20px" }}>
