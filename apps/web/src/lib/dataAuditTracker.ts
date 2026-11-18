@@ -49,11 +49,10 @@
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
-import { mockAttractionWaits } from "@disney-wait-planner/shared";
 import trackerJson from "../data/dataAuditTracker.json";
-import { DINING_PLACES, resolveDiningKey } from "./diningSuggestions";
-import { EXPERIENCE_PLACES, resolveExperienceKey } from "./experienceSuggestions";
-import { resolveAttractionIdentityKey } from "./legacyAttractions";
+import { getDiningContext } from "./diningSuggestions";
+import { getExperienceContext } from "./experienceSuggestions";
+import { getAttractionContext } from "./legacyAttractions";
 import { PARK_TO_RESORT, isValidParkId } from "./parkMetadata";
 import { normalizeKey } from "./plansMatching";
 import type { PlannerItemType } from "./plansTransfer";
@@ -185,35 +184,27 @@ export function trackerIdentityKey(i: Pick<TrackerItem, "type" | "resort" | "par
 // ============================================
 
 /**
- * Resolve an item's identity against the maintained catalogs. "active" =
- * exact canonical name in the active catalog (park must match when both are
- * known); "legacy" = exact canonical name only the legacy catalog knows
- * (legacy catalogs are not enumerable, so resolver-only); null = unknown.
+ * Resolve an item's identity against the maintained catalogs, using each
+ * domain's own context helper (active catalog first, legacy fallback) so no
+ * parallel lookup exists. The name must be the EXACT canonical name (not an
+ * alias/containment hit), the resort must match, and the park qualification
+ * must equal the catalog's for active AND legacy identities (a park-less
+ * identity must omit `parkId`). "active" / "legacy" come from the catalog;
+ * null = unknown or mis-qualified. Entertainment uses the lifecycle registry's
+ * resolver (same catalogs).
  */
 export function getTrackerCatalogState(
   i: Pick<TrackerItem, "type" | "resort" | "parkId">, name: string,
 ): TrackerCatalogState | null {
-  const key = normalizeKey(name);
-  const exactLegacy = (resolved: string | null) => (resolved === key ? "legacy" as const : null);
-  switch (i.type) {
-    case "entertainment":
-      return i.parkId ? getLifecycleCatalogState({ parkId: i.parkId, name }) : null;
-    case "attraction": {
-      const active = mockAttractionWaits.find((a) => a.resortId === i.resort && normalizeKey(a.name) === key);
-      // Park qualification must match the catalog exactly (an omitted parkId is not a valid alternative spelling).
-      if (active) return active.parkId !== i.parkId ? null : "active";
-      return exactLegacy(resolveAttractionIdentityKey(name, i.resort));
-    }
-    case "dining":
-    case "experience": {
-      const places = i.type === "dining" ? DINING_PLACES : EXPERIENCE_PLACES;
-      const active = places.find((p) => p.resort === i.resort && normalizeKey(p.name) === key);
-      if (active) return active.parkId !== i.parkId ? null : "active";
-      return exactLegacy((i.type === "dining" ? resolveDiningKey : resolveExperienceKey)(name, i.resort));
-    }
-    default:
-      return null;
-  }
+  if (i.type === "entertainment") return i.parkId ? getLifecycleCatalogState({ parkId: i.parkId, name }) : null;
+  const ctx =
+    i.type === "attraction" ? getAttractionContext(name, i.resort)
+    : i.type === "dining" ? getDiningContext(name, i.resort)
+    : i.type === "experience" ? getExperienceContext(name, i.resort)
+    : undefined;
+  if (!ctx || ctx.resortId !== i.resort || normalizeKey(ctx.name) !== normalizeKey(name)) return null;
+  if ((ctx.parkId ?? undefined) !== i.parkId) return null;
+  return ctx.lifecycle;
 }
 
 // ============================================
@@ -670,7 +661,7 @@ export function runDevDataAuditTrackerCases(): string[] {
     kinds(wrap(item({ parkId: undefined }))).includes("unknown_identity") &&
     kinds(wrap(item(), item({ trackerId: "DA-0901", parkId: undefined }))).includes("duplicate_identity"));
   check("identity: non-entertainment identity ignores park scope (legacy item with/without parkId collides)",
-    kinds(wrap(item({ name: "Splash Mountain", parkId: undefined }), item({ trackerId: "DA-0901", name: "Splash Mountain", parkId: "mk" }))).includes("duplicate_identity"));
+    kinds(wrap(item({ name: "Splash Mountain" }), item({ trackerId: "DA-0901", name: "Splash Mountain", parkId: "epcot" }))).includes("duplicate_identity"));
   check("identity: wrong park rejected", kinds(wrap(item({ parkId: "epcot" }))).includes("unknown_identity"));
   check("identity: park must belong to resort", kinds(wrap(item({ resort: "DLR" }))).includes("bad_park"));
   check("identity: entertainment requires parkId", kinds(wrap(item({ type: "entertainment", parkId: undefined, name: "Wondrous Journeys" }))).includes("missing_field"));
@@ -678,10 +669,18 @@ export function runDevDataAuditTrackerCases(): string[] {
     getTrackerCatalogState({ type: "attraction", resort: "WDW", parkId: "mk" }, "Space Mountain") === "active" &&
     getTrackerCatalogState({ type: "entertainment", resort: "DLR", parkId: "disneyland" }, "Wondrous Journeys") === "active" &&
     getTrackerCatalogState({ type: "entertainment", resort: "DLR", parkId: "disneyland" }, "Together Forever — A Pixar Nighttime Spectacular") === "legacy" &&
-    getTrackerCatalogState({ type: "attraction", resort: "WDW" }, "Splash Mountain") === "legacy" &&
+    getTrackerCatalogState({ type: "attraction", resort: "WDW", parkId: "mk" }, "Splash Mountain") === "legacy" &&
     getTrackerCatalogState({ type: "attraction", resort: "WDW" }, "Nope") === null);
   check("identity: legacy identity is valid (Active→Legacy keeps the same tracker item)",
-    !kinds(wrap(item({ name: "Splash Mountain", parkId: undefined }))).includes("unknown_identity"));
+    !kinds(wrap(item({ name: "Splash Mountain" }))).includes("unknown_identity"));
+  check("identity: dining park qualification validated via the maintained context (Blue Bayou Restaurant → disneyland)",
+    getTrackerCatalogState({ type: "dining", resort: "DLR", parkId: "disneyland" }, "Blue Bayou Restaurant") === "active" &&
+    getTrackerCatalogState({ type: "dining", resort: "DLR", parkId: "dca" }, "Blue Bayou Restaurant") === null &&
+    getTrackerCatalogState({ type: "dining", resort: "DLR" }, "Blue Bayou Restaurant") === null &&
+    getTrackerCatalogState({ type: "dining", resort: "WDW", parkId: "disneyland" as ParkId }, "Blue Bayou Restaurant") === null);
+  check("identity: legacy park qualification is validated against the catalog (wrong or omitted park rejected)",
+    kinds(wrap(item({ name: "Splash Mountain", parkId: "epcot" }))).includes("unknown_identity") &&
+    kinds(wrap(item({ name: "Splash Mountain", parkId: undefined }))).includes("unknown_identity"));
   check("identity: lifecycleRegistry applies to entertainment only",
     kinds(wrap(item({ lifecycleRegistry: true }))).includes("unexpected_field"));
   check("identity: lifecycleRegistry pointing at no registry record rejected (Fantasmic! at HS is active, not in the registry)",
