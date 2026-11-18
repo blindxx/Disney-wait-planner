@@ -169,9 +169,15 @@ export interface TrackerFinding {
 /** The Git-tracked tracker. Seeded only with findings verifiable from existing audit records. */
 export const DATA_AUDIT_TRACKER = trackerJson as unknown as DataAuditTracker;
 
-/** Identity key shared by uniqueness checks: type + park-or-resort scope + normalized name. */
+/**
+ * Identity key shared by uniqueness checks: type + scope + normalized name.
+ * Entertainment names repeat across parks, so its scope is the park; every other
+ * type's catalog keys are unique per resort, so its scope is the resort and an
+ * optional/omitted `parkId` can never split one catalog item across two IDs.
+ */
 export function trackerIdentityKey(i: Pick<TrackerItem, "type" | "resort" | "parkId">, name: string): string {
-  return `${i.type}:${i.parkId ?? i.resort}:${normalizeKey(name)}`;
+  const scope = i.type === "entertainment" ? (i.parkId ?? i.resort) : i.resort;
+  return `${i.type}:${scope}:${normalizeKey(name)}`;
 }
 
 // ============================================
@@ -194,14 +200,15 @@ export function getTrackerCatalogState(
       return i.parkId ? getLifecycleCatalogState({ parkId: i.parkId, name }) : null;
     case "attraction": {
       const active = mockAttractionWaits.find((a) => a.resortId === i.resort && normalizeKey(a.name) === key);
-      if (active) return i.parkId && active.parkId !== i.parkId ? null : "active";
+      // Park qualification must match the catalog exactly (an omitted parkId is not a valid alternative spelling).
+      if (active) return active.parkId !== i.parkId ? null : "active";
       return exactLegacy(resolveAttractionIdentityKey(name, i.resort));
     }
     case "dining":
     case "experience": {
       const places = i.type === "dining" ? DINING_PLACES : EXPERIENCE_PLACES;
       const active = places.find((p) => p.resort === i.resort && normalizeKey(p.name) === key);
-      if (active) return i.parkId !== undefined && active.parkId !== i.parkId ? null : "active";
+      if (active) return active.parkId !== i.parkId ? null : "active";
       return exactLegacy((i.type === "dining" ? resolveDiningKey : resolveExperienceKey)(name, i.resort));
     }
     default:
@@ -527,6 +534,13 @@ export function checkTrackerAppendOnly(previous: unknown, next: unknown): string
     const n = nextById.get(p.trackerId);
     if (!n) { out.push(`${p.trackerId}: item removed`); continue; }
     if (n.type !== p.type || n.resort !== p.resort || n.parkId !== p.parkId) out.push(`${p.trackerId}: type/resort/parkId changed (identity is permanent)`);
+    if (n.name !== p.name) {
+      // A name change must be fully explained by newly appended renamed entries chaining from the previous name.
+      const added = (n.history ?? []).slice((p.history ?? []).length).filter((h) => h?.kind === "renamed");
+      let cur = p.name, chained = added.length > 0;
+      for (const h of added) { if (h.from !== cur) { chained = false; break; } cur = h.to as string; }
+      if (!chained || cur !== n.name) out.push(`${p.trackerId}: name changed from "${p.name}" to "${n.name}" without appended renamed entries chaining from the previous name`);
+    }
     if (!prefix(p.history ?? [], n.history ?? [])) out.push(`${p.trackerId}: existing history entries were edited or removed`);
     if (!prefix(p.formerNames ?? [], n.formerNames ?? [])) out.push(`${p.trackerId}: formerNames were edited or removed`);
   }
@@ -625,6 +639,11 @@ export function runDevDataAuditTrackerCases(): string[] {
     !kinds(wrap(item(), item({ trackerId: "DA-0901", resort: "DLR", parkId: "disneyland", name: "Space Mountain" }))).includes("duplicate_identity"));
   check("identity: unknown name rejected", kinds(wrap(item({ name: "Not A Real Ride" }))).includes("unknown_identity"));
   check("identity: alias/near-miss is not canonical", kinds(wrap(item({ name: "Space Mountain Ride Extra" }))).includes("unknown_identity"));
+  check("identity: omitting parkId for a park-qualified catalog item is rejected, and cannot split the ID",
+    kinds(wrap(item({ parkId: undefined }))).includes("unknown_identity") &&
+    kinds(wrap(item(), item({ trackerId: "DA-0901", parkId: undefined }))).includes("duplicate_identity"));
+  check("identity: non-entertainment identity ignores park scope (legacy item with/without parkId collides)",
+    kinds(wrap(item({ name: "Splash Mountain", parkId: undefined }), item({ trackerId: "DA-0901", name: "Splash Mountain", parkId: "mk" }))).includes("duplicate_identity"));
   check("identity: wrong park rejected", kinds(wrap(item({ parkId: "epcot" }))).includes("unknown_identity"));
   check("identity: park must belong to resort", kinds(wrap(item({ resort: "DLR" }))).includes("bad_park"));
   check("identity: entertainment requires parkId", kinds(wrap(item({ type: "entertainment", parkId: undefined, name: "Wondrous Journeys" }))).includes("missing_field"));
@@ -735,6 +754,13 @@ export function runDevDataAuditTrackerCases(): string[] {
   check("append-only: deleting history is rejected", checkTrackerAppendOnly(base, dropped).some((m) => m.includes("history")));
   const reid = clone(base); (reid.items[0] as TrackerItem).parkId = "ak"; (reid.items[0] as TrackerItem).resort = "WDW";
   check("append-only: re-identifying an item is rejected", checkTrackerAppendOnly(base, reid).some((m) => m.includes("permanent")));
+  const renameOk = clone(base); { const t = renameOk.items[0] as TrackerItem; t.name = "Big Thunder Mountain Railroad"; t.formerNames = ["Space Mountain"];
+    t.history.push({ date: "2026-11-02", kind: "renamed", status: "open", episode: 1, summary: "s", from: "Space Mountain", to: "Big Thunder Mountain Railroad", evidence: [ev("2026-11-02")] }); }
+  check("append-only: a rename with an appended chained renamed entry is allowed", checkTrackerAppendOnly(base, renameOk).length === 0);
+  const silentRename = clone(base); (silentRename.items[0] as TrackerItem).name = "Big Thunder Mountain Railroad";
+  check("append-only: changing name without a renamed entry is rejected", checkTrackerAppendOnly(base, silentRename).some((m) => m.includes("name changed")));
+  const badChain = clone(renameOk); ((badChain.items[0] as TrackerItem).history[1] as TrackerHistoryEntry).from = "Pirates of the Caribbean";
+  check("append-only: renamed entry not chaining from the previous name is rejected", checkTrackerAppendOnly(base, badChain).some((m) => m.includes("name changed")));
   check("append-only: adding a new item is allowed", checkTrackerAppendOnly(base, { ...base, items: [...base.items, item({ trackerId: "DA-0902", name: "Pirates of the Caribbean" })] }).length === 0);
   check("nextTrackerId: max + 1", nextTrackerId(base as unknown as DataAuditTracker) === "DA-0902");
 
