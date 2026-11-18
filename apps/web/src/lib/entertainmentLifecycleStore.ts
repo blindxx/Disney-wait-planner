@@ -226,12 +226,14 @@ export async function supersedeLegacyIdentity(q: Queryable, parkId: ParkId, show
   );
 }
 
-/** Idempotent: a repeated discovery of the same (park, show, entity) is a no-op. */
+/** Idempotent: a repeat of an already-validated (park, show, entity) is a no-op; a previously superseded entity that returns is REACTIVATED (its row is kept, never duplicated). */
 export async function insertLegacyIdentity(q: Queryable, parkId: ParkId, showKey: string, id: DiscoveredLegacyIdentity, localDate: string): Promise<boolean> {
   const res = await q.query(
     `INSERT INTO entertainment_legacy_identity (park_id, show_key, show_name, entity_id, entity_type, provider_name, status, first_validated_date)
      VALUES ($1, $2, $3, $4, 'SHOW', $5, 'validated', $6::date)
-     ON CONFLICT (park_id, show_key, entity_id) DO NOTHING`,
+     ON CONFLICT (park_id, show_key, entity_id) DO UPDATE SET
+       status = 'validated', superseded_at = NULL, validated_at = NOW(), provider_name = EXCLUDED.provider_name
+     WHERE entertainment_legacy_identity.status = 'superseded'`,
     [parkId, showKey, id.name, id.entityId, id.providerName, localDate],
   );
   return (res.rowCount ?? 0) > 0;

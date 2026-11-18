@@ -556,7 +556,8 @@ class FakeLifecycleDb implements Queryable {
     if (t.startsWith("INSERT INTO entertainment_legacy_identity")) {
       const [park, key, name, ent, pname, date] = v as string[];
       const k = `${park}|${key}|${ent}`;
-      if (this.identities.has(k)) return { rowCount: 0, rows: [] };
+      const prior = this.identities.get(k);
+      if (prior && prior.status === "validated") return { rowCount: 0, rows: [] };
       // mirrors the partial unique indexes (one validated row per show and per entity)
       for (const r of this.identities.values()) if (r.status === "validated" && r.park_id === park && (r.show_key === key || r.entity_id === ent)) throw new Error("unique violation");
       this.identities.set(k, { park_id: park, show_key: key, show_name: name, entity_id: ent, provider_name: pname, status: "validated", first_validated_date: date });
@@ -1592,14 +1593,22 @@ export async function runDevLegacyIdentityDiscoveryCases(): Promise<string[]> {
     check("UUID change: valid history is kept under the same canonical show (evidence not lost, new day tracked via the new entity)", [...db.evidence.values()].filter((x) => x.show_key === lKey).length >= evidenceBefore && [...db.evidence.values()].some((x) => x.show_key === lKey && x.d === localOf(47) && x.day_class === "active"));
     check("UUID change: surfaced state is not reset or duplicated", (await stateOf(db))?.status === "legacy_comeback" && (await stateOf(db))?.restoreCount === 1 && evs(db, "legacy_comeback").length === 1);
 
+    // A → B → A: the superseded original returns and is reactivated (review finding), history/state intact
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME, perf: true }] }], 48);
+    check("UUID return: the superseded UUID is reactivated as the single validated identity (row reused, replacement superseded)", ids(db).length === 1 && ids(db)[0].entity_id === LID && ids(db, "superseded").length === 1 && ids(db, "superseded")[0].entity_id === LID2 && db.identities.size === 2 && evs(db, "legacy_identity_change").length === 2);
+    check("UUID return: the show keeps being observed and stays surfaced", [...db.evidence.values()].some((x) => x.show_key === lKey && x.d === localOf(48) && x.day_class === "active") && (await stateOf(db))?.status === "legacy_comeback");
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME, perf: true }] }], 48);
+    check("UUID return: duplicate delivery is idempotent", ids(db).length === 1 && db.identities.size === 2 && evs(db, "legacy_identity_change").length === 2);
+    await drive(runDb, [{ cands: [{ id: LID2, name: LEGACY_NAME, perf: true }] }], 49);
+    check("UUID flip-flop: B returns again and is reactivated too (no dead end in either direction)", ids(db).length === 1 && ids(db)[0].entity_id === LID2 && db.identities.size === 2);
     // re-hide (21-of-30, final silent days with identity established) and re-comeback, all with the persisted identity
-    await drive(runDb, Array(20).fill("absent"), 48);
+    await drive(runDb, Array(20).fill("absent"), 50);
     check("re-hide: 20 final absent days → still surfaced", (await stateOf(db))?.status === "legacy_comeback");
-    await drive(runDb, ["absent"], 68);
+    await drive(runDb, ["absent"], 70);
     check("re-hide: 21st day → legacy_hidden, audited once; identity retained", (await stateOf(db))?.status === "legacy_hidden" && evs(db, "legacy_rehide").length === 1 && ids(db).length === 1);
-    await drive(runDb, Array(6).fill({ cands: [{ id: LID2, perf: true }] } as World), 69);
+    await drive(runDb, Array(6).fill({ cands: [{ id: LID2, perf: true }] } as World), 71);
     check("re-comeback: 6 days → hidden", (await stateOf(db))?.status === "legacy_hidden");
-    await drive(runDb, [{ cands: [{ id: LID2, perf: true }] }], 75);
+    await drive(runDb, [{ cands: [{ id: LID2, perf: true }] }], 77);
     check("re-comeback: 7th day → second cycle via the same persisted identity", (await stateOf(db))?.status === "legacy_comeback" && (await stateOf(db))?.restoreCount === 2 && ids(db).length === 1);
   }
 
