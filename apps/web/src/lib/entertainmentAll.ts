@@ -59,7 +59,7 @@ import { getProviderEntertainmentLocation } from "./entertainmentProviderLocatio
 import { getResortLocalDate } from "./resortTime";
 import type { ThemeParksError, ThemeParksHistoryDaily, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 import { buildParkHistoryEvidence } from "./entertainmentHistory";
-import { THEMEPARKS_ENTERTAINMENT_MAPPING, legacyProviderEntityIds } from "./themeParksEntertainmentMapping";
+import { THEMEPARKS_ENTERTAINMENT_MAPPING, legacyProviderEntityIds, type EntertainmentProviderMapping } from "./themeParksEntertainmentMapping";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 // ============================================
@@ -131,6 +131,8 @@ export interface ParkAllEntertainment {
   legacyEntries?: AllEntertainmentEntry[];
   /** Phase 14.5D: canonical legacy names persisted as comebacks. Absent = unknown: no legacy show is surfaced. */
   lifecycleLegacyComebacks?: string[];
+  /** Phase 14.5D follow-up: persisted validated discovered legacy provider identities (attached by the route; lets the page re-validate comebacks). */
+  lifecycleLegacyIdentities?: Array<{ parkId: ParkId; name: string; entityId: string; providerName: string }>;
   /**
    * Phase 14.5C: canonical names of shows the lifecycle monitor has persisted as
    * auto-hidden. Absent = unknown (DB unavailable / older body): nothing automatic is hidden.
@@ -172,8 +174,10 @@ export function buildParkAllEntertainment(
   instant: Date = new Date(),
   /** Phase 14.4.2: park history (null → forward-horizon proof only); same evidence as Waits & Shows. */
   historyResult: ThemeParksResult<ThemeParksHistoryDaily> | null = null,
+  /** Phase 14.5D: effective legacy registry (manual + persisted discovered identities); default = shipped manual registry. */
+  legacyMapping?: EntertainmentProviderMapping[],
 ): ParkAllEntertainment {
-  const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant, historyResult);
+  const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant, historyResult, legacyMapping);
   const history = buildParkHistoryEvidence(parkId, PARK_TO_RESORT[parkId] as ResortId, historyResult, instant);
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const entries: AllEntertainmentEntry[] = [];
@@ -202,7 +206,7 @@ export function buildParkAllEntertainment(
   const live = result.ok ? result.data : null;
   if (live) {
     // Active mappings AND legacy-registered entities (14.5D) have an identity: never provider-only (no duplicates).
-    const claimed = new Set([...mappedEntityIds(), ...legacyProviderEntityIds()]);
+    const claimed = new Set([...mappedEntityIds(), ...legacyProviderEntityIds(legacyMapping)]);
     const parkUuid = THEMEPARKS_PARKS[parkId].entityId.toLowerCase();
     const nowMs = instant.getTime();
     const localDate = getResortLocalDate(resort, instant);

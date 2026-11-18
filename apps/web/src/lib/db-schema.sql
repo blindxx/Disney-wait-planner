@@ -304,7 +304,7 @@ ALTER TABLE entertainment_lifecycle_state ADD CONSTRAINT entertainment_lifecycle
   CHECK (status IN ('visible', 'auto_hidden', 'legacy_comeback', 'legacy_hidden'));
 
 -- Append-only decisions for the later research audit: auto_hide, auto_restore,
--- silence_flag, registry_restore, registry_conflict, legacy_comeback, legacy_rehide (14.5D). The natural key makes a duplicated cron
+-- silence_flag, registry_restore, registry_conflict, legacy_comeback, legacy_rehide, legacy_identity_discovered/_change/_candidate (14.5D). The natural key makes a duplicated cron
 -- delivery a no-op. audit_status is advanced only by the audit (never here).
 CREATE TABLE IF NOT EXISTS entertainment_lifecycle_events (
   park_id             TEXT        NOT NULL,
@@ -321,3 +321,28 @@ CREATE TABLE IF NOT EXISTS entertainment_lifecycle_events (
 
 CREATE INDEX IF NOT EXISTS entertainment_lifecycle_events_audit_idx
   ON entertainment_lifecycle_events (audit_status, occurred_at);
+
+-- Phase 14.5D follow-up: provider SHOW identities automatically discovered for LEGACY catalog shows
+-- (validated by exact normalized canonical name/approved alias + park + SHOW type + ownership checks).
+-- One validated row per (park, show) and per (park, entity); a replaced identity is kept as 'superseded'.
+CREATE TABLE IF NOT EXISTS entertainment_legacy_identity (
+  park_id              TEXT        NOT NULL,
+  show_key             TEXT        NOT NULL,
+  show_name            TEXT        NOT NULL,
+  entity_id            TEXT        NOT NULL,
+  entity_type          TEXT        NOT NULL DEFAULT 'SHOW',
+  provider_name        TEXT        NOT NULL,
+  status               TEXT        NOT NULL DEFAULT 'validated',
+  first_validated_date DATE        NOT NULL,
+  validated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  superseded_at        TIMESTAMPTZ,
+  PRIMARY KEY (park_id, show_key, entity_id),
+  CONSTRAINT entertainment_legacy_identity_status_chk CHECK (status IN ('validated', 'superseded')),
+  CONSTRAINT entertainment_legacy_identity_type_chk CHECK (entity_type = 'SHOW')
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS entertainment_legacy_identity_show_uidx
+  ON entertainment_legacy_identity (park_id, show_key) WHERE status = 'validated';
+CREATE UNIQUE INDEX IF NOT EXISTS entertainment_legacy_identity_entity_uidx
+  ON entertainment_legacy_identity (park_id, entity_id) WHERE status = 'validated';
+

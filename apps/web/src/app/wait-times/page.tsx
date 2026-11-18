@@ -71,7 +71,7 @@ import {
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
 import { applyRetainedInactivity, isEntertainmentHiddenToday, nextRetainedInactivity, partitionPartyEntertainment, type RetainedInactivity } from "../../lib/seasonalVisibility";
-import { activeRetainedEvidence, findShowtimeEntry, getLegacyComebackPlaces, getLifecycleHiddenNames, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
+import { activeRetainedEvidence, findShowtimeEntry, getLegacyComebackPlaces, getLifecycleHiddenNames, legacyIdentityOptions, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
@@ -1023,7 +1023,7 @@ export default function WaitTimesPage() {
     // Phase 14.5D: legacy shows the lifecycle monitor has persisted as comebacks (shared validation; same land filter).
     // Not subject to catalog seasonal/inactivity rules: their own 21-of-30 lifecycle decides the re-hide.
     const retained = activeRetainedEvidence(retainedLifecycle, selectedPark, displayNow);
-    const legacy = getLegacyComebackPlaces(selectedPark, showtimes?.lifecycleLegacyComebacks ?? retained?.legacyComebacks)
+    const legacy = getLegacyComebackPlaces(selectedPark, showtimes?.lifecycleLegacyComebacks ?? retained?.legacyComebacks, legacyIdentityOptions(showtimes?.lifecycleLegacyIdentities ?? retained?.legacyIdentities))
       .filter((p) => (!selectedLand || p.land === selectedLand) && !active.some((a) => a.name === p.name));
     return legacy.length > 0 ? [...active, ...legacy] : active;
   }, [parkEntertainment, selectedLand, selectedResort, selectedPark, displayNow, showtimes, lifecycleHidden, retainedInactivity, retainedLifecycle]);

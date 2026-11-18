@@ -35,6 +35,7 @@ import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, getLifecycleCatalogState, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
 import { isLifecycleEligible, resolveLegacyShow, type LegacyIdentityOptions } from "./entertainmentLifecycleDetector";
 import { getLegacyEntertainmentPlaces, type EntertainmentPlace } from "./entertainmentSuggestions";
+import { mergeDiscoveredLegacyIdentities, type DiscoveredLegacyIdentity } from "./themeParksEntertainmentMapping";
 import { getResortLocalDate } from "./resortTime";
 
 /** Names of curated shows with verified performances in the given showtime entries. */
@@ -117,6 +118,8 @@ export interface RetainedLifecycleEvidence {
   registryRestored?: string[];
   /** Phase 14.5D: persisted legacy comebacks (names only), retained like the hide evidence so a refresh failure does not flicker them. */
   legacyComebacks?: string[];
+  /** Persisted discovered legacy identities, retained with the comebacks they validate. */
+  legacyIdentities?: DiscoveredLegacyIdentity[];
 }
 
 type EvidenceResponse = {
@@ -127,6 +130,7 @@ type EvidenceResponse = {
   lifecycleAutoHidden?: string[];
   lifecycleRegistryRestored?: string[];
   lifecycleLegacyComebacks?: string[];
+  lifecycleLegacyIdentities?: DiscoveredLegacyIdentity[];
 } | null | undefined;
 
 /**
@@ -151,6 +155,7 @@ export function nextRetainedLifecycleEvidence(
     autoHidden: response.lifecycleAutoHidden.slice(),
     ...(Array.isArray(response.lifecycleRegistryRestored) ? { registryRestored: response.lifecycleRegistryRestored.slice() } : {}),
     ...(Array.isArray(response.lifecycleLegacyComebacks) ? { legacyComebacks: response.lifecycleLegacyComebacks.slice() } : {}),
+    ...(Array.isArray(response.lifecycleLegacyIdentities) ? { legacyIdentities: response.lifecycleLegacyIdentities.slice() } : {}),
   };
 }
 
@@ -167,6 +172,15 @@ export function activeRetainedEvidence(
 // ============================================
 // Legacy comebacks (Phase 14.5D)
 // ============================================
+
+/**
+ * Identity options for the legacy helpers below from the persisted discovered identities carried by the API
+ * body (`lifecycleLegacyIdentities`). Manual `mapped` entries stay authoritative; an ambiguous/malformed
+ * identity is dropped; undefined/unknown → the manual registry only.
+ */
+export function legacyIdentityOptions(identities: ReadonlyArray<DiscoveredLegacyIdentity> | null | undefined): LegacyIdentityOptions {
+  return Array.isArray(identities) && identities.length > 0 ? { legacyMapping: mergeDiscoveredLegacyIdentities(identities) } : {};
+}
 
 /** Legacy catalog places to surface for `parkId` from persisted comeback names (validated; deduplicated; unknown → none). */
 export function getLegacyComebackPlaces(parkId: ParkId, comebacks: readonly string[] | null | undefined, o: LegacyIdentityOptions = {}): EntertainmentPlace[] {

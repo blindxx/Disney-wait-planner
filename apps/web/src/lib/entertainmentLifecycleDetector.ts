@@ -402,7 +402,9 @@ export function historyBackfillObservations(args: {
 /** `legacy_comeback` / `legacy_hidden` (Phase 14.5D) apply to LEGACY identities only: surfaced vs. not surfaced after a comeback cycle. */
 export type LifecycleStatus = "visible" | "auto_hidden" | "legacy_comeback" | "legacy_hidden";
 export type LifecycleAuditFlag = "provider_silence" | "registry_conflict";
-export type LifecycleEventType = "auto_hide" | "auto_restore" | "silence_flag" | "registry_conflict" | "registry_restore" | "legacy_comeback" | "legacy_rehide";
+export type LifecycleEventType = "auto_hide" | "auto_restore" | "silence_flag" | "registry_conflict" | "registry_restore" | "legacy_comeback" | "legacy_rehide"
+  // Phase 14.5D follow-up: legacy provider-identity discovery (audit trail)
+  | "legacy_identity_discovered" | "legacy_identity_change" | "legacy_identity_candidate";
 
 export interface LifecycleShowState {
   status: LifecycleStatus;

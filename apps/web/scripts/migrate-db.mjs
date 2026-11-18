@@ -277,6 +277,23 @@ const TABLE_CONTRACTS = {
     ],
     primaryKey: ["park_id", "show_key", "event_type", "local_date"],
   },
+  // Phase 14.5D follow-up — discovered legacy provider identities (lib/entertainmentLifecycleStore.ts).
+  // The monitor's ON CONFLICT target requires this exact PRIMARY KEY. Readers fail open (no identities).
+  entertainment_legacy_identity: {
+    columns: [
+      { name: "park_id", dataType: "text", notNull: true },
+      { name: "show_key", dataType: "text", notNull: true },
+      { name: "show_name", dataType: "text", notNull: true },
+      { name: "entity_id", dataType: "text", notNull: true },
+      { name: "entity_type", dataType: "text", notNull: true, expectedDefault: { kind: "text", value: "SHOW" } },
+      { name: "provider_name", dataType: "text", notNull: true },
+      { name: "status", dataType: "text", notNull: true, expectedDefault: { kind: "text", value: "validated" } },
+      { name: "first_validated_date", dataType: "date", notNull: true },
+      { name: "validated_at", dataType: "timestamp with time zone", notNull: true, hasDefault: true },
+      { name: "superseded_at", dataType: "timestamp with time zone", notNull: false },
+    ],
+    primaryKey: ["park_id", "show_key", "entity_id"],
+  },
 };
 
 // SH.2.7 — route.ts (`Number(rows[0].revision)`) and syncHelper.ts both

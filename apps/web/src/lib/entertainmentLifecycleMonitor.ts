@@ -28,6 +28,14 @@
  * ≥ 7 verified-performance days in the rolling 14 → `legacy_comeback` (surfaced on both pages); then the
  * 21-of-30 rule → `legacy_rehide`. Events are natural-key deduplicated; the legacy catalog is never changed.
  *
+ * Legacy identity discovery (14.5D follow-up, same run): before observing legacy shows the monitor reads the
+ * persisted validated identities and — only on a fresh, healthy, non-stale payload with nothing dropped —
+ * discovers newly published provider SHOW entities that exactly match a known legacy identity
+ * (`discoverLegacyProviderIdentities`), persisting validated ones (`entertainment_legacy_identity`) and
+ * flagging uncertain candidates / UUID changes for audit. The effective registry (manual `mapped` entries
+ * win, then persisted identities) drives observation; the 7-of-14 / 21-of-30 rules are unchanged. A failure
+ * of this step never blocks the active lifecycle (manual identities only).
+ *
  * Fail open for NEW hiding: any provider/DB failure leaves state untouched
  * (no hide is ever produced from missing data); reviewed registry decisions are
  * never edited. The monitor never touches the registry JSON, the catalogs, the
@@ -39,6 +47,7 @@ import { ENTERTAINMENT_LIFECYCLE_REGISTRY, type EntertainmentLifecycleRegistry }
 import {
   EMPTY_LIFECYCLE_STATE,
   LIFECYCLE_RETENTION_DAYS,
+  assessParkHealth,
   evaluateLegacyLifecycle,
   evaluateShowLifecycle,
   historyBackfillObservations,
@@ -54,9 +63,13 @@ import {
 } from "./entertainmentLifecycleDetector";
 import {
   insertEvent,
+  insertEventOnce,
+  insertLegacyIdentity,
   pruneEvidence,
   readEvidence,
+  readLegacyIdentities,
   readStates,
+  supersedeLegacyIdentity,
   tryLifecycleLock,
   upsertObservations,
   writeState,
@@ -64,15 +77,24 @@ import {
 } from "./entertainmentLifecycleStore";
 import { buildParkHistoryEvidence } from "./entertainmentHistory";
 import { fetchParkHistoryWithin, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
-import type { ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
+import { legacyEntriesFor, type ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 import { getParkEntertainmentShowtimes } from "./entertainmentShowtimesService";
 import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { getParkHoursPool } from "./db";
 import { PARK_LABELS, PARK_TO_RESORT } from "./parkMetadata";
 import { createPoolExecutor, type Queryable } from "./parkHoursStore";
 import { addDaysToLocalDate } from "./resortTime";
-import { entertainmentMappingKey, getThemeParksEntertainmentRefs } from "./themeParksEntertainmentMapping";
-import type { ThemeParksHistoryDaily, ThemeParksResult } from "./themeParksApi";
+import {
+  LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
+  THEMEPARKS_ENTERTAINMENT_MAPPING,
+  discoverLegacyProviderIdentities,
+  entertainmentMappingKey,
+  getThemeParksEntertainmentRefs,
+  mergeDiscoveredLegacyIdentities,
+  type DiscoveredLegacyIdentity,
+} from "./themeParksEntertainmentMapping";
+import { THEMEPARKS_PARKS } from "./themeParksProviders";
+import type { ThemeParksHistoryDaily, ThemeParksLive, ThemeParksResult } from "./themeParksApi";
 
 /** Every supported park — derived from the single maintained park list. */
 export const LIFECYCLE_PARK_IDS = Object.keys(PARK_LABELS) as ParkId[];
@@ -100,6 +122,9 @@ export interface ParkLifecycleResult {
   /** Phase 14.5D: legacy shows that qualified as comebacks / were re-hidden this run. */
   legacyComebacks: string[];
   legacyRehidden: string[];
+  /** Phase 14.5D follow-up: legacy shows whose provider identity was newly validated / changed this run, and shows with uncertain candidates flagged for audit. */
+  legacyIdentitiesDiscovered: string[];
+  legacyIdentityFlags: string[];
   /** Observations were made in the resort-local end-of-day window (negatives are final and count). */
   dayEnd: boolean;
   secondary: "none" | "done" | "history_unavailable";
@@ -120,7 +145,7 @@ export interface LifecycleMonitorOptions {
   budgetMs?: number;
   providerDeadlineMs?: number;
   /** Test seams. */
-  getShowtimes?: (parkId: ParkId, instant: Date, captureHistory: GetHistory | undefined) => Promise<ParkEntertainmentShowtimes>;
+  getShowtimes?: (parkId: ParkId, instant: Date, captureHistory: GetHistory | undefined, captureLive?: (r: ThemeParksResult<ThemeParksLive>) => void) => Promise<ParkEntertainmentShowtimes>;
   getHistory?: GetHistory;
   getHistoryAccess?: GetHistoryAccess;
   /** Registry used for reviewed hide decisions (default: the shipped registry). */
@@ -235,6 +260,46 @@ async function evaluateAndPersist(
   return res;
 }
 
+interface IdentityStep { validated: DiscoveredLegacyIdentity[]; discovered: string[]; flagged: string[] }
+
+/**
+ * One locked transaction: read the persisted validated legacy identities and, when the payload is fresh,
+ * healthy, non-stale and complete, discover/persist new ones and flag uncertain candidates. Idempotent:
+ * identities are insert-or-ignore, flags are de-duplicated by (park, show, type, evidence).
+ */
+async function discoverAndPersistIdentities(
+  q: Queryable,
+  parkId: ParkId,
+  st: ParkEntertainmentShowtimes,
+  live: ThemeParksLive | null,
+  manual: typeof LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
+): Promise<IdentityStep> {
+  const step: IdentityStep = { validated: [], discovered: [], flagged: [] };
+  const existing = await readLegacyIdentities(q);
+  const eligible = !!live && !st.error && !st.stale && st.fetchedLocalDate === st.localDate && live.droppedEntries === 0 && assessParkHealth(st).healthy;
+  if (eligible && live) {
+    const res = discoverLegacyProviderIdentities({
+      parkId, parkUuid: THEMEPARKS_PARKS[parkId].entityId.toLowerCase(),
+      live: live.entries.map((e) => ({ entityId: e.entityId, name: e.name, entityType: e.entityType, parkId: e.parkId })),
+      existing, manual, active: THEMEPARKS_ENTERTAINMENT_MAPPING,
+    });
+    for (const sup of res.superseded) await supersedeLegacyIdentity(q, parkId, sup.showKey, sup.entityId);
+    for (const id of res.identities) await insertLegacyIdentity(q, parkId, entertainmentMappingKey(id.parkId, id.name), id, st.localDate);
+    const limitations = [
+      "provider evidence only: a name match is not independent confirmation that this entity is the legacy show",
+      "an identity only lets the monitor observe the show; it surfaces only after 7 distinct verified-performance days within 14",
+      "no catalog edit and no Smart Entry restoration: the legacy catalog is unchanged",
+    ];
+    for (const f of res.flags) {
+      const type = f.kind === "identity_discovered" ? "legacy_identity_discovered" : f.kind === "identity_change" ? "legacy_identity_change" : "legacy_identity_candidate";
+      await insertEventOnce(q, parkId, f.showKey, f.showName, { type, localDate: st.localDate, evidence: f.evidence, coverageLimitations: f.kind === "identity_candidate" ? [...limitations, "uncertain candidate: never persisted, never surfaced; flagged for the audit"] : limitations });
+      (f.kind === "identity_candidate" ? step.flagged : step.discovered).push(f.showName);
+    }
+  }
+  step.validated = await readLegacyIdentities(q, parkId);
+  return step;
+}
+
 function defaultRunDb(sleep: (ms: number) => Promise<void>): RunDb {
   return async (_parkId, fn) => {
     let lastErr: unknown;
@@ -277,8 +342,9 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
     const registry = options.registry ?? ENTERTAINMENT_LIFECYCLE_REGISTRY;
     const providerDeadlineMs = options.providerDeadlineMs ?? LIFECYCLE_PROVIDER_DEADLINE_MS;
     const histories = new Map<ParkId, ThemeParksResult<ThemeParksHistoryDaily>>();
-    const getShowtimes = options.getShowtimes ?? ((parkId: ParkId, at: Date, capture: GetHistory | undefined) =>
-      getParkEntertainmentShowtimes(parkId, { instant: at, getHistory: capture, getHistoryAccess: options.getHistoryAccess, historyDeadlineMs: LIFECYCLE_HISTORY_DEADLINE_MS }));
+    const lives = new Map<ParkId, ThemeParksResult<ThemeParksLive>>();
+    const getShowtimes = options.getShowtimes ?? ((parkId: ParkId, at: Date, capture: GetHistory | undefined, captureLive?: (r: ThemeParksResult<ThemeParksLive>) => void) =>
+      getParkEntertainmentShowtimes(parkId, { instant: at, getHistory: capture, getHistoryAccess: options.getHistoryAccess, historyDeadlineMs: LIFECYCLE_HISTORY_DEADLINE_MS, captureLive }));
 
     // ---- 1. FETCH (concurrent; per-park deadline; late results discarded) ----
     const fetched = await Promise.all(LIFECYCLE_PARK_IDS.map(async (parkId): Promise<ParkEntertainmentShowtimes | null> => {
@@ -288,7 +354,7 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         return await Promise.race([
-          getShowtimes(parkId, instant, capture),
+          getShowtimes(parkId, instant, capture, (r) => { lives.set(parkId, r); }),
           new Promise<null>((r) => { timer = setTimeout(() => r(null), providerDeadlineMs); }),
         ]);
       } catch {
@@ -303,16 +369,30 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
     for (let i = 0; i < LIFECYCLE_PARK_IDS.length; i++) {
       const parkId = LIFECYCLE_PARK_IDS[i];
       const st = fetched[i];
-      const base: ParkLifecycleResult = { parkId, status: "ok", observed: 0, classes: { active: 0, inactive: 0, dormant: 0, silent: 0, unknown: 0 }, hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], legacyComebacks: [], legacyRehidden: [], dayEnd: false, secondary: "none" };
+      const base: ParkLifecycleResult = { parkId, status: "ok", observed: 0, classes: { active: 0, inactive: 0, dormant: 0, silent: 0, unknown: 0 }, hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], legacyComebacks: [], legacyRehidden: [], legacyIdentitiesDiscovered: [], legacyIdentityFlags: [], dayEnd: false, secondary: "none" };
       base.dayEnd = isDayEndWindow(PARK_TO_RESORT[parkId] as ResortId, instant);
       if (Date.now() - startedMs > budgetMs) { parks.push({ ...base, status: "skipped_deadline" }); continue; }
       if (!st || st.error) { parks.push({ ...base, status: "provider_unavailable" }); continue; }
       const observations = observeParkDay(st, base.dayEnd);
       for (const o of observations) base.classes[o.dayClass]++;
       base.observed = observations.length;
-      const legacyObservations = observeLegacyParkDay(st, base.dayEnd, options.legacyIdentity);
       try {
-        const applied = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, [...observations, ...legacyObservations], new Set(), registry, options.legacyIdentity));
+        // Legacy identity: manual `mapped` entries win; persisted validated discoveries fill the rest. A failure of
+        // discovery (e.g. table not migrated) never blocks the active lifecycle — manual identities only.
+        const manualBase = options.legacyIdentity?.legacyMapping ?? LEGACY_ENTERTAINMENT_PROVIDER_MAPPING;
+        const liveResult = lives.get(parkId);
+        let idStep: IdentityStep = { validated: [], discovered: [], flagged: [] };
+        try {
+          idStep = await lockedTx(runDb, parkId, (q) => discoverAndPersistIdentities(q, parkId, st, liveResult?.ok ? liveResult.data : null, manualBase));
+        } catch (e) {
+          if (e instanceof LockBusyError) throw e;
+        }
+        base.legacyIdentitiesDiscovered.push(...idStep.discovered); base.legacyIdentityFlags.push(...idStep.flagged);
+        const legacyOpts = { ...options.legacyIdentity, legacyMapping: mergeDiscoveredLegacyIdentities(idStep.validated, manualBase, options.legacyIdentity?.activeMapping, options.legacyIdentity?.legacyPlaces) };
+        // With a real provider payload the legacy entries are rebuilt from the effective registry (test stubs without one keep theirs).
+        const stLegacy = liveResult?.ok ? { ...st, legacyEntries: legacyEntriesFor(parkId, liveResult, instant, histories.get(parkId) ?? null, legacyOpts.legacyMapping) } : st;
+        const legacyObservations = observeLegacyParkDay(stLegacy, base.dayEnd, legacyOpts);
+        const applied = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, [...observations, ...legacyObservations], new Set(), registry, legacyOpts));
         base.hidden.push(...applied.hidden); base.restored.push(...applied.restored);
         base.legacyComebacks.push(...applied.legacyComebacks); base.legacyRehidden.push(...applied.legacyRehidden);
         base.silenceFlagged.push(...applied.silenceFlagged); base.registryConflicts.push(...applied.registryConflicts); base.registryRestored.push(...applied.registryRestored);
@@ -331,7 +411,7 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
           base.secondary = evidence?.usable ? "done" : "history_unavailable";
           // Re-evaluate only when history was usable; an unusable window changes nothing and is retried next run.
           if (evidence?.usable) {
-            const again = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, backfill, new Set(applied.needsSecondary.map((s) => s.showKey)), registry, options.legacyIdentity));
+            const again = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, backfill, new Set(applied.needsSecondary.map((s) => s.showKey)), registry, legacyOpts));
             base.hidden.push(...again.hidden); base.restored.push(...again.restored);
             base.silenceFlagged.push(...again.silenceFlagged); base.registryConflicts.push(...again.registryConflicts); base.registryRestored.push(...again.registryRestored);
           }

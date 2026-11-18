@@ -49,8 +49,9 @@
  * re-verified when the entities return.
  */
 
-import type { ParkId } from "@disney-wait-planner/shared";
-import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
+import type { ParkId, ResortId } from "@disney-wait-planner/shared";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces, resolveEntertainmentKey } from "./entertainmentSuggestions";
+import { PARK_TO_RESORT } from "./parkMetadata";
 import { normalizeKey } from "./plansMatching";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 import type { ThemeParksChild, ThemeParksChildren } from "./themeParksApi";
@@ -346,6 +347,182 @@ export function isLegacyIdentityEstablished(
   if (!m || m.disposition !== "mapped" || m.provider.length === 0) return false;
   if (!legacyPlaces.some((p) => p.parkId === parkId && p.name === name)) return false;
   return !validateLegacyProviderMapping(legacy, active, legacyPlaces).some((f) => f.key === key);
+}
+
+// ============================================
+// LEGACY IDENTITY DISCOVERY (Phase 14.5D follow-up)
+// ============================================
+
+/**
+ * A provider SHOW entity automatically matched to a legacy catalog identity and persisted
+ * (`entertainment_legacy_identity`). It plays the role of a manual `mapped(...)` entry for
+ * observation purposes, but a MANUAL `mapped` entry always wins (`mergeDiscoveredLegacyIdentities`).
+ */
+export interface DiscoveredLegacyIdentity {
+  parkId: ParkId;
+  /** Exact canonical legacy catalog name. */
+  name: string;
+  /** Lowercase canonical provider UUID. */
+  entityId: string;
+  /** Provider's display name when validated (informational). */
+  providerName: string;
+}
+
+/**
+ * Effective legacy registry = manual registry with validated discovered identities filled in for legacy
+ * shows whose manual entry is not `mapped`. A manual `mapped` entry is authoritative (a discovered id is
+ * ignored). A discovered identity that would be ambiguous (shared with an active mapping, another legacy
+ * entry or another discovered identity) or malformed is dropped, so a conflicting id never establishes
+ * identity. Pure.
+ */
+export function mergeDiscoveredLegacyIdentities(
+  discovered: ReadonlyArray<DiscoveredLegacyIdentity> | null | undefined,
+  manual: EntertainmentProviderMapping[] = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
+  active: EntertainmentProviderMapping[] = THEMEPARKS_ENTERTAINMENT_MAPPING,
+  legacyPlaces: ReadonlyArray<{ name: string; parkId?: ParkId }> = getLegacyEntertainmentPlaces(),
+): EntertainmentProviderMapping[] {
+  if (!Array.isArray(discovered) || discovered.length === 0) return manual;
+  let merged = manual.slice();
+  // An id claimed by more than one discovered identity is ambiguous for all of them.
+  const idCount = new Map<string, number>();
+  for (const x of discovered) if (x && typeof x.entityId === "string") idCount.set(x.entityId.toLowerCase(), (idCount.get(x.entityId.toLowerCase()) ?? 0) + 1);
+  for (const dId of discovered) {
+    if (dId && typeof dId.entityId === "string" && (idCount.get(dId.entityId.toLowerCase()) ?? 0) > 1) continue;
+    if (!dId || typeof dId.entityId !== "string" || !legacyPlaces.some((p) => p.parkId === dId.parkId && p.name === dId.name)) continue;
+    const key = entertainmentMappingKey(dId.parkId, dId.name);
+    const cur = merged.find((m) => entertainmentMappingKey(m.parkId, m.dwpName) === key);
+    if (cur?.disposition === "mapped") continue; // manual mapping is authoritative
+    const entry: EntertainmentProviderMapping = { dwpName: dId.name, parkId: dId.parkId, disposition: "mapped", provider: [{ entityId: dId.entityId.toLowerCase(), entityType: "SHOW", providerName: dId.providerName }] };
+    const next = [...merged.filter((m) => m !== cur), entry];
+    // Ambiguity/malformed → drop the discovered identity (and any other sharing its id), keep the rest.
+    if (validateLegacyProviderMapping(next, active, legacyPlaces).some((f) => f.key === key)) continue;
+    merged = next;
+  }
+  // A shared id invalidates BOTH owners: re-check every synthesized entry after all merges.
+  const bad = new Set(validateLegacyProviderMapping(merged, active, legacyPlaces).map((f) => f.key));
+  return merged.map((m) => (m.disposition === "mapped" && bad.has(entertainmentMappingKey(m.parkId, m.dwpName)) && !manual.includes(m)
+    ? ({ dwpName: m.dwpName, parkId: m.parkId, disposition: "unmapped", reason: "discovered identity rejected as ambiguous" } as EntertainmentProviderMapping)
+    : m));
+}
+
+export type LegacyDiscoveryFlagKind =
+  | "identity_discovered" // new validated identity (persisted)
+  | "identity_change" // provider UUID changed; old identity superseded (history kept under the same canonical show)
+  | "identity_candidate"; // uncertain candidate (never persisted, never surfaces)
+
+export interface LegacyDiscoveryFlag {
+  kind: LegacyDiscoveryFlagKind;
+  /** Park-qualified canonical key of the legacy show the candidate resembles. */
+  showKey: string;
+  showName: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface LegacyDiscoveryResult {
+  /** New validated identities to persist (at most one per legacy show). */
+  identities: DiscoveredLegacyIdentity[];
+  /** Previously validated identities replaced by `identities` (same showKey, old entity absent from the feed). */
+  superseded: Array<{ showKey: string; entityId: string }>;
+  flags: LegacyDiscoveryFlag[];
+}
+
+export interface LegacyDiscoveryInput {
+  parkId: ParkId;
+  /** Provider park UUID (lowercase) for park qualification. */
+  parkUuid: string;
+  /** The park's live entities (ids/names/types as published). Caller guarantees a fresh, healthy, non-stale payload with nothing dropped. */
+  live: ReadonlyArray<{ entityId: string; name: string; entityType: string; parkId: string | null }>;
+  /** Persisted validated identities (all parks are fine; only this park's are used for supersession, all for ownership). */
+  existing: ReadonlyArray<DiscoveredLegacyIdentity>;
+  manual?: EntertainmentProviderMapping[];
+  active?: EntertainmentProviderMapping[];
+  legacyPlaces?: ReadonlyArray<{ name: string; parkId?: ParkId; resort?: ResortId }>;
+}
+
+/**
+ * Pure legacy-identity discovery for one park. A provider entity is a candidate for a legacy show only when
+ * its published name resolves — through the maintained resolver (`resolveEntertainmentKey`: exact normalized
+ * canonical name or approved legacy alias, resort-scoped, no fuzzy matching) — to a legacy catalog identity of
+ * THIS park that is not an active identity. It is accepted only when it is a SHOW with a canonical UUID owned
+ * by the park, the single candidate for that show, and unclaimed by any active mapping, manual legacy mapping,
+ * persisted identity of another show, or a second legacy show. Everything uncertain (wrong type/park,
+ * malformed id, duplicates, conflicts, a UUID change while the old entity is still published) becomes an audit
+ * flag and never an identity. Manual `mapped` entries are authoritative: discovery skips those shows.
+ */
+export function discoverLegacyProviderIdentities(input: LegacyDiscoveryInput): LegacyDiscoveryResult {
+  const { parkId } = input;
+  const manual = input.manual ?? LEGACY_ENTERTAINMENT_PROVIDER_MAPPING;
+  const active = input.active ?? THEMEPARKS_ENTERTAINMENT_MAPPING;
+  const legacyPlaces = input.legacyPlaces ?? getLegacyEntertainmentPlaces();
+  const resort = PARK_TO_RESORT[parkId] as ResortId;
+  const out: LegacyDiscoveryResult = { identities: [], superseded: [], flags: [] };
+  const activeKeys = new Set(ENTERTAINMENT_PLACES.map((p) => entertainmentMappingKey(p.parkId as ParkId, p.name)));
+  const activeIds = new Set<string>();
+  for (const m of active) if (m.disposition === "mapped") for (const r of m.provider) activeIds.add(r.entityId.toLowerCase());
+  const manualMappedKeys = new Set(manual.filter((m) => m.disposition === "mapped").map((m) => entertainmentMappingKey(m.parkId, m.dwpName)));
+  const manualIds = legacyProviderEntityIds(manual);
+  const liveIds = new Set(input.live.map((e) => e.entityId.toLowerCase()));
+
+  // 1. name → legacy identity (via the maintained resolver); group per legacy show.
+  type Cand = { entityId: string; name: string; entityType: string; parkId: string | null; clean: boolean; reason: string | null };
+  const byShow = new Map<string, { place: { name: string; parkId?: ParkId }; cands: Cand[] }>();
+  for (const e of input.live) {
+    const k = resolveEntertainmentKey(e.name, resort);
+    if (!k) continue;
+    const place = legacyPlaces.find((p) => p.parkId && `${p.parkId}:${k}` === entertainmentMappingKey(p.parkId, p.name));
+    if (!place || !place.parkId) continue;
+    if (activeKeys.has(entertainmentMappingKey(place.parkId, place.name))) continue; // an identity lives in exactly one catalog
+    const showKey = entertainmentMappingKey(place.parkId, place.name);
+    const id = e.entityId.toLowerCase();
+    let reason: string | null = null;
+    if (place.parkId !== parkId) reason = "wrong_park: name matches a legacy show of another park";
+    else if (e.entityType !== "SHOW") reason = `wrong_type: provider entityType is ${e.entityType}, expected SHOW`;
+    else if (!CANONICAL_UUID_RE.test(e.entityId)) reason = "malformed_id: not a lowercase canonical UUID";
+    else if (e.parkId !== null && e.parkId.toLowerCase() !== input.parkUuid.toLowerCase()) reason = "wrong_park: entity belongs to a different provider park";
+    const slot = byShow.get(showKey) ?? { place, cands: [] };
+    slot.cands.push({ entityId: id, name: e.name, entityType: e.entityType, parkId: e.parkId, clean: reason === null, reason });
+    byShow.set(showKey, slot);
+  }
+  // An entity matching two legacy shows is a conflict for both.
+  const showsOfEntity = new Map<string, Set<string>>();
+  for (const [sk, v] of byShow) for (const c of v.cands) showsOfEntity.set(c.entityId, (showsOfEntity.get(c.entityId) ?? new Set()).add(sk));
+  const existingByShow = new Map(input.existing.map((x) => [entertainmentMappingKey(x.parkId, x.name), x]));
+  const ownerOfExisting = new Map(input.existing.map((x) => [x.entityId.toLowerCase(), entertainmentMappingKey(x.parkId, x.name)]));
+  const claimedNow = new Set<string>();
+
+  const flag = (kind: LegacyDiscoveryFlagKind, showKey: string, showName: string, evidence: Record<string, unknown>) => out.flags.push({ kind, showKey, showName, evidence });
+  for (const [showKey, { place, cands }] of [...byShow].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (manualMappedKeys.has(showKey)) continue; // manual mapping is authoritative
+    const listing = cands.map((c) => ({ entityId: c.entityId, providerName: c.name, entityType: c.entityType, rejected: c.reason }));
+    const uncertain = (reason: string) => flag("identity_candidate", showKey, place.name, { reason, candidates: listing });
+    const rejected = cands.filter((c) => !c.clean);
+    const clean = cands.filter((c) => c.clean);
+    if (clean.length === 0) { uncertain(rejected[0]?.reason ?? "no clean candidate"); continue; }
+    if (rejected.length > 0 || clean.length > 1) { uncertain(clean.length > 1 ? "duplicate_candidates: more than one provider entity matches this legacy show" : "conflicting_candidates: a rejected candidate also matches this legacy show"); continue; }
+    const c = clean[0];
+    const sharedShows = showsOfEntity.get(c.entityId);
+    if (sharedShows && sharedShows.size > 1) { uncertain("conflict: the entity matches more than one legacy show"); continue; }
+    if (activeIds.has(c.entityId)) { uncertain("conflict: entity is mapped to an active catalog show"); continue; }
+    if (manualIds.has(c.entityId)) { uncertain("conflict: entity is manually mapped to another legacy show"); continue; }
+    const owner = ownerOfExisting.get(c.entityId);
+    if (owner && owner !== showKey) { uncertain("conflict: entity is already the persisted identity of another show"); continue; }
+    if (claimedNow.has(c.entityId)) { uncertain("conflict: entity already claimed in this run"); continue; }
+    const prev = existingByShow.get(showKey);
+    if (prev && prev.entityId.toLowerCase() === c.entityId) continue; // unchanged
+    const identity: DiscoveredLegacyIdentity = { parkId, name: place.name, entityId: c.entityId, providerName: c.name };
+    if (prev) {
+      if (liveIds.has(prev.entityId.toLowerCase())) { uncertain("conflict: a different entity matches while the validated entity is still published"); continue; }
+      claimedNow.add(c.entityId);
+      out.identities.push(identity);
+      out.superseded.push({ showKey, entityId: prev.entityId.toLowerCase() });
+      flag("identity_change", showKey, place.name, { previousEntityId: prev.entityId, previousProviderName: prev.providerName, entityId: c.entityId, providerName: c.name, history: "evidence stays under the same canonical show; the UUID change is flagged for audit, never silently merged" });
+      continue;
+    }
+    claimedNow.add(c.entityId);
+    out.identities.push(identity);
+    flag("identity_discovered", showKey, place.name, { entityId: c.entityId, providerName: c.name, entityType: c.entityType });
+  }
+  return out;
 }
 
 // ============================================
