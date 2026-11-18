@@ -18,6 +18,7 @@ import { type ParkId, type ResortId } from "@disney-wait-planner/shared";
 import ResortClock from "../../../components/ResortClock";
 import ThemeParksAttribution from "../../../components/ThemeParksAttribution";
 import ParkHoursLine from "../../../components/ParkHoursLine";
+import BackToTopButton from "../../../components/BackToTopButton";
 import {
   describeParkHours,
   parkHoursForDisplay,
@@ -120,6 +121,35 @@ const RESPONSIVE_CSS = `
     .all-page { max-width: 1100px; padding: 24px; }
     .entertainment-grid { grid-template-columns: repeat(3, 1fr); gap: 12px; }
     .entertainment-card { padding: 10px 14px; min-height: 52px; }
+  }
+
+  /* ---- Floating Back to Top — same look as /wait-times and /tom/help's .tomhg-back-to-top ---- */
+  .tomhg-back-to-top {
+    position: fixed;
+    right: 20px;
+    bottom: 24px;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px;
+    border-radius: 999px;
+    border: none;
+    background-color: var(--control-selected-bg);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  }
+  .tomhg-back-to-top:hover { background-color: var(--control-selected-hover); }
+  @media (max-width: 480px) {
+    .tomhg-back-to-top {
+      right: 16px;
+      bottom: 16px;
+      padding: 8px 14px;
+      font-size: 12px;
+    }
   }
 `;
 
@@ -612,6 +642,7 @@ export default function AllEntertainmentPage() {
           <ThemeParksAttribution linkOnly />
         </div>
       )}
+      <BackToTopButton />
     </>
   );
 }
