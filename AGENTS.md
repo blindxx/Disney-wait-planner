@@ -4,12 +4,17 @@
 
 - This is a pnpm workspace (`apps/*`, `packages/*`). The web app lives in
   `apps/web`; shared types/mock data live in `packages/shared`.
-- Runtime baseline: Next.js 16, React 19, Node.js 24 (`.nvmrc`), pnpm 9
-  (`packageManager`). `apps/web/package.json` and `pnpm-lock.yaml` are
+- Runtime baseline: Next.js 16, React 19, Node.js 24 (`.nvmrc`), pnpm 12
+  (`packageManager`, pinned 12.21.0). `apps/web/package.json` and `pnpm-lock.yaml` are
   authoritative for actual dependency versions; do not rely on the
   versions named here. Next.js 16 uses Turbopack by default for
   `next dev` and `next build`.
 - Next.js App Router lives in `apps/web/src/app`, not `apps/web/app`.
+- pnpm 12 writes a leading `packageManagerDependencies` document into
+  `pnpm-lock.yaml` (the pinned pnpm itself). pnpm 9 cannot read that
+  lockfile (`ERR_PNPM_BROKEN_LOCKFILE`), so install must run through
+  Corepack / the pinned version (on Vercel: `ENABLE_EXPERIMENTAL_COREPACK=1`;
+  without it Vercel selects pnpm 9/10 from `lockfileVersion: 9.0`).
 - Use filtered workspace commands rather than running app commands blindly
   at repo root:
   - `pnpm --filter web dev` — start the web app (port 3000)
