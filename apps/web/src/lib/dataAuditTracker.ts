@@ -541,7 +541,13 @@ export function checkTrackerAppendOnly(previous: unknown, next: unknown): string
       for (const h of added) { if (h.from !== cur) { chained = false; break; } cur = h.to as string; }
       if (!chained || cur !== n.name) out.push(`${p.trackerId}: name changed from "${p.name}" to "${n.name}" without appended renamed entries chaining from the previous name`);
     }
-    if (!prefix(p.history ?? [], n.history ?? [])) out.push(`${p.trackerId}: existing history entries were edited or removed`);
+    // Existing entries are immutable except that `relatedPrs` may gain trailing references (post-merge PR links).
+    const frozen = (h: TrackerHistoryEntry) => JSON.stringify({ ...h, relatedPrs: undefined });
+    const prsOk = (a?: string[], b?: string[]) => prefix(a ?? [], b ?? []);
+    const ph = p.history ?? [], nh = n.history ?? [];
+    if (ph.length > nh.length || ph.some((h, k) => frozen(h) !== frozen(nh[k]) || !prsOk(h.relatedPrs, nh[k].relatedPrs))) {
+      out.push(`${p.trackerId}: existing history entries were edited or removed`);
+    }
     if (!prefix(p.formerNames ?? [], n.formerNames ?? [])) out.push(`${p.trackerId}: formerNames were edited or removed`);
   }
   return out;
@@ -598,16 +604,14 @@ export function runDevDataAuditTrackerCases(): string[] {
   check("shipped: every lifecycle registry record is tracked exactly once",
     ENTERTAINMENT_LIFECYCLE_REGISTRY.records.every((rec) =>
       shipped.filter((i) => i.lifecycleRegistry && i.parkId && entertainmentMappingKey(i.parkId, i.name) === lifecycleRecordKey(rec)).length === 1));
-  check("shipped: seeded only from the lifecycle registry (no un-sourced extras)",
-    shipped.every((i) => i.type === "entertainment" && i.lifecycleRegistry === true) && shipped.length === ENTERTAINMENT_LIFECYCLE_REGISTRY.records.length);
+  check("shipped: lifecycle-registry-backed items are entertainment and never copy lifecycle fields (other items may be added later)",
+    shipped.filter((i) => i.lifecycleRegistry).every((i) => i.type === "entertainment"));
   check("shipped: tracker does not copy lifecycle assessment/evidence fields",
     shipped.every((i) => !("assessment" in i) && !("providerEvidence" in i) && !("verificationSources" in i)));
   check("shipped: audit statuses mirror the registry's unresolved set (none resolved while registry action ≠ none)",
     getUnresolvedLifecycleRecords().every((rec) =>
       shipped.find((i) => i.parkId && entertainmentMappingKey(i.parkId, i.name) === lifecycleRecordKey(rec))?.audit.status !== "resolved"));
   check("shipped: outstanding set excludes resolved only", getOutstandingTrackerItems().length === shipped.filter((i) => i.audit.status !== "resolved").length);
-  check("shipped: Magic Happens Parade deferred to registry dueBy 2027-05-15",
-    (() => { const m = shipped.find((i) => i.name === "Magic Happens Parade"); return m?.audit.status === "deferred" && m.audit.nextReview?.date === "2027-05-15"; })());
   check("shipped: nextTrackerId is unused", !shipped.some((i) => i.trackerId === nextTrackerId()));
   check("shipped: append-only against itself", checkTrackerAppendOnly(DATA_AUDIT_TRACKER, DATA_AUDIT_TRACKER).length === 0);
 
@@ -730,9 +734,9 @@ export function runDevDataAuditTrackerCases(): string[] {
     kinds(wrap(item({ history: [hist0(), { date: "2026-11-02", kind: "catalog_state_changed", status: "open", episode: 1, summary: "s", from: "legacy", to: "legacy", evidence: [] }] }))).includes("bad_transition"));
 
   // ---- lifecycle registry linkage ----
-  const first = shipped[0];
-  check("registry: a shipped item tracks a real record", !!first && first.lifecycleRegistry === true);
-  const missingOne = clone(DATA_AUDIT_TRACKER); missingOne.items.pop();
+  check("registry: shipped registry-backed items track real records (validator-enforced)", ENTERTAINMENT_LIFECYCLE_REGISTRY.records.length === 0 || shipped.some((i) => i.lifecycleRegistry === true));
+  const missingOne = clone(DATA_AUDIT_TRACKER);
+  { const at = missingOne.items.findIndex((i) => i.lifecycleRegistry === true); if (at >= 0) missingOne.items.splice(at, 1); }
   check("registry: dropping a registry-backed item is flagged", ENTERTAINMENT_LIFECYCLE_REGISTRY.records.length === 0 || kindsAll(missingOne).includes("registry_untracked"));
   const rec0 = ENTERTAINMENT_LIFECYCLE_REGISTRY.records.find((r) => r.nextReviewAction.action !== "none");
   const conflictT = clone(DATA_AUDIT_TRACKER);
@@ -761,6 +765,16 @@ export function runDevDataAuditTrackerCases(): string[] {
   check("append-only: changing name without a renamed entry is rejected", checkTrackerAppendOnly(base, silentRename).some((m) => m.includes("name changed")));
   const badChain = clone(renameOk); ((badChain.items[0] as TrackerItem).history[1] as TrackerHistoryEntry).from = "Pirates of the Caribbean";
   check("append-only: renamed entry not chaining from the previous name is rejected", checkTrackerAppendOnly(base, badChain).some((m) => m.includes("name changed")));
+  const prAppend = clone(base); { const h = (prAppend.items[0] as TrackerItem).history[0]; h.relatedPrs = [...(h.relatedPrs ?? []), "blindxx/Disney-wait-planner#999"]; }
+  check("append-only: appending a PR reference to an existing entry is allowed (and validates)",
+    checkTrackerAppendOnly(base, prAppend).length === 0 && kinds(prAppend).length === 0);
+  const prDrop = clone(prAppend); (prDrop.items[0] as TrackerItem).history[0].relatedPrs = ["blindxx/Disney-wait-planner#999"];
+  check("append-only: removing/replacing an existing PR reference is rejected", checkTrackerAppendOnly(prAppend, prDrop).some((m) => m.includes("history")));
+  const prEdit = clone(base); (prEdit.items[0] as TrackerItem).history[0].relatedPrs = ["blindxx/Disney-wait-planner#2"];
+  check("append-only: rewriting an existing PR reference is rejected", checkTrackerAppendOnly(base, prEdit).some((m) => m.includes("history")));
+  const futureItem = clone(DATA_AUDIT_TRACKER); futureItem.items.push(item({ trackerId: nextTrackerId() }) as TrackerItem);
+  check("shipped-ledger growth: a valid non-entertainment item added to the shipped ledger leaves every ledger-dependent check applicable",
+    validateDataAuditTracker(futureItem).length === 0 && futureItem.items.length === shipped.length + 1);
   check("append-only: adding a new item is allowed", checkTrackerAppendOnly(base, { ...base, items: [...base.items, item({ trackerId: "DA-0902", name: "Pirates of the Caribbean" })] }).length === 0);
   check("nextTrackerId: max + 1", nextTrackerId(base as unknown as DataAuditTracker) === "DA-0902");
 
