@@ -230,3 +230,13 @@ export function mergeLegacyComebackEntries<T extends { id: string; source: strin
   }
   return out;
 }
+
+/**
+ * All Entertainment: split the merged live list into regular entries and legacy-comeback entries (by the ids of the
+ * body's `legacyEntries`). Comebacks are exempt from the daily inactivity/seasonal filters (as on Waits & Shows);
+ * their own 21-of-30 lifecycle decides the re-hide. Order is preserved within each group.
+ */
+export function splitLegacyComebackEntries<T extends { id: string }>(entries: readonly T[], legacyEntries: ReadonlyArray<{ id: string }> | null | undefined): { regular: T[]; legacy: T[] } {
+  const ids = new Set((legacyEntries ?? []).map((e) => e.id));
+  return { regular: entries.filter((e) => !ids.has(e.id)), legacy: entries.filter((e) => ids.has(e.id)) };
+}

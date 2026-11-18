@@ -52,7 +52,7 @@ import { normalizeParkEntertainmentShowtimes, resolveShowtimesResponse, type Ent
 import { getSeasonalEntertainmentRank } from "./seasonalEntertainment";
 import { ENTERTAINMENT_PLACES, getEntertainmentForPark, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
-import { addDaysToLocalDate } from "./resortTime";
+import { addDaysToLocalDate, getResortLocalDate } from "./resortTime";
 import {
   LEGACY_ENTERTAINMENT_PROVIDER_MAPPING, THEMEPARKS_ENTERTAINMENT_MAPPING, entertainmentMappingKey, getEntertainmentProviderMapping,
   isLegacyIdentityEstablished, legacyProviderEntityIds, validateLegacyProviderMapping, type EntertainmentProviderMapping,
@@ -60,7 +60,7 @@ import {
 } from "./themeParksEntertainmentMapping";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 import { buildParkAllEntertainment } from "./entertainmentAll";
-import { findShowtimeEntry, getLegacyComebackPlaces, legacyIdentityOptions, mergeLegacyComebackEntries } from "./entertainmentLifecycleVisibility";
+import { findShowtimeEntry, getLegacyComebackPlaces, legacyIdentityOptions, mergeLegacyComebackEntries, splitLegacyComebackEntries } from "./entertainmentLifecycleVisibility";
 import type { ThemeParksLive } from "./themeParksApi";
 
 const TODAY = "2026-12-10";
@@ -1284,6 +1284,15 @@ export async function runDevLegacyComebackCases(): Promise<string[]> {
     check("All: legacy entry carries the verified performance", (all.legacyEntries?.[0].showtime.performances.length ?? 0) === 1);
     const merged = mergeLegacyComebackEntries(all.entries, all.legacyEntries, "disneyland", [LEGACY_NAME], LEGACY_FIXTURE);
     check("All: a persisted comeback adds the legacy entry exactly once", merged.filter((e) => e.name === LEGACY_NAME).length === 1 && merged.length === all.entries.length + 1);
+    // Review finding: a comeback with only a FUTURE performance has confirmedNoActivityToday and must not be dropped by the daily filter.
+    const futureOnly = { ...all.legacyEntries![0], showtime: { ...all.legacyEntries![0].showtime, performances: [], confirmedNoActivityToday: true, inactivityBasis: "forward_horizon" as const } };
+    const mergedFuture = mergeLegacyComebackEntries(all.entries, [futureOnly], "disneyland", [LEGACY_NAME], LEGACY_FIXTURE);
+    const todayLocal = getResortLocalDate("DLR", instant);
+    const naive = applyAllEntertainmentSeasonalVisibility(mergedFuture, "disneyland", "DLR", todayLocal, false, instant);
+    check("All: (regression guard) the unsplit daily filter WOULD drop a no-activity-today comeback", !naive.some((e) => e.name === LEGACY_NAME));
+    const sp = splitLegacyComebackEntries(mergedFuture, [futureOnly]);
+    const kept = [...applyAllEntertainmentSeasonalVisibility(sp.regular, "disneyland", "DLR", todayLocal, false, instant), ...sp.legacy];
+    check("All: comebacks are exempt from the daily inactivity filter (kept; regular entries still filtered), matching Waits & Shows", kept.some((e) => e.name === LEGACY_NAME) && sp.legacy.length === 1 && sp.regular.length === all.entries.length);
     check("All: merging is idempotent (never duplicates on re-merge)", mergeLegacyComebackEntries(merged, all.legacyEntries, "disneyland", [LEGACY_NAME], LEGACY_FIXTURE).length === merged.length);
     check("All: no persisted comeback → legacy show absent; unknown list → absent", mergeLegacyComebackEntries(all.entries, all.legacyEntries, "disneyland", [], LEGACY_FIXTURE).length === all.entries.length && mergeLegacyComebackEntries(all.entries, all.legacyEntries, "disneyland", undefined, LEGACY_FIXTURE).length === all.entries.length);
     const dup = [...all.entries, { ...all.legacyEntries![0], id: `provider:${LEGACY_ID}`, source: "provider_only" as const }];
