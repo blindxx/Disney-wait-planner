@@ -13,7 +13,7 @@
     "@disney-wait-planner/shared": "workspace:*",
     "@vercel/analytics": "^2.0.1",
     "@vercel/functions": "^3.10.1",
-    "next": "16.4.2",
+    "next": "16.4.6",
     "next-auth": "4.24.15",
     "nodemailer": "^7.0.13",
     "pg": "^8.20.0",
