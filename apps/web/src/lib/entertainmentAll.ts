@@ -40,7 +40,7 @@
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
-import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import {
   PARTIAL_SHOWTIMES_NOTE,
   SHOWTIME_STATUS_MESSAGES,
@@ -59,7 +59,7 @@ import { getProviderEntertainmentLocation } from "./entertainmentProviderLocatio
 import { getResortLocalDate } from "./resortTime";
 import type { ThemeParksError, ThemeParksHistoryDaily, ThemeParksLive, ThemeParksResult, ThemeParksShowtime } from "./themeParksApi";
 import { buildParkHistoryEvidence } from "./entertainmentHistory";
-import { THEMEPARKS_ENTERTAINMENT_MAPPING } from "./themeParksEntertainmentMapping";
+import { THEMEPARKS_ENTERTAINMENT_MAPPING, legacyProviderEntityIds, type EntertainmentProviderMapping } from "./themeParksEntertainmentMapping";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 
 // ============================================
@@ -124,6 +124,16 @@ export interface ParkAllEntertainment {
   inventoryIncomplete: boolean;
   entries: AllEntertainmentEntry[];
   /**
+   * Phase 14.5D: legacy catalog shows with an established provider identity, as curated-shaped entries
+   * (id `curated:{park}:{name}`). Never part of `entries`: a page adds one only while the lifecycle monitor
+   * has persisted it as a comeback (`lifecycleLegacyComebacks`) — see `mergeLegacyComebackEntries`.
+   */
+  legacyEntries?: AllEntertainmentEntry[];
+  /** Phase 14.5D: canonical legacy names persisted as comebacks. Absent = unknown: no legacy show is surfaced. */
+  lifecycleLegacyComebacks?: string[];
+  /** Phase 14.5D follow-up: persisted validated discovered legacy provider identities (attached by the route; lets the page re-validate comebacks). */
+  lifecycleLegacyIdentities?: Array<{ parkId: ParkId; name: string; entityId: string; providerName: string }>;
+  /**
    * Phase 14.5C: canonical names of shows the lifecycle monitor has persisted as
    * auto-hidden. Absent = unknown (DB unavailable / older body): nothing automatic is hidden.
    * Applied via entertainmentLifecycleVisibility.ts only.
@@ -139,7 +149,9 @@ export interface ParkAllEntertainment {
 
 /** Curated catalog land for a park-qualified DWP name (catalog identity, not provider data). */
 function curatedLand(parkId: ParkId, dwpName: string): string | null {
-  return ENTERTAINMENT_PLACES.find((p) => p.parkId === parkId && p.name === dwpName)?.land ?? null;
+  return ENTERTAINMENT_PLACES.find((p) => p.parkId === parkId && p.name === dwpName)?.land
+    ?? getLegacyEntertainmentPlaces().find((p) => p.parkId === parkId && p.name === dwpName)?.land
+    ?? null;
 }
 
 /** Entity ids claimed by any explicit curated mapping (lowercase). */
@@ -162,8 +174,10 @@ export function buildParkAllEntertainment(
   instant: Date = new Date(),
   /** Phase 14.4.2: park history (null → forward-horizon proof only); same evidence as Waits & Shows. */
   historyResult: ThemeParksResult<ThemeParksHistoryDaily> | null = null,
+  /** Phase 14.5D: effective legacy registry (manual + persisted discovered identities); default = shipped manual registry. */
+  legacyMapping?: EntertainmentProviderMapping[],
 ): ParkAllEntertainment {
-  const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant, historyResult);
+  const curated = normalizeParkEntertainmentShowtimes(parkId, result, instant, historyResult, legacyMapping);
   const history = buildParkHistoryEvidence(parkId, PARK_TO_RESORT[parkId] as ResortId, historyResult, instant);
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const entries: AllEntertainmentEntry[] = [];
@@ -191,7 +205,8 @@ export function buildParkAllEntertainment(
 
   const live = result.ok ? result.data : null;
   if (live) {
-    const claimed = mappedEntityIds();
+    // Active mappings AND legacy-registered entities (14.5D) have an identity: never provider-only (no duplicates).
+    const claimed = new Set([...mappedEntityIds(), ...legacyProviderEntityIds(legacyMapping)]);
     const parkUuid = THEMEPARKS_PARKS[parkId].entityId.toLowerCase();
     const nowMs = instant.getTime();
     const localDate = getResortLocalDate(resort, instant);
@@ -219,6 +234,14 @@ export function buildParkAllEntertainment(
     }
   }
 
+  // Phase 14.5D: legacy entries (same entry rules as curated; listed separately, surfaced only on a persisted comeback).
+  const legacyEntries: AllEntertainmentEntry[] = [];
+  if (result.ok) {
+    for (const e of curated.legacyEntries ?? []) {
+      legacyEntries.push({ id: `curated:${parkId}:${e.dwpName}`, source: "curated", name: e.dwpName, land: curatedLand(parkId, e.dwpName), venue: null, showtime: e, ...hoursFor(e.provider.map((r) => r.entityId), e.provider) });
+    }
+  }
+
   return {
     parkId,
     resort,
@@ -230,6 +253,7 @@ export function buildParkAllEntertainment(
     error: curated.error,
     inventoryIncomplete: !!live && live.droppedEntries > 0,
     entries,
+    ...(legacyEntries.length > 0 ? { legacyEntries } : {}),
   };
 }
 

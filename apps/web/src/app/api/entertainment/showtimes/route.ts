@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getParkEntertainmentShowtimes } from "../../../../lib/entertainmentShowtimesService";
+import { mergeDiscoveredLegacyIdentities } from "../../../../lib/themeParksEntertainmentMapping";
 import { getLifecycleVisibilityState } from "../../../../lib/entertainmentLifecycleStore";
 import { isValidParkId } from "../../../../lib/parkMetadata";
 
@@ -21,8 +22,9 @@ export async function GET(request: NextRequest) {
   if (!parkId || !isValidParkId(parkId)) {
     return NextResponse.json({ error: "Missing or invalid parkId" }, { status: 400 });
   }
-  // Phase 14.5C: persisted auto-hidden names ride along, fetched IN PARALLEL with the provider call, bounded
-  // and fail-open (undefined = unknown → nothing automatic is hidden; the page never waits on the database).
-  const [result, lifecycle] = await Promise.all([getParkEntertainmentShowtimes(parkId), getLifecycleVisibilityState(parkId)]);
-  return NextResponse.json(lifecycle === undefined ? result : { ...result, lifecycleAutoHidden: lifecycle.autoHidden, lifecycleRegistryRestored: lifecycle.registryRestored }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+  // Phase 14.5C: persisted auto-hidden names ride along, bounded, cached and fail-open (undefined = unknown →
+  // nothing automatic is hidden). Read first (14.5D follow-up): its persisted legacy identities feed the legacy entries.
+  const lifecycle = await getLifecycleVisibilityState(parkId);
+  const result = await getParkEntertainmentShowtimes(parkId, { legacyMapping: mergeDiscoveredLegacyIdentities(lifecycle?.legacyIdentities) });
+  return NextResponse.json(lifecycle === undefined ? result : { ...result, lifecycleAutoHidden: lifecycle.autoHidden, lifecycleRegistryRestored: lifecycle.registryRestored, lifecycleLegacyComebacks: lifecycle.legacyComebacks, lifecycleLegacyIdentities: lifecycle.legacyIdentities }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }

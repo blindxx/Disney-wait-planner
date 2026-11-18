@@ -47,7 +47,10 @@ written opportunistically by `parkHoursStore.ts`; it has no fallback, so
 migrate before deploy, and failures there never affect `/api/park-hours`;
 `entertainment_lifecycle_evidence` / `entertainment_lifecycle_state` /
 `entertainment_lifecycle_events` — Phase 14.5C lifecycle monitor tables, see
-"Active entertainment lifecycle"; migrate before deploy, readers fail open).
+"Active entertainment lifecycle"; migrate before deploy, readers fail open;
+Phase 14.5D widens the state `status` check for legacy comebacks and adds
+`entertainment_legacy_identity` (discovered legacy provider identities) — also
+migrate before deploy).
 It's kept safely rerunnable (`CREATE ... IF NOT EXISTS` /
 `ADD COLUMN IF NOT EXISTS`), so fresh setup and migrating an existing
 database both go through the same file — never hand-write a separate
@@ -546,6 +549,73 @@ observation is ever inferred). Modules: `entertainmentLifecycleDetector.ts`
   a database that applied the first 14.5C revision: `is_final`, `dormant_days`,
   `registry_restored_at`, widened `day_class` check); the monitor needs the tables
   (it reports `db_unavailable` otherwise, never hides).
+
+## Legacy entertainment comebacks (Phase 14.5D)
+
+Automatic, provisional resurfacing of LEGACY catalog entertainment
+(`getLegacyEntertainmentPlaces()`) on Waits & Shows and All Entertainment,
+inside the 14.5C system (same monitor run/cron, lock, evidence table, state
+table, events table, visibility module — no second cron or lifecycle system).
+The legacy catalog, canonical identities, historical plans/sync and Smart Entry
+exclusion are unchanged; a comeback is display-only until a reviewed catalog
+restoration (14.5E audit).
+
+- **Identity** has two sources, merged by `mergeDiscoveredLegacyIdentities`
+  (`themeParksEntertainmentMapping.ts`): (1) the manual
+  `LEGACY_ENTERTAINMENT_PROVIDER_MAPPING` — explicit, park-qualified, exact-name;
+  a `mapped` entry is AUTHORITATIVE and discovery skips that show; (2) identities
+  AUTOMATICALLY DISCOVERED by the monitor and persisted in
+  `entertainment_legacy_identity` (below). Only identities that pass
+  `isLegacyIdentityEstablished` (valid ids, owned by that one legacy entry, not
+  claimed by any active mapping, no other legacy/discovered entry) are ever
+  observed. Both shipped legacy shows are manually `unmapped` (verified
+  2026-11-18: no provider record); they come back automatically once the provider
+  publishes a matching SHOW. Registered/discovered ids are never provider-only in
+  All Entertainment.
+- **Identity discovery** (`discoverLegacyProviderIdentities`, run by the same
+  monitor pass under the same per-park lock): only on a fresh, healthy,
+  non-stale payload with nothing discarded. A provider entity is a candidate only
+  when its name resolves through the maintained `resolveEntertainmentKey`
+  (exact normalized canonical name or approved legacy alias — no fuzzy matching)
+  to a legacy identity of THIS park that is not an active identity; it is accepted
+  only as a SHOW with a canonical UUID owned by the park, the single candidate
+  for that show, and unclaimed by any active mapping, manual legacy mapping or
+  other persisted identity. Anything else (wrong type/park, malformed id,
+  duplicates, conflicts) is flagged `legacy_identity_candidate` (deduplicated
+  by identical evidence) and never persisted or surfaced. A provider UUID change
+  supersedes the old identity only when the old entity is no longer published and
+  the new one is the single clean match (`legacy_identity_change` event; evidence
+  history stays under the same canonical show key); otherwise it is a conflict.
+  An identity only lets the monitor OBSERVE: surfacing still needs the 7-of-14
+  rule. Discovery failure (e.g. table not migrated) never blocks the active
+  lifecycle; no catalog edit, registry edit or Smart Entry restoration.
+- **Evidence**: `observeLegacyParkDay` reuses the active classifier on
+  `ParkEntertainmentShowtimes.legacyEntries` (separate from `entries`); a
+  failed, stale-if-error or previous-day payload yields NO observation.
+- **Comeback**: ≥ 7 distinct resort-local `active` dates (verified current
+  performances) in the rolling 14 days, counting only dates after the latest
+  legacy re-hide → state `legacy_comeback`, event `legacy_comeback`. **Re-hide**:
+  exactly 21-of-30 (`evaluateShowLifecycle`, incl. day-end finality) → state
+  `legacy_hidden`, event `legacy_rehide`; later cycles repeat. No silence flags or
+  history backfill for legacy shows; registry decisions never apply.
+- **Delivery/visibility**: `/api/entertainment/{showtimes,all}` attach
+  `lifecycleLegacyComebacks` and `lifecycleLegacyIdentities` (fail-open: unknown
+  surfaces nothing; the identity read is its own transaction so a missing table
+  cannot affect the 14.5C state read) and build legacy entries from the effective
+  registry; both pages use
+  only `getLegacyComebackPlaces` / `mergeLegacyComebackEntries` /
+  `findShowtimeEntry` (`entertainmentLifecycleVisibility.ts`), which re-validate
+  identity and de-duplicate (id, name, provider entity). Waits & Shows retains the
+  names across refresh failures like the hide evidence.
+- **Audit**: `legacy_comeback`/`legacy_rehide` events (natural-key
+  deduplicated, `unreviewed`) plus `legacyComebacks` in
+  `GET /api/catalog/lifecycle-audit`; identity events `legacy_identity_discovered`
+  / `_change` / `_candidate` use the same table.
+- **Deploy**: run `db:migrate` against Production AND Preview first (widened
+  `entertainment_lifecycle_state_status_chk`; new table
+  `entertainment_legacy_identity`).
+- DEV checks: `runDevLegacyComebackCases()`, `runDevLegacyIdentityDiscoveryCases()`
+  (`entertainmentLifecycleDev.ts`).
 
 ## Catalog taxonomy
 

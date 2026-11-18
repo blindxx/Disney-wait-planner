@@ -36,6 +36,7 @@ import {
   type LifecycleShowState,
 } from "./entertainmentLifecycleDetector";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
+import { LEGACY_COMEBACK_MIN_DAYS, LEGACY_COMEBACK_WINDOW_DAYS, evaluateLegacyLifecycle, observeLegacyParkDay, resolveLegacyShow, type LegacyIdentityOptions } from "./entertainmentLifecycleDetector";
 import { LIFECYCLE_CRON_PATH, LIFECYCLE_PARK_IDS, runEntertainmentLifecycleMonitor, type LifecycleMonitorOptions } from "./entertainmentLifecycleMonitor";
 import {
   getLifecycleAutoHidden, insertEvent, readEvidence, readLifecycleAudit, readStates, resetLifecycleReadState,
@@ -51,8 +52,16 @@ import { normalizeParkEntertainmentShowtimes, resolveShowtimesResponse, type Ent
 import { getSeasonalEntertainmentRank } from "./seasonalEntertainment";
 import { ENTERTAINMENT_PLACES, getEntertainmentForPark, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
-import { addDaysToLocalDate } from "./resortTime";
-import { entertainmentMappingKey, getEntertainmentProviderMapping } from "./themeParksEntertainmentMapping";
+import { addDaysToLocalDate, getResortLocalDate } from "./resortTime";
+import {
+  LEGACY_ENTERTAINMENT_PROVIDER_MAPPING, THEMEPARKS_ENTERTAINMENT_MAPPING, entertainmentMappingKey, getEntertainmentProviderMapping,
+  isLegacyIdentityEstablished, legacyProviderEntityIds, validateLegacyProviderMapping, type EntertainmentProviderMapping,
+  discoverLegacyProviderIdentities, mergeDiscoveredLegacyIdentities, type DiscoveredLegacyIdentity,
+} from "./themeParksEntertainmentMapping";
+import { THEMEPARKS_PARKS } from "./themeParksProviders";
+import { buildParkAllEntertainment } from "./entertainmentAll";
+import { findShowtimeEntry, getLegacyComebackPlaces, legacyIdentityOptions, mergeLegacyComebackEntries, splitLegacyComebackEntries } from "./entertainmentLifecycleVisibility";
+import type { ThemeParksLive } from "./themeParksApi";
 
 const TODAY = "2026-12-10";
 const d = (offset: number) => addDaysToLocalDate(TODAY, offset)!;
@@ -72,10 +81,10 @@ const hiddenState = (over: Partial<LifecycleShowState> = {}): LifecycleShowState
 const perf = (n: number) => Array.from({ length: n }, (_, i) => ({ startTime: `${TODAY}T${19 + i}:00:00-05:00`, endTime: null, localTime: "7:00 PM", type: "Performance Time", passed: false }));
 const ref = (id: string, over: Partial<EntertainmentShowtimeEntry["provider"][number]> = {}) =>
   ({ entityId: id, present: true, status: "CLOSED", lastUpdated: null, rawShowtimeCount: 0, excludedShowtimeCount: 0, droppedShowtimeCount: 0, unrecognizedShowtimeCount: 0, ...over });
-function mkEntry(parkId: ParkId, name: string, kind: "active" | "inactive" | "silent" | "dormant" | "unknown" | "silent_present" | "operating_empty" | "unmapped"): EntertainmentShowtimeEntry {
+function mkEntry(parkId: ParkId, name: string, kind: "active" | "inactive" | "silent" | "dormant" | "unknown" | "silent_present" | "operating_empty" | "unmapped", idsOverride?: string[]): EntertainmentShowtimeEntry {
   const base = { dwpName: name, parkId, fetchedLocalDate: TODAY, unrecognizedTypes: [] as string[], message: null };
   const m = getEntertainmentProviderMapping(name, parkId);
-  const ids = (m && m.disposition === "mapped" ? m.provider : []).map((r) => r.entityId);
+  const ids = idsOverride ?? (m && m.disposition === "mapped" ? m.provider : []).map((r) => r.entityId);
   const refs = (over: Partial<EntertainmentShowtimeEntry["provider"][number]>) => (ids.length ? ids : ["00000000-0000-4000-8000-000000000000"]).map((i) => ref(i, over));
   switch (kind) {
     case "active": return { ...base, status: "upcoming", performances: perf(2), incomplete: false, provider: refs({ rawShowtimeCount: 2, status: "OPERATING" }), confirmedNoActivityToday: false } as unknown as EntertainmentShowtimeEntry;
@@ -496,6 +505,9 @@ class FakeLifecycleDb implements Queryable {
   evidence = new Map<string, Row>();
   states = new Map<string, Row>();
   events = new Map<string, Row>();
+  identities = new Map<string, Row>();
+  /** Simulates the identity table not being migrated yet: only identity SQL fails. */
+  failIdentitySql = false;
   lockHeld = false;
   failAll = false;
   statements = 0;
@@ -530,6 +542,35 @@ class FakeLifecycleDb implements Queryable {
       this.states.set(k, { park_id: park, show_key: key, show_name: name, status, cycle_reset_date: reset, last_active_date: lastActive, hidden_local_date: hiddenDate, hidden_at: hiddenAt, restored_at: restoredAt, hide_count: hc, restore_count: rc, inactive_days: id, dormant_days: dd, silent_days: sd, silence_flagged_at: flaggedAt, registry_restored_at: regAt, secondary_evaluated_on: secOn, audit_flag: flag, evaluated_local_date: evalDate });
       return { rowCount: 1, rows: [] };
     }
+    if (this.failIdentitySql && t.includes("entertainment_legacy_identity")) throw new Error('relation "entertainment_legacy_identity" does not exist');
+    if (t.includes("FROM entertainment_legacy_identity")) {
+      const park = v[0] as string | undefined;
+      return { rowCount: 0, rows: [...this.identities.values()].filter((r) => r.status === "validated" && (!park || r.park_id === park)).map((r) => ({ park_id: r.park_id, show_name: r.show_name, entity_id: r.entity_id, provider_name: r.provider_name })).sort((a, b) => `${a.park_id}${a.show_name}`.localeCompare(`${b.park_id}${b.show_name}`)) };
+    }
+    if (t.startsWith("UPDATE entertainment_legacy_identity")) {
+      const [park, key, ent] = v as string[];
+      const r = this.identities.get(`${park}|${key}|${ent}`);
+      if (r && r.status === "validated") { r.status = "superseded"; return { rowCount: 1, rows: [] }; }
+      return { rowCount: 0, rows: [] };
+    }
+    if (t.startsWith("INSERT INTO entertainment_legacy_identity")) {
+      const [park, key, name, ent, pname, date] = v as string[];
+      const k = `${park}|${key}|${ent}`;
+      const prior = this.identities.get(k);
+      if (prior && prior.status === "validated") return { rowCount: 0, rows: [] };
+      // mirrors the partial unique indexes (one validated row per show and per entity)
+      for (const r of this.identities.values()) if (r.status === "validated" && r.park_id === park && (r.show_key === key || r.entity_id === ent)) throw new Error("unique violation");
+      this.identities.set(k, { park_id: park, show_key: key, show_name: name, entity_id: ent, provider_name: pname, status: "validated", first_validated_date: date });
+      return { rowCount: 1, rows: [] };
+    }
+    if (t.startsWith("INSERT INTO entertainment_lifecycle_events") && t.includes("WHERE NOT EXISTS")) {
+      const [park, key, type, date, name, evidence, lim] = v as string[];
+      const k = `${park}|${key}|${type}|${date}`;
+      const dup = [...this.events.values()].some((e) => e.park_id === park && e.show_key === key && e.event_type === type && JSON.stringify(e.evidence) === JSON.stringify(JSON.parse(evidence)));
+      if (dup || this.events.has(k)) return { rowCount: 0, rows: [] };
+      this.events.set(k, { park_id: park, show_key: key, event_type: type, d: date, show_name: name, evidence: JSON.parse(evidence), coverage_limitations: JSON.parse(lim), audit_status: "unreviewed", occurred_at: new Date().toISOString() });
+      return { rowCount: 1, rows: [] };
+    }
     if (t.startsWith("INSERT INTO entertainment_lifecycle_events")) {
       const [park, key, type, date, name, evidence, lim] = v as string[];
       const k = `${park}|${key}|${type}|${date}`;
@@ -542,7 +583,7 @@ class FakeLifecycleDb implements Queryable {
       for (const [k, r] of this.evidence) if (r.park_id === park && (r.d as string) < before) this.evidence.delete(k);
       return { rowCount: 0, rows: [] };
     }
-    if (t.includes("registry_restored_at IS NOT NULL) AS restored")) return { rowCount: 0, rows: [...this.states.values()].filter((r) => r.status === "auto_hidden" || r.registry_restored_at != null).map((r) => ({ park_id: r.park_id, show_name: r.show_name, status: r.status, restored: r.registry_restored_at != null })) };
+    if (t.includes("registry_restored_at IS NOT NULL) AS restored")) return { rowCount: 0, rows: [...this.states.values()].filter((r) => r.status === "auto_hidden" || r.status === "legacy_comeback" || r.registry_restored_at != null).map((r) => ({ park_id: r.park_id, show_name: r.show_name, status: r.status, restored: r.registry_restored_at != null })) };
     throw new Error(`FakeLifecycleDb: unhandled SQL: ${t.slice(0, 80)}`);
   }
 }
@@ -1100,6 +1141,525 @@ export function runDevInactivityRetentionCases(): string[] {
     const pr = { ...historyTimedOut, entries: [{ ...historyTimedOut.entries[0], dwpName: partyPlace.name }] } as ParkEntertainmentShowtimes;
     const pev = { parkId: "mk", resort: "WDW", localDate: "2026-12-10", names: [partyPlace.name] } as RetainedInactivity;
     check("party-night exception preserved with retained inactivity", !isEntertainmentHiddenToday(partyPlace, "WDW", "2026-12-10", applyRetainedInactivity(pr as never, pev, "mk", NOW), NOW));
+  }
+  return failures;
+}
+
+// ============================================
+// PHASE 14.5D — LEGACY COMEBACKS
+// ============================================
+
+const LEGACY_NAME = "Together Forever — A Pixar Nighttime Spectacular"; // legacy, disneyland
+const LEGACY_NAME_DCA = "Better Together: A Pixar Pals Celebration!"; // legacy, dca
+const LEGACY_ID = "11111111-1111-4111-8111-111111111111";
+const LEGACY_ID_2 = "22222222-2222-4222-8222-222222222222";
+const fixtureLegacy = (...m: EntertainmentProviderMapping[]): LegacyIdentityOptions => ({ legacyMapping: m });
+const legacyMapped = (name: string, parkId: ParkId, id: string): EntertainmentProviderMapping =>
+  ({ dwpName: name, parkId, disposition: "mapped", provider: [{ entityId: id, entityType: "SHOW", providerName: name }] });
+/** Established fixture for the Disneyland legacy show; the DCA legacy show stays unmapped. */
+const LEGACY_FIXTURE: LegacyIdentityOptions = fixtureLegacy(
+  legacyMapped(LEGACY_NAME, "disneyland", LEGACY_ID),
+  { dwpName: LEGACY_NAME_DCA, parkId: "dca", disposition: "unmapped", reason: "none" },
+);
+const legacyKey = entertainmentMappingKey("disneyland", LEGACY_NAME);
+
+export async function runDevLegacyComebackCases(): Promise<string[]> {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const evalLegacy = (observations: Obs[], state: LifecycleShowState | null = null, established = true, today = TODAY) =>
+    evaluateLegacyLifecycle({ today, observations, state, identityEstablished: established });
+  const surfaced = (over: Partial<LifecycleShowState> = {}): LifecycleShowState =>
+    ({ status: "legacy_comeback", cycleResetDate: d(-1), lastActiveDate: d(-1), hiddenLocalDate: null, hideCount: 0, restoreCount: 1, silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, registryRestored: false, ...over });
+
+  // ---------- identity ----------
+  check("constants: 7 of 14", LEGACY_COMEBACK_MIN_DAYS === 7 && LEGACY_COMEBACK_WINDOW_DAYS === 14);
+  check("shipped legacy registry is structurally valid and covers every legacy identity", validateLegacyProviderMapping().length === 0);
+  check("shipped legacy shows have no verified provider identity yet → never established, never observed",
+    getLegacyEntertainmentPlaces().every((p) => !isLegacyIdentityEstablished(p.parkId!, p.name)) && legacyProviderEntityIds().size === 0);
+  check("fixture: a mapped, unambiguous legacy identity is established", isLegacyIdentityEstablished("disneyland", LEGACY_NAME, LEGACY_FIXTURE.legacyMapping) && !!resolveLegacyShow("disneyland", LEGACY_NAME, LEGACY_FIXTURE));
+  check("unmapped legacy identity is not established", !resolveLegacyShow("dca", LEGACY_NAME_DCA, LEGACY_FIXTURE));
+  check("identity is park-qualified: the same name in another park does not resolve", !resolveLegacyShow("dca", LEGACY_NAME, LEGACY_FIXTURE) && !resolveLegacyShow("mk", LEGACY_NAME, LEGACY_FIXTURE));
+  check("no name-only/alias/fuzzy resolution (alias 'Together Forever', case change)", !resolveLegacyShow("disneyland", "Together Forever", LEGACY_FIXTURE) && !resolveLegacyShow("disneyland", LEGACY_NAME.toLowerCase(), LEGACY_FIXTURE));
+  const activeId = (THEMEPARKS_ENTERTAINMENT_MAPPING.find((m) => m.disposition === "mapped") as Extract<EntertainmentProviderMapping, { disposition: "mapped" }>).provider[0].entityId;
+  const ambiguous = (m: EntertainmentProviderMapping[]) => !isLegacyIdentityEstablished("disneyland", LEGACY_NAME, m);
+  check("ambiguity: provider id shared with an ACTIVE mapping → not established", ambiguous([legacyMapped(LEGACY_NAME, "disneyland", activeId)]));
+  check("ambiguity: provider id shared by two legacy entries → neither established",
+    ambiguous([legacyMapped(LEGACY_NAME, "disneyland", LEGACY_ID), legacyMapped(LEGACY_NAME_DCA, "dca", LEGACY_ID)]) && !isLegacyIdentityEstablished("dca", LEGACY_NAME_DCA, [legacyMapped(LEGACY_NAME, "disneyland", LEGACY_ID), legacyMapped(LEGACY_NAME_DCA, "dca", LEGACY_ID)]));
+  check("ambiguity: malformed UUID / non-SHOW / empty refs → not established",
+    ambiguous([legacyMapped(LEGACY_NAME, "disneyland", "NOT-A-UUID")]) &&
+    ambiguous([{ dwpName: LEGACY_NAME, parkId: "disneyland", disposition: "mapped", provider: [{ entityId: LEGACY_ID, entityType: "ATTRACTION", providerName: "x" }] }]) &&
+    ambiguous([{ dwpName: LEGACY_NAME, parkId: "disneyland", disposition: "mapped", provider: [] }]));
+  check("a legacy registry entry for an ACTIVE identity is rejected", validateLegacyProviderMapping([legacyMapped(MMM, "disneyland", LEGACY_ID)]).some((f) => f.kind === "legacy_unknown_identity") && !resolveLegacyShow("disneyland", MMM, fixtureLegacy(legacyMapped(MMM, "disneyland", LEGACY_ID))));
+  check("registry validation: missing disposition for a legacy identity is reported", validateLegacyProviderMapping([]).filter((f) => f.kind === "legacy_missing_disposition").length === getLegacyEntertainmentPlaces().length);
+  check("a legacy name that is also an active identity never resolves even if listed as legacy", !resolveLegacyShow("disneyland", MMM, { ...fixtureLegacy(legacyMapped(MMM, "disneyland", LEGACY_ID)), legacyPlaces: [{ name: MMM, parkId: "disneyland" }] }));
+
+  // ---------- qualification (pure) ----------
+  let ev = evalLegacy(run("active", -5, 0));
+  check("6 active days do NOT qualify", ev.state.status === "legacy_hidden" && ev.events.length === 0);
+  ev = evalLegacy(run("active", -6, 0));
+  check("7 distinct active days within 14 → comeback with evidence + limitations",
+    ev.state.status === "legacy_comeback" && ev.state.restoreCount === 1 && ev.state.cycleResetDate === TODAY && ev.events.length === 1 && ev.events[0].type === "legacy_comeback" &&
+    (ev.events[0].evidence as { activeDays: number }).activeDays === 7 && ev.events[0].coverageLimitations.length >= 3);
+  check("7 non-consecutive active days inside the 14-day window qualify", evalLegacy([-13, -11, -9, -7, -5, -3, 0].map((o) => ({ localDate: d(o), dayClass: "active" as const }))).state.status === "legacy_comeback");
+  check("active days outside the rolling 14 days do not count (6 inside + 1 at -14)", evalLegacy([...run("active", -5, 0), { localDate: d(-14), dayClass: "active" }]).state.status === "legacy_hidden");
+  check("duplicate rows for one date count once", evalLegacy([...run("active", -5, 0), ...run("active", -5, 0)]).state.status === "legacy_hidden");
+  check("inactive/dormant/silent/unknown days never count toward a comeback", evalLegacy([...run("active", -5, 0), ...run("inactive", -9, -6), ...run("silent", -13, -10)]).state.status === "legacy_hidden");
+  check("future-dated rows are ignored", evalLegacy([...run("active", -5, 0), { localDate: d(1), dayClass: "active" }]).state.status === "legacy_hidden");
+  check("unestablished identity: nothing changes, nothing emitted (even with 14 active days)", (() => { const r = evalLegacy(run("active", -13, 0), null, false); return r.state.status === "legacy_hidden" && r.events.length === 0 && !r.changed; })());
+  check("repeat evaluation of a surfaced show is a no-op", (() => { const r = evalLegacy(run("active", -6, 0), surfaced({ cycleResetDate: TODAY, lastActiveDate: TODAY })); return r.events.length === 0 && r.state.status === "legacy_comeback" && !r.changed; })());
+  check("only days after the latest re-hide count toward the next comeback", evalLegacy(run("active", -6, 0), { ...surfaced(), status: "legacy_hidden", hiddenLocalDate: d(-3), hideCount: 1 }).state.status === "legacy_hidden"
+    && evalLegacy(run("active", -6, 0), { ...surfaced(), status: "legacy_hidden", hiddenLocalDate: d(-7), hideCount: 1 }).state.status === "legacy_comeback");
+
+  // ---------- re-hide / re-comeback (21-of-30 reuse) ----------
+  const sc = surfaced({ cycleResetDate: d(-21), lastActiveDate: d(-21), hiddenLocalDate: null });
+  ev = evalLegacy(run("inactive", -19, 0), sc);
+  check("20 inactive days do not re-hide", ev.state.status === "legacy_comeback" && ev.events.length === 0);
+  ev = evalLegacy(run("inactive", -20, 0), sc);
+  check("21 inactive days re-hide (legacy_rehide event; hiddenLocalDate; hideCount)",
+    ev.state.status === "legacy_hidden" && ev.state.hiddenLocalDate === TODAY && ev.state.hideCount === 1 && ev.events.length === 1 && ev.events[0].type === "legacy_rehide" && ev.events[0].coverageLimitations.length >= 3);
+  ev = evalLegacy([...run("dormant", -9, 0), ...run("inactive", -20, -10)], sc);
+  check("dormant + inactive days combine (distinct dates) toward the re-hide", ev.state.status === "legacy_hidden");
+  ev = evalLegacy([...run("silent", -20, 0)], sc);
+  check("sustained silence re-hides once a performance established identity (it did, to come back)", ev.state.status === "legacy_hidden" && ev.events[0]?.type === "legacy_rehide");
+  ev = evalLegacy([...run("inactive", -20, 0).map((o) => ({ ...o, final: false }))], sc);
+  check("provisional (not day-end) negatives never re-hide", ev.state.status === "legacy_comeback" && ev.events.length === 0);
+  ev = evalLegacy([...run("inactive", -20, -1), { localDate: TODAY, dayClass: "active" }], sc);
+  check("a verified active day resets the cycle: 20 old inactive days + active today → stays surfaced", ev.state.status === "legacy_comeback" && ev.state.cycleResetDate === TODAY && ev.events.length === 0);
+  ev = evalLegacy(run("unknown", -29, 0), sc);
+  check("unknown days (outage/stale) can never re-hide", ev.state.status === "legacy_comeback" && ev.events.length === 0);
+  check("silence flags / secondary evaluation are never produced for legacy shows", (() => { const r = evalLegacy(run("silent", -11, 0), sc); return r.events.every((e) => e.type !== "silence_flag") && !r.needsSecondary && !r.state.silenceFlagged; })());
+  const hidden1 = evalLegacy(run("inactive", -20, 0), sc).state;
+  const old = run("active", -26, -21);
+  check("after a re-hide the old active days cannot start a new comeback", evalLegacy([...old, ...run("active", -2, 0)], { ...hidden1, hiddenLocalDate: d(-3) }).state.status === "legacy_hidden");
+  ev = evalLegacy(run("active", -6, 0), { ...hidden1, hiddenLocalDate: d(-10) });
+  check("a fresh 7-of-14 after the re-hide starts the next cycle (comebackCount 2)", ev.state.status === "legacy_comeback" && ev.state.restoreCount === 2 && ev.events[0].type === "legacy_comeback" && (ev.events[0].evidence as { cycle: number }).cycle === 2);
+
+  // ---------- observation / failures / day boundaries ----------
+  const legacyPark = (kind: Parameters<typeof mkEntry>[2], extra: Partial<ParkEntertainmentShowtimes> = {}, date = TODAY) =>
+    mkPark("disneyland", {}, { legacyEntries: [mkEntry("disneyland", LEGACY_NAME, kind, [LEGACY_ID])], ...extra }, date);
+  const obsOf = (st: ParkEntertainmentShowtimes, dayEnd = true, o: LegacyIdentityOptions = LEGACY_FIXTURE) => observeLegacyParkDay(st, dayEnd, o);
+  check("observe: verified performance → active, final immediately (even before the day-end window)", (() => { const o = obsOf(legacyPark("active"), false); return o.length === 1 && o[0].dayClass === "active" && o[0].final && o[0].showKey === legacyKey; })());
+  check("observe: clean empty day → inactive; closed → dormant; absent → silent (day-end: final)", ["inactive", "dormant", "silent"].every((k) => { const o = obsOf(legacyPark(k as "inactive")); return o.length === 1 && o[0].dayClass === k && o[0].final; }));
+  check("day boundary: negatives before the day-end window are provisional (never counted)", ["inactive", "dormant", "silent"].every((k) => obsOf(legacyPark(k as "inactive"), false)[0].final === false));
+  check("observe: provider failure / stale-if-error / previous-day payload yield NO observation",
+    obsOf(legacyPark("active", { error: { kind: "timeout", message: "t" } })).length === 0 && obsOf(legacyPark("active", { stale: true })).length === 0 && obsOf(legacyPark("active", { fetchedLocalDate: d(-1) })).length === 0);
+  check("observe: unestablished identity (shipped registry) → nothing, even with a performing entry", obsOf(legacyPark("active"), true, {}).length === 0);
+  check("observe: unmapped entry / entry for another park / duplicate entry are skipped",
+    obsOf(legacyPark("unmapped")).length === 0 &&
+    obsOf(mkPark("dca", {}, { legacyEntries: [mkEntry("disneyland", LEGACY_NAME, "active", [LEGACY_ID])] })).length === 0 &&
+    obsOf(legacyPark("active", { legacyEntries: [mkEntry("disneyland", LEGACY_NAME, "active", [LEGACY_ID]), mkEntry("disneyland", LEGACY_NAME, "active", [LEGACY_ID])] })).length === 1);
+  check("observe: no legacy entries → none (active-show observation unchanged)", observeLegacyParkDay(mkPark("disneyland", {}), true, LEGACY_FIXTURE).length === 0 && !observeParkDay(legacyPark("active")).some((o) => o.showKey === legacyKey));
+  check("observe: unknown (OPERATING without times) is not activity or inactivity", obsOf(legacyPark("operating_empty"))[0].dayClass === "unknown");
+  check("observe: weak park coverage cannot produce negative evidence", obsOf(mkPark("disneyland", Object.fromEntries(getEntertainmentForPark("disneyland").map((p) => [p.name, "unknown" as const])), { legacyEntries: [mkEntry("disneyland", LEGACY_NAME, "inactive", [LEGACY_ID])] }))[0]?.dayClass === "unknown");
+
+  // ---------- both-page visibility (shared logic) ----------
+  const placeOf = (names: ReadonlyArray<string> | null | undefined, o: LegacyIdentityOptions = LEGACY_FIXTURE) => getLegacyComebackPlaces("disneyland", names, o).map((p) => p.name);
+  check("shared: a persisted comeback of an established legacy identity surfaces", placeOf([LEGACY_NAME]).join() === LEGACY_NAME);
+  check("shared: unknown/undefined/non-array comeback list surfaces nothing (fail open)", placeOf(undefined).length === 0 && placeOf(null).length === 0 && placeOf("x" as never).length === 0);
+  check("shared: unestablished / wrong-park / active / unknown / duplicate names never surface",
+    placeOf([LEGACY_NAME], {}).length === 0 && getLegacyComebackPlaces("dca", [LEGACY_NAME], LEGACY_FIXTURE).length === 0 && placeOf([MMM, "No Such Show", "Together Forever"]).length === 0 && placeOf([LEGACY_NAME, LEGACY_NAME]).length === 1);
+  const cardEntry = mkEntry("disneyland", LEGACY_NAME, "active", [LEGACY_ID]);
+  const stForPage = legacyPark("active", { legacyEntries: [cardEntry] });
+  check("Waits & Shows: the card finds the legacy showtime entry; active entries still win by name", findShowtimeEntry(stForPage, LEGACY_NAME) === cardEntry && findShowtimeEntry(stForPage, MMM)?.dwpName === MMM && findShowtimeEntry(stForPage, "x") === undefined && findShowtimeEntry(null, LEGACY_NAME) === undefined);
+  check("Waits & Shows: legacy entries never leak into the active entries list (no provider-only/active duplicate)", !stForPage.entries.some((e) => e.dwpName === LEGACY_NAME));
+
+  // All Entertainment against a real provider payload (mutating the shipped registry, restored in finally).
+  const registryBackup = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING.slice();
+  try {
+    const idx = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING.findIndex((m) => m.dwpName === LEGACY_NAME);
+    LEGACY_ENTERTAINMENT_PROVIDER_MAPPING[idx] = legacyMapped(LEGACY_NAME, "disneyland", LEGACY_ID);
+    const instant = new Date(`${TODAY}T20:00:00Z`);
+    const live = (extraId?: string): ThemeParksLive => ({
+      entityId: "park", name: "Disneyland Park", timeZone: "America/Los_Angeles", droppedEntries: 0, droppedShowtimes: 0,
+      entries: [
+        { entityId: LEGACY_ID, name: LEGACY_NAME, entityType: "SHOW", parkId: null, externalId: null, status: "OPERATING", lastUpdated: null, droppedShowtimes: 0, showtimes: [{ type: "Performance Time", startTime: `${TODAY}T20:30:00-08:00`, endTime: null }] },
+        ...(extraId ? [{ entityId: extraId, name: "Some Provider Only Show", entityType: "SHOW", parkId: null, externalId: null, status: "OPERATING", lastUpdated: null, droppedShowtimes: 0, showtimes: [] }] : []),
+      ],
+    });
+    const ok = (data: ThemeParksLive) => ({ ok: true as const, data, meta: { origin: "network" as const, fetchedAt: instant.getTime(), etag: null } });
+    const all = buildParkAllEntertainment("disneyland", ok(live(LEGACY_ID_2)), instant);
+    check("All: a registered legacy entity is never provider-only (no provider-only duplicate); other provider-only shows still are",
+      !all.entries.some((e) => e.source === "provider_only" && e.id === `provider:${LEGACY_ID}`) && all.entries.some((e) => e.source === "provider_only" && e.id === `provider:${LEGACY_ID_2}`));
+    check("All: the legacy entry is listed separately, curated-shaped, with its legacy land, and not in `entries`", all.legacyEntries?.length === 1 && all.legacyEntries[0].id === `curated:disneyland:${LEGACY_NAME}` && all.legacyEntries[0].land === "Main Street, U.S.A." && !all.entries.some((e) => e.name === LEGACY_NAME));
+    check("All: legacy entry carries the verified performance", (all.legacyEntries?.[0].showtime.performances.length ?? 0) === 1);
+    const merged = mergeLegacyComebackEntries(all.entries, all.legacyEntries, "disneyland", [LEGACY_NAME], LEGACY_FIXTURE);
+    check("All: a persisted comeback adds the legacy entry exactly once", merged.filter((e) => e.name === LEGACY_NAME).length === 1 && merged.length === all.entries.length + 1);
+    // Review finding: a comeback with only a FUTURE performance has confirmedNoActivityToday and must not be dropped by the daily filter.
+    const futureOnly = { ...all.legacyEntries![0], showtime: { ...all.legacyEntries![0].showtime, performances: [], confirmedNoActivityToday: true, inactivityBasis: "forward_horizon" as const } };
+    const mergedFuture = mergeLegacyComebackEntries(all.entries, [futureOnly], "disneyland", [LEGACY_NAME], LEGACY_FIXTURE);
+    const todayLocal = getResortLocalDate("DLR", instant);
+    const naive = applyAllEntertainmentSeasonalVisibility(mergedFuture, "disneyland", "DLR", todayLocal, false, instant);
+    check("All: (regression guard) the unsplit daily filter WOULD drop a no-activity-today comeback", !naive.some((e) => e.name === LEGACY_NAME));
+    const sp = splitLegacyComebackEntries(mergedFuture, [futureOnly]);
+    const kept = [...applyAllEntertainmentSeasonalVisibility(sp.regular, "disneyland", "DLR", todayLocal, false, instant), ...sp.legacy];
+    check("All: comebacks are exempt from the daily inactivity filter (kept; regular entries still filtered), matching Waits & Shows", kept.some((e) => e.name === LEGACY_NAME) && sp.legacy.length === 1 && sp.regular.length === all.entries.length);
+    check("All: merging is idempotent (never duplicates on re-merge)", mergeLegacyComebackEntries(merged, all.legacyEntries, "disneyland", [LEGACY_NAME], LEGACY_FIXTURE).length === merged.length);
+    check("All: no persisted comeback → legacy show absent; unknown list → absent", mergeLegacyComebackEntries(all.entries, all.legacyEntries, "disneyland", [], LEGACY_FIXTURE).length === all.entries.length && mergeLegacyComebackEntries(all.entries, all.legacyEntries, "disneyland", undefined, LEGACY_FIXTURE).length === all.entries.length);
+    const dup = [...all.entries, { ...all.legacyEntries![0], id: `provider:${LEGACY_ID}`, source: "provider_only" as const }];
+    check("All: a provider-only entry already carrying the legacy entity blocks the legacy merge (duplicate guard)", mergeLegacyComebackEntries(dup, all.legacyEntries, "disneyland", [LEGACY_NAME], LEGACY_FIXTURE).length === dup.length);
+    check("All: lifecycle hide set cannot hide a legacy comeback (legacy never in the hidden set)", filterLifecycleHiddenEntries(merged, getLifecycleHiddenNames("disneyland", [LEGACY_NAME])).some((e) => e.name === LEGACY_NAME));
+    check("All: provider failure → no legacy entries (nothing fabricated)", buildParkAllEntertainment("disneyland", { ok: false, error: { kind: "timeout", message: "t" } }, instant).legacyEntries === undefined);
+    const st = normalizeParkEntertainmentShowtimes("disneyland", ok(live()), instant);
+    check("Waits & Shows normalizer: legacyEntries for the established legacy show only (separate from entries)", st.legacyEntries?.length === 1 && st.legacyEntries[0].dwpName === LEGACY_NAME && st.legacyEntries[0].performances.length === 1 && !st.entries.some((e) => e.dwpName === LEGACY_NAME));
+    check("Waits & Shows normalizer: other parks / failures carry no legacy entries", normalizeParkEntertainmentShowtimes("dca", ok(live()), instant).legacyEntries === undefined && normalizeParkEntertainmentShowtimes("disneyland", { ok: false, error: { kind: "timeout", message: "t" } }, instant).legacyEntries === undefined);
+  } finally {
+    LEGACY_ENTERTAINMENT_PROVIDER_MAPPING.splice(0, LEGACY_ENTERTAINMENT_PROVIDER_MAPPING.length, ...registryBackup);
+  }
+  check("shipped registry restored after fixtures", LEGACY_ENTERTAINMENT_PROVIDER_MAPPING.every((m) => m.disposition === "unmapped"));
+  check("catalog preserved: legacy catalog unchanged and no legacy identity in the active catalog or Smart Entry source",
+    getLegacyEntertainmentPlaces().length === 2 && !ENTERTAINMENT_PLACES.some((p) => getLegacyEntertainmentPlaces().some((l) => l.name === p.name)) && !getEntertainmentForPark("disneyland").some((p) => p.name === LEGACY_NAME));
+
+  // ---------- retained evidence (refresh flicker) ----------
+  const retainedBody = { parkId: "disneyland" as ParkId, resort: "DLR" as const, localDate: TODAY, lifecycleAutoHidden: [] as string[], lifecycleLegacyComebacks: [LEGACY_NAME] };
+  const rEv = nextRetainedLifecycleEvidence(null, "disneyland", retainedBody);
+  check("refresh: legacy comebacks are retained across a failed refresh (same park/day) like the hide evidence", rEv?.legacyComebacks?.[0] === LEGACY_NAME && nextRetainedLifecycleEvidence(rEv, "disneyland", null) === rEv && activeRetainedEvidence(rEv, "disneyland", new Date(`${TODAY}T20:00:00Z`))?.legacyComebacks?.length === 1);
+  check("refresh: another park / next resort day never reuses retained comebacks", nextRetainedLifecycleEvidence(rEv, "dca", null) === null && activeRetainedEvidence(rEv, "disneyland", new Date("2026-12-12T20:00:00Z")) === null);
+  check("refresh: a healthy response without the legacy list drops stale retained comebacks", nextRetainedLifecycleEvidence(rEv, "disneyland", { ...retainedBody, lifecycleLegacyComebacks: undefined })?.legacyComebacks === undefined);
+
+  // ---------- monitor over the in-memory SQL stand-in ----------
+  const PARK: ParkId = "disneyland";
+  const localOf = (off: number) => addDaysToLocalDate(MONITOR_DAY0, off)!;
+  type Day = Parameters<typeof mkEntry>[2] | "provider_down" | "stale" | "prev_day";
+  async function drive(runDb: LifecycleMonitorOptions["runDb"], days: Day[], startOffset = 0, instantOf: (off: number) => Date = instantFor, legacyIdentity: LegacyIdentityOptions = LEGACY_FIXTURE) {
+    const reports = [];
+    for (let i = 0; i < days.length; i++) {
+      const off = startOffset + i; const kind = days[i]; const date = localOf(off);
+      reports.push(await runEntertainmentLifecycleMonitor({
+        instant: instantOf(off), runDb, sleep: async () => {}, legacyIdentity,
+        getShowtimes: async (parkId) => {
+          if (parkId !== PARK || kind === "provider_down") return mkPark(parkId, {}, { error: { kind: "timeout", message: "t" } }, date);
+          const k = kind === "stale" || kind === "prev_day" ? "active" : kind;
+          const extra: Partial<ParkEntertainmentShowtimes> = { legacyEntries: [mkEntry(PARK, LEGACY_NAME, k, [LEGACY_ID])] };
+          if (kind === "stale") extra.stale = true;
+          if (kind === "prev_day") extra.fetchedLocalDate = localOf(off - 1);
+          return mkPark(parkId, {}, extra, date);
+        },
+      }));
+    }
+    return reports;
+  }
+  const stateOf = async (db: Queryable) => (await readStates(db, PARK)).get(legacyKey);
+  const eventsOf = (db: FakeLifecycleDb, type: string) => [...db.events.values()].filter((e) => e.show_key === legacyKey && e.event_type === type);
+
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    let reps = await drive(runDb, Array(6).fill("active"));
+    check("monitor: 6 verified active days → no state row, no events", (await stateOf(db)) === undefined && eventsOf(db, "legacy_comeback").length === 0);
+    check("monitor: 6 days of evidence are persisted for the legacy identity (same evidence table)", [...db.evidence.values()].filter((r) => r.show_key === legacyKey).length === 6);
+    reps = await drive(runDb, ["active"], 6);
+    let st = await stateOf(db);
+    check("monitor: 7th verified day → legacy_comeback persisted, reported, audited", st?.status === "legacy_comeback" && st.restoreCount === 1 && !!st.restoredAt && reps[0]!.parks.find((p) => p.parkId === PARK)!.legacyComebacks.includes(LEGACY_NAME) && eventsOf(db, "legacy_comeback").length === 1);
+    const ce = eventsOf(db, "legacy_comeback")[0];
+    check("monitor: comeback event has evidence, coverage limitations and unreviewed status", ce.audit_status === "unreviewed" && (ce.evidence as { activeDays: number }).activeDays === 7 && (ce.coverage_limitations as string[]).length >= 3);
+    check("monitor: the active-show lifecycle is untouched by the legacy run (no hide/restore/flag events for anything)", [...db.events.values()].every((e) => e.event_type === "legacy_comeback"));
+    check("persisted state drives both pages end to end", await (async () => {
+      resetLifecycleReadState();
+      const v = await getLifecycleVisibilityState(PARK, { executor: { run: (fn) => fn(db), abort() {} } as PersistExecutor });
+      return !!v && v.legacyComebacks.includes(LEGACY_NAME) && v.autoHidden.length === 0 && getLegacyComebackPlaces(PARK, v.legacyComebacks, LEGACY_FIXTURE).length === 1;
+    })());
+    check("legacy comebacks are never in the active hide set", !getLifecycleHiddenNames(PARK, (await getLifecycleAutoHidden(PARK, { executor: { run: (fn) => fn(db), abort() {} } as PersistExecutor })) ?? undefined).has(LEGACY_NAME));
+
+    // idempotency / dedupe
+    const evCount = db.events.size;
+    await drive(runDb, ["active"], 6);
+    check("audit idempotency: a duplicated delivery adds no event and keeps counters", db.events.size === evCount && (await stateOf(db))?.restoreCount === 1);
+    await drive(runDb, ["active"], 7);
+    check("audit idempotency: further active days while surfaced add no comeback event", eventsOf(db, "legacy_comeback").length === 1 && (await stateOf(db))?.status === "legacy_comeback");
+    const newer = (await stateOf(db))!;
+    await drive(runDb, ["inactive"], 3);
+    check("late run for an EARLIER date never overwrites newer legacy state", (await stateOf(db))?.evaluatedLocalDate === newer.evaluatedLocalDate && (await stateOf(db))?.status === "legacy_comeback");
+
+    // failures never transition
+    const core = async () => { const x = (await stateOf(db))!; return JSON.stringify([x.status, x.restoreCount, x.hideCount, x.hiddenLocalDate, x.cycleResetDate, x.lastActiveDate, x.restoredAt]); };
+    const before = await core();
+    const evBefore = db.events.size;
+    reps = await drive(runDb, ["provider_down", "stale", "prev_day", "provider_down"], 8);
+    check("failures: outage / stale / previous-day payloads change no legacy state and emit nothing", (await core()) === before && db.events.size === evBefore);
+    check("failures: stale and previous-day payloads write no evidence for the legacy show", ![...db.evidence.values()].some((r) => r.show_key === legacyKey && ((r.d as string) === localOf(9) || (r.d as string) === localOf(10))));
+    await drive(runDb, Array(40).fill("provider_down"), 12);
+    check("failures: a long outage never re-hides (elapsed time and unknown days never count)", (await stateOf(db))?.status === "legacy_comeback");
+
+    // re-hide: 21 distinct final inactive days after the last active (offset 7), cycle reset at 7
+    await drive(runDb, Array(20).fill("inactive"), 52); // far later days; window rolls
+    st = await stateOf(db);
+    check("re-hide: 20 inactive days → still surfaced", st?.status === "legacy_comeback");
+    reps = await drive(runDb, ["inactive"], 72);
+    st = await stateOf(db);
+    check("re-hide: 21st inactive day → legacy_hidden, audited once", st?.status === "legacy_hidden" && st.hideCount === 1 && st.hiddenLocalDate === localOf(72) && eventsOf(db, "legacy_rehide").length === 1 && reps[0]!.parks.find((p) => p.parkId === PARK)!.legacyRehidden.includes(LEGACY_NAME));
+    check("re-hide: legacy comebacks list no longer includes it", await (async () => { resetLifecycleReadState(); const v = await getLifecycleVisibilityState(PARK, { executor: { run: (fn) => fn(db), abort() {} } as PersistExecutor }); return !!v && !v.legacyComebacks.includes(LEGACY_NAME); })());
+    await drive(runDb, ["inactive"], 72);
+    check("re-hide: duplicate delivery adds no second event", eventsOf(db, "legacy_rehide").length === 1);
+    await drive(runDb, Array(6).fill("active"), 73);
+    check("re-comeback: 6 active days → still hidden", (await stateOf(db))?.status === "legacy_hidden");
+    await drive(runDb, ["active"], 79);
+    st = await stateOf(db);
+    check("re-comeback: 7 active days after the re-hide → second cycle (comeback #2, separate audit event)", st?.status === "legacy_comeback" && st.restoreCount === 2 && eventsOf(db, "legacy_comeback").length === 2);
+  }
+
+  // provisional negatives (earlier than the day-end window) never re-hide
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    await drive(runDb, Array(7).fill("active"));
+    const midday = (off: number) => new Date(`${localOf(off)}T20:00:00Z`); // 12:00 PST: before the day-end window
+    await drive(runDb, Array(25).fill("inactive"), 7, midday);
+    check("day boundary: 25 mid-day (provisional) inactive observations never re-hide", (await stateOf(db))?.status === "legacy_comeback");
+    check("day boundary: provisional rows are stored non-final", [...db.evidence.values()].filter((r) => r.show_key === legacyKey && r.d !== localOf(0) && (r.d as string) > localOf(6)).every((r) => r.is_final === false));
+  }
+
+  // identity ambiguity / shipped registry: the monitor never evaluates or writes legacy rows
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    await drive(runDb, Array(10).fill("active"), 0, instantFor, {}); // shipped (unmapped) registry
+    check("identity: with the shipped registry (no verified identity) 10 performing days write no legacy rows", [...db.evidence.values()].every((r) => r.show_key !== legacyKey) && db.states.size === [...db.states.values()].filter((r) => r.show_key !== legacyKey).length);
+    const amb = fixtureLegacy(legacyMapped(LEGACY_NAME, "disneyland", activeId));
+    await drive(runDb, Array(10).fill("active"), 0, instantFor, amb);
+    check("identity: an ambiguous (active-shared) provider id never produces rows or a comeback", [...db.evidence.values()].every((r) => r.show_key !== legacyKey) && ![...db.events.values()].some((e) => e.event_type === "legacy_comeback"));
+    await drive(runDb, Array(7).fill("active"), 0, instantFor, LEGACY_FIXTURE);
+    check("identity: the same evidence qualifies once the identity is established", (await stateOf(db))?.status === "legacy_comeback");
+    // identity later withdrawn: the page validation stops surfacing it even though a state row remains
+    check("identity: if the identity is later no longer established, the shared page logic stops surfacing the persisted comeback", getLegacyComebackPlaces(PARK, [LEGACY_NAME], {}).length === 0);
+  }
+
+  // DB failure leaves state untouched
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    await drive(runDb, Array(7).fill("active"));
+    db.failAll = true;
+    const reps = await drive(runDb, ["inactive"], 7);
+    db.failAll = false;
+    check("failures: a database outage reports db_unavailable and changes nothing", reps[0]!.parks.find((p) => p.parkId === PARK)!.status === "db_unavailable" && (await stateOf(db))?.status === "legacy_comeback");
+  }
+  return failures;
+}
+
+// ============================================
+// PHASE 14.5D FOLLOW-UP — AUTOMATIC LEGACY IDENTITY DISCOVERY
+// ============================================
+
+const DL_UUID = THEMEPARKS_PARKS.disneyland.entityId;
+const DCA_UUID = THEMEPARKS_PARKS.dca.entityId;
+const LID = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+const LID2 = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+const LID3 = "cccccccc-3333-4333-8333-cccccccccccc";
+type LiveRow = { entityId: string; name: string; entityType: string; parkId: string | null };
+const lr = (entityId: string, name: string, entityType = "SHOW", parkId: string | null = null): LiveRow => ({ entityId, name, entityType, parkId });
+const disc = (parkId: ParkId, live: LiveRow[], existing: DiscoveredLegacyIdentity[] = [], manual?: EntertainmentProviderMapping[]) =>
+  discoverLegacyProviderIdentities({ parkId, parkUuid: parkId === "dca" ? DCA_UUID : DL_UUID, live, existing, manual });
+const dId = (entityId: string, name = LEGACY_NAME, parkId: ParkId = "disneyland"): DiscoveredLegacyIdentity => ({ parkId, name, entityId, providerName: name });
+
+export async function runDevLegacyIdentityDiscoveryCases(): Promise<string[]> {
+  const failures: string[] = [];
+  const check = (label: string, ok: boolean) => { if (!ok) failures.push(label); };
+  const kinds = (r: ReturnType<typeof disc>) => r.flags.map((f) => f.kind).join(",");
+
+  // ---------- pure discovery ----------
+  let r = disc("disneyland", [lr(LID, LEGACY_NAME)]);
+  check("discovery: exact canonical name + park + SHOW → validated identity, discovered flag", r.identities.length === 1 && r.identities[0].entityId === LID && r.identities[0].name === LEGACY_NAME && kinds(r) === "identity_discovered");
+  r = disc("disneyland", [lr(LID, "Together Forever")]);
+  check("discovery: approved legacy alias resolves to the canonical legacy show (canonical name kept)", r.identities.length === 1 && r.identities[0].name === LEGACY_NAME);
+  r = disc("disneyland", [lr(LID, "Pixar Nighttime Magic"), lr(LID2, "Together Forever Spectacular")]);
+  check("discovery: no fuzzy/partial/unapproved-name matching", r.identities.length === 0 && r.flags.length === 0);
+  r = disc("disneyland", [lr(LID, MMM), lr(LID2, "Fantasmic!")]);
+  check("discovery: active catalog identities are never discovered as legacy", r.identities.length === 0 && r.flags.length === 0);
+  r = disc("disneyland", [lr(LID, LEGACY_NAME, "ATTRACTION")]);
+  check("discovery: wrong provider type → flagged, never an identity", r.identities.length === 0 && kinds(r) === "identity_candidate" && /wrong_type/.test(String(r.flags[0].evidence.candidates && (r.flags[0].evidence.candidates as Array<{ rejected: string }>)[0].rejected)));
+  r = disc("disneyland", [lr(LID, LEGACY_NAME_DCA)]);
+  check("discovery: a legacy show of ANOTHER park in this park's payload → wrong_park flag, no identity", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("dca", [lr(LID, LEGACY_NAME)]);
+  check("discovery: cross-park (Disneyland legacy name in DCA payload) rejected", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("disneyland", [lr(LID, LEGACY_NAME, "SHOW", DCA_UUID)]);
+  check("discovery: entity owned by a different provider park rejected", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("disneyland", [lr(LID.toUpperCase(), LEGACY_NAME), lr("not-a-uuid", "Together Forever")]);
+  check("discovery: malformed ids rejected and flagged", r.identities.length === 0 && r.flags.length === 1 && r.flags[0].kind === "identity_candidate");
+  r = disc("disneyland", [lr(LID, LEGACY_NAME), lr(LID2, LEGACY_NAME)]);
+  check("discovery: duplicate candidates for one legacy show → ambiguous, nothing persisted", r.identities.length === 0 && kinds(r) === "identity_candidate" && /duplicate/.test(String(r.flags[0].evidence.reason)));
+  r = disc("disneyland", [lr(LID, LEGACY_NAME), lr(LID2, "Together Forever", "ATTRACTION")]);
+  check("discovery: a clean candidate plus a rejected look-alike is still ambiguous", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  const activeEntity = (THEMEPARKS_ENTERTAINMENT_MAPPING.find((m) => m.disposition === "mapped") as Extract<EntertainmentProviderMapping, { disposition: "mapped" }>).provider[0].entityId;
+  r = disc("disneyland", [lr(activeEntity, LEGACY_NAME)]);
+  check("discovery: an entity already mapped to an ACTIVE show is a conflict", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("disneyland", [lr(LID, LEGACY_NAME)], [dId(LID, LEGACY_NAME_DCA, "dca")]);
+  check("discovery: an entity already the persisted identity of another show is a conflict", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("disneyland", [lr(LID, LEGACY_NAME)], [], [legacyMapped(LEGACY_NAME_DCA, "dca", LID)]);
+  check("discovery: an entity manually mapped to another legacy show is a conflict", r.identities.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("disneyland", [lr(LID2, LEGACY_NAME)], [], [legacyMapped(LEGACY_NAME, "disneyland", LID)]);
+  check("discovery: a manual `mapped` entry is authoritative (discovery skips that show, no flag)", r.identities.length === 0 && r.flags.length === 0);
+  r = disc("disneyland", [lr(LID, LEGACY_NAME)], [dId(LID)]);
+  check("discovery: an already-persisted identity is unchanged (idempotent: nothing to write or flag)", r.identities.length === 0 && r.flags.length === 0 && r.superseded.length === 0);
+  r = disc("disneyland", [lr(LID2, LEGACY_NAME)], [dId(LID)]);
+  check("UUID change: old entity gone + one clean new entity → supersede + audit flag (never silent)", r.identities[0]?.entityId === LID2 && r.superseded[0]?.entityId === LID && kinds(r) === "identity_change");
+  r = disc("disneyland", [lr(LID, LEGACY_NAME), lr(LID2, LEGACY_NAME)], [dId(LID)]);
+  check("UUID change: while the validated entity is still published, a second candidate is a conflict (no merge)", r.identities.length === 0 && r.superseded.length === 0 && kinds(r) === "identity_candidate");
+  r = disc("disneyland", [lr(LID, "Renamed Provider Show"), lr(LID2, LEGACY_NAME)], [dId(LID)]);
+  check("UUID change: the validated entity is still published (renamed) while a new one matches → conflict, no supersede", r.identities.length === 0 && r.superseded.length === 0 && kinds(r) === "identity_candidate" && /still published/.test(String(r.flags[0].evidence.reason)));
+  r = disc("disneyland", [lr(LID2, LEGACY_NAME), lr(LID3, LEGACY_NAME)], [dId(LID)]);
+  check("UUID change: two new candidates after the old one vanished → ambiguous, old identity kept", r.identities.length === 0 && r.superseded.length === 0 && kinds(r) === "identity_candidate");
+
+  // ---------- merge (effective registry) ----------
+  const merged = (ids: DiscoveredLegacyIdentity[], manual?: EntertainmentProviderMapping[]) => mergeDiscoveredLegacyIdentities(ids, manual);
+  check("merge: a discovered identity establishes the legacy show (no manual update)", isLegacyIdentityEstablished("disneyland", LEGACY_NAME, merged([dId(LID)])) && !isLegacyIdentityEstablished("dca", LEGACY_NAME_DCA, merged([dId(LID)])));
+  check("merge: no discovered identities → the manual registry object itself", merged([]) === LEGACY_ENTERTAINMENT_PROVIDER_MAPPING && mergeDiscoveredLegacyIdentities(undefined) === LEGACY_ENTERTAINMENT_PROVIDER_MAPPING);
+  check("merge: manual `mapped` stays authoritative over a discovered id", (() => { const m = merged([dId(LID2)], [legacyMapped(LEGACY_NAME, "disneyland", LID), { dwpName: LEGACY_NAME_DCA, parkId: "dca", disposition: "unmapped", reason: "x" }]); const e = m.find((x) => x.dwpName === LEGACY_NAME)!; return e.disposition === "mapped" && e.provider[0].entityId === LID; })());
+  check("merge: discovered id shared with an ACTIVE mapping is dropped", !isLegacyIdentityEstablished("disneyland", LEGACY_NAME, merged([dId(activeEntity)])));
+  check("merge: two discovered identities sharing one id are both dropped", (() => { const m = merged([dId(LID), dId(LID, LEGACY_NAME_DCA, "dca")]); return !isLegacyIdentityEstablished("disneyland", LEGACY_NAME, m) && !isLegacyIdentityEstablished("dca", LEGACY_NAME_DCA, m); })());
+  check("merge: identities for non-legacy names / malformed ids are ignored", !isLegacyIdentityEstablished("disneyland", MMM, merged([dId(LID, MMM)])) && !isLegacyIdentityEstablished("disneyland", LEGACY_NAME, merged([dId("BAD-ID")])));
+
+  // ---------- monitor over the in-memory SQL stand-in ----------
+  const PARK: ParkId = "disneyland";
+  const localOf = (off: number) => addDaysToLocalDate(MONITOR_DAY0, off)!;
+  type Cand = { id: string; name?: string; type?: string; status?: string; perf?: boolean; parkId?: string | null };
+  type Kind = "perf" | "closed" | "absent" | "down" | "stale";
+  type World = { cands: Cand[]; fillers?: number; dropped?: number };
+  const worldOf = (kind: Kind, id = LID): World => ({ cands: kind === "absent" ? [] : [{ id, name: LEGACY_NAME, perf: kind === "perf" || kind === "stale", status: kind === "closed" ? "CLOSED" : "OPERATING" }] });
+  const mkLive = (date: string, w: World): ThemeParksLive => ({
+    entityId: DL_UUID, name: "Disneyland Park", timeZone: "America/Los_Angeles", droppedEntries: w.dropped ?? 0, droppedShowtimes: 0,
+    entries: [
+      ...Array.from({ length: w.fillers ?? 3 }, (_, i) => ({ entityId: `f0f0f0f0-0000-4000-8000-00000000000${i}`, name: `Provider Filler ${i}`, entityType: "SHOW", parkId: null, externalId: null, status: "OPERATING", lastUpdated: null, droppedShowtimes: 0, showtimes: [{ type: "Performance Time", startTime: `${date}T20:30:00-08:00`, endTime: null }] })),
+      ...w.cands.map((c) => ({ entityId: c.id, name: c.name ?? LEGACY_NAME, entityType: c.type ?? "SHOW", parkId: c.parkId ?? null, externalId: null, status: c.status ?? "OPERATING", lastUpdated: null, droppedShowtimes: 0, showtimes: c.perf ? [{ type: "Performance Time", startTime: `${date}T19:30:00-08:00`, endTime: null }] : [] })),
+    ],
+  });
+  async function drive(runDb: LifecycleMonitorOptions["runDb"], days: Array<Kind | World>, start = 0, legacyIdentity?: LegacyIdentityOptions) {
+    const reps = [];
+    for (let i = 0; i < days.length; i++) {
+      const off = start + i; const day = days[i]; const kind = typeof day === "string" ? day : "perf"; const date = localOf(off);
+      const world = typeof day === "string" ? worldOf(day) : day;
+      reps.push(await runEntertainmentLifecycleMonitor({
+        instant: instantFor(off), runDb, sleep: async () => {}, legacyIdentity,
+        getShowtimes: async (parkId, instant, _h, captureLive) => {
+          if (parkId !== PARK || kind === "down") return mkPark(parkId, {}, { error: { kind: "timeout", message: "t" } }, date);
+          const origin = typeof day === "string" && day === "stale" ? "stale" as const : "network" as const;
+          const res = { ok: true as const, data: mkLive(date, world), meta: { origin, fetchedAt: instant.getTime(), etag: null } };
+          captureLive?.(res);
+          return normalizeParkEntertainmentShowtimes(PARK, res, instant);
+        },
+      }));
+    }
+    return reps;
+  }
+  const lKey = legacyKey;
+  const stateOf = async (db: Queryable) => (await readStates(db, PARK)).get(lKey);
+  const ids = (db: FakeLifecycleDb, status = "validated") => [...db.identities.values()].filter((x) => x.status === status);
+  const evs = (db: FakeLifecycleDb, type: string) => [...db.events.values()].filter((e) => e.event_type === type);
+  const ex = (db: FakeLifecycleDb) => ({ run: (fn: (q: Queryable) => Promise<unknown>) => fn(db), abort() {} }) as unknown as PersistExecutor;
+
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    const reps = await drive(runDb, ["perf"]);
+    check("monitor: shipped registry is unmapped, yet the provider-published show is discovered and persisted (no manual update)", ids(db).length === 1 && ids(db)[0].entity_id === LID && ids(db)[0].show_key === lKey && reps[0]!.parks.find((p) => p.parkId === PARK)!.legacyIdentitiesDiscovered.includes(LEGACY_NAME));
+    check("monitor: discovery writes an unreviewed audit event with evidence + limitations", (() => { const e = evs(db, "legacy_identity_discovered")[0]; return !!e && e.audit_status === "unreviewed" && (e.evidence as { entityId: string }).entityId === LID && (e.coverage_limitations as string[]).length >= 3; })());
+    check("monitor: the discovered identity is observed the same run (active evidence row)", [...db.evidence.values()].some((x) => x.show_key === lKey && x.day_class === "active"));
+    check("monitor: an identity alone never surfaces anything (no comeback state/event after 1 day)", (await stateOf(db)) === undefined && evs(db, "legacy_comeback").length === 0);
+    await drive(runDb, Array(5).fill("perf"), 1);
+    check("qualification: 6 verified days → not surfaced", (await stateOf(db)) === undefined);
+    // restart: fresh monitor invocation + fresh read cache over the same persisted rows
+    resetLifecycleReadState();
+    const vs0 = await getLifecycleVisibilityState(PARK, { executor: ex(db) });
+    check("persistence/restart: identity survives and is served to the pages; no comeback yet", !!vs0 && vs0.legacyIdentities.length === 1 && vs0.legacyIdentities[0].entityId === LID && vs0.legacyComebacks.length === 0);
+    await drive(runDb, ["perf"], 6);
+    const st = await stateOf(db);
+    check("qualification: 7th verified day (restart, no manual mapping) → legacy_comeback persisted and audited once", st?.status === "legacy_comeback" && st.restoreCount === 1 && evs(db, "legacy_comeback").length === 1);
+    resetLifecycleReadState();
+    const vs = await getLifecycleVisibilityState(PARK, { executor: ex(db) });
+    check("pages: persisted comeback + persisted identity surface the show through the shared helpers (both pages)", !!vs && getLegacyComebackPlaces(PARK, vs.legacyComebacks, legacyIdentityOptions(vs.legacyIdentities)).map((p) => p.name).join() === LEGACY_NAME);
+    check("pages: without the identity (unknown/older body) a comeback name surfaces nothing (fail open)", getLegacyComebackPlaces(PARK, vs!.legacyComebacks, legacyIdentityOptions(undefined)).length === 0);
+    // the same persisted identity drives both page data builders
+    const instant = instantFor(6);
+    const res = { ok: true as const, data: mkLive(localOf(6), worldOf("perf")), meta: { origin: "network" as const, fetchedAt: instant.getTime(), etag: null } };
+    const effective = mergeDiscoveredLegacyIdentities(vs!.legacyIdentities);
+    const stp = normalizeParkEntertainmentShowtimes(PARK, res, instant, null, effective);
+    const all = buildParkAllEntertainment(PARK, res, instant, null, effective);
+    check("Waits & Shows data: the discovered identity yields a legacy entry (and none without it)", stp.legacyEntries?.length === 1 && stp.legacyEntries[0].performances.length === 1 && normalizeParkEntertainmentShowtimes(PARK, res, instant).legacyEntries === undefined);
+    check("All Entertainment data: legacy entry listed once; the discovered entity is not provider-only; without identity it is provider-only",
+      all.legacyEntries?.length === 1 && !all.entries.some((e) => e.id === `provider:${LID}`) &&
+      mergeLegacyComebackEntries(all.entries, all.legacyEntries, PARK, vs!.legacyComebacks, legacyIdentityOptions(vs!.legacyIdentities)).filter((e) => e.name === LEGACY_NAME).length === 1 &&
+      buildParkAllEntertainment(PARK, res, instant).entries.some((e) => e.id === `provider:${LID}`));
+
+    // idempotency
+    const evN = db.events.size, idN = db.identities.size;
+    await drive(runDb, ["perf"], 6);
+    check("idempotency: a duplicated delivery adds no identity row and no audit event", db.events.size === evN && db.identities.size === idN);
+
+    // outage / stale / dropped / weak coverage: no transition and no new identity
+    const core = async () => { const x = (await stateOf(db))!; return JSON.stringify([x.status, x.restoreCount, x.hideCount, x.cycleResetDate, x.lastActiveDate]); };
+    const before = await core();
+    await drive(runDb, ["down", "stale", "down"], 7);
+    check("outage: provider failure / stale payload change nothing (identity, state, events)", (await core()) === before && ids(db).length === 1 && db.events.size === evN);
+    check("outage: long outage never re-hides", (await drive(runDb, Array(35).fill("down"), 10), (await stateOf(db))?.status === "legacy_comeback"));
+
+    // UUID change while surfaced: history kept, audited, no silent merge of two live entities
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME, perf: true }, { id: LID2, name: LEGACY_NAME, perf: true }] }], 45);
+    check("UUID change: two live matches with the validated one still published → conflict flagged, identity unchanged", ids(db).length === 1 && ids(db)[0].entity_id === LID && evs(db, "legacy_identity_candidate").length === 1 && evs(db, "legacy_identity_change").length === 0);
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME, perf: true }, { id: LID2, name: LEGACY_NAME, perf: true }] }], 46);
+    check("audit dedupe: a standing conflict is flagged once, not every run", evs(db, "legacy_identity_candidate").length === 1);
+    const evidenceBefore = [...db.evidence.values()].filter((x) => x.show_key === lKey).length;
+    await drive(runDb, [{ cands: [{ id: LID2, name: LEGACY_NAME, perf: true }] }], 47);
+    check("UUID change: old entity gone + one clean new entity → old superseded, new validated, change audited", ids(db).length === 1 && ids(db)[0].entity_id === LID2 && ids(db, "superseded").length === 1 && ids(db, "superseded")[0].entity_id === LID && evs(db, "legacy_identity_change").length === 1);
+    check("UUID change: valid history is kept under the same canonical show (evidence not lost, new day tracked via the new entity)", [...db.evidence.values()].filter((x) => x.show_key === lKey).length >= evidenceBefore && [...db.evidence.values()].some((x) => x.show_key === lKey && x.d === localOf(47) && x.day_class === "active"));
+    check("UUID change: surfaced state is not reset or duplicated", (await stateOf(db))?.status === "legacy_comeback" && (await stateOf(db))?.restoreCount === 1 && evs(db, "legacy_comeback").length === 1);
+
+    // A → B → A: the superseded original returns and is reactivated (review finding), history/state intact
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME, perf: true }] }], 48);
+    check("UUID return: the superseded UUID is reactivated as the single validated identity (row reused, replacement superseded)", ids(db).length === 1 && ids(db)[0].entity_id === LID && ids(db, "superseded").length === 1 && ids(db, "superseded")[0].entity_id === LID2 && db.identities.size === 2 && evs(db, "legacy_identity_change").length === 2);
+    check("UUID return: the show keeps being observed and stays surfaced", [...db.evidence.values()].some((x) => x.show_key === lKey && x.d === localOf(48) && x.day_class === "active") && (await stateOf(db))?.status === "legacy_comeback");
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME, perf: true }] }], 48);
+    check("UUID return: duplicate delivery is idempotent", ids(db).length === 1 && db.identities.size === 2 && evs(db, "legacy_identity_change").length === 2);
+    await drive(runDb, [{ cands: [{ id: LID2, name: LEGACY_NAME, perf: true }] }], 49);
+    check("UUID flip-flop: B returns again and is reactivated too (no dead end in either direction)", ids(db).length === 1 && ids(db)[0].entity_id === LID2 && db.identities.size === 2);
+    // re-hide (21-of-30, final silent days with identity established) and re-comeback, all with the persisted identity
+    await drive(runDb, Array(20).fill("absent"), 50);
+    check("re-hide: 20 final absent days → still surfaced", (await stateOf(db))?.status === "legacy_comeback");
+    await drive(runDb, ["absent"], 70);
+    check("re-hide: 21st day → legacy_hidden, audited once; identity retained", (await stateOf(db))?.status === "legacy_hidden" && evs(db, "legacy_rehide").length === 1 && ids(db).length === 1);
+    await drive(runDb, Array(6).fill({ cands: [{ id: LID2, perf: true }] } as World), 71);
+    check("re-comeback: 6 days → hidden", (await stateOf(db))?.status === "legacy_hidden");
+    await drive(runDb, [{ cands: [{ id: LID2, perf: true }] }], 77);
+    check("re-comeback: 7th day → second cycle via the same persisted identity", (await stateOf(db))?.status === "legacy_comeback" && (await stateOf(db))?.restoreCount === 2 && ids(db).length === 1);
+  }
+
+  // discovery requires a fresh, healthy, complete payload
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    await drive(runDb, [{ cands: [{ id: LID }], fillers: 3, dropped: 1 }]);
+    check("discovery: a payload with discarded (malformed) entities never discovers", ids(db).length === 0);
+    await drive(runDb, [{ cands: [{ id: LID }], fillers: 0 }], 1);
+    check("discovery: weak park coverage never discovers", ids(db).length === 0);
+    await drive(runDb, ["stale"], 2);
+    check("discovery: stale-if-error payload never discovers", ids(db).length === 0);
+    await drive(runDb, ["down"], 3);
+    check("discovery: provider outage never discovers", ids(db).length === 0);
+    await drive(runDb, [{ cands: [{ id: LID, type: "ATTRACTION" }] }, { cands: [{ id: LID, type: "ATTRACTION" }] }], 4);
+    check("discovery: wrong-type candidate is flagged once (deduped across runs), never persisted, never observed", ids(db).length === 0 && evs(db, "legacy_identity_candidate").length === 1 && ![...db.evidence.values()].some((x) => x.show_key === lKey));
+    await drive(runDb, [{ cands: [{ id: LID, name: LEGACY_NAME }, { id: LID2, name: "Together Forever" }] }], 6);
+    check("discovery: duplicate candidates flagged, never persisted or surfaced", ids(db).length === 0 && evs(db, "legacy_identity_candidate").length === 2);
+    await drive(runDb, Array(10).fill({ cands: [{ id: LID }, { id: LID2, name: "Together Forever" }], fillers: 3 } as World), 7);
+    check("discovery: an ambiguous show can never come back, however many performances", (await stateOf(db)) === undefined);
+  }
+
+  // manual mapping is authoritative in the monitor
+  {
+    const db = new FakeLifecycleDb();
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    await drive(runDb, [{ cands: [{ id: LID2, perf: true }] }], 0, LEGACY_FIXTURE); // fixture manual id = LEGACY_ID, provider offers LID2
+    check("manual mapping: authoritative — a different provider entity is neither discovered nor flagged", ids(db).length === 0 && evs(db, "legacy_identity_candidate").length === 0 && ![...db.evidence.values()].some((x) => x.show_key === lKey && x.day_class === "active"));
+    await drive(runDb, [{ cands: [{ id: LEGACY_ID, perf: true }] }], 1, LEGACY_FIXTURE);
+    check("manual mapping: the manual id is observed as before", [...db.evidence.values()].some((x) => x.show_key === lKey && x.day_class === "active"));
+  }
+
+  // identity table not migrated: active lifecycle unaffected, legacy manual-only
+  {
+    const db = new FakeLifecycleDb();
+    db.failIdentitySql = true;
+    const runDb: LifecycleMonitorOptions["runDb"] = async (_p, fn) => fn(db);
+    const reps = await drive(runDb, ["perf"]);
+    check("failure: identity persistence unavailable → park still ok, active shows still evaluated, nothing discovered", reps[0]!.parks.find((p) => p.parkId === PARK)!.status === "ok" && db.identities.size === 0 && [...db.evidence.values()].some((x) => x.park_id === PARK && x.show_key !== lKey));
+    resetLifecycleReadState();
+    check("failure: identity read failure leaves the lifecycle visibility state readable (fail open)", await (async () => { await drive(runDb, Array(1).fill("perf"), 1); const v = await getLifecycleVisibilityState(PARK, { executor: ex(db) }); return !!v && v.legacyIdentities.length === 0; })());
   }
   return failures;
 }

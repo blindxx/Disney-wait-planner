@@ -48,7 +48,7 @@
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
-import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import {
   MIN_PUBLISHED_ENTITIES_TODAY,
   buildParkHistoryEvidence,
@@ -69,6 +69,8 @@ import type {
 } from "./themeParksApi";
 import {
   getEntertainmentProviderMapping,
+  getLegacyProviderMapping,
+  isLegacyIdentityEstablished,
   type EntertainmentProviderMapping,
 } from "./themeParksEntertainmentMapping";
 
@@ -200,7 +202,23 @@ export interface ParkEntertainmentShowtimes {
   /** Typed provider failure when there was no usable data; null otherwise. */
   error: ThemeParksError | null;
   /** Every active curated Entertainment entry for the park. */
-  entries: EntertainmentShowtimeEntry[];  /**
+  entries: EntertainmentShowtimeEntry[];
+  /**
+   * Phase 14.5D: provider showtimes for LEGACY catalog shows whose provider identity is established
+   * (`isLegacyIdentityEstablished`: park-qualified, exact, unambiguous). Never part of `entries`: the
+   * pages render one only while the lifecycle monitor has persisted it as a legacy comeback
+   * (`lifecycleLegacyComebacks`), so a legacy show is never listed on provider data alone. Absent on
+   * failed fetches and when no legacy identity is established.
+   */
+  legacyEntries?: EntertainmentShowtimeEntry[];
+  /**
+   * Phase 14.5D: canonical legacy names the lifecycle monitor has persisted as comebacks (attached by
+   * the API route). Absent = unknown: no legacy show is surfaced.
+   */
+  lifecycleLegacyComebacks?: string[];
+  /** Phase 14.5D follow-up: persisted validated discovered legacy provider identities (attached by the route; lets the page re-validate comebacks). */
+  lifecycleLegacyIdentities?: Array<{ parkId: ParkId; name: string; entityId: string; providerName: string }>;
+  /**
    * Phase 14.5C: canonical names the lifecycle monitor has persisted as auto-hidden
    * (attached by the API route, never by the normalizer). Absent = unknown: nothing
    * automatic is hidden. Applied via entertainmentLifecycleVisibility.ts only.
@@ -506,6 +524,32 @@ export function entryFromMapping(
 }
 
 /**
+ * Phase 14.5D: showtime entries for LEGACY catalog shows whose provider identity is established in
+ * `legacyMapping` (manual `mapped` entries plus persisted discovered identities; see
+ * `mergeDiscoveredLegacyIdentities`). Same entry rules as active shows; empty on provider failure.
+ */
+export function legacyEntriesFor(
+  parkId: ParkId,
+  result: ThemeParksResult<ThemeParksLive>,
+  instant: Date,
+  historyResult: ThemeParksResult<ThemeParksHistoryDaily> | null = null,
+  legacyMapping?: EntertainmentProviderMapping[],
+): EntertainmentShowtimeEntry[] {
+  if (!result.ok) return [];
+  const resort = PARK_TO_RESORT[parkId] as ResortId;
+  const localDate = getResortLocalDate(resort, instant);
+  const fetchedLocalDate = getResortLocalDate(resort, new Date(result.meta.fetchedAt));
+  const history = buildParkHistoryEvidence(parkId, resort, historyResult, instant);
+  const out: EntertainmentShowtimeEntry[] = [];
+  for (const place of getLegacyEntertainmentPlaces()) {
+    if (place.parkId !== parkId || !isLegacyIdentityEstablished(parkId, place.name, legacyMapping)) continue;
+    const m = getLegacyProviderMapping(place.name, parkId, legacyMapping);
+    if (m) out.push(entryFromMapping(m, result.data, resort, localDate, instant.getTime(), fetchedLocalDate === localDate, result.meta.origin === "stale", history));
+  }
+  return out;
+}
+
+/**
  * Pure: turn a provider live result for a park into normalized showtimes for
  * every active curated Entertainment entry in that park. `instant` is "now".
  */
@@ -515,6 +559,8 @@ export function normalizeParkEntertainmentShowtimes(
   instant: Date = new Date(),
   /** Phase 14.4.2: park-level history result (null = not fetched / failed → forward-horizon proof only). */
   historyResult: ThemeParksResult<ThemeParksHistoryDaily> | null = null,
+  /** Phase 14.5D: effective legacy registry (manual + persisted discovered identities); default = the shipped manual registry. */
+  legacyMapping?: EntertainmentProviderMapping[],
 ): ParkEntertainmentShowtimes {
   const resort = PARK_TO_RESORT[parkId] as ResortId;
   const localDate = getResortLocalDate(resort, instant);
@@ -537,6 +583,7 @@ export function normalizeParkEntertainmentShowtimes(
     }
     entries.push(entryFromMapping(m, live, resort, localDate, nowMs, payloadCurrent, result.ok && result.meta.origin === "stale", history));
   }
+  const legacyEntries = live ? legacyEntriesFor(parkId, result, instant, historyResult, legacyMapping) : [];
   return {
     parkId,
     resort,
@@ -549,6 +596,7 @@ export function normalizeParkEntertainmentShowtimes(
       : null,
     error: result.ok ? null : result.error,
     entries,
+    ...(legacyEntries.length > 0 ? { legacyEntries } : {}),
     ...(live ? { providerCoverage: { publishedEntities: countEntitiesActiveToday(live, resort, localDate), droppedEntities: live.droppedEntries, droppedShowtimes: live.droppedShowtimes } } : {}),
   };
 }

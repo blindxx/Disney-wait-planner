@@ -17,6 +17,9 @@
  *  - `insertEvent` has a natural key (park, show, type, date): a repeated
  *    decision is a no-op. Events are the audit trail (see readLifecycleAudit).
  *
+ * Phase 14.5D: LEGACY identities use the same tables (status `legacy_comeback` / `legacy_hidden`, events
+ * `legacy_comeback` / `legacy_rehide`); `getLifecycleVisibilityState` also returns the persisted legacy comebacks.
+ *
  * READ side for the entertainment APIs (`getLifecycleAutoHidden`): best-effort,
  * bounded, cached, and FAIL OPEN — any problem returns `undefined` ("unknown"),
  * which hides nothing automatic. It reuses the dedicated one-connection pool
@@ -34,6 +37,7 @@ import {
   type ShowDayObservation,
 } from "./entertainmentLifecycleDetector";
 import { createPoolExecutor, type PersistExecutor, type Queryable } from "./parkHoursStore";
+import type { DiscoveredLegacyIdentity } from "./themeParksEntertainmentMapping";
 
 // ============================================
 // WRITE SIDE
@@ -125,7 +129,7 @@ export async function readStates(q: Queryable, parkId: ParkId): Promise<Map<stri
   for (const r of res.rows) {
     out.set(String(r.show_key), {
       showKey: String(r.show_key), showName: String(r.show_name),
-      status: r.status === "auto_hidden" ? "auto_hidden" : "visible",
+      status: r.status === "auto_hidden" || r.status === "legacy_comeback" || r.status === "legacy_hidden" ? (r.status as StoredLifecycleState["status"]) : "visible",
       cycleResetDate: dateOrNull(r.cycle_reset_date), lastActiveDate: dateOrNull(r.last_active_date),
       hiddenLocalDate: dateOrNull(r.hidden_local_date), hiddenAt: iso(r.hidden_at), restoredAt: iso(r.restored_at),
       hideCount: Number(r.hide_count), restoreCount: Number(r.restore_count),
@@ -176,8 +180,63 @@ export async function insertEvent(q: Queryable, parkId: ParkId, showKey: string,
   );
 }
 
+/**
+ * Like `insertEvent`, but also a no-op when an event of the same (park, show, type) with IDENTICAL evidence
+ * already exists on any date — a standing identity conflict is flagged once, not re-flagged every run.
+ */
+export async function insertEventOnce(q: Queryable, parkId: ParkId, showKey: string, showName: string, e: PlannedLifecycleEvent): Promise<void> {
+  await q.query(
+    `INSERT INTO entertainment_lifecycle_events (park_id, show_key, event_type, local_date, show_name, evidence, coverage_limitations)
+     SELECT $1, $2, $3, $4::date, $5, $6::jsonb, $7::jsonb
+     WHERE NOT EXISTS (SELECT 1 FROM entertainment_lifecycle_events WHERE park_id = $1 AND show_key = $2 AND event_type = $3 AND evidence = $6::jsonb)
+     ON CONFLICT (park_id, show_key, event_type, local_date) DO NOTHING`,
+    [parkId, showKey, e.type, e.localDate, showName, JSON.stringify(e.evidence), JSON.stringify(e.coverageLimitations)],
+  );
+}
+
 export async function pruneEvidence(q: Queryable, parkId: ParkId, before: string): Promise<void> {
   await q.query("DELETE FROM entertainment_lifecycle_evidence WHERE park_id = $1 AND local_date < $2::date", [parkId, before]);
+}
+
+// ============================================
+// LEGACY PROVIDER IDENTITIES (Phase 14.5D follow-up)
+// ============================================
+
+/**
+ * Validated discovered provider identities for legacy shows (`entertainment_legacy_identity`). One
+ * `validated` row per (park, show) and per (park, entity) is enforced by partial unique indexes; a
+ * replaced identity stays as `superseded` (history). Written only by the monitor inside its locked
+ * transaction; rows are never edited by requests. Keyed by the park-qualified canonical show key, so
+ * evidence/comeback history stays attached to the same show across a provider UUID change.
+ */
+export async function readLegacyIdentities(q: Queryable, parkId?: ParkId): Promise<DiscoveredLegacyIdentity[]> {
+  const res = await q.query(
+    `SELECT park_id, show_name, entity_id, provider_name FROM entertainment_legacy_identity
+     WHERE status = 'validated' ${parkId ? "AND park_id = $1" : ""} ORDER BY park_id, show_name`,
+    parkId ? [parkId] : [],
+  );
+  return res.rows.map((r) => ({ parkId: String(r.park_id) as ParkId, name: String(r.show_name), entityId: String(r.entity_id), providerName: String(r.provider_name) }));
+}
+
+export async function supersedeLegacyIdentity(q: Queryable, parkId: ParkId, showKey: string, entityId: string): Promise<void> {
+  await q.query(
+    `UPDATE entertainment_legacy_identity SET status = 'superseded', superseded_at = NOW()
+     WHERE park_id = $1 AND show_key = $2 AND entity_id = $3 AND status = 'validated'`,
+    [parkId, showKey, entityId],
+  );
+}
+
+/** Idempotent: a repeat of an already-validated (park, show, entity) is a no-op; a previously superseded entity that returns is REACTIVATED (its row is kept, never duplicated). */
+export async function insertLegacyIdentity(q: Queryable, parkId: ParkId, showKey: string, id: DiscoveredLegacyIdentity, localDate: string): Promise<boolean> {
+  const res = await q.query(
+    `INSERT INTO entertainment_legacy_identity (park_id, show_key, show_name, entity_id, entity_type, provider_name, status, first_validated_date)
+     VALUES ($1, $2, $3, $4, 'SHOW', $5, 'validated', $6::date)
+     ON CONFLICT (park_id, show_key, entity_id) DO UPDATE SET
+       status = 'validated', superseded_at = NULL, validated_at = NOW(), provider_name = EXCLUDED.provider_name
+     WHERE entertainment_legacy_identity.status = 'superseded'`,
+    [parkId, showKey, id.name, id.entityId, id.providerName, localDate],
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 // ============================================
@@ -186,6 +245,8 @@ export async function pruneEvidence(q: Queryable, parkId: ParkId, before: string
 
 export interface LifecycleAuditReport {
   hidden: Array<{ parkId: string; showName: string; hiddenLocalDate: string | null; hiddenAt: string | null; hideCount: number; restoreCount: number; auditFlag: string | null }>;
+  /** Phase 14.5D: legacy catalog shows currently surfaced by the automatic comeback rule (awaiting audit review; catalog unchanged). */
+  legacyComebacks: Array<{ parkId: string; showName: string; restoredAt: string | null; comebackCount: number; rehideCount: number; lastActiveDate: string | null }>;
   /** Unresolved candidates: flagged states (silence, registry conflict). */
   flagged: Array<{ parkId: string; showName: string; auditFlag: string; silentDays: number; inactiveDays: number; status: string; silenceFlaggedAt: string | null }>;
   /** Decisions awaiting the research audit (audit_status = 'unreviewed'), newest first. */
@@ -196,12 +257,15 @@ export async function readLifecycleAudit(q: Queryable, limit = 200): Promise<Lif
   // Sequential: one client runs one query at a time (pg deprecates overlapping queries).
   const h = await q.query(`SELECT park_id, show_name, to_char(hidden_local_date, 'YYYY-MM-DD') AS d, hidden_at, hide_count, restore_count, audit_flag
              FROM entertainment_lifecycle_state WHERE status = 'auto_hidden' ORDER BY hidden_at`);
+  const lc = await q.query(`SELECT park_id, show_name, restored_at, restore_count, hide_count, to_char(last_active_date, 'YYYY-MM-DD') AS d
+             FROM entertainment_lifecycle_state WHERE status = 'legacy_comeback' ORDER BY restored_at`);
   const f = await q.query(`SELECT park_id, show_name, audit_flag, silent_days, inactive_days, status, silence_flagged_at
              FROM entertainment_lifecycle_state WHERE audit_flag IS NOT NULL ORDER BY park_id, show_name`);
   const ev = await q.query(`SELECT park_id, show_name, event_type, to_char(local_date, 'YYYY-MM-DD') AS d, occurred_at, evidence, coverage_limitations
              FROM entertainment_lifecycle_events WHERE audit_status = 'unreviewed' ORDER BY occurred_at DESC LIMIT $1`, [limit]);
   return {
     hidden: h.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), hiddenLocalDate: dateOrNull(r.d), hiddenAt: iso(r.hidden_at), hideCount: Number(r.hide_count), restoreCount: Number(r.restore_count), auditFlag: r.audit_flag == null ? null : String(r.audit_flag) })),
+    legacyComebacks: lc.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), restoredAt: iso(r.restored_at), comebackCount: Number(r.restore_count), rehideCount: Number(r.hide_count), lastActiveDate: dateOrNull(r.d) })),
     flagged: f.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), auditFlag: String(r.audit_flag), silentDays: Number(r.silent_days), inactiveDays: Number(r.inactive_days), status: String(r.status), silenceFlaggedAt: iso(r.silence_flagged_at) })),
     unreviewedEvents: ev.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), eventType: String(r.event_type), localDate: String(r.d), occurredAt: iso(r.occurred_at) ?? "", evidence: r.evidence, coverageLimitations: r.coverage_limitations })),
   };
@@ -217,7 +281,14 @@ const CACHE_TTL_MS = 60_000;
 const STALE_OK_MS = 10 * 60_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 
-export interface LifecycleVisibilityState { autoHidden: string[]; registryRestored: string[] }
+/** `legacyComebacks` (Phase 14.5D): legacy catalog names currently persisted as comebacks (status `legacy_comeback`). */
+export interface LifecycleVisibilityState {
+  autoHidden: string[];
+  registryRestored: string[];
+  legacyComebacks: string[];
+  /** Persisted validated legacy provider identities for the park (14.5D follow-up); empty when none/unknown. */
+  legacyIdentities: DiscoveredLegacyIdentity[];
+}
 
 let cache: { at: number; byPark: Map<string, LifecycleVisibilityState> } | null = null;
 let inflight: Promise<void> | null = null;
@@ -225,10 +296,10 @@ let blockedUntil = 0;
 
 export function resetLifecycleReadState(): void { cache = null; inflight = null; blockedUntil = 0; }
 
-async function refresh(clock: () => number, executor: PersistExecutor, deadlineMs: number): Promise<void> {
+async function refresh(clock: () => number, executor: PersistExecutor, deadlineMs: number, identityExecutor?: () => PersistExecutor | null): Promise<void> {
   let failed = false;
   const work = executor
-    .run((q) => q.query("SELECT park_id, show_name, status, (registry_restored_at IS NOT NULL) AS restored FROM entertainment_lifecycle_state WHERE status = 'auto_hidden' OR registry_restored_at IS NOT NULL ORDER BY park_id, show_name"))
+    .run((q) => q.query("SELECT park_id, show_name, status, (registry_restored_at IS NOT NULL) AS restored FROM entertainment_lifecycle_state WHERE status IN ('auto_hidden', 'legacy_comeback') OR registry_restored_at IS NOT NULL ORDER BY park_id, show_name"))
     .catch(() => { failed = true; return null; });
   let timer: ReturnType<typeof setTimeout> | undefined;
   const res = await Promise.race([work, new Promise<"timeout">((r) => { timer = setTimeout(() => r("timeout"), deadlineMs); })]);
@@ -236,10 +307,27 @@ async function refresh(clock: () => number, executor: PersistExecutor, deadlineM
   if (res === "timeout") { try { executor.abort(); } catch { /* best effort */ } blockedUntil = clock() + FAILURE_COOLDOWN_MS; return; }
   if (failed || !res) { blockedUntil = clock() + FAILURE_COOLDOWN_MS; return; }
   const byPark = new Map<string, LifecycleVisibilityState>();
+  // Identities: separate, best-effort, bounded transaction (any failure → none; active lifecycle visibility is unaffected).
+  let identities: DiscoveredLegacyIdentity[] = [];
+  const idExec = identityExecutor?.() ?? null;
+  if (idExec) {
+    let idTimer: ReturnType<typeof setTimeout> | undefined;
+    const idWork = idExec.run((q) => readLegacyIdentities(q)).catch(() => null);
+    const idRes = await Promise.race([idWork, new Promise<"timeout">((r) => { idTimer = setTimeout(() => r("timeout"), deadlineMs); })]);
+    if (idTimer) clearTimeout(idTimer);
+    if (idRes === "timeout") { try { idExec.abort(); } catch { /* best effort */ } }
+    else if (Array.isArray(idRes)) identities = idRes;
+  }
+  for (const id of identities) {
+    const cur = byPark.get(id.parkId) ?? { autoHidden: [], registryRestored: [], legacyComebacks: [], legacyIdentities: [] };
+    cur.legacyIdentities.push(id);
+    byPark.set(id.parkId, cur);
+  }
   for (const r of res.rows) {
     const k = String(r.park_id);
-    const cur = byPark.get(k) ?? { autoHidden: [], registryRestored: [] };
+    const cur = byPark.get(k) ?? { autoHidden: [], registryRestored: [], legacyComebacks: [], legacyIdentities: [] };
     if (r.status === "auto_hidden") cur.autoHidden.push(String(r.show_name));
+    if (r.status === "legacy_comeback") cur.legacyComebacks.push(String(r.show_name));
     if (r.restored === true) cur.registryRestored.push(String(r.show_name));
     byPark.set(k, cur);
   }
@@ -264,13 +352,15 @@ export async function getLifecycleVisibilityState(
         let executor = opts.executor ?? null;
         if (!executor && process.env.DATABASE_URL) executor = createPoolExecutor(getParkHoursPool());
         if (executor) {
-          const run = refresh(clock, executor, opts.deadlineMs ?? READ_DEADLINE_MS).catch(() => { blockedUntil = clock() + FAILURE_COOLDOWN_MS; });
+          const injected = opts.executor;
+          const idFactory = () => injected ?? (process.env.DATABASE_URL ? createPoolExecutor(getParkHoursPool()) : null);
+          const run = refresh(clock, executor, opts.deadlineMs ?? READ_DEADLINE_MS, idFactory).catch(() => { blockedUntil = clock() + FAILURE_COOLDOWN_MS; });
           inflight = run.finally(() => { inflight = null; });
         }
       }
       if (inflight) await inflight;
     }
-    if (cache && clock() - cache.at < STALE_OK_MS) return cache.byPark.get(parkId) ?? { autoHidden: [], registryRestored: [] };
+    if (cache && clock() - cache.at < STALE_OK_MS) return cache.byPark.get(parkId) ?? { autoHidden: [], registryRestored: [], legacyComebacks: [], legacyIdentities: [] };
     return undefined;
   } catch {
     return undefined;
