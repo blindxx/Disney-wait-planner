@@ -149,8 +149,12 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
     show("0bd8e001-83f8-4c9e-9e14-df5a2d6400c3", "Halloween Screams with Fireworks"),
     show("7bedcc70-2443-4b54-9815-b41d3a3a59f2", "Halloween Screams with Projections"),
   ),
-  unmapped("Believe... in Holiday Magic", "disneyland", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
-  unmapped("A Christmas Fantasy Parade", "disneyland", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  // Holidays at the Disneyland Resort 2026 refresh: provider SHOW records verified 2026-11-18 (/children + /live).
+  mapped("Believe... in Holiday Magic", "disneyland", show("9a9c4a2c-5ddb-47df-adda-e9f6ccf7864b", "\"Believe...In Holiday Magic\" Fireworks Spectacular")),
+  mapped("A Christmas Fantasy Parade", "disneyland", show("ddcbbb3a-129b-41f9-9f69-50c99dfa5eb3", "A Christmas Fantasy Parade")),
+  mapped("Wintertime Enchantment", "disneyland", show("66043687-d166-409d-a895-4f6a8e225939", "Wintertime Enchantment at Sleeping Beauty's Winter Castle")),
+  mapped("\"it's a small world\" Holiday Clock Parade and Projection Show", "disneyland", show("50cb2431-01ee-437d-9821-be1a9136cf07", "\"it's a small world\" Holiday Clock Parade and Projection Show")),
+  mapped("Disney Holiday Dance Party", "disneyland", show("f4fadd1e-cefd-417d-a558-72eca52d238f", "Disney Holiday Dance Party")),
   unmapped("Main Street Electrical Parade", "disneyland", NOT_IN_PROVIDER),
   // Phase 14.4B: provider publishes this show as two SHOW records by presentation (verified 2026-11-10).
   mapped(
@@ -169,14 +173,23 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Fire of the Rising Moons", "disneyland", show("e9ef1443-c735-43b6-81c6-45e53527cf93", "Fire of the Rising Moons")),
 
   // ---- Disney California Adventure ----
-  mapped("World of Color", "dca", show("e46d8982-4991-4b9e-8e4a-b519d3ca6060", "World of Color – ONE")),
+  // World of Color keeps ONE canonical identity; the provider publishes each edition as its own SHOW record
+  // (ONE verified earlier; "Season of Light" is the 2026 holiday edition, verified 2026-11-18).
+  mapped(
+    "World of Color", "dca",
+    show("e46d8982-4991-4b9e-8e4a-b519d3ca6060", "World of Color – ONE"),
+    show("895a5be5-80ec-498e-a2a6-ec42b8ff96f2", "World of Color - Season of Light"),
+  ),
   // Phase 14.4B: provider SHOW parented to DCA (verified 2026-11-10); Plaza de la Familia festival show.
   mapped("The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", "dca", show("0ee981af-9e3b-4c36-80a2-a7f00fa4841f", "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!")),
   unmapped("Frightfully Fun Parade", "dca", `${NOT_IN_PROVIDER}; replaced for 2026 by Madame Leota's Swinging Wake`),
   // Phase 14.4B: provider lists a DCA-parented SHOW (distinct UUID from the Hollywood Studios one; verified 2026-11-10).
   mapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", show("8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a", "Disney Jr. Mickey Mouse Clubhouse Live!")),
-  unmapped("Mickey's Happy Holidays", "dca", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
-  unmapped("Disney ¡Viva Navidad! Street Party", "dca", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
+  // Holidays at the Disneyland Resort 2026 refresh: provider SHOW records verified 2026-11-18 (/children + /live).
+  mapped("Mickey's Happy Holidays", "dca", show("20634d43-a2ae-4b4f-94ea-c97b87aa0e4f", "Mickey's Happy Holidays")),
+  mapped("Disney ¡Viva Navidad! Street Party", "dca", show("7cf3a265-bf29-43a4-bb91-810b1be48d85", "Disney ¡Viva Navidad! Street Party")),
+  mapped("Mirabel's Gifts of the Season", "dca", show("dac70470-4a37-444b-8c13-2654fc13488e", "Mirabel's Gifts of the Season")),
+  mapped("A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!", "dca", show("98007d9f-67c5-45c5-8b35-aeeed82c27d6", "A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!")),
   mapped(
     "Madame Leota's Swinging Wake – A Haunted Mansion Street Party", "dca",
     show("26468072-7cdf-4d3b-a5fb-b110d51b177f", "Madame Leota's Swinging Wake – A Haunted Mansion Street Party at Oogie Boogie Bash"),
@@ -845,8 +858,7 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
     const stillUnmapped: Array<[string, ParkId]> = [
       ["Wondrous Journeys", "disneyland"], ["Paint the Night", "disneyland"], ["Magic Happens Parade", "disneyland"],
       ["Main Street Electrical Parade", "disneyland"],
-      ["Believe... in Holiday Magic", "disneyland"], ["A Christmas Fantasy Parade", "disneyland"],
-      ["Frightfully Fun Parade", "dca"], ["Mickey's Happy Holidays", "dca"], ["Disney ¡Viva Navidad! Street Party", "dca"],
+      ["Frightfully Fun Parade", "dca"],
       ["Candlelight Processional", "epcot"], ["JOYFUL! A Celebration of the Season", "epcot"],
       ["Once Upon a Studio Theater", "hs"],
     ];
@@ -892,6 +904,52 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
     const none = verifyEntertainmentMapping({});
     check("14.4B provider failure: no payloads → park_payload_missing for each mapped park, nothing verified",
       !none.ok && none.verified.length === 0 && kinds(none, "error").filter((k) => k === "park_payload_missing").length === 6);
+  }
+
+  // ---- Holidays at the Disneyland Resort 2026 refresh (verified 2026-11-18) ----
+  {
+    const ids = (name: string, park: ParkId) => getThemeParksEntertainmentRefs(name, park).map((r) => r.entityId).join();
+    const expected: Array<[string, ParkId, string]> = [
+      ["Believe... in Holiday Magic", "disneyland", "9a9c4a2c-5ddb-47df-adda-e9f6ccf7864b"],
+      ["A Christmas Fantasy Parade", "disneyland", "ddcbbb3a-129b-41f9-9f69-50c99dfa5eb3"],
+      ["Wintertime Enchantment", "disneyland", "66043687-d166-409d-a895-4f6a8e225939"],
+      ["\"it's a small world\" Holiday Clock Parade and Projection Show", "disneyland", "50cb2431-01ee-437d-9821-be1a9136cf07"],
+      ["Disney Holiday Dance Party", "disneyland", "f4fadd1e-cefd-417d-a558-72eca52d238f"],
+      ["Mickey's Happy Holidays", "dca", "20634d43-a2ae-4b4f-94ea-c97b87aa0e4f"],
+      ["Disney ¡Viva Navidad! Street Party", "dca", "7cf3a265-bf29-43a4-bb91-810b1be48d85"],
+      ["Mirabel's Gifts of the Season", "dca", "dac70470-4a37-444b-8c13-2654fc13488e"],
+      ["A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!", "dca", "98007d9f-67c5-45c5-8b35-aeeed82c27d6"],
+    ];
+    check("DLR holidays: all nine curated holiday shows (both parks) map to their verified SHOW record",
+      expected.every(([n, p, id]) => ids(n, p) === id && resolveDwpEntertainmentFromThemeParksId(id)?.parkId === p));
+    check("DLR holidays: World of Color keeps ONE canonical identity with the ONE and Season of Light editions",
+      ids("World of Color", "dca") === "e46d8982-4991-4b9e-8e4a-b519d3ca6060,895a5be5-80ec-498e-a2a6-ec42b8ff96f2" &&
+      resolveDwpEntertainmentFromThemeParksId("895a5be5-80ec-498e-a2a6-ec42b8ff96f2")?.dwpName === "World of Color" &&
+      ENTERTAINMENT_PLACES.filter((p) => /world of color/i.test(p.name)).length === 1);
+    const providerOnly = [
+      "e9c263c4-80dc-4431-bfc9-581a0ff1f578", // Holiday Toy Drummers
+      "17f94015-f97b-44cd-b127-6a2fb6cac85d", // Buena Vista Street Holiday Tree Lighting
+      "c1153264-84dd-4ef2-a249-29cc5eddc7eb", // "it's a small world" Holiday Lighting
+      "6ac8a892-675d-4365-8d7a-2a3d7e0cd4ff", // Main Street, U.S.A. Holiday Tree Lighting
+      "6b92f6ae-c794-484b-8621-92f8e05c28e3", // The Dickens Yuletide Band
+      "82fb3f4a-c4cf-4ba2-a69d-b469e352c00b", // Santa Claus at Redwood Creek Challenge Trail
+      "56a9a06a-1be9-4ec6-b319-2367ed5348be", // Meet Santa Claus at the Disneyland Resort
+    ];
+    check("DLR holidays: ceremonies, roaming bands, Toy Drummers and Santa meets stay provider-only (not curated, not mapped)",
+      providerOnly.every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
+    const names = ENTERTAINMENT_PLACES.filter((p) => p.resort === "DLR").map((p) => `${p.parkId}:${normalizeKey(p.name)}`);
+    check("DLR holidays: no duplicate DLR catalog identity", new Set(names).size === names.length);
+    const owned = THEMEPARKS_ENTERTAINMENT_MAPPING.flatMap((m) => (m.disposition === "mapped" ? m.provider.map((r) => r.entityId.toLowerCase()) : []));
+    check("DLR holidays: no provider entity is owned by two DWP shows", new Set(owned).size === owned.length);
+    check("DLR holidays: mapping structure stays valid", validateEntertainmentMappingStructure().length === 0);
+    // Lifecycle/Smart Entry: holiday shows are seasonal (lifecycle-exempt) and resolve by exact canonical + shorthand aliases.
+    check("DLR holidays: aliases resolve to the canonical shows",
+      resolveEntertainmentKey("holiday dance party", "DLR") === "disney holiday dance party" &&
+      resolveEntertainmentKey("Wintertime Enchantment at Sleeping Beauty's Winter Castle", "DLR") === "wintertime enchantment" &&
+      resolveEntertainmentKey("Mirabel's Gifts of the Season", "DLR") === "mirabels gifts of the season" &&
+      resolveEntertainmentKey("A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!", "DLR") === "a musical christmas with mariachi alegr a de disneyland miguel" &&
+      resolveEntertainmentKey("mariachi christmas", "DLR") === "a musical christmas with mariachi alegr a de disneyland miguel" &&
+      resolveEntertainmentKey("World of Color – Season of Light", "DLR") === "world of color");
   }
 
   return failures;

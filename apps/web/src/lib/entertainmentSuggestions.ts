@@ -161,8 +161,17 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Tapestry of Happiness", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
   { name: "Fire of the Rising Moons", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Star Wars: Galaxy’s Edge", availabilityType: "regular" },
   // Holiday-season DCA shows — not currently listed by the provider (unmapped; no inferred showtimes).
-  { name: "Mickey's Happy Holidays", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Buena Vista Street", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Holidays at the Disneyland Resort 2026 refresh: these two now have verified provider SHOW records (see mapping).
+  // Mickey's Happy Holidays starts at Paradise Gardens Park (Holiday Toy Drummers, obelisk) and travels to Hollywood Land.
+  { name: "Mickey's Happy Holidays", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Disney ¡Viva Navidad! Street Party", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  // Holidays at the Disneyland Resort 2026 refresh: core scheduled holiday shows with verified provider SHOW records
+  // (lands per Disney Parks Blog / disneyland.com, Nov 2026).
+  { name: "Wintertime Enchantment", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "\"it's a small world\" Holiday Clock Parade and Projection Show", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Disney Holiday Dance Party", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Tomorrowland", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "Mirabel's Gifts of the Season", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal", availabilityTheme: "christmas" },
+  { name: "A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Buena Vista Street", availabilityType: "seasonal", availabilityTheme: "christmas" },
   // Phase 14.4B: Plaza de la Familia festival stage show (Aug 21–Nov 2, 2026; park admission). A discrete scheduled
   // performance with a verified provider SHOW record, so it meets the Entertainment rule; no festival theme value exists.
   { name: "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal" },
@@ -384,6 +393,15 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "happy holidays": "mickeys happy holidays",
   "viva navidad": "disney viva navidad street party",
   "viva navidad street party": "disney viva navidad street party",
+  "wintertime enchantment at sleeping beautys winter castle": "wintertime enchantment",
+  "winter castle": "wintertime enchantment",
+  "small world holiday clock show": "its a small world holiday clock parade and projection show",
+  "small world holiday projection show": "its a small world holiday clock parade and projection show",
+  "holiday dance party": "disney holiday dance party",
+  "mirabels gifts": "mirabels gifts of the season",
+  "mariachi christmas": "a musical christmas with mariachi alegr a de disneyland miguel",
+  "musical christmas with mariachi": "a musical christmas with mariachi alegr a de disneyland miguel",
+  "musical christmas": "a musical christmas with mariachi alegr a de disneyland miguel",
   "disney on broadway": "disney on broadway concert series",
   "broadway concert series": "disney on broadway concert series",
   "woc": "world of color",               // World of Color (DCA)
@@ -700,4 +718,15 @@ export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
   { input: "Disney on Broadway Concert Series", resort: "WDW", expectedKey: "disney on broadway concert series" },
   { input: "Disney on Broadway", resort: "WDW", expectedKey: "disney on broadway concert series" },
   { input: "Disney on Broadway", resort: "DLR", expectedKey: null },
+  // Holidays at the Disneyland Resort 2026 refresh (DLR)
+  { input: "Wintertime Enchantment", resort: "DLR", expectedKey: "wintertime enchantment" },
+  { input: "Wintertime Enchantment at Sleeping Beauty's Winter Castle", resort: "DLR", expectedKey: "wintertime enchantment" },
+  { input: "Disney Holiday Dance Party", resort: "DLR", expectedKey: "disney holiday dance party" },
+  { input: "holiday dance party", resort: "DLR", expectedKey: "disney holiday dance party" },
+  { input: "\"it's a small world\" Holiday Clock Parade and Projection Show", resort: "DLR", expectedKey: "its a small world holiday clock parade and projection show" },
+  { input: "small world holiday clock show", resort: "DLR", expectedKey: "its a small world holiday clock parade and projection show" },
+  { input: "Mirabel's Gifts of the Season", resort: "DLR", expectedKey: "mirabels gifts of the season" },
+  { input: "A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!", resort: "DLR", expectedKey: "a musical christmas with mariachi alegr a de disneyland miguel" },
+  { input: "mariachi christmas", resort: "DLR", expectedKey: "a musical christmas with mariachi alegr a de disneyland miguel" },
+  { input: "Wintertime Enchantment", resort: "WDW", expectedKey: null }, // DLR-only show
 ];

@@ -51,6 +51,8 @@ const loc = (parkId: ParkId, entityId: string, land: string, venue?: string): Pr
 export const PROVIDER_ENTERTAINMENT_LOCATIONS: ProviderEntertainmentLocation[] = [
   // ---- Disneyland Park ----
   loc("disneyland", "78568c55-6dcb-4893-a14e-ba7ed9bddaff", "Fantasyland"), // Disneyland Band at "it's a small world" Promenade
+  loc("disneyland", "c1153264-84dd-4ef2-a249-29cc5eddc7eb", "Fantasyland"), // "it's a small world" Holiday Lighting (in front of the attraction)
+  loc("disneyland", "6ac8a892-675d-4365-8d7a-2a3d7e0cd4ff", MAIN_ST), // Main Street, U.S.A. Holiday Tree Lighting (land named by the provider record)
   loc("disneyland", "cb84b53c-dbb5-483d-a717-00d9259c6484", "Frontierland"), // Disneyland Band at Frontierland
   loc("disneyland", "a6760f7b-3489-47df-9547-d70dd2d8cb76", MAIN_ST), // Disneyland Band at Main Street, U.S.A.
   loc("disneyland", "eeafc865-a4e0-4dc5-9cea-446108bf7d48", MAIN_ST), // Flag Retreat Ceremony
@@ -73,6 +75,7 @@ export const PROVIDER_ENTERTAINMENT_LOCATIONS: ProviderEntertainmentLocation[] =
   loc("dca", "4c570f5a-c5da-4388-9804-dd56123d18ce", "Buena Vista Street"), // Meet Disney Pals on Buena Vista Street
   loc("dca", "f71bfc6e-2f10-40a1-bf29-a4b98c5350f4", "Cars Land"), // Meet the Residents of Radiator Springs in Cars Land
   loc("dca", "dca741a6-3472-4d4f-a9aa-7774aae81754", "Paradise Gardens Park"), // Paradise Garden Bandstand
+  loc("dca", "17f94015-f97b-44cd-b127-6a2fb6cac85d", "Buena Vista Street"), // Buena Vista Street Holiday Tree Lighting (Disney Parks Blog: on Buena Vista Street)
 
   // ---- Magic Kingdom ----
   loc("mk", "1eee22e8-1d0a-4809-a42b-df3ae55c69d5", MAIN_ST), // The Dapper Dans
