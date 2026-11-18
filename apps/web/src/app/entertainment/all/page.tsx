@@ -48,7 +48,7 @@ import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
 import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
-import { filterLifecycleHiddenEntries, getLifecycleHiddenNames, performingNamesFromAllEntries } from "../../../lib/entertainmentLifecycleVisibility";
+import { filterLifecycleHiddenEntries, getLifecycleHiddenNames, mergeLegacyComebackEntries, performingNamesFromAllEntries } from "../../../lib/entertainmentLifecycleVisibility";
 import {
   describeAllEntertainmentEvent,
   EVENT_INFO_NOTE,
@@ -337,7 +337,11 @@ export default function AllEntertainmentPage() {
     () => getLifecycleHiddenNames(selectedPark, all?.lifecycleAutoHidden, performingNamesFromAllEntries(all?.entries), undefined, all?.lifecycleRegistryRestored),
     [selectedPark, all],
   );
-  const liveEntries = useMemo(() => filterLifecycleHiddenEntries(all?.entries ?? [], lifecycleHidden), [all, lifecycleHidden]);
+  // Phase 14.5D: persisted legacy comebacks join the live list exactly once (shared validation + provider-only duplicate guard).
+  const liveEntries = useMemo(
+    () => filterLifecycleHiddenEntries(mergeLegacyComebackEntries(all?.entries ?? [], all?.legacyEntries, selectedPark, all?.lifecycleLegacyComebacks), lifecycleHidden),
+    [all, lifecycleHidden, selectedPark],
+  );
 
   // When "Show out-of-season entertainment" is ON, synthesize entries for curated
   // shows that are confirmed out-of-season and not already in the live inventory.

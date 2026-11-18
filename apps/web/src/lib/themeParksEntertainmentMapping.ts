@@ -19,7 +19,12 @@
  *                 SHOW and an ATTRACTION record).
  *   - "unmapped": intentionally no provider entity, with a reason (dormant /
  *                 seasonal / not present in the provider's park children).
- * - Legacy-only entertainment (LEGACY_ENTERTAINMENT_PLACES) is out of scope.
+ * - Legacy-only entertainment (LEGACY_ENTERTAINMENT_PLACES) is out of scope of
+ *   THIS table (a legacy key here is an `orphan_mapping`). Phase 14.5D keeps
+ *   its provider identity in the separate `LEGACY_ENTERTAINMENT_PROVIDER_MAPPING`
+ *   below, in this same module, so the legacy-comeback monitor has a verified,
+ *   park-qualified, unambiguous identity to watch; it never changes the legacy
+ *   catalog or the active mapping.
  * - Attractions are out of scope: Enchanted Tiki Room, Country Bear Musical
  *   Jamboree, Mickey's PhilharMagic and Turtle Talk with Crush were
  *   reclassified to the Attractions catalog (Phase 12 boundary) and carry no
@@ -45,7 +50,7 @@
  */
 
 import type { ParkId } from "@disney-wait-planner/shared";
-import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { normalizeKey } from "./plansMatching";
 import { THEMEPARKS_PARKS } from "./themeParksProviders";
 import type { ThemeParksChild, ThemeParksChildren } from "./themeParksApi";
@@ -77,6 +82,10 @@ export type MappingFindingKind =
   | "invalid_uuid"
   | "duplicate_provider_id"
   | "empty_provider_refs"
+  // legacy identity registry (Phase 14.5D)
+  | "legacy_unknown_identity"
+  | "legacy_missing_disposition"
+  | "legacy_ambiguous_provider_id"
   // provider verification
   | "park_payload_missing"
   | "entity_missing"
@@ -234,6 +243,112 @@ for (const m of THEMEPARKS_ENTERTAINMENT_MAPPING) {
 }
 
 // ============================================
+// LEGACY PROVIDER IDENTITY (Phase 14.5D)
+// ============================================
+
+/**
+ * Provider identity for LEGACY catalog entertainment (`getLegacyEntertainmentPlaces()`), the
+ * ONLY source the legacy-comeback monitor trusts. One explicit, park-qualified disposition per
+ * legacy identity, keyed exactly like the active table; no name-based or fuzzy matching.
+ *
+ * A legacy show can come back automatically only when it is `mapped` to provider SHOW entities
+ * that are verified (live `/entity/{park}/children` record whose identity matches the legacy
+ * show) and UNAMBIGUOUS (`isLegacyIdentityEstablished`: structurally valid, each id owned by this
+ * one legacy entry, and not claimed by any active mapping). Add a `mapped(...)` entry here only
+ * after verifying the live record's identity; never carry a historical UUID over unverified.
+ * `unmapped` = no verifiable provider entity (the show can never auto-resurface). Registering a
+ * ref also removes that entity from All Entertainment's provider-only inventory (no duplicates).
+ *
+ * Verified 2026-11-18 against `GET /v1/entity/{park}/children` (Disneyland Park, DCA): neither
+ * legacy show has a provider SHOW record, so both are `unmapped` today and nothing can resurface
+ * until the provider publishes a matching entity and it is registered here.
+ */
+export const LEGACY_ENTERTAINMENT_PROVIDER_MAPPING: EntertainmentProviderMapping[] = [
+  unmapped("Together Forever — A Pixar Nighttime Spectacular", "disneyland", "No provider SHOW entity in park children (verified 2026-11-18); ended, no announced return"),
+  unmapped("Better Together: A Pixar Pals Celebration!", "dca", "No provider SHOW entity in park children (verified 2026-11-18); ended Aug 3, 2025, not returning in 2026"),
+];
+
+/** Explicit legacy disposition for an exact legacy (park, name), or undefined. */
+export function getLegacyProviderMapping(
+  dwpName: string,
+  parkId: ParkId,
+  mapping: EntertainmentProviderMapping[] = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
+): EntertainmentProviderMapping | undefined {
+  const key = entertainmentMappingKey(parkId, dwpName);
+  return mapping.find((m) => entertainmentMappingKey(m.parkId, m.dwpName) === key);
+}
+
+/** Lowercase provider entity ids registered for legacy identities (claimed: never provider-only). */
+export function legacyProviderEntityIds(mapping: EntertainmentProviderMapping[] = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING): Set<string> {
+  const ids = new Set<string>();
+  for (const m of mapping) if (m.disposition === "mapped") for (const r of m.provider) ids.add(r.entityId.toLowerCase());
+  return ids;
+}
+
+/**
+ * Offline structural audit of the legacy registry: exactly one disposition per legacy identity, no
+ * entry for a non-legacy identity (active identities live in the active table), canonical unique
+ * UUIDs, mapped entries carry refs, and no provider id is shared with an active mapping.
+ */
+export function validateLegacyProviderMapping(
+  legacy: EntertainmentProviderMapping[] = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
+  active: EntertainmentProviderMapping[] = THEMEPARKS_ENTERTAINMENT_MAPPING,
+  legacyPlaces: ReadonlyArray<{ name: string; parkId?: ParkId }> = getLegacyEntertainmentPlaces(),
+): MappingFinding[] {
+  const findings: MappingFinding[] = [];
+  const add = (kind: MappingFindingKind, key: string, detail: string) => findings.push({ kind, severity: "error", key, detail });
+  const legacyKeys = new Set<string>();
+  for (const p of legacyPlaces) if (p.parkId) legacyKeys.add(entertainmentMappingKey(p.parkId, p.name));
+  const activeIds = new Map<string, string>();
+  for (const m of active) if (m.disposition === "mapped") for (const r of m.provider) activeIds.set(r.entityId.toLowerCase(), entertainmentMappingKey(m.parkId, m.dwpName));
+  const seen = new Set<string>();
+  const idOwner = new Map<string, string>();
+  for (const m of legacy) {
+    const key = entertainmentMappingKey(m.parkId, m.dwpName);
+    if (seen.has(key)) add("duplicate_mapping", key, "More than one legacy mapping entry for the same (park, name)");
+    seen.add(key);
+    if (!legacyKeys.has(key)) add("legacy_unknown_identity", key, "Legacy mapping does not correspond to a legacy catalog identity (park-qualified exact name)");
+    if (m.disposition !== "mapped") continue;
+    if (m.provider.length === 0) add("empty_provider_refs", key, "Mapped legacy entry has no provider refs");
+    for (const r of m.provider) {
+      const id = r.entityId.toLowerCase();
+      if (!CANONICAL_UUID_RE.test(r.entityId)) add("invalid_uuid", key, `Provider id ${r.entityId} is not a lowercase canonical UUID`);
+      if (r.entityType !== "SHOW") add("legacy_ambiguous_provider_id", key, `Provider id ${r.entityId} is not a SHOW record`);
+      const activeOwner = activeIds.get(id);
+      if (activeOwner) add("legacy_ambiguous_provider_id", key, `Provider id ${r.entityId} is also mapped to active entry ${activeOwner}`);
+      const owner = idOwner.get(id);
+      if (owner !== undefined) {
+        // Ambiguous for BOTH owners: neither legacy show can claim the entity.
+        add("duplicate_provider_id", key, `Provider id ${r.entityId} already mapped by legacy entry ${owner}`);
+        if (owner !== key) add("duplicate_provider_id", owner, `Provider id ${r.entityId} is also mapped by legacy entry ${key}`);
+      } else idOwner.set(id, key);
+    }
+  }
+  for (const k of legacyKeys) if (!seen.has(k)) add("legacy_missing_disposition", k, "Legacy catalog identity has no explicit provider disposition");
+  return findings;
+}
+
+/**
+ * Legacy identity is established only when the registry entry is `mapped` with ≥ 1 ref and its key
+ * and ids carry no structural finding (unknown identity, duplicate, invalid id, shared with an active
+ * mapping or another legacy entry). Unmapped, ambiguous or malformed → false: such a show is never
+ * observed, so it can never resurface. Static data only.
+ */
+export function isLegacyIdentityEstablished(
+  parkId: ParkId,
+  name: string,
+  legacy: EntertainmentProviderMapping[] = LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
+  active: EntertainmentProviderMapping[] = THEMEPARKS_ENTERTAINMENT_MAPPING,
+  legacyPlaces: ReadonlyArray<{ name: string; parkId?: ParkId }> = getLegacyEntertainmentPlaces(),
+): boolean {
+  const key = entertainmentMappingKey(parkId, name);
+  const m = getLegacyProviderMapping(name, parkId, legacy);
+  if (!m || m.disposition !== "mapped" || m.provider.length === 0) return false;
+  if (!legacyPlaces.some((p) => p.parkId === parkId && p.name === name)) return false;
+  return !validateLegacyProviderMapping(legacy, active, legacyPlaces).some((f) => f.key === key);
+}
+
+// ============================================
 // LOOKUPS (exact key only — never name-based remapping)
 // ============================================
 
@@ -338,7 +453,7 @@ export function verifyEntertainmentMapping(
     droppedChildren[parkId] = payload.droppedEntries;
   }
 
-  const mappedIds = new Set<string>();
+  const mappedIds = new Set<string>(legacyProviderEntityIds()); // legacy-registered entities have an identity (14.5D): never provider-only
   const parkPayloadReported = new Set<ParkId>();
   for (const m of mapping) {
     const key = entertainmentMappingKey(m.parkId, m.dwpName);

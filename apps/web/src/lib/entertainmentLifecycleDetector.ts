@@ -55,6 +55,22 @@
  * provider edition/variant name (World of Color – ONE / Happiness!) resolves to
  * the canonical catalog entry via the existing alias resolver, never a new row.
  *
+ * LEGACY COMEBACKS (Phase 14.5D) — the same system, run on the LEGACY catalog:
+ *   Identity   only legacy shows whose park-qualified provider identity is established
+ *              (`isLegacyIdentityEstablished`, themeParksEntertainmentMapping.ts: exact, unambiguous,
+ *              verified refs) are observed; everything else yields no observation (never fuzzy/name-only).
+ *   Evidence   the SAME per-day classes (`observeLegacyParkDay` reuses the active classifier). Stricter for
+ *              activity: a failed, stale-if-error or previous-day payload yields NO observation at all, so
+ *              uncertain/stale/failed data never establishes activity or inactivity.
+ *   COMEBACK   ≥ 7 distinct resort-local dates with a verified performance (`active`) inside the rolling
+ *              14 days ending today, counting only dates AFTER the latest legacy re-hide → state
+ *              `legacy_comeback` (surfaced on both pages; the legacy catalog itself is untouched).
+ *   RE-HIDE    while surfaced, exactly the 21-of-30 inactive/dormant/silent rule above (reuses
+ *              `evaluateShowLifecycle`, incl. day-end finality and the active-cycle reset) → `legacy_hidden`;
+ *              a later qualifying 7-of-14 pattern starts the next cycle.
+ *   Audit      `legacy_comeback` / `legacy_rehide` events (natural-key deduplicated) with evidence and limitations.
+ *   Silence flags/history backfill are not run for legacy shows; registry decisions never apply to them.
+ *
  * DEV checks: `runDevEntertainmentLifecycleDetectorCases()` (entertainmentLifecycleDev.ts).
  */
 
@@ -63,12 +79,14 @@ import { MIN_PUBLISHED_ENTITIES_TODAY, isActive, isDark } from "./entertainmentH
 import type { ParkHistoryEvidence } from "./entertainmentHistory";
 import type { EntertainmentShowtimeEntry, ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, lifecycleRecordKey, seasonalExemptionReason, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
-import { ENTERTAINMENT_PLACES, resolveEntertainmentKey } from "./entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces, resolveEntertainmentKey } from "./entertainmentSuggestions";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { RESORT_TIME_ZONES, addDaysToLocalDate } from "./resortTime";
 import {
   THEMEPARKS_ENTERTAINMENT_MAPPING,
+  LEGACY_ENTERTAINMENT_PROVIDER_MAPPING,
   entertainmentMappingKey,
+  isLegacyIdentityEstablished,
   validateEntertainmentMappingStructure,
   type EntertainmentProviderMapping,
 } from "./themeParksEntertainmentMapping";
@@ -83,6 +101,9 @@ export const LIFECYCLE_MIN_INACTIVE_DAYS = 21;
 export const LIFECYCLE_SILENCE_FLAG_DAYS = 10;
 /** Evidence older than this may be pruned (cycle reset dates survive in state). */
 export const LIFECYCLE_RETENTION_DAYS = 90;
+/** Phase 14.5D: a legacy show comes back after ≥ 7 distinct verified-performance days within the rolling 14 resort-local days. */
+export const LEGACY_COMEBACK_MIN_DAYS = 7;
+export const LEGACY_COMEBACK_WINDOW_DAYS = 14;
 
 export type LifecycleDayClass = "active" | "inactive" | "dormant" | "silent" | "unknown";
 /** Precedence within the same finality: a stronger observation replaces a weaker one, never the reverse. */
@@ -226,7 +247,16 @@ export function assessParkHealth(st: ParkEntertainmentShowtimes): ParkObservatio
 export function observeShowDay(entry: EntertainmentShowtimeEntry, localDate: string, health: ParkObservationHealth, dayEnd = true): ShowDayObservation | null {
   const resolved = resolveLifecycleShow(entry.parkId, entry.dwpName);
   if (!resolved || !isLifecycleEligiblePlace(resolved.place) || entry.status === "unmapped") return null;
-  const base = { parkId: entry.parkId, showKey: resolved.showKey, showName: resolved.place.name, localDate, source: "live" as const };
+  return classifyShowDay(entry, { parkId: entry.parkId, showKey: resolved.showKey, showName: resolved.place.name, localDate, source: "live" as const }, health, dayEnd);
+}
+
+/** Shared per-day classifier (active catalog shows and, since 14.5D, legacy shows with an established identity). */
+function classifyShowDay(
+  entry: EntertainmentShowtimeEntry,
+  base: { parkId: ParkId; showKey: string; showName: string; localDate: string; source: "live" },
+  health: ParkObservationHealth,
+  dayEnd: boolean,
+): ShowDayObservation {
   const partial = dayEnd ? [] : ["observed before the resort-local end-of-day window: provisional, never counted"];
 
   if (entry.performances.length > 0) {
@@ -280,6 +310,50 @@ export function observeParkDay(st: ParkEntertainmentShowtimes, dayEnd = true): S
 }
 
 // ============================================
+// LEGACY OBSERVATION (Phase 14.5D)
+// ============================================
+
+export interface LegacyIdentityOptions {
+  /** Test seam: legacy registry (default: the shipped `LEGACY_ENTERTAINMENT_PROVIDER_MAPPING`). */
+  legacyMapping?: typeof LEGACY_ENTERTAINMENT_PROVIDER_MAPPING;
+  /** Test seam: active mapping used for the ambiguity check. */
+  activeMapping?: typeof THEMEPARKS_ENTERTAINMENT_MAPPING;
+  /** Test seam: legacy catalog. */
+  legacyPlaces?: ReadonlyArray<{ name: string; parkId?: ParkId }>;
+}
+
+/** Exact, park-qualified legacy catalog name with an established provider identity (no alias/fuzzy resolution). */
+export function resolveLegacyShow(parkId: ParkId, name: string, o: LegacyIdentityOptions = {}): { name: string; showKey: string } | null {
+  const legacyPlaces = o.legacyPlaces ?? getLegacyEntertainmentPlaces();
+  const place = legacyPlaces.find((p) => p.parkId === parkId && p.name === name);
+  if (!place) return null;
+  // A name that is (also) an active catalog identity is never a legacy comeback (an identity lives in exactly one catalog).
+  if (ENTERTAINMENT_PLACES.some((p) => p.parkId === parkId && p.name === name)) return null;
+  if (!isLegacyIdentityEstablished(parkId, name, o.legacyMapping, o.activeMapping, legacyPlaces)) return null;
+  return { name: place.name, showKey: entertainmentMappingKey(parkId, place.name) };
+}
+
+/**
+ * Observations for legacy shows from `st.legacyEntries`. A failed, stale-if-error or previous-day payload
+ * yields none: uncertain data never establishes activity (or inactivity) for a legacy show. Entries whose
+ * identity is not established are skipped. Classification is the active classifier's, unchanged.
+ */
+export function observeLegacyParkDay(st: ParkEntertainmentShowtimes, dayEnd = true, o: LegacyIdentityOptions = {}): ShowDayObservation[] {
+  if (st.error || st.stale || st.fetchedLocalDate !== st.localDate) return [];
+  const health = assessParkHealth(st);
+  const out: ShowDayObservation[] = [];
+  const seen = new Set<string>();
+  for (const e of st.legacyEntries ?? []) {
+    if (e.status === "unmapped") continue;
+    const resolved = resolveLegacyShow(e.parkId, e.dwpName, o);
+    if (!resolved || e.parkId !== st.parkId || seen.has(resolved.showKey)) continue;
+    seen.add(resolved.showKey);
+    out.push(classifyShowDay(e, { parkId: e.parkId, showKey: resolved.showKey, showName: resolved.name, localDate: st.localDate, source: "live" }, health, dayEnd));
+  }
+  return out;
+}
+
+// ============================================
 // HISTORY BACKFILL (secondary evaluation)
 // ============================================
 
@@ -325,9 +399,10 @@ export function historyBackfillObservations(args: {
 // EVALUATION
 // ============================================
 
-export type LifecycleStatus = "visible" | "auto_hidden";
+/** `legacy_comeback` / `legacy_hidden` (Phase 14.5D) apply to LEGACY identities only: surfaced vs. not surfaced after a comeback cycle. */
+export type LifecycleStatus = "visible" | "auto_hidden" | "legacy_comeback" | "legacy_hidden";
 export type LifecycleAuditFlag = "provider_silence" | "registry_conflict";
-export type LifecycleEventType = "auto_hide" | "auto_restore" | "silence_flag" | "registry_conflict" | "registry_restore";
+export type LifecycleEventType = "auto_hide" | "auto_restore" | "silence_flag" | "registry_conflict" | "registry_restore" | "legacy_comeback" | "legacy_rehide";
 
 export interface LifecycleShowState {
   status: LifecycleStatus;
@@ -548,6 +623,71 @@ export function evaluateShowLifecycle(input: {
   const r = result();
   r.needsSecondary = needsSecondary;
   return r;
+}
+
+// ============================================
+// LEGACY EVALUATION (Phase 14.5D)
+// ============================================
+
+/**
+ * Pure evaluation of one LEGACY show (see header, LEGACY COMEBACKS). `identityEstablished` must come from
+ * `isLegacyIdentityEstablished`; false → nothing changes and nothing is emitted. Stored state uses
+ * `legacy_hidden` (not surfaced; also the empty default) and `legacy_comeback` (surfaced). Counters reuse
+ * the existing fields: restoreCount = comebacks, hideCount = re-hides.
+ */
+export function evaluateLegacyLifecycle(input: {
+  today: string;
+  observations: LifecycleObservationInput[];
+  state: LifecycleShowState | null;
+  identityEstablished: boolean;
+}): LifecycleEvaluation {
+  const { today } = input;
+  const prev: LifecycleShowState = { ...(input.state ?? EMPTY_LIFECYCLE_STATE), status: input.state?.status === "legacy_comeback" ? "legacy_comeback" : "legacy_hidden" };
+  const unchanged = (): LifecycleEvaluation => ({ state: input.state ?? prev, inactiveDays: 0, dormantDays: 0, silentDays: 0, events: [], needsSecondary: false, changed: false });
+  if (!input.identityEstablished) return unchanged();
+
+  const obs = input.observations.filter((o) => o.localDate <= today);
+  if (prev.status === "legacy_comeback") {
+    // Surfaced: the existing 21-of-30 rule decides the re-hide (mapping identity is established; a performance made the show "known").
+    const ev = evaluateShowLifecycle({ today, observations: obs, state: { ...prev, status: "visible", registryRestored: false, silenceFlagged: false }, eligible: true, registryHide: "none", mappingEstablished: true });
+    const hide = ev.events.find((e) => e.type === "auto_hide");
+    const state: LifecycleShowState = { ...ev.state, status: hide ? "legacy_hidden" : "legacy_comeback", silenceFlagged: false, secondaryEvaluatedOn: null, auditFlag: null, registryRestored: false };
+    const events: PlannedLifecycleEvent[] = hide
+      ? [{ type: "legacy_rehide", localDate: today, evidence: { ...hide.evidence, comebackCount: prev.restoreCount, lastActiveDate: ev.state.lastActiveDate }, coverageLimitations: [...hide.coverageLimitations, "a legacy re-hide only withdraws the automatic surfacing; the legacy catalog entry is unchanged"] }]
+      : [];
+    return { state, inactiveDays: ev.inactiveDays, dormantDays: ev.dormantDays, silentDays: ev.silentDays, events, needsSecondary: false, changed: JSON.stringify(state) !== JSON.stringify(input.state ?? prev) };
+  }
+
+  // Not surfaced: ≥ 7 distinct verified-performance dates in the rolling 14 days, strictly after the latest re-hide.
+  const windowStart = addDaysToLocalDate(today, -(LEGACY_COMEBACK_WINDOW_DAYS - 1)) ?? today;
+  const boundary = prev.hiddenLocalDate;
+  const active = new Map<string, { basis: string | null; perf: number }>();
+  for (const o of obs) if (o.dayClass === "active" && o.localDate >= windowStart && (!boundary || o.localDate > boundary)) {
+    const cur = active.get(o.localDate);
+    active.set(o.localDate, { basis: cur?.basis ?? o.basis ?? null, perf: Math.max(cur?.perf ?? 0, o.performanceCount ?? 0) });
+  }
+  const dates = [...active.keys()].sort();
+  let lastActive: string | null = prev.lastActiveDate;
+  for (const o of obs) if (o.dayClass === "active" && (!lastActive || o.localDate > lastActive)) lastActive = o.localDate;
+  const base: LifecycleShowState = { ...prev, lastActiveDate: lastActive };
+  if (dates.length < LEGACY_COMEBACK_MIN_DAYS) {
+    return { state: base, inactiveDays: 0, dormantDays: 0, silentDays: 0, events: [], needsSecondary: false, changed: JSON.stringify(base) !== JSON.stringify(input.state ?? prev) };
+  }
+  const state: LifecycleShowState = { ...base, status: "legacy_comeback", cycleResetDate: dates[dates.length - 1], restoreCount: prev.restoreCount + 1, auditFlag: null };
+  const bases: Record<string, number> = {};
+  for (const d of dates) { const k = active.get(d)!.basis ?? "unspecified"; bases[k] = (bases[k] ?? 0) + 1; }
+  return {
+    state, inactiveDays: 0, dormantDays: 0, silentDays: 0, needsSecondary: false, changed: true,
+    events: [{
+      type: "legacy_comeback", localDate: today,
+      evidence: { windowStart, windowEnd: today, threshold: LEGACY_COMEBACK_MIN_DAYS, windowDays: LEGACY_COMEBACK_WINDOW_DAYS, activeDays: dates.length, activeDates: dates, performanceCounts: Object.fromEntries(dates.map((d) => [d, active.get(d)!.perf])), bases, previousRehideDate: boundary, cycle: prev.restoreCount + 1 },
+      coverageLimitations: [
+        "provider evidence only: ThemeParks.wiki performances are never independent confirmation of a return",
+        "stale, failed or previous-day provider data never counts; only verified current performances on distinct resort-local dates",
+        "automatic surfacing is provisional until the scheduled research audit reviews it; the legacy catalog and Smart Entry are unchanged",
+      ],
+    }],
+  };
 }
 
 /** DEV helper: rolling window start (resort-local dates). */

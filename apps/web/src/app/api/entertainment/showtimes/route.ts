@@ -24,5 +24,5 @@ export async function GET(request: NextRequest) {
   // Phase 14.5C: persisted auto-hidden names ride along, fetched IN PARALLEL with the provider call, bounded
   // and fail-open (undefined = unknown → nothing automatic is hidden; the page never waits on the database).
   const [result, lifecycle] = await Promise.all([getParkEntertainmentShowtimes(parkId), getLifecycleVisibilityState(parkId)]);
-  return NextResponse.json(lifecycle === undefined ? result : { ...result, lifecycleAutoHidden: lifecycle.autoHidden, lifecycleRegistryRestored: lifecycle.registryRestored }, { headers: { "Cache-Control": "no-store, max-age=0" } });
+  return NextResponse.json(lifecycle === undefined ? result : { ...result, lifecycleAutoHidden: lifecycle.autoHidden, lifecycleRegistryRestored: lifecycle.registryRestored, lifecycleLegacyComebacks: lifecycle.legacyComebacks }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }

@@ -293,14 +293,18 @@ CREATE TABLE IF NOT EXISTS entertainment_lifecycle_state (
   updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (park_id, show_key),
   CONSTRAINT entertainment_lifecycle_state_status_chk
-    CHECK (status IN ('visible', 'auto_hidden'))
+    CHECK (status IN ('visible', 'auto_hidden', 'legacy_comeback', 'legacy_hidden'))
 );
 
 ALTER TABLE entertainment_lifecycle_state ADD COLUMN IF NOT EXISTS dormant_days INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE entertainment_lifecycle_state ADD COLUMN IF NOT EXISTS registry_restored_at TIMESTAMPTZ;
+-- Phase 14.5D: legacy comeback statuses (idempotent widening of the status check).
+ALTER TABLE entertainment_lifecycle_state DROP CONSTRAINT IF EXISTS entertainment_lifecycle_state_status_chk;
+ALTER TABLE entertainment_lifecycle_state ADD CONSTRAINT entertainment_lifecycle_state_status_chk
+  CHECK (status IN ('visible', 'auto_hidden', 'legacy_comeback', 'legacy_hidden'));
 
 -- Append-only decisions for the later research audit: auto_hide, auto_restore,
--- silence_flag, registry_restore, registry_conflict. The natural key makes a duplicated cron
+-- silence_flag, registry_restore, registry_conflict, legacy_comeback, legacy_rehide (14.5D). The natural key makes a duplicated cron
 -- delivery a no-op. audit_status is advanced only by the audit (never here).
 CREATE TABLE IF NOT EXISTS entertainment_lifecycle_events (
   park_id             TEXT        NOT NULL,

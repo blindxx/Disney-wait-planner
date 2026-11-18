@@ -22,6 +22,12 @@
  *     park-level request at most, reused if step 1 already fetched it) backfills
  *     per-day dark/performed observations, then the same evaluation re-runs.
  *
+ * Phase 14.5D (same run, same lock, same tables — no second cron): LEGACY catalog shows with an established
+ * provider identity are observed from the same showtimes payload (`observeLegacyParkDay`; a failed/stale/
+ * previous-day payload yields nothing) and evaluated by `evaluateLegacyLifecycle` in the same transaction:
+ * ≥ 7 verified-performance days in the rolling 14 → `legacy_comeback` (surfaced on both pages); then the
+ * 21-of-30 rule → `legacy_rehide`. Events are natural-key deduplicated; the legacy catalog is never changed.
+ *
  * Fail open for NEW hiding: any provider/DB failure leaves state untouched
  * (no hide is ever produced from missing data); reviewed registry decisions are
  * never edited. The monitor never touches the registry JSON, the catalogs, the
@@ -33,12 +39,16 @@ import { ENTERTAINMENT_LIFECYCLE_REGISTRY, type EntertainmentLifecycleRegistry }
 import {
   EMPTY_LIFECYCLE_STATE,
   LIFECYCLE_RETENTION_DAYS,
+  evaluateLegacyLifecycle,
   evaluateShowLifecycle,
   historyBackfillObservations,
   isDayEndWindow,
   isLifecycleEligiblePlace,
   isMappingIdentityEstablished,
+  observeLegacyParkDay,
   observeParkDay,
+  resolveLegacyShow,
+  type LegacyIdentityOptions,
   registryHideKind,
   type ShowDayObservation,
 } from "./entertainmentLifecycleDetector";
@@ -56,7 +66,7 @@ import { buildParkHistoryEvidence } from "./entertainmentHistory";
 import { fetchParkHistoryWithin, type GetHistory, type GetHistoryAccess } from "./entertainmentHistoryService";
 import type { ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 import { getParkEntertainmentShowtimes } from "./entertainmentShowtimesService";
-import { ENTERTAINMENT_PLACES } from "./entertainmentSuggestions";
+import { ENTERTAINMENT_PLACES, getLegacyEntertainmentPlaces } from "./entertainmentSuggestions";
 import { getParkHoursPool } from "./db";
 import { PARK_LABELS, PARK_TO_RESORT } from "./parkMetadata";
 import { createPoolExecutor, type Queryable } from "./parkHoursStore";
@@ -87,6 +97,9 @@ export interface ParkLifecycleResult {
   silenceFlagged: string[];
   registryConflicts: string[];
   registryRestored: string[];
+  /** Phase 14.5D: legacy shows that qualified as comebacks / were re-hidden this run. */
+  legacyComebacks: string[];
+  legacyRehidden: string[];
   /** Observations were made in the resort-local end-of-day window (negatives are final and count). */
   dayEnd: boolean;
   secondary: "none" | "done" | "history_unavailable";
@@ -112,13 +125,15 @@ export interface LifecycleMonitorOptions {
   getHistoryAccess?: GetHistoryAccess;
   /** Registry used for reviewed hide decisions (default: the shipped registry). */
   registry?: EntertainmentLifecycleRegistry;
+  /** Phase 14.5D test seam: legacy provider-identity registry/catalog (default: the shipped data). */
+  legacyIdentity?: LegacyIdentityOptions;
   runDb?: RunDb;
   sleep?: (ms: number) => Promise<void>;
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-interface ApplyResult { hidden: string[]; restored: string[]; silenceFlagged: string[]; registryConflicts: string[]; registryRestored: string[]; needsSecondary: Array<{ showKey: string; showName: string }> }
+interface ApplyResult { hidden: string[]; restored: string[]; silenceFlagged: string[]; registryConflicts: string[]; registryRestored: string[]; legacyComebacks: string[]; legacyRehidden: string[]; needsSecondary: Array<{ showKey: string; showName: string }> }
 
 /**
  * One locked transaction body: persist observations, evaluate every eligible
@@ -134,8 +149,9 @@ async function evaluateAndPersist(
   observations: ShowDayObservation[],
   markSecondary: ReadonlySet<string>,
   registry: EntertainmentLifecycleRegistry,
+  legacyIdentity: LegacyIdentityOptions = {},
 ): Promise<ApplyResult> {
-  const res: ApplyResult = { hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], needsSecondary: [] };
+  const res: ApplyResult = { hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], legacyComebacks: [], legacyRehidden: [], needsSecondary: [] };
   await upsertObservations(q, observations);
   const rows = await readEvidence(q, parkId, addDaysToLocalDate(today, -(LIFECYCLE_RETENTION_DAYS - 1)) ?? today, today);
   const states = await readStates(q, parkId);
@@ -183,6 +199,37 @@ async function evaluateAndPersist(
       else res.registryConflicts.push(place.name);
     }
     if (ev.needsSecondary) res.needsSecondary.push({ showKey, showName: place.name });
+  }
+  // ---- Phase 14.5D: legacy comebacks (same transaction/lock; identity re-validated, never fuzzy) ----
+  for (const place of getLegacyEntertainmentPlaces()) {
+    if (place.parkId !== parkId) continue;
+    const resolved = resolveLegacyShow(parkId, place.name, legacyIdentity);
+    if (!resolved) continue; // not established / ambiguous / now active: never evaluated
+    const showKey = resolved.showKey;
+    const obs = byShow.get(showKey) ?? [];
+    const prev = states.get(showKey) ?? null;
+    if (obs.length === 0 && !prev) continue;
+    const ev = evaluateLegacyLifecycle({ today, observations: obs, state: prev ? { ...EMPTY_LIFECYCLE_STATE, ...prev } : null, identityEstablished: true });
+    if (!ev.changed && ev.events.length === 0 && prev && prev.evaluatedLocalDate === today) continue;
+    const hasType = (t: string) => ev.events.some((e) => e.type === t);
+    const next: StoredLifecycleState = {
+      ...ev.state,
+      showKey, showName: place.name,
+      hiddenAt: hasType("legacy_rehide") ? nowIso : prev?.hiddenAt ?? null,
+      restoredAt: hasType("legacy_comeback") ? nowIso : prev?.restoredAt ?? null,
+      registryRestoredAt: null, silenceFlaggedAt: null, secondaryEvaluatedOn: null,
+      inactiveDays: ev.inactiveDays, dormantDays: ev.dormantDays, silentDays: ev.silentDays,
+      evaluatedLocalDate: today,
+    };
+    // Nothing to remember for a never-surfaced show with no transition: do not create a state row.
+    if (!prev && ev.events.length === 0) continue;
+    const wrote = await writeState(q, parkId, next);
+    if (!wrote) continue;
+    for (const e of ev.events) {
+      await insertEvent(q, parkId, showKey, place.name, e);
+      if (e.type === "legacy_comeback") res.legacyComebacks.push(place.name);
+      else if (e.type === "legacy_rehide") res.legacyRehidden.push(place.name);
+    }
   }
   await pruneEvidence(q, parkId, addDaysToLocalDate(today, -LIFECYCLE_RETENTION_DAYS) ?? today);
   return res;
@@ -256,16 +303,18 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
     for (let i = 0; i < LIFECYCLE_PARK_IDS.length; i++) {
       const parkId = LIFECYCLE_PARK_IDS[i];
       const st = fetched[i];
-      const base: ParkLifecycleResult = { parkId, status: "ok", observed: 0, classes: { active: 0, inactive: 0, dormant: 0, silent: 0, unknown: 0 }, hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], dayEnd: false, secondary: "none" };
+      const base: ParkLifecycleResult = { parkId, status: "ok", observed: 0, classes: { active: 0, inactive: 0, dormant: 0, silent: 0, unknown: 0 }, hidden: [], restored: [], silenceFlagged: [], registryConflicts: [], registryRestored: [], legacyComebacks: [], legacyRehidden: [], dayEnd: false, secondary: "none" };
       base.dayEnd = isDayEndWindow(PARK_TO_RESORT[parkId] as ResortId, instant);
       if (Date.now() - startedMs > budgetMs) { parks.push({ ...base, status: "skipped_deadline" }); continue; }
       if (!st || st.error) { parks.push({ ...base, status: "provider_unavailable" }); continue; }
       const observations = observeParkDay(st, base.dayEnd);
       for (const o of observations) base.classes[o.dayClass]++;
       base.observed = observations.length;
+      const legacyObservations = observeLegacyParkDay(st, base.dayEnd, options.legacyIdentity);
       try {
-        const applied = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, observations, new Set(), registry));
+        const applied = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, [...observations, ...legacyObservations], new Set(), registry, options.legacyIdentity));
         base.hidden.push(...applied.hidden); base.restored.push(...applied.restored);
+        base.legacyComebacks.push(...applied.legacyComebacks); base.legacyRehidden.push(...applied.legacyRehidden);
         base.silenceFlagged.push(...applied.silenceFlagged); base.registryConflicts.push(...applied.registryConflicts); base.registryRestored.push(...applied.registryRestored);
 
         if (applied.needsSecondary.length > 0 && Date.now() - startedMs <= budgetMs) {
@@ -282,7 +331,7 @@ export async function runEntertainmentLifecycleMonitor(options: LifecycleMonitor
           base.secondary = evidence?.usable ? "done" : "history_unavailable";
           // Re-evaluate only when history was usable; an unusable window changes nothing and is retried next run.
           if (evidence?.usable) {
-            const again = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, backfill, new Set(applied.needsSecondary.map((s) => s.showKey)), registry));
+            const again = await lockedTx(runDb, parkId, (q) => evaluateAndPersist(q, parkId, st.localDate, instant, backfill, new Set(applied.needsSecondary.map((s) => s.showKey)), registry, options.legacyIdentity));
             base.hidden.push(...again.hidden); base.restored.push(...again.restored);
             base.silenceFlagged.push(...again.silenceFlagged); base.registryConflicts.push(...again.registryConflicts); base.registryRestored.push(...again.registryRestored);
           }

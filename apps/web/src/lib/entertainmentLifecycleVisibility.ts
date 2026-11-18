@@ -19,13 +19,22 @@
  * the pages apply the returned set on top of the existing seasonal/performance-day
  * rules, and the All Entertainment synthesized/event/toggle paths take it as a parameter.
  *
+ * Legacy comebacks (Phase 14.5D): `getLegacyComebackPlaces` / `mergeLegacyComebackEntries` are the ONE
+ * place that turns the persisted `lifecycleLegacyComebacks` names into legacy catalog shows to surface on
+ * Waits & Shows and All Entertainment. A name surfaces only when it is an exact, park-qualified LEGACY
+ * catalog identity whose provider identity is established (never an active identity, alias or provider-only
+ * record) — so nothing here changes the legacy catalog, Smart Entry or planner identities. Unknown/undefined
+ * input surfaces nothing. A comeback is never inferred from the page's own response: only the persisted
+ * 7-of-14 state surfaces a legacy show.
+ *
  * Fail open: a missing/undefined `autoHidden` (DB down, older body) hides
  * nothing automatic; registry decisions still apply (static bundled data).
  */
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import { ENTERTAINMENT_LIFECYCLE_REGISTRY, getLifecycleCatalogState, type EntertainmentLifecycleRegistry } from "./entertainmentLifecycleRegistry";
-import { isLifecycleEligible } from "./entertainmentLifecycleDetector";
+import { isLifecycleEligible, resolveLegacyShow, type LegacyIdentityOptions } from "./entertainmentLifecycleDetector";
+import { getLegacyEntertainmentPlaces, type EntertainmentPlace } from "./entertainmentSuggestions";
 import { getResortLocalDate } from "./resortTime";
 
 /** Names of curated shows with verified performances in the given showtime entries. */
@@ -106,6 +115,8 @@ export interface RetainedLifecycleEvidence {
   localDate: string;
   autoHidden?: string[];
   registryRestored?: string[];
+  /** Phase 14.5D: persisted legacy comebacks (names only), retained like the hide evidence so a refresh failure does not flicker them. */
+  legacyComebacks?: string[];
 }
 
 type EvidenceResponse = {
@@ -115,6 +126,7 @@ type EvidenceResponse = {
   error?: unknown;
   lifecycleAutoHidden?: string[];
   lifecycleRegistryRestored?: string[];
+  lifecycleLegacyComebacks?: string[];
 } | null | undefined;
 
 /**
@@ -138,6 +150,7 @@ export function nextRetainedLifecycleEvidence(
     localDate: response.localDate,
     autoHidden: response.lifecycleAutoHidden.slice(),
     ...(Array.isArray(response.lifecycleRegistryRestored) ? { registryRestored: response.lifecycleRegistryRestored.slice() } : {}),
+    ...(Array.isArray(response.lifecycleLegacyComebacks) ? { legacyComebacks: response.lifecycleLegacyComebacks.slice() } : {}),
   };
 }
 
@@ -149,4 +162,57 @@ export function activeRetainedEvidence(
 ): RetainedLifecycleEvidence | null {
   if (!retained || retained.parkId !== parkId) return null;
   return retained.localDate === getResortLocalDate(retained.resort, instant) ? retained : null;
+}
+
+// ============================================
+// Legacy comebacks (Phase 14.5D)
+// ============================================
+
+/** Legacy catalog places to surface for `parkId` from persisted comeback names (validated; deduplicated; unknown → none). */
+export function getLegacyComebackPlaces(parkId: ParkId, comebacks: readonly string[] | null | undefined, o: LegacyIdentityOptions = {}): EntertainmentPlace[] {
+  if (!Array.isArray(comebacks)) return [];
+  const legacyPlaces = o.legacyPlaces ?? getLegacyEntertainmentPlaces();
+  const out: EntertainmentPlace[] = [];
+  const seen = new Set<string>();
+  for (const n of comebacks) {
+    if (typeof n !== "string" || seen.has(n) || !resolveLegacyShow(parkId, n, o)) continue;
+    const place = (legacyPlaces as readonly EntertainmentPlace[]).find((p) => p.parkId === parkId && p.name === n);
+    if (!place) continue;
+    seen.add(n);
+    out.push(place);
+  }
+  return out;
+}
+
+/** The showtime entry for a Waits & Shows card: active entries first, then (comeback-only) legacy entries. */
+export function findShowtimeEntry<T extends { dwpName: string }>(showtimes: { entries: readonly T[]; legacyEntries?: readonly T[] } | null | undefined, name: string): T | undefined {
+  return showtimes?.entries.find((e) => e.dwpName === name) ?? showtimes?.legacyEntries?.find((e) => e.dwpName === name);
+}
+
+/**
+ * All Entertainment: add the legacy entries of persisted comebacks to the live list. Exactly once per show:
+ * skipped when an entry with the same id or name already exists, or when ANY existing entry (curated or
+ * provider-only) already carries one of the legacy entry's provider entity ids (provider-only duplicate guard).
+ */
+export function mergeLegacyComebackEntries<T extends { id: string; source: string; name: string; showtime: { provider: ReadonlyArray<{ entityId: string }> } }>(
+  entries: readonly T[],
+  legacyEntries: readonly T[] | null | undefined,
+  parkId: ParkId,
+  comebacks: readonly string[] | null | undefined,
+  o: LegacyIdentityOptions = {},
+): T[] {
+  const names = new Set(getLegacyComebackPlaces(parkId, comebacks, o).map((p) => p.name));
+  if (names.size === 0 || !legacyEntries?.length) return entries.slice();
+  const ids = new Set(entries.map((e) => e.id));
+  const have = new Set(entries.map((e) => e.name));
+  const entities = new Set(entries.flatMap((e) => e.showtime.provider.map((r) => r.entityId.toLowerCase())));
+  const out = entries.slice();
+  for (const le of legacyEntries) {
+    if (le.source !== "curated" || !names.has(le.name) || ids.has(le.id) || have.has(le.name)) continue;
+    if (le.showtime.provider.some((r) => entities.has(r.entityId.toLowerCase()))) continue;
+    ids.add(le.id); have.add(le.name);
+    for (const r of le.showtime.provider) entities.add(r.entityId.toLowerCase());
+    out.push(le);
+  }
+  return out;
 }

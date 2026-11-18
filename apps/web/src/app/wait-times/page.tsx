@@ -71,7 +71,7 @@ import {
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
 import { applyRetainedInactivity, isEntertainmentHiddenToday, nextRetainedInactivity, partitionPartyEntertainment, type RetainedInactivity } from "../../lib/seasonalVisibility";
-import { activeRetainedEvidence, getLifecycleHiddenNames, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
+import { activeRetainedEvidence, findShowtimeEntry, getLegacyComebackPlaces, getLifecycleHiddenNames, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
 import {
   EVENT_MEETS_UNAVAILABLE_MESSAGE,
   describeEventMeet,
@@ -1008,7 +1008,7 @@ export default function WaitTimesPage() {
   const visibleEntertainment = useMemo(() => {
     const today = getResortLocalDate(selectedResort, displayNow);
     const inactivityEntries = applyRetainedInactivity(showtimes, retainedInactivity, selectedPark, displayNow);
-    return parkEntertainment.filter(
+    const active = parkEntertainment.filter(
       (p) =>
         (!selectedLand || p.land === selectedLand) &&
         !lifecycleHidden.has(p.name) &&
@@ -1020,7 +1020,13 @@ export default function WaitTimesPage() {
           displayNow,
         ),
     );
-  }, [parkEntertainment, selectedLand, selectedResort, selectedPark, displayNow, showtimes, lifecycleHidden, retainedInactivity]);
+    // Phase 14.5D: legacy shows the lifecycle monitor has persisted as comebacks (shared validation; same land filter).
+    // Not subject to catalog seasonal/inactivity rules: their own 21-of-30 lifecycle decides the re-hide.
+    const retained = activeRetainedEvidence(retainedLifecycle, selectedPark, displayNow);
+    const legacy = getLegacyComebackPlaces(selectedPark, showtimes?.lifecycleLegacyComebacks ?? retained?.legacyComebacks)
+      .filter((p) => (!selectedLand || p.land === selectedLand) && !active.some((a) => a.name === p.name));
+    return legacy.length > 0 ? [...active, ...legacy] : active;
+  }, [parkEntertainment, selectedLand, selectedResort, selectedPark, displayNow, showtimes, lifecycleHidden, retainedInactivity, retainedLifecycle]);
 
   // PR #209 follow-up: on a confirmed party date, visible curated shows explicitly associated with that party
   // (registry + resort-local date, never showtimes/names) group into Party Entertainment; the rest stay regular.
@@ -1151,7 +1157,7 @@ export default function WaitTimesPage() {
                   <EntertainmentCard
                     key={show.name}
                     entertainment={show}
-                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    showtime={findShowtimeEntry(showtimes, show.name)}
                     stale={showtimes?.stale}
                     now={displayNow}
                   />
@@ -1209,7 +1215,7 @@ export default function WaitTimesPage() {
                   <EntertainmentCard
                     key={show.name}
                     entertainment={show}
-                    showtime={showtimes?.entries.find((e) => e.dwpName === show.name)}
+                    showtime={findShowtimeEntry(showtimes, show.name)}
                     stale={showtimes?.stale}
                     now={displayNow}
                   />
