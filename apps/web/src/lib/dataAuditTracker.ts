@@ -413,6 +413,7 @@ export function validateDataAuditTracker(tracker: unknown = DATA_AUDIT_TRACKER):
         if (kind !== "opened") bad("first entry must be opened");
         if (ep !== 1) bad("first entry must be episode 1");
         if (st === "resolved") bad("a finding cannot open as resolved");
+        if (evidence.length === 0) add("evidence_unsourced", key, `${where}: opening a finding requires at least one sourced evidence entry (never open from memory)`);
         topicNow = h.topic;
       } else if (prev !== null) {
         if (hd < prev.date) add("history_order", key, `${where}.date is before the previous entry (history is chronological)`);
@@ -493,15 +494,22 @@ export function validateDataAuditTracker(tracker: unknown = DATA_AUDIT_TRACKER):
 // ============================================
 
 /**
- * Items the audit still owes work on: every status except `resolved`. Items with
- * a due nextReview date first (earliest first), then others oldest `lastReviewed`
- * first; ties by trackerId. Resolved findings stay in history only.
+ * Items the audit still owes work on: every status except `resolved`. Ordered
+ * for the monthly reconciliation: items whose `nextReview.date` is already due
+ * (≤ `asOf`, YYYY-MM-DD) first, earliest due date first; then everything else
+ * (future-dated, condition-only, undated) by oldest `lastReviewed`; ties by
+ * trackerId. A future review date never jumps the queue. Resolved findings stay
+ * in history only.
  */
-export function getOutstandingTrackerItems(tracker: DataAuditTracker = DATA_AUDIT_TRACKER): TrackerItem[] {
+export function getOutstandingTrackerItems(
+  tracker: DataAuditTracker = DATA_AUDIT_TRACKER,
+  asOf: string = new Date().toISOString().slice(0, 10),
+): TrackerItem[] {
+  const due = (i: TrackerItem) => { const d = i.audit.nextReview?.date; return d !== undefined && d <= asOf ? d : undefined; };
   return tracker.items
     .filter((i) => i.audit.status !== "resolved")
     .sort((a, b) => {
-      const da = a.audit.nextReview?.date, db = b.audit.nextReview?.date;
+      const da = due(a), db = due(b);
       if (da && db && da !== db) return da.localeCompare(db);
       if (da && !db) return -1;
       if (!da && db) return 1;
@@ -612,6 +620,19 @@ export function runDevDataAuditTrackerCases(): string[] {
     getUnresolvedLifecycleRecords().every((rec) =>
       shipped.find((i) => i.parkId && entertainmentMappingKey(i.parkId, i.name) === lifecycleRecordKey(rec))?.audit.status !== "resolved"));
   check("shipped: outstanding set excludes resolved only", getOutstandingTrackerItems().length === shipped.filter((i) => i.audit.status !== "resolved").length);
+  // Outstanding ordering: due dates first, future-dated items never jump ahead of older undated ones.
+  const ord = (...its: unknown[]) => wrap(...its) as unknown as DataAuditTracker;
+  const mk = (id: string, name: string, last: string, nr?: { date?: string; condition?: string }) =>
+    item({ trackerId: id, name, audit: { status: "deferred", episode: 1, action: "x", lastReviewed: last, nextReview: nr ?? { condition: "c" } }, history: [{ ...hist0(), date: "2026-10-01", status: "deferred", evidence: [ev("2026-10-01")] }] });
+  const order = (asOf: string) => getOutstandingTrackerItems(ord(
+    mk("DA-0911", "Space Mountain", "2026-11-05", { date: "2027-05-15" }),
+    mk("DA-0912", "Big Thunder Mountain Railroad", "2026-11-01"),
+    mk("DA-0913", "Pirates of the Caribbean", "2026-11-03", { date: "2026-11-10" }),
+    mk("DA-0914", "Haunted Mansion", "2026-11-02", { date: "2026-11-08" }),
+  ), asOf).map((i) => i.trackerId).join();
+  check("outstanding: due items first (earliest due first), then oldest lastReviewed; future date does not jump the queue",
+    order("2026-11-18") === "DA-0914,DA-0913,DA-0912,DA-0911");
+  check("outstanding: an item becomes prioritized once its date is due", order("2027-06-01") === "DA-0914,DA-0913,DA-0911,DA-0912");
   check("shipped: nextTrackerId is unused", !shipped.some((i) => i.trackerId === nextTrackerId()));
   check("shipped: append-only against itself", checkTrackerAppendOnly(DATA_AUDIT_TRACKER, DATA_AUDIT_TRACKER).length === 0);
 
@@ -628,6 +649,8 @@ export function runDevDataAuditTrackerCases(): string[] {
     kinds(wrap(item({ audit: { status: "done", episode: 1, action: "x", lastReviewed: "2026-11-01" } }))).includes("bad_enum") &&
     kinds(wrap(item({ type: "show" }))).includes("bad_enum") && kinds(wrap(item({ topic: "vibes" }))).includes("bad_enum"));
   check("schema: impossible date rejected", kinds(wrap(item({ audit: { status: "open", episode: 1, action: "x", lastReviewed: "2026-02-30" } }))).includes("bad_date"));
+  check("schema: opening without any sourced evidence rejected",
+    kinds(wrap(item({ history: [{ ...hist0(), evidence: [] }] }))).includes("evidence_unsourced"));
   check("schema: evidence without url/ref rejected",
     kinds(wrap(item({ history: [{ ...hist0(), evidence: [{ date: "2026-11-01", note: "trust me" }] }] }))).includes("evidence_unsourced"));
   check("schema: repository ref evidence accepted",

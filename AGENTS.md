@@ -651,12 +651,14 @@ must have exactly one such item (`registry_untracked`).
   repository `ref` — nothing free-floating), decision and `relatedPrs`
   (`owner/repo#N`). Routine daily observations never create items or entries;
   a no-op review is advanced via `audit.lastReviewed` only.
-- **Monthly reconciliation**: (1) list `getOutstandingTrackerItems()`; work due
-  `nextReview.date` items first, then oldest `lastReviewed`; (2) re-check each
+- **Monthly reconciliation**: (1) list `getOutstandingTrackerItems()` (optional `asOf` date, default
+  today); work items whose `nextReview.date` is already due first, then the rest
+  by oldest `lastReviewed` (a future date never jumps the queue); (2) re-check each
   against `main` catalogs/registries; update `audit.*` and append a history entry
   only for a real change (new evidence, decision, status change); (3) resolve a
   lifecycle-backed item only after its registry record's `nextReviewAction` is
-  `none`; (4) open new items only for newly verified findings — never from
+  `none`; (4) open new items only for newly verified findings (an `opened` entry needs
+  sourced evidence) — never from
   memory or unrecoverable earlier trackers (the November 2 tracker is not
   reconstructed).
 - **PR verification**: when a PR resolves or advances a finding, append the PR to
