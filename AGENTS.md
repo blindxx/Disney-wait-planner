@@ -622,6 +622,54 @@ restoration (14.5E audit).
 - DEV checks: `runDevLegacyComebackCases()`, `runDevLegacyIdentityDiscoveryCases()`
   (`entertainmentLifecycleDev.ts`).
 
+## Data Audit maintenance tracker (Phase 14.5E-A)
+
+`apps/web/src/data/dataAuditTracker.json` is the ONE Git-tracked, validated ledger
+of recurring Data Audit findings (types, validator, read helpers and DEV checks:
+`apps/web/src/lib/dataAuditTracker.ts`). It is maintenance metadata only: no
+runtime consumer, UI, table or endpoint, and not a catalog. Catalogs stay the
+identity authority; `entertainmentLifecycleRegistry.json` stays authoritative for
+entertainment lifecycle assessment/evidence/visibility decisions. A tracker item
+points at a registry record with `lifecycleRegistry: true` (same park-qualified
+identity) and never copies assessment or evidence fields; every registry record
+must have exactly one such item (`registry_untracked`).
+
+- **One item per canonical catalog item** (type + resort/park + name) with an
+  opaque, permanent `trackerId` (`DA-0001`; next free id = `nextTrackerId()`).
+  Reuse it for every later finding, resolution, rename (`renamed` entry +
+  `formerNames`), Active↔Legacy move (`catalog_state_changed` entry) and
+  reopening. Current and former names are globally unique. Catalog/lifecycle
+  state is derived (`getTrackerCatalogState`), never stored: audit status ≠
+  catalog status.
+- **Audit status**: `open | monitoring | deferred | pending_implementation |
+  resolved`, plus `action`, `lastReviewed`, optional `nextReview` {date,
+  condition} (required for monitoring/deferred) and a finding `topic`. Resolved
+  items keep full history and drop out of `getOutstandingTrackerItems()`.
+- **History is append-only and significant-only** (`opened`, `reviewed` with
+  evidence/decision, `status_changed`, `resolved`, `reopened`, `renamed`,
+  `catalog_state_changed`), each with dated sourced evidence (public `url` or
+  repository `ref` — nothing free-floating), decision and `relatedPrs`
+  (`owner/repo#N`). Routine daily observations never create items or entries;
+  a no-op review is advanced via `audit.lastReviewed` only.
+- **Monthly reconciliation**: (1) list `getOutstandingTrackerItems()` (optional `asOf` date, default
+  today); work items whose `nextReview.date` is already due first, then the rest
+  by oldest `lastReviewed` (a future date never jumps the queue); (2) re-check each
+  against `main` catalogs/registries; update `audit.*` and append a history entry
+  only for a real change (new evidence, decision, status change); (3) resolve a
+  lifecycle-backed item only after its registry record's `nextReviewAction` is
+  `none`; (4) open new items only for newly verified findings (an `opened` entry needs
+  sourced evidence) — never from
+  memory or unrecoverable earlier trackers (the November 2 tracker is not
+  reconstructed).
+- **PR verification**: when a PR resolves or advances a finding, append the PR to
+  that entry's `relatedPrs` after it merges (or note it as `pending_implementation`
+  beforehand). Run `runDevDataAuditTrackerCases()` and compare against `main` with
+  `checkTrackerAppendOnly(previous, next)` (previous = `git show origin/main:<file>`):
+  no removed items, edited history or changed identity.
+- **Reopening**: only from `resolved`, via a `reopened` entry that increments
+  `episode`, states `reopenReason` (`new_evidence` | `new_lifecycle_episode`) and
+  carries evidence dated AFTER the resolution. Never edit the old resolution.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

@@ -1,0 +1,195 @@
+{
+  "schemaVersion": 1,
+  "items": [
+    {
+      "trackerId": "DA-0001",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "disneyland",
+      "name": "Paint the Night",
+      "lifecycleRegistry": true,
+      "topic": "lifecycle",
+      "audit": {
+        "status": "monitoring",
+        "episode": 1,
+        "action": "Follow the lifecycle registry record's nextReviewAction; resolve here only when the registry record is resolved (nextReviewAction none).",
+        "lastReviewed": "2026-11-16",
+        "nextReview": {
+          "condition": "2027 return announcement (registry: monitor)"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-16",
+          "kind": "opened",
+          "status": "monitoring",
+          "episode": 1,
+          "topic": "lifecycle",
+          "summary": "Seeded from the Phase 14.5B lifecycle baseline. Assessment, provider evidence, verification sources and visibility decision remain in the lifecycle registry.",
+          "evidence": [
+            {
+              "date": "2026-11-16",
+              "note": "Lifecycle registry record (firstFlagged and lastReviewed 2026-11-16).",
+              "ref": "apps/web/src/data/entertainmentLifecycleRegistry.json#disneyland:paint the night"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#207"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0002",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "disneyland",
+      "name": "Wondrous Journeys",
+      "lifecycleRegistry": true,
+      "topic": "lifecycle",
+      "audit": {
+        "status": "monitoring",
+        "episode": 1,
+        "action": "Follow the lifecycle registry record's nextReviewAction; resolve here only when the registry record is resolved (nextReviewAction none).",
+        "lastReviewed": "2026-11-16",
+        "nextReview": {
+          "condition": "Publication of the 2027 nighttime lineup (registry: monitor)"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-16",
+          "kind": "opened",
+          "status": "monitoring",
+          "episode": 1,
+          "topic": "lifecycle",
+          "summary": "Seeded from the Phase 14.5B lifecycle baseline. Assessment, provider evidence, verification sources and visibility decision remain in the lifecycle registry.",
+          "evidence": [
+            {
+              "date": "2026-11-16",
+              "note": "Lifecycle registry record (firstFlagged and lastReviewed 2026-11-16).",
+              "ref": "apps/web/src/data/entertainmentLifecycleRegistry.json#disneyland:wondrous journeys"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#207"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0003",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "disneyland",
+      "name": "Magic Happens Parade",
+      "lifecycleRegistry": true,
+      "topic": "lifecycle",
+      "audit": {
+        "status": "deferred",
+        "episode": 1,
+        "action": "Follow the lifecycle registry record's nextReviewAction; resolve here only when the registry record is resolved (nextReviewAction none).",
+        "lastReviewed": "2026-11-16",
+        "nextReview": {
+          "date": "2027-05-15"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-16",
+          "kind": "opened",
+          "status": "deferred",
+          "episode": 1,
+          "topic": "lifecycle",
+          "summary": "Seeded from the Phase 14.5B lifecycle baseline. Assessment, provider evidence, verification sources and visibility decision remain in the lifecycle registry.",
+          "evidence": [
+            {
+              "date": "2026-11-16",
+              "note": "Lifecycle registry record (firstFlagged and lastReviewed 2026-11-16).",
+              "ref": "apps/web/src/data/entertainmentLifecycleRegistry.json#disneyland:magic happens parade"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#207"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0004",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "disneyland",
+      "name": "Main Street Electrical Parade",
+      "lifecycleRegistry": true,
+      "topic": "lifecycle",
+      "audit": {
+        "status": "monitoring",
+        "episode": 1,
+        "action": "Follow the lifecycle registry record's nextReviewAction; resolve here only when the registry record is resolved (nextReviewAction none).",
+        "lastReviewed": "2026-11-16",
+        "nextReview": {
+          "condition": "A future return announcement (registry: monitor)"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-16",
+          "kind": "opened",
+          "status": "monitoring",
+          "episode": 1,
+          "topic": "lifecycle",
+          "summary": "Seeded from the Phase 14.5B lifecycle baseline. Assessment, provider evidence, verification sources and visibility decision remain in the lifecycle registry.",
+          "evidence": [
+            {
+              "date": "2026-11-16",
+              "note": "Lifecycle registry record (firstFlagged and lastReviewed 2026-11-16).",
+              "ref": "apps/web/src/data/entertainmentLifecycleRegistry.json#disneyland:main street electrical parade"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#207"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0005",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "disneyland",
+      "name": "Mickey's Mix Magic",
+      "lifecycleRegistry": true,
+      "topic": "lifecycle",
+      "audit": {
+        "status": "monitoring",
+        "episode": 1,
+        "action": "Follow the lifecycle registry record's nextReviewAction; resolve here only when the registry record is resolved (nextReviewAction none).",
+        "lastReviewed": "2026-11-16",
+        "nextReview": {
+          "condition": "21 consecutive inactive days (about 2026-12-03) via the future detector test, or an official end/return notice (registry: monitor)"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-16",
+          "kind": "opened",
+          "status": "monitoring",
+          "episode": 1,
+          "topic": "lifecycle",
+          "summary": "Seeded from the Phase 14.5B lifecycle baseline. Assessment, provider evidence, verification sources and visibility decision remain in the lifecycle registry.",
+          "evidence": [
+            {
+              "date": "2026-11-16",
+              "note": "Lifecycle registry record (firstFlagged and lastReviewed 2026-11-16).",
+              "ref": "apps/web/src/data/entertainmentLifecycleRegistry.json#disneyland:mickeys mix magic"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#207"
+          ]
+        }
+      ]
+    }
+  ]
+}

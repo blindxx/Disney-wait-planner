@@ -90,6 +90,7 @@ ThemeParks.wiki does not replace Queue-Times for attraction waits, and it does n
 - Attraction naming is resolved deterministically through coordinated canonical-identity paths — one for live data and planned closures, one for My Plans and Lightning Lane — kept in parity so naming differences never cause mismatches or duplicates
 
 Entertainment lifecycle maintenance metadata for the recurring data audit lives in `apps/web/src/data/entertainmentLifecycleRegistry.json` (empty until the audit records verified findings; maintenance-only, no runtime effect). See `AGENTS.md`.
+The persistent Data Audit finding ledger (one permanent tracker ID per canonical catalog item, append-only history) lives in `apps/web/src/data/dataAuditTracker.json`; it references, and never duplicates, the lifecycle registry. Maintenance-only, no runtime effect. See `AGENTS.md`.
 
 For implementation-level invariants, data flow details, and correctness constraints, see [`AGENTS.md`](./AGENTS.md).
 
