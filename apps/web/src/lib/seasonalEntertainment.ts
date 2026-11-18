@@ -46,7 +46,7 @@ import {
   resolveEntertainmentKey,
 } from "./entertainmentSuggestions";
 import { normalizeKey } from "./plansMatching";
-import { resolveDwpEntertainmentFromThemeParksId } from "./themeParksEntertainmentMapping";
+import { THEMEPARKS_ENTERTAINMENT_MAPPING, resolveDwpEntertainmentFromThemeParksId } from "./themeParksEntertainmentMapping";
 import { isValidIsoCalendarDate } from "./plannerWarnings";
 import {
   getSeasonalEvent,
@@ -105,7 +105,13 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   "A Christmas Fantasy Parade": [{ eventId: "holidays-dlr", kind: "season" }],
   // Phase 14.4A — DLR Holidays DCA shows (park-admission season, confirmed).
   "Mickey's Happy Holidays": [{ eventId: "holidays-dlr", kind: "season" }],
-  "Disney ¡Viva Navidad! Street Party": [{ eventId: "holidays-dlr", kind: "season" }],
+  "Disney ¡Viva Navidad! Street Party": [{ eventId: "holidays-dlr", kind: "season", note: "Disney Parks Blog: \"select days\" — never assumed to perform every season day." }],
+  // Holidays at the Disneyland Resort 2026 refresh (Disney Parks Blog / disneyland.com, verified 2026-11-18).
+  "Wintertime Enchantment": [{ eventId: "holidays-dlr", kind: "season" }],
+  "\"it's a small world\" Holiday Clock Parade and Projection Show": [{ eventId: "holidays-dlr", kind: "season", note: "Projection show runs \"during select times throughout each night\" (Disney Parks Blog)." }],
+  "Disney Holiday Dance Party": [{ eventId: "holidays-dlr", kind: "season" }],
+  "Mirabel's Gifts of the Season": [{ eventId: "holidays-dlr", kind: "season", note: "Disney Parks Blog: \"select days\" — never assumed to perform every season day. One regional official page gives Nov 18; the registry season start is used." }],
+  "A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!": [{ eventId: "holidays-dlr", kind: "season", note: "Official listing: Monday–Friday evenings (\"select days\" per Disney Parks Blog); English pages give a Nov 18 start, the registry season start is used." }],
   // Disney Jollywood Nights (WDW, Hollywood Studios) — party-only.
   // Show names confirmed from Disney Parks Blog / provider; the party suffix
   // ("at Disney Jollywood Nights") is a naming variant — same show.
@@ -290,6 +296,13 @@ export const SEASONAL_PROVIDER_ONLY_EVENTS: SeasonalProviderEntertainmentAssocia
     "Disneyland press release: runs only \"on select days\" of the festival — hidden outside the festival, never assumed to perform every festival day."),
   seasonOnly("dca", "e9c263c4-80dc-4431-bfc9-581a0ff1f578", "Holiday Toy Drummers", "holidays-dlr",
     "Official Disneyland listing: returns for Holidays at the Disneyland Resort (Nov 13, 2026; one official page says Nov 18, the registry season start is used)."),
+  // Holidays at the Disneyland Resort 2026 refresh: holiday ceremonies with explicit official dates (Disney Parks Blog,
+  // verified 2026-11-18). Minor ceremonies stay provider-only (not curated). Santa meets, bands and unsourced tree
+  // lightings are intentionally NOT associated (see the audit report).
+  seasonOnly("dca", "17f94015-f97b-44cd-b127-6a2fb6cac85d", "Buena Vista Street Holiday Tree Lighting", "holidays-dlr",
+    "Disney Parks Blog: tree lighting begins Nov 13 on Buena Vista Street."),
+  seasonOnly("disneyland", "c1153264-84dd-4ef2-a249-29cc5eddc7eb", "\"it's a small world\" Holiday Lighting", "holidays-dlr",
+    "Disney Parks Blog: lights come on at dusk nightly in front of the attraction during Holidays at the Disneyland Resort."),
 ];
 
 const PROVIDER_EVENTS_BY_KEY: Map<string, SeasonalProviderEntertainmentAssociation> = new Map(
@@ -523,6 +536,24 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
     return prank("dca", chefs, "DLR", "2026-11-10") === "off-season" && prank("dca", kitties, "DLR", "2026-11-10") === "off-season" && prank("dca", chefs, "DLR", "2027-03-15") === "neutral" &&
       prank("dca", drummers, "DLR", "2026-11-12") === "off-season" && prank("dca", drummers, "DLR", "2026-11-13") === "season" && prank("dca", drummers, "DLR", "2027-01-06") === "season" && prank("dca", drummers, "DLR", "2027-01-07") === "neutral";
   } },
+  // ---- Holidays at the Disneyland Resort 2026 refresh ----
+  { label: "DLR holidays 2026: new curated shows (both parks) carry holidays-dlr season associations and resolve in the catalog", ok: () =>
+    ["Wintertime Enchantment", "\"it's a small world\" Holiday Clock Parade and Projection Show", "Disney Holiday Dance Party", "Mirabel's Gifts of the Season", "A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!"]
+      .every((n) => ENTERTAINMENT_PLACES.some((p) => p.name === n && p.resort === "DLR" && p.availabilityType === "seasonal" && p.availabilityTheme === "christmas") &&
+        SEASONAL_ENTERTAINMENT_EVENTS[n]?.length === 1 && SEASONAL_ENTERTAINMENT_EVENTS[n][0].eventId === "holidays-dlr" && SEASONAL_ENTERTAINMENT_EVENTS[n][0].kind === "season") },
+  { label: "DLR holidays 2026: new shows demoted Nov 10 (before Nov 13), boosted Nov 20, unknown after Jan 6 2027, wrong-park context neutral", ok: () =>
+    rank("Wintertime Enchantment", "DLR", "2026-11-10", "disneyland") === "off-season" && rank("Wintertime Enchantment", "DLR", "2026-11-20", "disneyland") === "season" &&
+    rank("Mirabel's Gifts of the Season", "DLR", "2026-11-20", "dca") === "season" && rank("Mirabel's Gifts of the Season", "DLR", "2027-01-07", "dca") === "neutral" &&
+    rank("Disney Holiday Dance Party", "DLR", "2026-11-12", "disneyland") === "off-season" },
+  { label: "DLR holidays 2026: provider-only lighting ceremonies are holidays-dlr season rows (BVS tree lighting, small world lighting); Santa meets, bands and Toy Drummers stay as audited", ok: () =>
+    prank("dca", "17f94015-f97b-44cd-b127-6a2fb6cac85d", "DLR", "2026-11-20") === "season" && prank("dca", "17f94015-f97b-44cd-b127-6a2fb6cac85d", "DLR", "2026-11-10") === "off-season" &&
+    prank("disneyland", "c1153264-84dd-4ef2-a249-29cc5eddc7eb", "DLR", "2026-11-20") === "season" &&
+    prank("dca", "82fb3f4a-c4cf-4ba2-a69d-b469e352c00b", "DLR", "2026-11-20") === "neutral" && // Santa at Redwood Creek (meet; dates end Dec 24)
+    prank("disneyland", "6b92f6ae-c794-484b-8621-92f8e05c28e3", "DLR", "2026-11-20") === "neutral" && // Dickens Yuletide Band (roaming band)
+    prank("dca", "e9c263c4-80dc-4431-bfc9-581a0ff1f578", "DLR", "2026-11-20") === "season" },
+  { label: "DLR holidays 2026: a curated holiday show's provider id is never also a provider-only association (no double listing)", ok: () => {
+    const curated = new Set(THEMEPARKS_ENTERTAINMENT_MAPPING.flatMap((m) => (m.disposition === "mapped" ? m.provider.map((r) => r.entityId.toLowerCase()) : [])));
+    return SEASONAL_PROVIDER_ONLY_EVENTS.every((r) => !curated.has(r.entityId.toLowerCase())); } },
   { label: "14.4B: select-days limitation is recorded on the association (Confection Purrfection) — not modelled as every day", ok: () =>
     !!SEASONAL_PROVIDER_ONLY_EVENTS.find((r) => r.entityId === "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa")?.associations[0].note?.includes("select days") },
   { label: "14.4B: registry events referenced by provider rows have a season record for the audited year (2026) or an announced one", ok: () =>
