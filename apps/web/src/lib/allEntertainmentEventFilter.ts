@@ -319,10 +319,10 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
   { label: "14.4D options: HS, AK (date-only Holidays at WDW), Disneyland, DCA", ok: () =>
     sameSet(vals("hs"), ["", "jollywood-nights", "holidays-wdw"]) && sameSet(vals("ak"), ["", "holidays-wdw"]) &&
     sameSet(vals("disneyland"), ["", "halloween-time-dlr", "holidays-dlr"]) &&
-    sameSet(vals("dca"), ["", "oogie-boogie-bash", "holidays-dlr", "plaza-de-la-familia", "dca-food-and-wine"]) },
-  { label: "14.4D options: associations only (MNSSHP, season ended), dates only (AK Holidays), both (Flower & Garden; Arts too since 14.5B), neither hidden (DCA Lunar New Year, Halloween Time at DCA)", ok: () =>
+    sameSet(vals("dca"), ["", "oogie-boogie-bash", "holidays-dlr", "plaza-de-la-familia", "lunar-new-year-dca", "dca-food-and-wine"]) },
+  { label: "14.4D options: associations only (MNSSHP, season ended), dates only (AK Holidays), both (Flower & Garden; Arts too since 14.5B), associations only incl. DCA Lunar New Year since 14.6A (Mulan's procession), neither hidden (Halloween Time at DCA)", ok: () =>
     vals("mk").includes("mnsshp") && vals("epcot").includes("epcot-festival-of-the-arts") && vals("ak").includes("holidays-wdw") &&
-    vals("epcot").includes("epcot-flower-and-garden") && !vals("dca").includes("lunar-new-year-dca") && !vals("dca").includes("halloween-time-dlr") },
+    vals("epcot").includes("epcot-flower-and-garden") && vals("dca").includes("lunar-new-year-dca") && !vals("dca").includes("halloween-time-dlr") },
   { label: "14.4D options: a historical season alone never qualifies (Jul 2027: Holidays-at-AK gone, associated events stay incl. Arts via Disney on Broadway, 14.5B)", ok: () =>
     vals("epcot", LATER).includes("epcot-festival-of-the-arts") && !vals("ak", LATER).includes("holidays-wdw") && vals("mk", LATER).includes("mnsshp") && sameSet(vals("ak", LATER), [""]) },
   { label: "14.4D options: every option is a top-level registry event hosting the park, labelled by its short label", ok: () =>

@@ -175,6 +175,12 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // Phase 14.4B: Plaza de la Familia festival stage show (Aug 21–Nov 2, 2026; park admission). A discrete scheduled
   // performance with a verified provider SHOW record, so it meets the Entertainment rule; no festival theme value exists.
   { name: "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Paradise Gardens Park", availabilityType: "seasonal" },
+  // Phase 14.6A: Lunar New Year festival procession (Hollywood Land → Paradise Gardens; official disneyland.com page: offered during
+  // the Lunar New Year celebration only). A discrete scheduled performance. The provider has no SHOW record out of season (verified
+  // 2026-11-19), so it is intentionally unmapped until one is published; association lives in SEASONAL_ENTERTAINMENT_EVENTS.
+  { name: "Mulan's Lunar New Year Procession", resort: "DLR", location: "Disney California Adventure", parkId: "dca", land: "Hollywood Land", availabilityType: "seasonal" },
+  // Phase 14.6A: Fantasy Faire's Royal Theatre stage show (official disneyland.com page; provider SHOW verified 2026-11-19).
+  { name: "Storytelling at Royal Theatre", resort: "DLR", location: "Disneyland Park", parkId: "disneyland", land: "Fantasyland", availabilityType: "regular" },
 
   // ---- Magic Kingdom ----
   // Hocus Pocus Villain Spelltacular and Mickey's Most Merriest Celebration
@@ -186,6 +192,8 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Disney Starlight: Dream the Night Away", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Festival of Fantasy Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Disney Adventure Friends Cavalcade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
+  // Phase 14.6A: Cinderella Castle forecourt stage show (official disneyworld.com page lists Main Street, U.S.A.; provider SHOW verified 2026-11-19).
+  { name: "Mickey's Magical Friendship Faire", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "regular" },
   { name: "Mickey's Boo-To-You Halloween Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
   { name: "Mickey's Once Upon a Christmastime Parade", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "christmas" },
   { name: "Disney's Not-So-Spooky Spectacular", resort: "WDW", location: "Magic Kingdom", parkId: "mk", land: "Main Street, U.S.A.", availabilityType: "seasonal", availabilityTheme: "halloween" },
@@ -230,6 +238,12 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   { name: "Festival of the Lion King", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Africa", availabilityType: "regular" },
   { name: "Finding Nemo: The Big Blue... and Beyond!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Asia", availabilityType: "regular" },
   { name: "Zootopia: Better Zoogether!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "regular" },
+  // Phase 14.6A: Anandapur Theater bird show (official disneyworld.com page: Asia; "may not run daily"). Provider SHOW verified 2026-11-19.
+  { name: "Feathered Friends in Flight!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Asia", availabilityType: "regular" },
+  // Phase 14.6A: nighttime projection show on the Tree of Life, "offered seasonally" after dusk (official disneyworld.com page; holiday
+  // edition Nov 13, 2026–Jan 3, 2027). Not tied to a ticketed event or registry season, so "limited" without an event association;
+  // the 14.5C lifecycle monitor handles dark periods. Provider SHOW verified 2026-11-19.
+  { name: "Tree of Life Awakenings", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "limited" },
 
   // Galaxy's Edge's Savi's Workshop – Handbuilt Lightsabers and Droid Depot
   // moved to the Experience catalog in EXP.2 (see module doc comment above
@@ -404,6 +418,15 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "musical christmas": "a musical christmas with mariachi alegr a de disneyland miguel",
   "disney on broadway": "disney on broadway concert series",
   "broadway concert series": "disney on broadway concert series",
+  // Phase 14.6A
+  "friendship faire": "mickeys magical friendship faire",
+  "feathered friends": "feathered friends in flight",
+  "tree of life awakening": "tree of life awakenings",
+  "mulan procession": "mulans lunar new year procession",
+  "mulans procession": "mulans lunar new year procession",
+  "lunar new year procession": "mulans lunar new year procession",
+  "storytelling at the royal theatre": "storytelling at royal theatre",
+  "royal theatre storytelling": "storytelling at royal theatre",
   "woc": "world of color",               // World of Color (DCA)
   "folk": "festival of the lion king",   // Festival of the Lion King (AK) — "fotlk" already existed above
 };
@@ -729,4 +752,17 @@ export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
   { input: "A Musical Christmas with Mariachi Alegría de Disneyland & Miguel!", resort: "DLR", expectedKey: "a musical christmas with mariachi alegr a de disneyland miguel" },
   { input: "mariachi christmas", resort: "DLR", expectedKey: "a musical christmas with mariachi alegr a de disneyland miguel" },
   { input: "Wintertime Enchantment", resort: "WDW", expectedKey: null }, // DLR-only show
+  // Phase 14.6A reconciliation additions
+  { input: "Mickey's Magical Friendship Faire", resort: "WDW", expectedKey: "mickeys magical friendship faire" },
+  { input: "friendship faire", resort: "WDW", expectedKey: "mickeys magical friendship faire" },
+  { input: "friendship faire", resort: "DLR", expectedKey: null }, // WDW-only
+  { input: "Feathered Friends in Flight!", resort: "WDW", expectedKey: "feathered friends in flight" },
+  { input: "feathered friends", resort: "WDW", expectedKey: "feathered friends in flight" },
+  { input: "Tree of Life Awakenings", resort: "WDW", expectedKey: "tree of life awakenings" },
+  { input: "Mulan's Lunar New Year Procession", resort: "DLR", expectedKey: "mulans lunar new year procession" },
+  { input: "Mulan’s Lunar New Year Procession", resort: "DLR", expectedKey: "mulans lunar new year procession" },
+  { input: "lunar new year procession", resort: "WDW", expectedKey: null }, // DLR-only
+  { input: "Storytelling at Royal Theatre", resort: "DLR", expectedKey: "storytelling at royal theatre" },
+  { input: "Storytelling at the Royal Theatre", resort: "DLR", expectedKey: "storytelling at royal theatre" },
+  { input: "Storytelling at Royal Theatre", resort: "WDW", expectedKey: null }, // DLR-only
 ];
