@@ -776,6 +776,22 @@ no provider SHOW and stay unmapped.
   `runDevPublishedPerformanceScheduleCases()`, `runDevSeasonalVisibilityCases()`,
   `runDevAllEntertainmentEventFilterCases()`.
 
+## Date-specific official schedules in My Plans (Phase 14.6C)
+
+`plannerPublishedSchedule.ts` + `PlannerPublishedSchedule.tsx` show the active My Plans day's official
+schedule (Phase 14.6B resolver only; no parallel model, no network, read-only: saved items, ordering, sync and
+import/export are untouched). Rows: the day's PLANNED covered shows (canonical identity via
+`getPlannerItemMetadata`) in every state — performance (times/performers; date-only says "times not
+published"), confirmed no-performance, or "not published" (unknown) — plus unplanned covered shows of the
+effective park only when a performance is CONFIRMED that date. Past/invalid dates show nothing. DEV checks:
+`runDevPlannerPublishedScheduleCases()`.
+
+- **Tom is intentionally NOT extended.** Tom's backend is a separate repo and nothing here verifies that it
+  interprets new `context.schedule` fields; `context.schedule.entertainment_showtimes` is `today_only` and its
+  `note` tells Tom no other-date showtimes exist. Do not add published-schedule fields to `/api/tom/ask` or claim
+  Tom uses them until the Tom repo ships and verifies a matching contract (a 14.6C DEV case in
+  `runDevTomScheduleContextCases()` locks the current shape).
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

@@ -804,5 +804,19 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     check("12.8.1: lookup answer-use signal", showtimesLookupUsedByAnswer({ context_used: ["dwp_showtimes_lookup"] }) && showtimesLookupUsedByAnswer({ meta: { context_used: ["dwp_showtimes_lookup"] } }) && !showtimesLookupUsedByAnswer({ context_used: ["schedule"] }) && !showtimesLookupUsedByAnswer(null));
   }
 
+  // Phase 14.6C contract lock: the Tom backend's handling of new context fields is unverified, so official
+  // published schedules (14.6B) are NOT added to context.schedule. A future EPCOT day with a planned covered
+  // show must keep the verified shape: hours only, no showtimes (today-only), no published-schedule fields.
+  {
+    const planned = { days: [day("d1", "2027-01-20", "epcot")], plans: [{ dayId: "d1", name: "Disney on Broadway Concert Series", type: "entertainment" }], dayAutoFallbacks: {} };
+    showAsked.length = 0;
+    const c = await buildTomScheduleContext(planned, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Disney on Broadway Concert Series") });
+    const keys = Object.keys(c ?? {}).sort().join();
+    const json = JSON.stringify(c);
+    check("14.6C: future covered-show day keeps the verified context.schedule keys (no published-schedule field)", keys === "attribution,hours,not_fetched,note,source" && !/Ashley Brown|Josh Strickland|17:15|published|official/i.test(json.replace(NOTE, "")));
+    check("14.6C: no showtimes fetched or sent for a future date (today-only scope unchanged)", showAsked.length === 0 && !c?.entertainment_showtimes && /today only/.test(c?.note ?? ""));
+    check("14.6C: no attribution signal from planner-only context (no provider-confirmed facts, answer-use not reported)", !scheduleUsedByAnswer(c, { context_used: ["planner"] }));
+  }
+
   return failures;
 }

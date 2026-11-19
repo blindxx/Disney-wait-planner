@@ -45,6 +45,7 @@ import {
 } from "@/lib/timeUtils";
 import { detectTimeConflicts } from "@/lib/timeConflicts";
 import PlannerParkHours from "@/components/PlannerParkHours";
+import PlannerPublishedSchedule from "@/components/PlannerPublishedSchedule";
 import ThemeParksAttribution from "@/components/ThemeParksAttribution";
 import {
   computeCrossDayChecks,
@@ -5720,6 +5721,8 @@ export default function PlansPage() {
   // the park selector and wait-overlay label agree; null (unresolved) is a
   // valid, expected state for an Auto day with no park context of its own.
   const activeDayPark = ready ? resolveDayPark(activeDayId) : null;
+  // Phase 14.6C — read-only view of the active day's items for the official-schedule block (stable identity between edits).
+  const activeDayItems = useMemo(() => items.filter((it) => it.dayId === activeDayId), [items, activeDayId]);
 
   // SH.4.1a — ACCOUNT-AWARE LOCAL CONTENT OWNERSHIP RENDER GATE. Placed
   // after every hook above (this early return never skips a hook call) and
@@ -7037,6 +7040,17 @@ export default function PlansPage() {
             date={dayMeta[activeDayId]?.date && isValidIsoCalendarDate(dayMeta[activeDayId].date!) ? dayMeta[activeDayId].date! : null}
             parkId={activeDayPark}
             onProviderDataPresented={setParkHoursPresented}
+          />
+        )}
+
+        {/* Phase 14.6C — official date-specific entertainment schedule for the active day (read-only; never
+            changes saved items or their order). Resolves through the Phase 14.6B resolver only. */}
+        {ready && (
+          <PlannerPublishedSchedule
+            date={dayMeta[activeDayId]?.date && isValidIsoCalendarDate(dayMeta[activeDayId].date!) ? dayMeta[activeDayId].date! : null}
+            parkId={activeDayPark}
+            resort={activeDayPark ? (PARK_TO_RESORT[activeDayPark] as ResortId) : selectedResort}
+            items={activeDayItems}
           />
         )}
 
