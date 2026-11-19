@@ -41,7 +41,7 @@ async function main() {
   const parsed = parseAuditResponse(body);
   const snapshot = buildSnapshot(prev, parsed, new Date().toISOString());
   const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
-  assertNoSecret(serialized, key);
+  assertNoSecret(snapshot, key);
 
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(`${out}.tmp`, serialized);

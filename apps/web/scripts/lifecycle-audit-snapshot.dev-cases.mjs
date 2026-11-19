@@ -46,7 +46,11 @@ export function runDevLifecycleAuditSnapshotCases() {
   check("complete flag true for untruncated fetch", again.completeness.complete === true && again.completeness.retainedEvents === 2);
 
   check("corrupt/unknown previous snapshot refuses overwrite", throws(() => parsePreviousSnapshot({ schemaVersion: 99, events: [] })) && throws(() => parsePreviousSnapshot({ schemaVersion: 1, events: [{}] })) && parsePreviousSnapshot(null) === null);
-  check("secret guard aborts when key appears in output", throws(() => assertNoSecret('{"x":"supersecretvalue"}', "supersecretvalue")) && !throws(() => assertNoSecret("{}", "supersecretvalue")));
+  check("secret guard aborts when key appears in output", throws(() => assertNoSecret({ x: "supersecretvalue" }, "supersecretvalue")) && !throws(() => assertNoSecret({}, "supersecretvalue")));
+  check("secret guard catches keys with JSON-escaped characters and short keys", throws(() => assertNoSecret({ showName: 'private"catalog\\key' }, 'private"catalog\\key')) && throws(() => assertNoSecret({ a: "xx abc yy" }, "abc")) && throws(() => assertNoSecret({ "k-secret": 1 }, "k-secret")) && throws(() => assertNoSecret({}, "")));
+  const inSentence = sanitizeEvidence({ reason: `wrong_type: provider entityType is ghp_${"A".repeat(40)}, expected SHOW`, r2: `see ${"Zz9".repeat(20)} here`, r3: "Bearer abcdefgh12345678 sent" });
+  check("token-shaped substrings are redacted inside sentences, surrounding text kept", !inSentence.reason.includes("ghp_") && inSentence.reason.includes("expected SHOW") && !inSentence.r2.includes("Zz9Zz9") && inSentence.r2.startsWith("see ") && !inSentence.r3.includes("abcdefgh"));
+  check("ordinary evidence text (dates, UUIDs, reasons) is not over-redacted", sanitizeEvidence({ a: "wrong_type: provider entityType is ATTRACTION, expected SHOW", id: "a1b2c3d4-0000-4000-8000-000000000001", d: "2026-11-10" }).a.includes("ATTRACTION") && sanitizeEvidence({ id: "a1b2c3d4-0000-4000-8000-000000000001" }).id.startsWith("a1b2"));
   return failures;
 }
 

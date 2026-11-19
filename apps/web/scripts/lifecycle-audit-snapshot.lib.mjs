@@ -22,11 +22,16 @@ const MAX_DEPTH = 3;
 export class SnapshotError extends Error {}
 const fail = (msg) => { throw new SnapshotError(msg); };
 
-/** Redacts anything credential-/URL-shaped; keeps short human-readable evidence. */
+/** Token-shaped substrings (anywhere in a sentence): known credential prefixes and long unbroken key-like runs. */
+const TOKEN_PREFIXED = /\b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|AKIA|AIza)[A-Za-z0-9_-]{8,}/g;
+const TOKEN_RUN = /[A-Za-z0-9+/_-]{40,}={0,2}/g;
+const URL_WITH_SECRETISH = /https?:\/\/\S*[?#@]\S*/gi;
+const AUTH_SCHEME = /\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+
+/** Redacts credential-/URL-shaped substrings wherever they occur; keeps short human-readable evidence. */
 function cleanString(s) {
-  if (/https?:\/\/\S*[?#@]/i.test(s) || /\b(bearer|basic)\s+[a-z0-9._~+/=-]{8,}/i.test(s)) return "[redacted]";
-  if (/\b[A-Za-z0-9+/_-]{40,}={0,2}\b/.test(s) && !/\s/.test(s)) return "[redacted]";
-  return s.length > MAX_STRING ? `${s.slice(0, MAX_STRING)}…` : s;
+  const r = s.replace(URL_WITH_SECRETISH, "[redacted]").replace(AUTH_SCHEME, "[redacted]").replace(TOKEN_PREFIXED, "[redacted]").replace(TOKEN_RUN, "[redacted]");
+  return r.length > MAX_STRING ? `${r.slice(0, MAX_STRING)}…` : r;
 }
 
 /** Whitelist-by-shape sanitizer: JSON scalars, bounded arrays/objects, no sensitive-looking keys. */
@@ -134,7 +139,18 @@ export function buildSnapshot(prev, parsed, fetchedAtIso) {
   };
 }
 
-/** Last-line guard: the serialized snapshot must never contain the API key. */
-export function assertNoSecret(serialized, secret) {
-  if (secret && secret.length >= 8 && serialized.includes(secret)) fail("snapshot contains the API key; aborting");
+/**
+ * Last-line guard: neither the raw key nor its JSON-escaped form may appear anywhere in the snapshot, and no
+ * individual string value (or object key) may contain it. No minimum length: a short key fails closed too.
+ */
+export function assertNoSecret(snapshot, secret) {
+  if (!secret) fail("no API key available for the leak check");
+  const serialized = JSON.stringify(snapshot);
+  if (serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1, -1))) fail("snapshot contains the API key; aborting");
+  const walk = (v) => {
+    if (typeof v === "string") { if (v.includes(secret)) fail("snapshot contains the API key; aborting"); return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) { walk(k); walk(x); }
+  };
+  walk(snapshot);
 }
