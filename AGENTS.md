@@ -634,6 +634,18 @@ points at a registry record with `lifecycleRegistry: true` (same park-qualified
 identity) and never copies assessment or evidence fields; every registry record
 must have exactly one such item (`registry_untracked`).
 
+- **Exception-based, not a changelog.** The tracker records actual catalog
+  discrepancies, investigation findings and significant catalog decisions
+  only. Do NOT create records for ordinary features, refactoring, UI fixes or
+  routine data refreshes (e.g. a new season's lineup for an already-covered
+  show) — Git history and PR descriptions are the development log.
+- **Update within the implementation PR.** A PR that addresses an existing
+  finding updates that item in the same PR; a PR that implements a newly
+  verified finding opens (if needed) and updates its item there. A verified
+  finding may be marked `resolved` during final PR preparation (the resolution
+  entry cites the PR in `relatedPrs`); the resolution reaches `main` when the
+  PR merges. There is no routine requirement for a separate tracker-only
+  closeout PR. Permanent IDs and append-only history always apply.
 - **One item per canonical catalog item** (type + resort/park + name) with an
   opaque, permanent `trackerId` (`DA-0001`; next free id = `nextTrackerId()`).
   Reuse it for every later finding, resolution, rename (`renamed` entry +
@@ -661,9 +673,10 @@ must have exactly one such item (`registry_untracked`).
   sourced evidence) — never from
   memory or unrecoverable earlier trackers (the November 2 tracker is not
   reconstructed).
-- **PR verification**: when a PR resolves or advances a finding, append the PR to
-  that entry's `relatedPrs` after it merges (or note it as `pending_implementation`
-  beforehand). Run `runDevDataAuditTrackerCases()` and compare against `main` with
+- **PR verification**: when a PR resolves or advances a finding, cite the PR in
+  that entry's `relatedPrs` in the same PR (`pending_implementation` is for work
+  whose implementation is not yet verified, not a required waiting state until
+  merge). Run `runDevDataAuditTrackerCases()` and compare against `main` with
   `checkTrackerAppendOnly(previous, next)` (previous = `git show origin/main:<file>`):
   no removed items, edited history or changed identity.
 - **Reopening**: only from `resolved`, via a `reopened` entry that increments
@@ -700,7 +713,7 @@ It is a findings export only: not a tracker, registry or catalog, and it never e
 
 Six-park audit of ThemeParks `/children` SHOW inventories against the active/legacy
 catalogs, mappings and provider-only locations. Added (active catalog, explicit
-mapping, tracker `DA-0006`–`DA-0010`; `DA-0006`–`DA-0009` stay `pending_implementation` until PR #220 merges and is verified on main): Mickey's Magical Friendship Faire (MK),
+mapping, tracker `DA-0006`–`DA-0010`): Mickey's Magical Friendship Faire (MK),
 Feathered Friends in Flight! and Tree of Life Awakenings (AK, the latter
 `seasonal` with deliberately NO event association, so it is neutral-ranked and
 excluded from the 14.5C lifecycle monitor), Storytelling at Royal Theatre (Disneyland),
@@ -747,13 +760,19 @@ no provider SHOW and stay unmapped.
   `getPublishedScheduleLines` ("Official schedule: …", "No performance today (official schedule)",
   "Next: …" for the next confirmed date — trip planning, distinct from today's live showtimes; or
   "Last official run ended …; no newer schedule recorded" once a run is over) and
-  replace the "Showtimes not tracked" placeholder only where such lines exist.
+  replace the "Showtimes not tracked" placeholder only where such lines exist. All Entertainment
+  cards for covered shows also offer a "View full schedule" / "Hide schedule" disclosure
+  (`getPublishedFullSchedule`, same data/resolver): in-progress and upcoming seasons only (ended
+  seasons are history, never a current schedule), dates grouped by identical performers/times and
+  compacted ("Jan 15, 17–18, 21–22"), shared times shown once, date-only groups say "Times not
+  published", each season links its official source.
 - Official = Disney-owned domains only (validator). Seasonal association/windows, lifecycle
   exemption (festival-associated seasonal shows are never monitored), identity/aliases
   (`garden rocks`, `eat to the beat`), My Plans, Tom and `/api/catalog/query` keep using the same
   catalog/registry sources; planner ordering and Tom schedule context are intentionally unchanged.
 - To add a season: append a record (sources, `verifiedOn`, window equal to the registry season,
-  completeness basis), add/confirm the registry season, update the tracker item, and run
+  completeness basis), add/confirm the registry season (a routine season refresh needs no
+  tracker record; update an item only if an audit finding exists), and run
   `runDevPublishedPerformanceScheduleCases()`, `runDevSeasonalVisibilityCases()`,
   `runDevAllEntertainmentEventFilterCases()`.
 

@@ -564,13 +564,10 @@
       "name": "Garden Rocks Concert Series",
       "topic": "identity",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After merge: verify on main, resolve; then add a 2027 schedule record only when Disney publishes the Garden Rocks 2027 lineup (never carry 2026 forward).",
-        "nextReview": {
-          "condition": "Disney publishes the 2027 Garden Rocks lineup/dates (expected before the Mar 10, 2027 festival start)"
-        }
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -622,6 +619,39 @@
               "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
             }
           ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "Implemented and verified in PR #223 (production build, DEV checks and the Codex review of the implementation are clean): Garden Rocks Concert Series: curated EPCOT catalog entry, Flower & Garden association, explicit ThemeParks SHOW mapping, removal of the provider-only row, aliases, and a complete 2026 official schedule record. Resolution reaches main when PR #223 merges.",
+          "decision": "Resolved: the verified implementation is part of PR #223 and no further audit action is open. Later seasons' lineups are routine data refreshes, not tracker findings.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry + alias.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Festival association (provider-only row removed).",
+              "ref": "apps/web/src/lib/seasonalEntertainment.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "2026 official schedule record; 2027 intentionally absent until Disney publishes it.",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#223"
+          ]
         }
       ]
     },
@@ -633,13 +663,10 @@
       "name": "Eat to the Beat Concert Series",
       "topic": "identity",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After merge: verify on main, resolve; add a 2027 schedule record only when Disney announces Food & Wine 2027 dates and the Eat to the Beat lineup.",
-        "nextReview": {
-          "condition": "Disney announces the 2027 EPCOT Food & Wine Festival dates and Eat to the Beat lineup"
-        }
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -686,6 +713,39 @@
               "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
             }
           ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "Implemented and verified in PR #223 (production build, DEV checks and the Codex review of the implementation are clean): Eat to the Beat Concert Series: curated EPCOT catalog entry, Eat to the Beat association (child of Food & Wine in the filter), explicit ThemeParks SHOW mapping, removal of the provider-only row, aliases, and a complete date-only 2026 official schedule record. Resolution reaches main when PR #223 merges.",
+          "decision": "Resolved: the verified implementation is part of PR #223 and no further audit action is open. Later seasons' lineups are routine data refreshes, not tracker findings.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry + alias.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Festival association (provider-only row removed).",
+              "ref": "apps/web/src/lib/seasonalEntertainment.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "2026 official schedule record; 2027 intentionally absent until Disney publishes it.",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#223"
+          ]
         }
       ]
     },
@@ -697,13 +757,10 @@
       "name": "Candlelight Processional",
       "topic": "seasonal",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After merge: verify on main, resolve; add a 2027 record only when the 2027 narrator lineup is published.",
-        "nextReview": {
-          "condition": "Disney publishes the 2027 Candlelight Processional narrator lineup"
-        }
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -745,6 +802,29 @@
               "ref": "apps/web/src/lib/seasonalEntertainment.ts"
             }
           ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "Implemented and verified in PR #223 (production build, DEV checks and the Codex review of the implementation are clean): Candlelight Processional: complete 2026 official schedule record (dates, three nightly times, narrators) plus the expandable full-schedule presentation; catalog identity, association and unmapped status unchanged. Resolution reaches main when PR #223 merges.",
+          "decision": "Resolved: the verified implementation is part of PR #223 and no further audit action is open. Later seasons' lineups are routine data refreshes, not tracker findings.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "2026 official schedule record and full-schedule presentation.",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Unchanged association and unmapped disposition.",
+              "ref": "apps/web/src/lib/seasonalEntertainment.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#223"
+          ]
         }
       ]
     },
@@ -756,13 +836,10 @@
       "name": "Disney on Broadway Concert Series",
       "topic": "seasonal",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After merge: verify on main, resolve; add finale-night times only when Disney publishes them.",
-        "nextReview": {
-          "condition": "Disney publishes the Feb 27 – Mar 1, 2027 finale performance details"
-        }
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -803,6 +880,29 @@
               "note": "Unchanged association and unmapped disposition.",
               "ref": "apps/web/src/lib/seasonalEntertainment.ts"
             }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "Implemented and verified in PR #223 (production build, DEV checks and the Codex review of the implementation are clean): Disney on Broadway Concert Series: complete 2027 official schedule record (dated pairings, three nightly times on pairing nights, date-only finale nights) plus the expandable full-schedule presentation; catalog identity, association and unmapped status unchanged. Resolution reaches main when PR #223 merges.",
+          "decision": "Resolved: the verified implementation is part of PR #223 and no further audit action is open. Later seasons' lineups are routine data refreshes, not tracker findings.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "2027 official schedule record and full-schedule presentation.",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Unchanged association and unmapped disposition.",
+              "ref": "apps/web/src/lib/seasonalEntertainment.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#223"
           ]
         }
       ]

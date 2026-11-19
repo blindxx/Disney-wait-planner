@@ -28,9 +28,9 @@
 
 import type { ParkId } from "@disney-wait-planner/shared";
 import type { AllEntertainmentEntry } from "./entertainmentAll";
-import { filterAllEntertainment } from "./entertainmentAll";
+import { filterAllEntertainment, showtimesRegionId, toggleExpanded } from "./entertainmentAll";
 import { getEntertainmentForPark } from "./entertainmentSuggestions";
-import { getPublishedScheduleLines } from "./publishedPerformanceSchedule";
+import { getPublishedFullSchedule, getPublishedScheduleLines } from "./publishedPerformanceSchedule";
 import { getResortLocalDate } from "./resortTime";
 import { SEASONAL_ENTERTAINMENT_EVENTS, SEASONAL_PROVIDER_ONLY_EVENTS } from "./seasonalEntertainment";
 import { SEASONAL_EVENTS, type SeasonalEventDefinition, type SeasonalEventSeasonRecord } from "./seasonalEventData";
@@ -482,6 +482,22 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
         const live = [mkCur("epcot", GR), mkCur("epcot", DOB)];
         return has("epcot-flower-and-garden", "2026-03-07", GR, live) === 1 && has("epcot-festival-of-the-arts", "2027-01-20", DOB, live) === 1 &&
           new Set(pool("epcot-festival-of-the-holidays", "2026-12-01").map((e) => e.id)).size === pool("epcot-festival-of-the-holidays", "2026-12-01").length;
+      } },
+      { label: "14.6B full schedule disclosure: offered for exactly the shows with a current official schedule in their festival filter (Broadway, Candlelight today); not for ended seasons (Garden Rocks, Eat to the Beat) or uncovered shows (JOYFUL!)", ok: () => {
+        const d = "2026-11-19";
+        const full = (event: string, n: string) => { const e = pool(event, d).find((x) => x.name === n); return e ? getPublishedFullSchedule("epcot", e.name, at(d)) : "missing"; };
+        return full("epcot-festival-of-the-arts", DOB) !== null && full("epcot-festival-of-the-arts", DOB) !== "missing" &&
+          full("epcot-festival-of-the-holidays", CPR) !== null && full("epcot-festival-of-the-holidays", CPR) !== "missing" &&
+          full("epcot-flower-and-garden", GR) === null && full("epcot-food-and-wine", ETTB) === null &&
+          getPublishedFullSchedule("epcot", "JOYFUL! A Celebration of the Season", at(d)) === null;
+      } },
+      { label: "14.6B full schedule disclosure state: the schedule toggle is independent of the show-all-times toggle, per entry, with distinct region ids", ok: () => {
+        const id = "curated:epcot:Candlelight Processional", other = "curated:epcot:Disney on Broadway Concert Series";
+        const a = toggleExpanded(new Set<string>(), `schedule:${id}`);
+        const b = toggleExpanded(a, id);
+        const c = toggleExpanded(b, `schedule:${id}`);
+        return a.has(`schedule:${id}`) && !a.has(id) && b.has(id) && b.has(`schedule:${id}`) && !c.has(`schedule:${id}`) && c.has(id) && !a.has(`schedule:${other}`) &&
+          showtimesRegionId(`schedule:${id}`) !== showtimesRegionId(id) && showtimesRegionId(`schedule:${id}`) !== showtimesRegionId(`schedule:${other}`) && showtimesRegionId(`schedule:${id}`) === showtimesRegionId(`schedule:${id}`);
       } },
       { label: "14.6B festival filters: every festival has qualifying options and no provider-only remnants remain for the promoted offerings", ok: () =>
         ["epcot-festival-of-the-arts", "epcot-flower-and-garden", "epcot-food-and-wine", "epcot-festival-of-the-holidays"].every((v) => vals("epcot", at("2026-11-19")).includes(v)) &&

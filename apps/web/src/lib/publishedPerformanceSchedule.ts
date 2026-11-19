@@ -372,6 +372,120 @@ export function getPublishedScheduleLines(
   return lines;
 }
 
+// ── Full schedule (expandable card disclosure; pure) ─────────────────────
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const monthDay = (iso: string) => `${MONTHS[Number(iso.slice(5, 7)) - 1]} ${Number(iso.slice(8, 10))}`;
+
+/**
+ * Compact date list for one group: consecutive dates collapse into ranges and the month is named only where it
+ * changes — "Jan 15, 17–18, 21–22" / "Jan 29, 31, Feb 1, 4–5" / "Jan 31 – Feb 1". Input must be ascending unique dates.
+ */
+export function formatPublishedDateList(dates: readonly string[]): string {
+  const runs: string[][] = [];
+  for (const d of dates) {
+    const last = runs[runs.length - 1];
+    if (last && addDaysToLocalDate(last[last.length - 1], 1) === d) last.push(d);
+    else runs.push([d]);
+  }
+  let prevMonth = "";
+  return runs.map((run) => {
+    const a = run[0], b = run[run.length - 1];
+    const startText = a.slice(0, 7) === prevMonth ? String(Number(a.slice(8, 10))) : monthDay(a);
+    prevMonth = b.slice(0, 7);
+    if (run.length === 1) return startText;
+    return a.slice(0, 7) === b.slice(0, 7) ? `${startText}–${Number(b.slice(8, 10))}` : `${startText} – ${monthDay(b)}`;
+  }).join(", ");
+}
+
+export interface PublishedScheduleGroup {
+  /** Stable key within the season. */
+  id: string;
+  /** Compact dates, e.g. "Jan 15, 17–18, 21–22". */
+  dates: string;
+  /** Number of dates in the group. */
+  count: number;
+  /** Official performer / narrator / act names ([] when none published). */
+  performers: string[];
+  /** Only set when this group's times differ from the season's common times: its own times, or "Times not published". */
+  timesText: string | null;
+  note?: string;
+}
+
+export interface PublishedFullSeason {
+  seasonYear: number;
+  status: "in_progress" | "upcoming";
+  /** "Jan 15 – Mar 1, 2027". */
+  rangeText: string;
+  performerLabel: string;
+  /** Times shared by every shown group that has times ("5:15 PM • 6:30 PM • 7:45 PM"), or null when none/differing. */
+  commonTimes: string | null;
+  /** True when no shown group has published times. */
+  timesNotPublished: boolean;
+  groups: PublishedScheduleGroup[];
+  /** In-progress seasons list today onward only; how many earlier dates were left out. */
+  omittedPastDates: number;
+  completeness: "complete" | "partial";
+  source: { title: string; url: string; verifiedOn: string };
+}
+
+/**
+ * Full published schedule for the expandable card section: every season record of the show that is in progress or
+ * upcoming on the resort-local day (ended seasons are history, never offered as a current schedule), with performance
+ * days grouped by identical (performers, times, note) — a pairing that alternates days stays one row — and dates
+ * compacted. Date-only days stay date-only; nothing is invented. null when the show has nothing current to show.
+ */
+export function getPublishedFullSchedule(
+  parkId: ParkId | undefined | null,
+  name: string,
+  instant: Date,
+  records: readonly PublishedScheduleSeason[] = PUBLISHED_PERFORMANCE_SCHEDULES,
+): PublishedFullSeason[] | null {
+  if (!parkId || !hasPublishedSchedule(parkId, name, records)) return null;
+  const resort = PARK_TO_RESORT[parkId] as ResortId;
+  const today = getResortLocalDate(resort, instant);
+  const out: PublishedFullSeason[] = [];
+  for (const r of records.filter((x) => x.parkId === parkId && x.name === name && x.windowEnd >= today).sort((a, b) => (a.windowStart < b.windowStart ? -1 : 1))) {
+    const status = r.windowStart <= today ? "in_progress" as const : "upcoming" as const;
+    const shown = r.days.filter((d) => d.date >= today).sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (shown.length === 0) continue;
+    const groups = new Map<string, { days: PublishedPerformanceDay[]; times: string[] }>();
+    for (const d of shown) {
+      const times = d.times ?? r.times ?? [];
+      const key = JSON.stringify([d.performers ?? [], times, d.note ?? ""]);
+      const g = groups.get(key);
+      if (g) g.days.push(d); else groups.set(key, { days: [d], times });
+    }
+    // Times shared by every group that HAS times are shown once; only differing groups (or date-only ones, when others
+    // have times) carry their own text. No times anywhere → one "not published" note and no per-row text.
+    const withTimes = new Set([...groups.values()].filter((g) => g.times.length > 0).map((g) => g.times.join(",")));
+    const commonKey = withTimes.size === 1 ? [...withTimes][0] : null;
+    const commonTimes = commonKey ? commonKey.split(",").map(formatPublishedTime).join(" • ") : null;
+    out.push({
+      seasonYear: r.seasonYear, status, rangeText: formatEventWindow(r.windowStart, r.windowEnd), performerLabel: r.performerLabel,
+      commonTimes, timesNotPublished: withTimes.size === 0,
+      groups: [...groups.values()].map((g, i) => ({
+        id: `${r.seasonYear}-${i}`,
+        dates: formatPublishedDateList(g.days.map((d) => d.date)),
+        count: g.days.length,
+        performers: g.days[0].performers ?? [],
+        timesText: withTimes.size === 0 || (commonKey !== null && g.times.join(",") === commonKey) ? null : (g.times.length > 0 ? g.times.map(formatPublishedTime).join(" • ") : "Times not published"),
+        ...(g.days[0].note ? { note: g.days[0].note } : {}),
+      })),
+      omittedPastDates: r.days.length - shown.length,
+      completeness: r.completeness,
+      source: { title: r.sources[0].title, url: r.sources[0].url, verifiedOn: r.sources[0].verifiedOn },
+    });
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** "Jan 15 – Mar 1, 2027" / "Nov 13, 2026 – Jan 6, 2027". */
+function formatEventWindow(start: string, end: string): string {
+  const sy = start.slice(0, 4), ey = end.slice(0, 4);
+  return sy === ey ? `${monthDay(start)} – ${monthDay(end)}, ${ey}` : `${monthDay(start)}, ${sy} – ${monthDay(end)}, ${ey}`;
+}
+
 // ── Validation + DEV checks ──────────────────────────────────────────────
 
 /** Structural problems with the shipped (or a supplied) record set; `[]` = valid. */
@@ -422,7 +536,7 @@ const st = (name: string, date: string) => getPublishedPerformanceDay(EP, name, 
 const rec = (name: string) => PUBLISHED_PERFORMANCE_SCHEDULES.find((r) => r.name === name)!;
 const SYN: PublishedScheduleSeason = {
   parkId: "epcot", name: GR, seasonYear: 2099, eventId: "x", windowStart: "2099-03-01", windowEnd: "2099-03-10", completeness: "partial",
-  completenessBasis: "", performerLabel: "Performer", sources: [], days: [{ date: "2099-03-02" }, { date: "2099-03-03", times: ["19:00"] }],
+  completenessBasis: "", performerLabel: "Performer", sources: [{ title: "synthetic", url: "https://disneyparksblog.com/x", publishedDate: "2099-01-01", verifiedOn: "2099-01-01" }], days: [{ date: "2099-03-02" }, { date: "2099-03-03", times: ["19:00"] }],
 };
 
 export const DEV_PUBLISHED_PERFORMANCE_SCHEDULE_CASES: DevPublishedScheduleCase[] = [
@@ -501,6 +615,59 @@ export const DEV_PUBLISHED_PERFORMANCE_SCHEDULE_CASES: DevPublishedScheduleCase[
     const c = getPublishedScheduleLines(EP, ETTB, new Date("2027-09-12T17:00:00Z"));
     return a.join("|") === "Last official run ended Mon, Jun 1; no newer schedule recorded" && b.join("|") === "Last official run ended Mon, Nov 16; no newer schedule recorded" &&
       c.join("|") === "Last official run ended Mon, Nov 16, 2026; no newer schedule recorded" && !a.concat(b, c).some((l) => /^Next:|No performance|Official schedule/.test(l));
+  } },
+  // Full schedule presentation (expandable card section)
+  { label: "date list: consecutive dates collapse to ranges and the month is named only where it changes", ok: () =>
+    formatPublishedDateList(["2027-01-15", "2027-01-17", "2027-01-18", "2027-01-21", "2027-01-22"]) === "Jan 15, 17–18, 21–22" &&
+    formatPublishedDateList(["2027-01-29", "2027-01-31", "2027-02-01", "2027-02-04", "2027-02-05"]) === "Jan 29, 31 – Feb 1, 4–5" &&
+    formatPublishedDateList(["2026-11-29", "2026-11-30", "2026-12-01"]) === "Nov 29 – Dec 1" && formatPublishedDateList(["2026-10-12"]) === "Oct 12" &&
+    formatPublishedDateList(["2026-12-31", "2027-01-01"]) === "Dec 31 – Jan 1" && formatPublishedDateList([]) === "" },
+  { label: "full schedule, Disney on Broadway before the festival: one upcoming 2027 season, 46 dates in 7 groups (alternating pairings stay one row each), times shown once", ok: () => {
+    const s = getPublishedFullSchedule(EP, DOB, new Date("2026-11-19T17:00:00Z"))!;
+    const [season] = s;
+    return s.length === 1 && season.status === "upcoming" && season.seasonYear === 2027 && season.rangeText === "Jan 15 – Mar 1, 2027" &&
+      season.commonTimes === "5:15 PM • 6:30 PM • 7:45 PM" && !season.timesNotPublished && season.groups.length === 7 && season.groups.reduce((n, g) => n + g.count, 0) === 46 &&
+      season.groups[0].dates === "Jan 15, 17–18, 21–22, 25–26" && season.groups[0].performers.join() === "Michael James Scott,Marisha Wallace" && season.groups[0].timesText === null &&
+      season.groups[2].dates === "Jan 29, 31 – Feb 1, 4–5, 8–9" && season.omittedPastDates === 0 && season.completeness === "complete" && season.source.url.startsWith("https://disneyparksblog.com/");
+  } },
+  { label: "full schedule, date-only entries never get a time: Broadway finale nights say 'Times not published' with the note; Eat to the Beat/Garden Rocks seasons say times are not published", ok: () => {
+    const fin = getPublishedFullSchedule(EP, DOB, new Date("2026-11-19T17:00:00Z"))![0].groups[6];
+    const e = getPublishedFullSchedule(EP, ETTB, new Date("2026-10-01T17:00:00Z"))![0];
+    const g = getPublishedFullSchedule(EP, GR, new Date("2026-03-10T17:00:00Z"))![0];
+    return fin.dates === "Feb 27 – Mar 1" && fin.timesText === "Times not published" && /Newsies/.test(fin.note ?? "") && fin.performers.length === 0 &&
+      e.timesNotPublished && e.commonTimes === null && e.groups.every((x) => x.timesText === null) && g.timesNotPublished && g.groups.every((x) => x.timesText === null);
+  } },
+  { label: "full schedule, Candlelight: 15 narrator groups (34 dates) with shared times; cross-month runs read 'Nov 29 – Dec 1'", ok: () => {
+    const [s] = getPublishedFullSchedule(EP, CPR, new Date("2026-11-19T17:00:00Z"))!;
+    return s.groups.length === 15 && s.groups.reduce((n, g) => n + g.count, 0) === 34 && s.commonTimes === "4:45 PM • 6:30 PM • 8:00 PM" && s.performerLabel === "Narrator" &&
+      s.groups[0].dates === "Nov 27–28" && s.groups[0].performers.join() === "Jordan Fisher" && s.groups[1].dates === "Nov 29 – Dec 1" && s.groups[1].performers.join() === "Gary Sinise" && s.groups[14].dates === "Dec 28–30";
+  } },
+  { label: "full schedule, in-progress season lists today onward only and counts the earlier dates left out (Candlelight Dec 10 → 13 omitted, starts with Neil Patrick Harris)", ok: () => {
+    const [s] = getPublishedFullSchedule(EP, CPR, new Date("2026-12-10T17:00:00Z"))!;
+    return s.status === "in_progress" && s.omittedPastDates === 13 && s.groups[0].performers.join() === "Neil Patrick Harris" && s.groups[0].dates === "Dec 10–12" && s.groups.reduce((n, g) => n + g.count, 0) === 21;
+  } },
+  { label: "full schedule, expired / unannounced seasons: nothing is offered (Garden Rocks & Eat to the Beat after their 2026 runs, Candlelight/Broadway after theirs, unrecorded shows)", ok: () => {
+    const n = new Date("2026-11-19T17:00:00Z");
+    return getPublishedFullSchedule(EP, GR, n) === null && getPublishedFullSchedule(EP, ETTB, n) === null && getPublishedFullSchedule(EP, CPR, new Date("2026-12-31T17:00:00Z")) === null &&
+      getPublishedFullSchedule(EP, DOB, new Date("2027-03-02T17:00:00Z")) === null && getPublishedFullSchedule(EP, "Luminous The Symphony of Us", n) === null && getPublishedFullSchedule("mk", DOB, n) === null;
+  } },
+  { label: "full schedule, partial and mixed-time records: partial is flagged; differing times each show their own, shared times only once", ok: () => {
+    const base = { ...SYN, seasonYear: 2099, windowStart: "2099-03-01", windowEnd: "2099-03-10" };
+    const mixed: PublishedScheduleSeason = { ...base, completeness: "complete", completenessBasis: "x".repeat(24), times: ["19:00"], days: [{ date: "2099-03-02" }, { date: "2099-03-03", times: ["20:30"] }, { date: "2099-03-04", times: [] }] };
+    const [p] = getPublishedFullSchedule(EP, GR, new Date("2099-02-01T17:00:00Z"), [SYN])!;
+    const [m] = getPublishedFullSchedule(EP, GR, new Date("2099-02-01T17:00:00Z"), [mixed])!;
+    return p.completeness === "partial" && p.commonTimes === "7:00 PM" && !p.timesNotPublished && p.groups.map((g) => g.timesText).join("|") === "Times not published|" && m.commonTimes === null && !m.timesNotPublished &&
+      m.groups.map((g) => g.timesText).join("|") === "7:00 PM|8:30 PM|Times not published";
+  } },
+  { label: "full schedule stays consistent with the resolver: every listed date resolves as a performance with the same performers and times", ok: () =>
+    [[DOB, "2026-11-19"], [CPR, "2026-11-19"]].every(([n, at]) => {
+      const rec = PUBLISHED_PERFORMANCE_SCHEDULES.find((r) => r.name === n)!;
+      const seasons = getPublishedFullSchedule(EP, n, new Date(`${at}T17:00:00Z`))!;
+      return seasons[0].groups.reduce((c, g) => c + g.count, 0) === rec.days.length && rec.days.every((d) => getPublishedPerformanceDay(EP, n, d.date).state === "performance");
+    }) },
+  { label: "full schedule uses the same data as the compact lines: the 'Next:' date is the first listed date of the first group", ok: () => {
+    const [s] = getPublishedFullSchedule(EP, DOB, new Date("2026-11-19T17:00:00Z"))!;
+    return getPublishedScheduleLines(EP, DOB, new Date("2026-11-19T17:00:00Z"))[0].startsWith("Next: Fri, Jan 15, 2027") && s.groups[0].dates.startsWith("Jan 15");
   } },
   { label: "lines: shows without a record produce no lines", ok: () => getPublishedScheduleLines(EP, "Luminous The Symphony of Us", new Date("2026-11-19T17:00:00Z")).length === 0 },
 ];
