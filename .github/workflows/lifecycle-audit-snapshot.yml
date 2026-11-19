@@ -50,6 +50,21 @@ jobs:
             git checkout -q --orphan "$SNAPSHOT_BRANCH"
           fi
 
+      - name: Ensure Vercel deployment exclusion config (create only if missing)
+        env:
+          VERCEL_CONFIG: apps/web/vercel.json
+        run: |
+          set -euo pipefail
+          # Keeps Vercel from deploying the data branch. Written on first creation or recovery of the
+          # branch only; an existing file is never rewritten. Uses the same Vercel project root as main (apps/web).
+          if [ ! -f "data/$VERCEL_CONFIG" ]; then
+            mkdir -p "data/$(dirname "$VERCEL_CONFIG")"
+            printf '%s\n' '{"git":{"deploymentEnabled":{"lifecycle-audit-snapshot":false}}}' > "data/$VERCEL_CONFIG"
+            echo "created $VERCEL_CONFIG"
+          else
+            echo "$VERCEL_CONFIG already present; preserved"
+          fi
+
       - name: Fetch, validate and write snapshot
         id: snap
         env:
@@ -71,7 +86,9 @@ jobs:
           cd data
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$SNAPSHOT_FILE"
+          # snapshot.json is the only routinely changing file; vercel.json is staged solely so a
+          # first-time/recovery commit includes it (no-op when unchanged).
+          git add "$SNAPSHOT_FILE" apps/web/vercel.json
           if git diff --cached --quiet; then echo "no change"; exit 0; fi
           git commit -q -m "Lifecycle audit snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q origin "HEAD:refs/heads/$SNAPSHOT_BRANCH"

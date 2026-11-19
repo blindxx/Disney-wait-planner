@@ -171,7 +171,10 @@ sanitized findings are exported). One-time setup (no values are committed):
    and can be deleted once the new key works.
 3. Actions → "Lifecycle audit snapshot" → Run workflow once; confirm the data branch and file appear, and that the
    ChatGPT GitHub connector can read that branch/file (not testable from the repo).
-4. If the repo has been inactive for 60 days GitHub disables scheduled workflows; re-enable them.
+4. The workflow also creates `apps/web/vercel.json` on the data branch (`{"git":{"deploymentEnabled":{"lifecycle-audit-snapshot":false}}}`)
+   when missing (first creation or recovery) so Vercel never deploys it; an existing file is preserved and
+   `snapshot.json` stays the only routinely updated file. `main`/feature-branch deployments are unaffected.
+5. If the repo has been inactive for 60 days GitHub disables scheduled workflows; re-enable them.
 The ChatGPT audit must check `completeness.complete`, `generatedAt` age (`staleAfterHours`, 48) and a failed/missing
 latest run before trusting the snapshot. The job holds no production write access; nothing here changes catalogs,
 the tracker or `audit_status`.
