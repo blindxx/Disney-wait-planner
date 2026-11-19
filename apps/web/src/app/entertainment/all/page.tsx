@@ -103,7 +103,7 @@ const RESPONSIVE_CSS = `
   .all-sched h4 { margin: 8px 0 2px; font-size: 13px; font-weight: 600; color: var(--text-strong); }
   .all-sched h4:first-child { margin-top: 0; }
   .all-sched ul { list-style: none; margin: 4px 0 0; padding: 0; }
-  .all-sched li { padding: 3px 0; overflow-wrap: anywhere; }
+  .all-sched li { padding: 5px 0; overflow-wrap: anywhere; }
   .all-sched .all-sched-dates { font-weight: 600; color: var(--text-strong); }
   .all-sched .all-sched-meta { color: var(--text-muted); }
   .all-sched a { color: var(--status-info); }
@@ -196,9 +196,9 @@ function PublishedScheduleSection({ seasons, id }: { seasons: PublishedFullSeaso
           <ul>
             {s.groups.map((g) => (
               <li key={g.id}>
-                <span className="all-sched-dates">{g.dates}</span>
-                {g.performers.length > 0 && <span> — {s.performerLabel}: {g.performers.join(" & ")}</span>}
-                {g.timesText && <span className="all-sched-meta"> · {g.timesText}</span>}
+                <div className="all-sched-dates">{g.dates}</div>
+                {g.performers.length > 0 && <div>{s.performerLabel}: {g.performers.join(" & ")}</div>}
+                {g.timesText && <div className="all-sched-meta">{g.timesText}</div>}
                 {g.note && <div className="all-sched-meta">{g.note}</div>}
               </li>
             ))}
