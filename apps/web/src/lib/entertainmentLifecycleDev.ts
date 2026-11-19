@@ -753,6 +753,10 @@ export async function runDevEntertainmentLifecycleMonitorCases(realPool?: Pool):
     // concurrency primitive: second tryLock while held (fake)
     check("lock primitive: tryLifecycleLock reflects the held state", await (async () => { const q = new FakeLifecycleDb(); const a = await tryLifecycleLock(q, PARK); q.lockHeld = true; return a && !(await tryLifecycleLock(q, PARK)); })());
     check("audit read: report API works on stored rows", await (async () => { try { await readLifecycleAudit({ query: async () => ({ rowCount: 0, rows: [] }) }); return true; } catch { return false; } })());
+    check("audit read: completeness metadata (unreviewed total + applied limit) is reported for truncation detection", await (async () => {
+      const r = await readLifecycleAudit({ query: async (sql: string) => (/COUNT\(\*\)/.test(sql) ? { rowCount: 1, rows: [{ n: "1500" }] } : { rowCount: 0, rows: [] }) }, 7);
+      return r.unreviewedTotal === 1500 && r.eventLimit === 7 && r.unreviewedEvents.length === 0;
+    })());
     // writeState guard / events natural key
     check("writeState: an earlier evaluation date is rejected; events natural key dedupes", await (async () => {
       const q = new FakeLifecycleDb();

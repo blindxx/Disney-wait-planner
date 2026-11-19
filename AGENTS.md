@@ -670,6 +670,28 @@ must have exactly one such item (`registry_untracked`).
   `episode`, states `reopenReason` (`new_evidence` | `new_lifecycle_episode`) and
   carries evidence dated AFTER the resolution. Never edit the old resolution.
 
+## Lifecycle audit snapshot bridge (Phase 14.5E-B1)
+
+Read-only GitHub Actions bridge (`.github/workflows/lifecycle-audit-snapshot.yml`,
+`apps/web/scripts/lifecycle-audit-snapshot{,.lib}.mjs`) from the protected
+`/api/catalog/lifecycle-audit` to a sanitized Git snapshot on the dedicated data branch
+`lifecycle-audit-snapshot` (`lifecycle-audit/snapshot.json`; never `main`, repo is PUBLIC).
+It is a findings export only: not a tracker, registry or catalog, and it never edits
+`audit_status`, catalogs, Smart Entry or visibility. Tracker/registry changes stay reviewed PRs.
+
+- **Secrets**: `DWP_CATALOG_API_KEY` (Actions secret) and `DWP_AUDIT_BASE_URL` (Actions variable);
+  triggers are schedule/manual only (no PR triggers); `contents: write` is the only permission;
+  the job has no database or production write access. The script prints no response bodies and aborts
+  if the key appears in its output.
+- **Sanitization**: shape-based (`sanitizeEvidence`): scalars/bounded arrays only, sensitive-looking keys
+  dropped, URL/token-shaped strings redacted. Park-qualified identity = `parkId` + `showName`; `eventId` =
+  `park:type:localDate:slug(show)` (the table's natural key, so a new episode on a new date is a new event).
+- **Completeness/freshness**: API `meta` carries `generatedAt`, `eventLimit`, `eventsReturned`,
+  `unreviewedTotal`, `eventsTruncated` (`?limit=` 1..1000, default 200). Events are retained additively
+  (`firstSeenAt`/`lastSeenAt`/`inLatestFetch`); truncation publishes `complete: false` and fails the run;
+  any API/auth/network/validation failure writes nothing (exit 1). Consumers must check `complete`, `generatedAt`
+  age and run status. DEV checks: `node apps/web/scripts/lifecycle-audit-snapshot.dev-cases.mjs`.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

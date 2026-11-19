@@ -251,7 +251,13 @@ export interface LifecycleAuditReport {
   flagged: Array<{ parkId: string; showName: string; auditFlag: string; silentDays: number; inactiveDays: number; status: string; silenceFlaggedAt: string | null }>;
   /** Decisions awaiting the research audit (audit_status = 'unreviewed'), newest first. */
   unreviewedEvents: Array<{ parkId: string; showName: string; eventType: string; localDate: string; occurredAt: string; evidence: unknown; coverageLimitations: unknown }>;
+  /** Phase 14.5E-B1 completeness metadata: all unreviewed events in the table (not just the returned page) and the page limit applied. */
+  unreviewedTotal: number;
+  eventLimit: number;
 }
+
+/** Hard ceiling for the optional `limit` query parameter of /api/catalog/lifecycle-audit. */
+export const LIFECYCLE_AUDIT_MAX_LIMIT = 1000;
 
 export async function readLifecycleAudit(q: Queryable, limit = 200): Promise<LifecycleAuditReport> {
   // Sequential: one client runs one query at a time (pg deprecates overlapping queries).
@@ -263,11 +269,14 @@ export async function readLifecycleAudit(q: Queryable, limit = 200): Promise<Lif
              FROM entertainment_lifecycle_state WHERE audit_flag IS NOT NULL ORDER BY park_id, show_name`);
   const ev = await q.query(`SELECT park_id, show_name, event_type, to_char(local_date, 'YYYY-MM-DD') AS d, occurred_at, evidence, coverage_limitations
              FROM entertainment_lifecycle_events WHERE audit_status = 'unreviewed' ORDER BY occurred_at DESC LIMIT $1`, [limit]);
+  const total = await q.query(`SELECT COUNT(*) AS n FROM entertainment_lifecycle_events WHERE audit_status = 'unreviewed'`);
   return {
     hidden: h.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), hiddenLocalDate: dateOrNull(r.d), hiddenAt: iso(r.hidden_at), hideCount: Number(r.hide_count), restoreCount: Number(r.restore_count), auditFlag: r.audit_flag == null ? null : String(r.audit_flag) })),
     legacyComebacks: lc.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), restoredAt: iso(r.restored_at), comebackCount: Number(r.restore_count), rehideCount: Number(r.hide_count), lastActiveDate: dateOrNull(r.d) })),
     flagged: f.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), auditFlag: String(r.audit_flag), silentDays: Number(r.silent_days), inactiveDays: Number(r.inactive_days), status: String(r.status), silenceFlaggedAt: iso(r.silence_flagged_at) })),
     unreviewedEvents: ev.rows.map((r) => ({ parkId: String(r.park_id), showName: String(r.show_name), eventType: String(r.event_type), localDate: String(r.d), occurredAt: iso(r.occurred_at) ?? "", evidence: r.evidence, coverageLimitations: r.coverage_limitations })),
+    unreviewedTotal: Number(total.rows[0]?.n ?? 0),
+    eventLimit: limit,
   };
 }
 

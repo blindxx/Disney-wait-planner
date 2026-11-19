@@ -157,6 +157,23 @@ app code) whenever `db-schema.sql` changes.
 - `CRON_SECRET` — required by `/api/cron/park-hours` (Vercel Cron, 02:00 UTC daily via `apps/web/vercel.json`); the route fails closed (500) when unset. Vercel sends it as `Authorization: Bearer`.
 - `CRON_SECRET` also gates `/api/cron/entertainment-lifecycle` (Phase 14.5C, twice daily at 03:00 and 06:00 UTC so each resort's end-of-day window is observed): the scheduled entertainment lifecycle monitor, which needs `DATABASE_URL` and the lifecycle tables from `pnpm --filter web run db:migrate` (migrate Production **and** Preview before deploying). Read-only audit feed: `GET /api/catalog/lifecycle-audit` with `x-dwp-catalog-api-key` (`DWP_CATALOG_API_KEY`).
 
+**Lifecycle audit snapshot bridge** (Phase 14.5E-B1; GitHub Actions, read-only)
+
+`.github/workflows/lifecycle-audit-snapshot.yml` (daily 09:17 UTC + manual run) reads the protected
+`GET /api/catalog/lifecycle-audit` and publishes a sanitized, additive snapshot to the dedicated
+`lifecycle-audit-snapshot` branch at `lifecycle-audit/snapshot.json` (never `main`; the repo is public, so only
+sanitized findings are exported). One-time setup (no values are committed):
+
+1. Deploy the 14.5E-B1 API first (the bridge refuses an API without the completeness metadata).
+2. Repo → Settings → Secrets and variables → Actions: secret `DWP_CATALOG_API_KEY` (same value as the production
+   key) and variable `DWP_AUDIT_BASE_URL` (`https://dwpapp.com`).
+3. Actions → "Lifecycle audit snapshot" → Run workflow once; confirm the data branch and file appear, and that the
+   ChatGPT GitHub connector can read that branch/file (not testable from the repo).
+4. If the repo has been inactive for 60 days GitHub disables scheduled workflows; re-enable them.
+The ChatGPT audit must check `completeness.complete`, `generatedAt` age (`staleAfterHours`, 48) and a failed/missing
+latest run before trusting the snapshot. The job holds no production write access; nothing here changes catalogs,
+the tracker or `audit_status`.
+
 **Ask Tom** (server-only — never expose these as `NEXT_PUBLIC_*`)
 
 - `TOM_API_URL` — Tom Railway API base URL
