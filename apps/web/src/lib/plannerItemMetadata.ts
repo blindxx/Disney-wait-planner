@@ -99,7 +99,7 @@ export type PlannerItemMetadata = {
 // "21:00") from a name before type lookup only, so an old imported/restored
 // item like "Fantasmic 9pm" still resolves by its activity name. Never
 // touches the stored/display name, only this module's own lookup key.
-function stripTrailingTimeForInference(name: string): string {
+export function stripTrailingTimeForInference(name: string): string {
   return name
     .replace(/\s*\b\d{1,2}(:\d{2})?\s*(am|pm)\b\s*$/i, "")
     .replace(/\s*\b\d{1,2}:\d{2}\s*$/, "")

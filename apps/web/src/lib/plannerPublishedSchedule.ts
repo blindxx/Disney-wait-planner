@@ -24,7 +24,7 @@
 
 import type { ParkId, ResortId } from "@disney-wait-planner/shared";
 import type { PlannerItemType } from "./plansTransfer";
-import { getPlannerItemMetadata, resolvePlannerItemEffectiveType } from "./plannerItemMetadata";
+import { getPlannerItemMetadata, resolvePlannerItemEffectiveType, stripTrailingTimeForInference } from "./plannerItemMetadata";
 import {
   PUBLISHED_PERFORMANCE_SCHEDULES,
   formatPublishedTime,
@@ -90,7 +90,8 @@ export function getPlannerPublishedScheduleRows(
   for (const item of items) {
     const type = resolvePlannerItemEffectiveType(item.type, item.name, resort);
     if (type !== "entertainment") continue;
-    const meta = getPlannerItemMetadata(item.name, type, resort);
+    // Same trailing-time normalization the type resolver and planner cards use ("Garden Rocks 7pm").
+    const meta = getPlannerItemMetadata(stripTrailingTimeForInference(item.name), type, resort);
     if (!meta.canonicalName || !meta.parkId || meta.lifecycle === "legacy") continue;
     const park = meta.parkId as ParkId;
     if (!records.some((r) => r.parkId === park && r.name === meta.canonicalName)) continue;
@@ -160,6 +161,12 @@ export const DEV_PLANNER_PUBLISHED_SCHEDULE_CASES: DevPlannerPublishedScheduleCa
     const frozen = JSON.stringify(items);
     const r = rows("2026-12-01", "epcot", items);
     return JSON.stringify(items) === frozen && r.filter((x) => x.name === "Candlelight Processional").length === 1 && r[0].source === "planned";
+  } },
+  { label: "annotated saved/imported names ('Candlelight 5:00 PM', 'Garden Rocks 7pm') resolve alone — unknown/no-performance notices are not suppressed", ok: () => {
+    const a = rows("2027-04-17", "epcot", [{ name: "Garden Rocks 7pm" }]);
+    const b = getPlannerPublishedScheduleRows("2026-03-10", "epcot", "WDW", [{ name: "Garden Rocks 7pm", type: "entertainment" }], new Date("2026-03-01T17:00:00Z"));
+    return a.length === 1 && a[0].name === "Garden Rocks Concert Series" && a[0].state === "unknown" && b.length === 1 && b[0].state === "no_performance" &&
+      rows("2027-04-17", "epcot", [{ name: "Candlelight 5:00 PM" }])[0]?.state === "unknown";
   } },
   { label: "planned show on a day with another effective park (or unresolved Auto park) still resolves by its own canonical EPCOT identity", ok: () =>
     rows("2026-12-01", "mk", [{ name: "Candlelight Processional", type: "entertainment" }])[0]?.state === "performance" &&
