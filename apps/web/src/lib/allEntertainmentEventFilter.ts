@@ -28,8 +28,9 @@
 
 import type { ParkId } from "@disney-wait-planner/shared";
 import type { AllEntertainmentEntry } from "./entertainmentAll";
-import { filterAllEntertainment } from "./entertainmentAll";
+import { filterAllEntertainment, showtimesRegionId, toggleExpanded } from "./entertainmentAll";
 import { getEntertainmentForPark } from "./entertainmentSuggestions";
+import { getPublishedFullSchedule, getPublishedScheduleLines } from "./publishedPerformanceSchedule";
 import { getResortLocalDate } from "./resortTime";
 import { SEASONAL_ENTERTAINMENT_EVENTS, SEASONAL_PROVIDER_ONLY_EVENTS } from "./seasonalEntertainment";
 import { SEASONAL_EVENTS, type SeasonalEventDefinition, type SeasonalEventSeasonRecord } from "./seasonalEventData";
@@ -103,6 +104,30 @@ export function resetAllEntertainmentFilters(): AllEntertainmentFilterState {
 export function showResetFilters(state: AllEntertainmentFilterState): boolean {
   const d = DEFAULT_ALL_ENTERTAINMENT_FILTERS;
   return state.event !== d.event || state.land !== d.land || state.operatingOnly !== d.operatingOnly || state.showOutOfSeason !== d.showOutOfSeason;
+}
+
+/**
+ * Expanded-disclosure state (schedule / all-times keys) after the Event dropdown changes: always cleared, so returning to a
+ * previously browsed event never shows a stale expanded schedule. Park switch and "Reset filters" clear it the same way;
+ * only manual toggles and nothing else (e.g. provider refreshes) change it otherwise.
+ */
+export function expandedAfterEventChange(_expanded: ReadonlySet<string>): Set<string> {
+  return new Set();
+}
+
+/** Intro copy under the filters. */
+export const ALL_ENTERTAINMENT_INTRO_DEFAULT = "Explore today's entertainment and showtimes around the park.";
+export const ALL_ENTERTAINMENT_INTRO_EVENT = "Explore entertainment and show schedules for this event.";
+export const ALL_ENTERTAINMENT_INTRO_FILTERED = "Explore entertainment that matches your filters.";
+
+/**
+ * Intro text for the active filters: an event selection takes priority; otherwise any other non-default filter
+ * (land, Operating only, out-of-season toggle — the same notion as "Reset filters" being shown); else the default.
+ * Pass the EFFECTIVE selections (a stale event/land already resolved to its default).
+ */
+export function getAllEntertainmentIntroText(state: AllEntertainmentFilterState): string {
+  if (state.event !== ALL_ENTERTAINMENT_EVENT_ALL) return ALL_ENTERTAINMENT_INTRO_EVENT;
+  return showResetFilters(state) ? ALL_ENTERTAINMENT_INTRO_FILTERED : ALL_ENTERTAINMENT_INTRO_DEFAULT;
 }
 
 /**
@@ -370,9 +395,9 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
   { label: "14.4D reset state carries no park/resort or provider fields (park switch and refetch effects are untouched)", ok: () =>
     Object.keys(resetAllEntertainmentFilters()).sort().join() === "event,land,operatingOnly,showOutOfSeason" },
   { label: "14.4D info card carries one concise availability disclaimer (no performance promise)", ok: () => EVENT_INFO_NOTE === "Entertainment shown is associated with this event. Individual performance dates and times may vary." },
-  { label: "14.4D parent grouping: Garden Rocks → Flower & Garden, Eat to the Beat → Food & Wine (via registry parentEventId)", ok: () =>
-    getAllEntryEventIds(mkProv("epcot", GARDEN_ROCKS, "g"), "epcot").join() === "epcot-flower-and-garden" &&
-    getAllEntryEventIds(mkProv("epcot", EAT_TO_THE_BEAT, "e"), "epcot").join() === "epcot-food-and-wine" },
+  { label: "14.4D parent grouping: Garden Rocks → Flower & Garden, Eat to the Beat → Food & Wine (via registry parentEventId; curated since 14.6B)", ok: () =>
+    getAllEntryEventIds(mkCur("epcot", "Garden Rocks Concert Series"), "epcot").join() === "epcot-flower-and-garden" &&
+    getAllEntryEventIds(mkCur("epcot", "Eat to the Beat Concert Series"), "epcot").join() === "epcot-food-and-wine" },
   { label: "14.4D park switch/reset: selection invalid for new park resolves to All; valid one kept", ok: () =>
     resolveEventSelection("hs", "mnsshp", NOW) === "" && resolveEventSelection("mk", "mnsshp", NOW) === "mnsshp" && resolveEventSelection("mk", "", NOW) === "" },
   { label: "14.4D checkbox visible only for All Entertainment", ok: () => showOutOfSeasonToggle("") && !showOutOfSeasonToggle("mnsshp") },
@@ -445,7 +470,96 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     info("mk", "mvmcp").rangeText === "Nov 8 – Dec 22, 2026" && info("mk", "mvmcp").nights?.length === 23 && EVENT_INFO_NOTE.includes("Individual performance dates and times may vary") },
   { label: "14.4.1 reset to default returns to performance-day filtering (event pool off, checkboxes shown again)", ok: () =>
     resolveEventSelection("mk", resetAllEntertainmentFilters().event, NOW) === "" && showOutOfSeasonToggle("") },
+  { label: "event switch clears disclosures: expand Broadway's schedule, switch event and back → collapsed; manual toggle and Reset still work; unrelated state never collapses it", ok: () => {
+    const DOB_ID = "curated:epcot:Disney on Broadway Concert Series", CPR_ID = "curated:epcot:Candlelight Processional";
+    let expanded: Set<string> = toggleExpanded(new Set<string>(), `schedule:${DOB_ID}`);
+    expanded = toggleExpanded(expanded, CPR_ID); // an all-times disclosure too
+    const opened = expanded.has(`schedule:${DOB_ID}`) && expanded.has(CPR_ID);
+    // a provider refresh changes entries, not the disclosure set: the set object is untouched by anything but these handlers
+    const afterRefresh = new Set(expanded);
+    const sameAfterRefresh = afterRefresh.has(`schedule:${DOB_ID}`) && afterRefresh.size === 2;
+    expanded = expandedAfterEventChange(expanded); // → Food & Wine
+    expanded = expandedAfterEventChange(expanded); // → back to Festival of the Arts
+    const collapsed = !expanded.has(`schedule:${DOB_ID}`) && !expanded.has(CPR_ID) && expanded.size === 0;
+    expanded = toggleExpanded(expanded, `schedule:${DOB_ID}`); // manual expand works again
+    const reopened = expanded.has(`schedule:${DOB_ID}`);
+    expanded = toggleExpanded(expanded, `schedule:${DOB_ID}`); // manual collapse works
+    const closed = !expanded.has(`schedule:${DOB_ID}`);
+    const input = new Set([`schedule:${DOB_ID}`]);
+    const pure = expandedAfterEventChange(input) !== input && input.size === 1; // returns a fresh set, never mutates the old one
+    return opened && sameAfterRefresh && collapsed && reopened && closed && pure;
+  } },
+  { label: "intro text: default, event (takes priority, even with other filters), and other-filters-only wording", ok: () => {
+    const d = resetAllEntertainmentFilters();
+    return getAllEntertainmentIntroText(d) === "Explore today's entertainment and showtimes around the park." &&
+      getAllEntertainmentIntroText({ ...d, event: "mvmcp" }) === "Explore entertainment and show schedules for this event." &&
+      getAllEntertainmentIntroText({ ...d, event: "mvmcp", land: "Fantasyland", operatingOnly: true, showOutOfSeason: true }) === "Explore entertainment and show schedules for this event." &&
+      [{ land: "Fantasyland" }, { operatingOnly: true }, { showOutOfSeason: true }, { land: "World Showcase", operatingOnly: true }]
+        .every((o) => getAllEntertainmentIntroText({ ...d, ...o }) === "Explore entertainment that matches your filters.") &&
+      getAllEntertainmentIntroText(resetAllEntertainmentFilters()) === ALL_ENTERTAINMENT_INTRO_DEFAULT;
+  } },
+  { label: "intro text follows reset: after Reset filters the default copy returns", ok: () =>
+    getAllEntertainmentIntroText({ event: "epcot-food-and-wine", land: "World Showcase", operatingOnly: true, showOutOfSeason: true }) === ALL_ENTERTAINMENT_INTRO_EVENT &&
+    getAllEntertainmentIntroText(resetAllEntertainmentFilters()) === ALL_ENTERTAINMENT_INTRO_DEFAULT },
   { label: "14.4D info is null for All Entertainment / stale selections", ok: () => describeAllEntertainmentEvent("mk", "", NOW) === null && describeAllEntertainmentEvent("hs", "mnsshp", NOW) === null },
+
+  // ── Phase 14.6B: festival filters retain their published-schedule show ──
+  ...(() => {
+    const at = (date: string) => new Date(`${date}T17:00:00Z`);
+    const DOB = "Disney on Broadway Concert Series", GR = "Garden Rocks Concert Series", ETTB = "Eat to the Beat Concert Series", CPR = "Candlelight Processional";
+    const pool = (event: string, date: string, live: AllEntertainmentEntry[] = []) => getAllEntertainmentEventEntries(live, "epcot", event, at(date));
+    const has = (event: string, date: string, name: string, live?: AllEntertainmentEntry[]) => pool(event, date, live).filter((e) => e.name === name).length;
+    return [
+      { label: "14.6B festival filters: each EPCOT festival keeps its associated show exactly once, in season and out (Arts→Broadway, Flower & Garden→Garden Rocks, Food & Wine→Eat to the Beat, Holidays→Candlelight)", ok: () =>
+        [["2027-01-20", "epcot-festival-of-the-arts", DOB], ["2026-03-07", "epcot-flower-and-garden", GR], ["2026-10-12", "epcot-food-and-wine", ETTB], ["2026-12-01", "epcot-festival-of-the-holidays", CPR],
+          ["2026-11-19", "epcot-festival-of-the-arts", DOB], ["2026-11-19", "epcot-flower-and-garden", GR], ["2026-11-19", "epcot-food-and-wine", ETTB], ["2026-11-19", "epcot-festival-of-the-holidays", CPR]]
+          .every(([d, ev, n]) => has(ev, d, n) === 1) },
+      { label: "14.6B festival filters: the Food & Wine event still lists Eat to the Beat after its run ended Nov 16 (season-ended browsing preserved; narrower window stays on the offering)", ok: () =>
+        has("epcot-food-and-wine", "2026-11-19", ETTB) === 1 && info("epcot", "epcot-food-and-wine", at("2026-11-19")).offerings.length === 0 },
+      { label: "14.6B festival filters: a confirmed non-performance day keeps Garden Rocks in its festival with the official status line (Mar 10 2026), while default All hides it", ok: () => {
+        const d = "2026-03-10";
+        const listed = pool("epcot-flower-and-garden", d).find((e) => e.name === GR)!;
+        const dflt = applyAllEntertainmentSeasonalVisibility([listed], "epcot", "WDW", d, true, at(d));
+        const lines = getPublishedScheduleLines("epcot", GR, at(d));
+        return !!listed && dflt.length === 0 && lines[0] === "No performance today (official schedule)" && lines[1] === "Next: Fri, Mar 13";
+      } },
+      { label: "14.6B festival filters: a confirmed performance day shows the official lines in the filter (Broadway Jan 20 2027 → times + pairing); the default list also keeps it", ok: () => {
+        const d = "2027-01-20";
+        const listed = pool("epcot-festival-of-the-arts", d).find((e) => e.name === DOB)!;
+        const lines = getPublishedScheduleLines("epcot", DOB, at(d));
+        return !!listed && applyAllEntertainmentSeasonalVisibility([listed], "epcot", "WDW", d, false, at(d)).length === 1 && lines[0] === "Official schedule: 5:15 PM • 6:30 PM • 7:45 PM" && lines[1] === "Featuring: Ashley Brown & Josh Strickland";
+      } },
+      { label: "14.6B festival filters: before the season the filter still lists the show and carries the next confirmed date for trip planning (Candlelight Nov 19 → Nov 27); unannounced Garden Rocks 2027 has none", ok: () =>
+        has("epcot-festival-of-the-holidays", "2026-11-19", CPR) === 1 &&
+        getPublishedScheduleLines("epcot", CPR, at("2026-11-19")).join("|") === "Next: Fri, Nov 27 • 4:45 PM • 6:30 PM • 8:00 PM" &&
+        !getPublishedScheduleLines("epcot", GR, at("2026-11-19")).some((l) => l.startsWith("Next:")) },
+      { label: "14.6B duplicate prevention: a live curated entry and the synthesized catalog record never double-list a festival show", ok: () => {
+        const live = [mkCur("epcot", GR), mkCur("epcot", DOB)];
+        return has("epcot-flower-and-garden", "2026-03-07", GR, live) === 1 && has("epcot-festival-of-the-arts", "2027-01-20", DOB, live) === 1 &&
+          new Set(pool("epcot-festival-of-the-holidays", "2026-12-01").map((e) => e.id)).size === pool("epcot-festival-of-the-holidays", "2026-12-01").length;
+      } },
+      { label: "14.6B full schedule disclosure: offered for exactly the shows with a current official schedule in their festival filter (Broadway, Candlelight today); not for ended seasons (Garden Rocks, Eat to the Beat) or uncovered shows (JOYFUL!)", ok: () => {
+        const d = "2026-11-19";
+        const full = (event: string, n: string) => { const e = pool(event, d).find((x) => x.name === n); return e ? getPublishedFullSchedule("epcot", e.name, at(d)) : "missing"; };
+        return full("epcot-festival-of-the-arts", DOB) !== null && full("epcot-festival-of-the-arts", DOB) !== "missing" &&
+          full("epcot-festival-of-the-holidays", CPR) !== null && full("epcot-festival-of-the-holidays", CPR) !== "missing" &&
+          full("epcot-flower-and-garden", GR) === null && full("epcot-food-and-wine", ETTB) === null &&
+          getPublishedFullSchedule("epcot", "JOYFUL! A Celebration of the Season", at(d)) === null;
+      } },
+      { label: "14.6B full schedule disclosure state: the schedule toggle is independent of the show-all-times toggle, per entry, with distinct region ids", ok: () => {
+        const id = "curated:epcot:Candlelight Processional", other = "curated:epcot:Disney on Broadway Concert Series";
+        const a = toggleExpanded(new Set<string>(), `schedule:${id}`);
+        const b = toggleExpanded(a, id);
+        const c = toggleExpanded(b, `schedule:${id}`);
+        return a.has(`schedule:${id}`) && !a.has(id) && b.has(id) && b.has(`schedule:${id}`) && !c.has(`schedule:${id}`) && c.has(id) && !a.has(`schedule:${other}`) &&
+          showtimesRegionId(`schedule:${id}`) !== showtimesRegionId(id) && showtimesRegionId(`schedule:${id}`) !== showtimesRegionId(`schedule:${other}`) && showtimesRegionId(`schedule:${id}`) === showtimesRegionId(`schedule:${id}`);
+      } },
+      { label: "14.6B festival filters: every festival has qualifying options and no provider-only remnants remain for the promoted offerings", ok: () =>
+        ["epcot-festival-of-the-arts", "epcot-flower-and-garden", "epcot-food-and-wine", "epcot-festival-of-the-holidays"].every((v) => vals("epcot", at("2026-11-19")).includes(v)) &&
+        !SEASONAL_PROVIDER_ONLY_EVENTS.some((r) => r.entityId === GARDEN_ROCKS || r.entityId === EAT_TO_THE_BEAT) &&
+        ["Garden Rocks Concert Series", "Eat to the Beat Concert Series"].every((n) => (SEASONAL_ENTERTAINMENT_EVENTS[n] ?? []).length === 1) },
+    ] as DevAllEntertainmentEventCase[];
+  })(),
 ];
 
 export function runDevAllEntertainmentEventFilterCases(): string[] {

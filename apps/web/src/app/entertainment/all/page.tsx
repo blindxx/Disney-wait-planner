@@ -48,6 +48,7 @@ import { PARTIAL_SHOWTIMES_NOTE } from "../../../lib/entertainmentShowtimes";
 import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
+import { getPublishedFullSchedule, getPublishedScheduleLines, type PublishedFullSeason } from "../../../lib/publishedPerformanceSchedule";
 import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
 import { filterLifecycleHiddenEntries, getLifecycleHiddenNames, legacyIdentityOptions, mergeLegacyComebackEntries, performingNamesFromAllEntries, splitLegacyComebackEntries } from "../../../lib/entertainmentLifecycleVisibility";
 import {
@@ -55,6 +56,8 @@ import {
   EVENT_INFO_NOTE,
   resetAllEntertainmentFilters,
   showResetFilters,
+  getAllEntertainmentIntroText,
+  expandedAfterEventChange,
   EVENT_NIGHTS_PREVIEW,
   EVENT_NO_ENTERTAINMENT_MESSAGE,
   getAllEntertainmentEventEntries,
@@ -97,6 +100,15 @@ const RESPONSIVE_CSS = `
   .entertainment-card:last-child { border-bottom: none; }
   .all-empty { padding: 48px 20px; text-align: center; color: var(--text-muted); font-size: 15px; background-color: var(--surface); }
   .all-toggle { background: none; border: none; padding: 4px 0; margin-top: 2px; font-size: 12px; color: var(--status-info); cursor: pointer; }
+  .all-sched-toggle { min-height: 32px; padding: 6px 0; font-size: 13px; }
+  .all-sched { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 13px; line-height: 1.35; }
+  .all-sched h4 { margin: 8px 0 2px; font-size: 13px; font-weight: 600; color: var(--text-strong); }
+  .all-sched h4:first-child { margin-top: 0; }
+  .all-sched ul { list-style: none; margin: 4px 0 0; padding: 0; }
+  .all-sched li { padding: 5px 0; overflow-wrap: anywhere; }
+  .all-sched .all-sched-dates { font-weight: 600; color: var(--text-strong); }
+  .all-sched .all-sched-meta { color: var(--text-muted); }
+  .all-sched a { color: var(--status-info); }
   .all-select-field { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; }
   .all-select-field > label { flex: 0 0 44px; font-size: 13px; color: var(--text-muted); }
   .all-event-select, .all-land-select { width: 200px; max-width: 100%; min-width: 0; text-overflow: ellipsis; padding-right: 32px !important; }
@@ -169,6 +181,40 @@ function humanizeStatus(s: string): string {
 }
 
 /**
+ * Phase 14.6B: expanded official schedule for one show (grouped dates, times, performers/narrators). Pure presentation of
+ * `getPublishedFullSchedule`; date-only groups never show a time, and each season links its official source.
+ */
+function PublishedScheduleSection({ seasons, id }: { seasons: PublishedFullSeason[]; id: string }) {
+  return (
+    <div id={id} className="all-sched" role="region" aria-label="Official performance schedule">
+      {seasons.map((s) => (
+        <div key={s.seasonYear}>
+          <h4>{s.seasonYear} season · {s.rangeText}</h4>
+          <div className="all-sched-meta">
+            {s.commonTimes ? `Performances: ${s.commonTimes}` : s.timesNotPublished ? "Performance times not published" : "Times vary by date"}
+            {s.omittedPastDates > 0 && ` · ${s.omittedPastDates} earlier ${s.omittedPastDates === 1 ? "date" : "dates"} not shown`}
+            {s.completeness === "partial" && " · Partial schedule: more dates may be announced"}
+          </div>
+          <ul>
+            {s.groups.map((g) => (
+              <li key={g.id}>
+                <div className="all-sched-dates">{g.dates}</div>
+                {g.performers.length > 0 && <div>{s.performerLabel}: {g.performers.join(" & ")}</div>}
+                {g.timesText && <div className="all-sched-meta">{g.timesText}</div>}
+                {g.note && <div className="all-sched-meta">{g.note}</div>}
+              </li>
+            ))}
+          </ul>
+          <div className="all-sched-meta" style={{ marginTop: "4px" }}>
+            Source: <a href={s.source.url} target="_blank" rel="noopener noreferrer">{s.source.title}</a> (verified {s.source.verifiedOn})
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
  * One card. Collapsed: exactly the Waits & Shows showtime line (upcoming /
  * in-progress times, or the status message). Expanded: the full daily schedule
  * with passed times muted.
@@ -179,20 +225,32 @@ function AllEntertainmentCard({
   now,
   expanded,
   onToggle,
+  scheduleOpen,
+  onToggleSchedule,
 }: {
   entry: AllEntertainmentEntry;
   stale: boolean;
   now: Date;
   expanded: boolean;
   onToggle: () => void;
+  scheduleOpen: boolean;
+  onToggleSchedule: () => void;
 }) {
   const view = allEntryViewAt(entry, now);
   const isUpcoming = view.status === "upcoming";
   const providerStatus = allEntryProviderStatus(entry);
   const nonOperating = providerStatus && providerStatus !== "OPERATING" ? humanizeStatus(providerStatus) : null;
   const locationLabel = allEntryLocationLabel(entry);
-  const { showFull, showShowtimes, showtimesStale, hoursStale, staleScope } = allEntryLayout(view, expanded, stale);
+  const layout = allEntryLayout(view, expanded, stale);
+  const { showFull, showtimesStale, hoursStale, staleScope } = layout;
+  // Phase 14.6B: official published schedule lines for curated shows that have one (also on confirmed non-performance days
+  // and ahead of the season for trip planning). They replace the "Showtimes not tracked" placeholder of provider-less shows.
+  const publishedLines = entry.source === "curated" ? getPublishedScheduleLines(entry.showtime.parkId, entry.name, now) : [];
+  const showShowtimes = layout.showShowtimes && !(publishedLines.length > 0 && entry.showtime.status === "unmapped");
   const timesId = showtimesRegionId(entry.id);
+  // Full official schedule (in-progress/upcoming seasons only) behind a disclosure; the compact lines above stay as-is.
+  const fullSchedule = entry.source === "curated" ? getPublishedFullSchedule(entry.showtime.parkId, entry.name, now) : null;
+  const scheduleId = showtimesRegionId(`schedule:${entry.id}`);
 
   return (
     <div className="entertainment-card">
@@ -243,6 +301,11 @@ function AllEntertainmentCard({
           {showtimesStale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
+      {publishedLines.map((line) => (
+        <div key={line} style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text)", marginTop: "4px" }}>
+          {line}
+        </div>
+      ))}
       {view.hoursText && (
         <div style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text-muted)", marginTop: showShowtimes ? "2px" : "4px" }}>
           {view.hoursText}
@@ -257,6 +320,16 @@ function AllEntertainmentCard({
         <button type="button" className="all-toggle" onClick={onToggle} aria-expanded={expanded} aria-controls={timesId}>
           {expanded ? "Show fewer" : "Show all times"}
         </button>
+      )}
+      {fullSchedule && (
+        <>
+          <div>
+            <button type="button" className="all-toggle all-sched-toggle" onClick={onToggleSchedule} aria-expanded={scheduleOpen} aria-controls={scheduleId}>
+              {scheduleOpen ? "Hide schedule" : "View full schedule"}
+            </button>
+          </div>
+          {scheduleOpen && <PublishedScheduleSection seasons={fullSchedule} id={scheduleId} />}
+        </>
       )}
     </div>
   );
@@ -415,6 +488,7 @@ export default function AllEntertainmentPage() {
     setOperatingOnly(d.operatingOnly);
     setShowOutOfSeason(d.showOutOfSeason);
     setNightsExpanded(false);
+    setExpanded(new Set()); // collapse open schedule / all-times disclosures, like a park switch does
     eventSelectRef.current?.focus(); // the button unmounts; keep keyboard focus in the filter bar
   }
 
@@ -543,7 +617,7 @@ export default function AllEntertainmentPage() {
               className="all-event-select"
               value={effectiveEvent}
               title={eventOptions.find((o) => o.value === effectiveEvent)?.label}
-              onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); }}
+              onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); setExpanded(expandedAfterEventChange); }}
               style={selectStyle}
             >
               {eventOptions.map((o) => (
@@ -595,7 +669,7 @@ export default function AllEntertainmentPage() {
         )}
 
         <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
-          Explore today&apos;s entertainment and showtimes throughout the park.
+          {getAllEntertainmentIntroText({ event: effectiveEvent, land: effectiveLand, operatingOnly, showOutOfSeason })}
         </p>
 
         <div className="entertainment-grid">
@@ -621,6 +695,8 @@ export default function AllEntertainmentPage() {
                 now={displayNow}
                 expanded={expanded.has(entry.id)}
                 onToggle={() => setExpanded((prev) => toggleExpanded(prev, entry.id))}
+                scheduleOpen={expanded.has(`schedule:${entry.id}`)}
+                onToggleSchedule={() => setExpanded((prev) => toggleExpanded(prev, `schedule:${entry.id}`))}
               />
             ))
           )}

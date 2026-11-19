@@ -209,6 +209,11 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // Phase 14.5B: Disney on Broadway Concert Series (America Gardens Theatre) — a festival concert run, associated with the
   // EPCOT International Festival of the Arts via SEASONAL_ENTERTAINMENT_EVENTS (no availabilityTheme: theme is holiday-only).
   { name: "Disney on Broadway Concert Series", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal" },
+  // Phase 14.6B: the other two EPCOT festival concert series (America Gardens Theatre, American Adventure pavilion), promoted from
+  // provider-only. Each is associated with its festival via SEASONAL_ENTERTAINMENT_EVENTS (no availabilityTheme: theme is holiday-only)
+  // and mapped to its verified ThemeParks SHOW; official dated lineups live in publishedPerformanceSchedule.ts.
+  { name: "Garden Rocks Concert Series", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal" },
+  { name: "Eat to the Beat Concert Series", resort: "WDW", location: "EPCOT", parkId: "epcot", land: "World Showcase", availabilityType: "seasonal" },
 
   // ---- Hollywood Studios ----
   { name: "Fantasmic!", resort: "WDW", location: "Hollywood Studios", parkId: "hs", land: "Sunset Boulevard", availabilityType: "regular" },
@@ -419,6 +424,9 @@ const ENTERTAINMENT_ALIASES: Record<string, string> = {
   "musical christmas": "a musical christmas with mariachi alegr a de disneyland miguel",
   "disney on broadway": "disney on broadway concert series",
   "broadway concert series": "disney on broadway concert series",
+  // Phase 14.6B
+  "garden rocks": "garden rocks concert series",
+  "eat to the beat": "eat to the beat concert series",
   // Phase 14.6A
   "friendship faire": "mickeys magical friendship faire",
   "feathered friends": "feathered friends in flight",
@@ -742,6 +750,14 @@ export const DEV_ENTERTAINMENT_ALIAS_CASES: Array<{
   { input: "Disney on Broadway Concert Series", resort: "WDW", expectedKey: "disney on broadway concert series" },
   { input: "Disney on Broadway", resort: "WDW", expectedKey: "disney on broadway concert series" },
   { input: "Disney on Broadway", resort: "DLR", expectedKey: null },
+  // Phase 14.6B: Garden Rocks / Eat to the Beat (EPCOT, WDW-only) — canonical names, short forms and DLR negatives
+  { input: "Garden Rocks Concert Series", resort: "WDW", expectedKey: "garden rocks concert series" },
+  { input: "Garden Rocks", resort: "WDW", expectedKey: "garden rocks concert series" },
+  { input: "Garden Rocks", resort: "DLR", expectedKey: null },
+  { input: "Eat to the Beat Concert Series", resort: "WDW", expectedKey: "eat to the beat concert series" },
+  { input: "eat to the beat", resort: "WDW", expectedKey: "eat to the beat concert series" },
+  { input: "Eat to the Beat", resort: "DLR", expectedKey: null },
+  { input: "Candlelight", resort: "WDW", expectedKey: "candlelight processional" },
   // Holidays at the Disneyland Resort 2026 refresh (DLR)
   { input: "Wintertime Enchantment", resort: "DLR", expectedKey: "wintertime enchantment" },
   { input: "Wintertime Enchantment at Sleeping Beauty's Winter Castle", resort: "DLR", expectedKey: "wintertime enchantment" },

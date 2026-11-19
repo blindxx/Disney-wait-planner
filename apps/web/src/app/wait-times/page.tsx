@@ -70,6 +70,7 @@ import {
   type ParkEntertainmentShowtimes,
 } from "../../lib/entertainmentShowtimes";
 import { getResortLocalDate } from "../../lib/resortTime";
+import { getPublishedScheduleLines } from "../../lib/publishedPerformanceSchedule";
 import { applyRetainedInactivity, isEntertainmentHiddenToday, nextRetainedInactivity, partitionPartyEntertainment, type RetainedInactivity } from "../../lib/seasonalVisibility";
 import { activeRetainedEvidence, findShowtimeEntry, getLegacyComebackPlaces, getLifecycleHiddenNames, legacyIdentityOptions, nextRetainedLifecycleEvidence, performingNamesFromShowtimes, type RetainedLifecycleEvidence } from "../../lib/entertainmentLifecycleVisibility";
 import {
@@ -543,7 +544,10 @@ function EntertainmentCard({
   // blank, distinct from "No showtimes posted". Passed performances are omitted
   // (re-evaluated at render); complete normalized data is untouched.
   const display = showtime ? entryDisplayAt(showtime, now) : null;
-  const showtimeText = !display
+  // Phase 14.6B: official published schedule lines (EPCOT festival concerts + Candlelight Processional). Where the show has
+  // no provider record, they replace the "Showtimes not tracked" placeholder; live provider data stays supplemental.
+  const publishedLines = getPublishedScheduleLines(entertainment.parkId, entertainment.name, now);
+  const showtimeText = !display || (publishedLines.length > 0 && display.status === "unmapped")
     ? null
     : display.status === "upcoming"
       ? display.remaining.map((p) => p.localTime).join(" • ")
@@ -594,6 +598,11 @@ function EntertainmentCard({
           {stale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
+      {publishedLines.map((line) => (
+        <div key={line} style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text)", marginTop: "4px" }}>
+          {line}
+        </div>
+      ))}
     </div>
   );
 }

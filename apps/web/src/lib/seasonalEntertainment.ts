@@ -127,7 +127,18 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   // America Gardens Theatre; no ThemeParks entity exists, so no showtimes are modelled or inferred.
   "Disney on Broadway Concert Series": [{
     eventId: "epcot-festival-of-the-arts", kind: "season",
-    note: "Official (Disney Parks Blog, 2026-11-10): nightly Jan 15–Mar 1, 2027, three performances at America Gardens Theatre; rotating performer pairings by date are published but not modelled here.",
+    note: "Official (Disney Parks Blog, 2026-11-10): nightly Jan 15–Mar 1, 2027, three performances at America Gardens Theatre; the dated performer pairings and times are modelled in publishedPerformanceSchedule.ts.",
+  }],
+  // Phase 14.6B: festival concert series promoted from provider-only (same event ids/notes as their former provider-only rows).
+  // Garden Rocks follows the parent Flower & Garden window; Eat to the Beat is its own narrower registry event. Day-level
+  // dates/lineups come only from publishedPerformanceSchedule.ts (never inferred from these windows).
+  "Garden Rocks Concert Series": [{
+    eventId: "epcot-flower-and-garden", kind: "season",
+    note: "Parent-festival window only; performance days are not nightly — dated lineups come from the official published schedule (publishedPerformanceSchedule.ts), never assumed from the window.",
+  }],
+  "Eat to the Beat Concert Series": [{
+    eventId: "epcot-eat-to-the-beat", kind: "season",
+    note: "Concert series ends Nov 16, 2026 — five days before the festival (Nov 21): modelled as its own registry event, not the parent festival.",
   }],
   // Frightfully Fun Parade (DLR, DCA): Oogie Boogie Bash entertainment. Official
   // 2026 evidence confirms it did NOT return for the 2026 season (replaced by
@@ -288,10 +299,8 @@ export const SEASONAL_PROVIDER_ONLY_EVENTS: SeasonalProviderEntertainmentAssocia
   partyOnly("hs", "74b46a33-ec93-4222-a3d5-d8372b1498e9", "Grand Avenue Dance Party at Disney Jollywood Nights", "jollywood-nights"),
   partyOnly("hs", "71da34dd-a27e-4db5-aef3-f880ef939f98", "Pixar Disco at Disney Jollywood Nights", "jollywood-nights"),
   // EPCOT festivals (park admission). Concert names carry the festival in the provider record.
-  seasonOnly("epcot", "0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival", "epcot-flower-and-garden",
-    "Parent-festival window only; day-level schedule not verified (sources disagree between nightly and weekends) — never assumed to perform every festival day."),
-  seasonOnly("epcot", "d6bb186c-382f-4ae6-bc76-fde8f141ed69", "Eat to the Beat Concert Series Presented by Enterprise® at EPCOT International Food & Wine Festival", "epcot-eat-to-the-beat",
-    "Concert series ends Nov 16, 2026 — five days before the festival (Nov 21): modelled as its own registry event, not the parent festival."),
+  // Phase 14.6B: Garden Rocks and Eat to the Beat are now curated catalog entries (SEASONAL_ENTERTAINMENT_EVENTS) mapped to their
+  // ThemeParks SHOWs; their former provider-only rows were removed so no card is duplicated.
   // DCA festivals / holidays (park admission).
   seasonOnly("dca", "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "Cookin' with the Jammin’ Chefs", "dca-food-and-wine",
     "Disneyland press release: daily festival entertainment (Mar 6–Apr 27, 2026)."),
@@ -542,14 +551,14 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
     return seasonRows.length >= 5 && seasonRows.every((r) => r.associations.every((a) => { const e = getSeasonalEvent(a.eventId)!; return e.format === "continuous" && e.parkIds.includes(r.parkId); }));
   } },
   { label: "14.4B: Garden Rocks follows the parent Flower & Garden window only (2027 in-window season, outside off-season, unannounced 2028 neutral)", ok: () => {
-    const id = "0e35a7a2-c2cd-451b-88e2-afc9d370e69e";
-    return prank("epcot", id, "WDW", "2026-11-10") === "off-season" && prank("epcot", id, "WDW", "2027-04-01") === "season" &&
-      prank("epcot", id, "WDW", "2027-06-15") === "off-season" && prank("epcot", id, "WDW", "2028-04-01") === "neutral";
+    const n = "Garden Rocks Concert Series"; // curated since 14.6B (same association as its former provider-only row)
+    return rank(n, "WDW", "2026-11-10", "epcot") === "off-season" && rank(n, "WDW", "2027-04-01", "epcot") === "season" &&
+      rank(n, "WDW", "2027-06-15", "epcot") === "off-season" && rank(n, "WDW", "2028-04-01", "epcot") === "neutral";
   } },
   { label: "14.4B: Eat to the Beat is season through Nov 16 but off-season Nov 17–21 even though the festival is still running (date-specific limit)", ok: () => {
-    const id = "d6bb186c-382f-4ae6-bc76-fde8f141ed69";
-    return prank("epcot", id, "WDW", "2026-11-12") === "season" && prank("epcot", id, "WDW", "2026-11-16") === "season" &&
-      prank("epcot", id, "WDW", "2026-11-17") === "off-season" && prank("epcot", id, "WDW", "2026-11-21") === "off-season" && prank("epcot", id, "WDW", "2027-09-15") === "neutral";
+    const n = "Eat to the Beat Concert Series"; // curated since 14.6B
+    return rank(n, "WDW", "2026-11-12", "epcot") === "season" && rank(n, "WDW", "2026-11-16", "epcot") === "season" &&
+      rank(n, "WDW", "2026-11-17", "epcot") === "off-season" && rank(n, "WDW", "2026-11-21", "epcot") === "off-season" && rank(n, "WDW", "2027-09-15", "epcot") === "neutral";
   } },
   { label: "14.4B: DCA Food & Wine acts off-season in Nov 2026, unknown in 2027; Toy Drummers season Nov 13 – Jan 6, unknown after", ok: () => {
     const chefs = "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", kitties = "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", drummers = "e9c263c4-80dc-4431-bfc9-581a0ff1f578";
