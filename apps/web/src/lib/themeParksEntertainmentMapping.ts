@@ -171,6 +171,8 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Shadows of Memory: A Skywalker Saga", "disneyland", show("fa0ef252-8002-4c39-934b-46c3231d206e", "Shadows of Memory: A Skywalker Saga")),
   mapped("Tapestry of Happiness", "disneyland", show("34f7bd8a-ec8e-41ac-9d63-d94ffc54f1ef", "Tapestry of Happiness")),
   mapped("Fire of the Rising Moons", "disneyland", show("e9ef1443-c735-43b6-81c6-45e53527cf93", "Fire of the Rising Moons")),
+  // Phase 14.6A: provider SHOW parented to Disneyland Park (verified 2026-11-19); previously provider-only (location row removed).
+  mapped("Storytelling at Royal Theatre", "disneyland", show("72340a8a-b6d2-474f-aca5-5ea7d2d52335", "Storytelling at Royal Theatre")),
 
   // ---- Disney California Adventure ----
   // World of Color keeps ONE canonical identity; the provider publishes each edition as its own SHOW record
@@ -182,6 +184,8 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   ),
   // Phase 14.4B: provider SHOW parented to DCA (verified 2026-11-10); Plaza de la Familia festival show.
   mapped("The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", "dca", show("0ee981af-9e3b-4c36-80a2-a7f00fa4841f", "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!")),
+  // Phase 14.6A: no provider SHOW record out of season (DCA children verified 2026-11-19: 54 SHOWs, none match). Never guessed; map when published.
+  unmapped("Mulan's Lunar New Year Procession", "dca", `${NOT_IN_PROVIDER}; Lunar New Year festival only (2026 run Jan 23–Feb 22; 2027 not yet published)`),
   unmapped("Frightfully Fun Parade", "dca", `${NOT_IN_PROVIDER}; replaced for 2026 by Madame Leota's Swinging Wake`),
   // Phase 14.4B: provider lists a DCA-parented SHOW (distinct UUID from the Hollywood Studios one; verified 2026-11-10).
   mapped("Disney Jr. Mickey Mouse Clubhouse Live!", "dca", show("8c0a4fdb-69e0-4e4e-ab80-d8247edabe3a", "Disney Jr. Mickey Mouse Clubhouse Live!")),
@@ -200,6 +204,8 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Disney Starlight: Dream the Night Away", "mk", show("d69261dc-62b8-434c-83bd-93649b43c408", "Disney Starlight: Dream the Night Away")),
   mapped("Festival of Fantasy Parade", "mk", show("ee56b2f3-fd49-4a29-ae1a-2d321549a633", "Disney Festival of Fantasy Parade")),
   mapped("Disney Adventure Friends Cavalcade", "mk", show("f819079e-644e-4fce-bda3-26b899ac7027", "Disney Adventure Friends Cavalcade")),
+  // Phase 14.6A: provider SHOW parented to Magic Kingdom (verified 2026-11-19).
+  mapped("Mickey's Magical Friendship Faire", "mk", show("4c31b3ad-5dc9-437f-ac1a-0fdff36a2818", "Mickey's Magical Friendship Faire")),
   mapped("Mickey's Boo-To-You Halloween Parade", "mk", show("5c00cd7c-b207-4d9d-9c8c-a8d418fc5425", "Mickey’s Boo-To-You Halloween Parade at Mickey's Not-So-Scary Halloween Party")),
   // Phase 14.4B: Christmas parade is published as a standalone SHOW (performs on non-party dates too) plus a
   // party-labelled SHOW. Both are the same DWP show; a verified performance today overrides seasonal hiding.
@@ -242,6 +248,9 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   mapped("Festival of the Lion King", "ak", show("3a4e0f49-f9ff-4481-a95b-d4952cdf6097", "Festival of the Lion King")),
   mapped("Finding Nemo: The Big Blue... and Beyond!", "ak", show("95712b31-ceed-4f7d-be3e-3d5e6badac5c", "Finding Nemo: The Big Blue... and Beyond!")),
   mapped("Zootopia: Better Zoogether!", "ak", attraction("1b15c77b-0311-4171-8e59-7f38e6d60754", "Zootopia: Better Zoogether!")),
+  // Phase 14.6A: provider SHOW records parented to Animal Kingdom (verified 2026-11-19); previously provider-only (location rows removed).
+  mapped("Feathered Friends in Flight!", "ak", show("d8214ba6-22a7-4a92-8977-bae3779d5c4c", "Feathered Friends in Flight!")),
+  mapped("Tree of Life Awakenings", "ak", show("2a55aee6-c87a-4bda-a3d4-b022693a62a3", "Tree of Life Awakenings")),
 ];
 
 const MAPPING_BY_KEY: Map<string, EntertainmentProviderMapping> = new Map();
@@ -881,8 +890,16 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
     check("14.4B scope: festival concert acts and the Holiday Toy Drummers stay provider-only (not curated, not mapped)",
       ["0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "d6bb186c-382f-4ae6-bc76-fde8f141ed69", "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", "e9c263c4-80dc-4431-bfc9-581a0ff1f578"]
         .every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
-    check("14.4B scope: Mulan's procession / Hurry Home are not catalogued without verified provider identity",
-      !ENTERTAINMENT_PLACES.some((p) => /mulan|hurry home/i.test(p.name)));
+    check("14.4B scope: Hurry Home is not catalogued without verified provider identity",
+      !ENTERTAINMENT_PLACES.some((p) => /hurry home/i.test(p.name)));
+    check("14.6A scope: Mulan's procession is catalogued once (DCA) but unmapped — no provider SHOW exists, no UUID invented",
+      ENTERTAINMENT_PLACES.filter((p) => /mulan/i.test(p.name)).length === 1 &&
+      getThemeParksEntertainmentRefs("Mulan's Lunar New Year Procession", "dca").length === 0);
+    check("14.6A mapping: Friendship Faire / Feathered Friends / Tree of Life Awakenings / Royal Theatre storytelling → their verified SHOW records",
+      ids("Mickey's Magical Friendship Faire", "mk") === "4c31b3ad-5dc9-437f-ac1a-0fdff36a2818" &&
+      ids("Feathered Friends in Flight!", "ak") === "d8214ba6-22a7-4a92-8977-bae3779d5c4c" &&
+      ids("Tree of Life Awakenings", "ak") === "2a55aee6-c87a-4bda-a3d4-b022693a62a3" &&
+      ids("Storytelling at Royal Theatre", "disneyland") === "72340a8a-b6d2-474f-aca5-5ea7d2d52335");
     check("14.5B scope: Disney on Broadway Concert Series is one catalogued EPCOT entry, unmapped (no provider SHOW), never given an invented UUID",
       ENTERTAINMENT_PLACES.filter((p) => /disney on broadway/i.test(p.name)).length === 1 &&
       getThemeParksEntertainmentRefs("Disney on Broadway Concert Series", "epcot").length === 0);

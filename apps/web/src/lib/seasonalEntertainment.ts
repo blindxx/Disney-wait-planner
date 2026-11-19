@@ -145,6 +145,9 @@ export const SEASONAL_ENTERTAINMENT_EVENTS: Record<string, SeasonalEntertainment
   "Frozen Holiday Surprise": [{ eventId: "holidays-wdw", kind: "season" }, { eventId: "mvmcp", kind: "party" }],
   // Phase 14.4B: Plaza de la Familia festival stage show (DCA, Aug 21–Nov 2 2026, park admission).
   "The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!": [{ eventId: "plaza-de-la-familia", kind: "season" }],
+  // Phase 14.6A: Mulan's Lunar New Year Procession (DCA) — official disneyland.com page ties it to the Lunar New Year celebration; the
+  // 2026 season record exists in the registry, 2027 is unannounced → neutral/unknown for 2027 dates (never "permanently ended").
+  "Mulan's Lunar New Year Procession": [{ eventId: "lunar-new-year-dca", kind: "season" }],
 };
 
 /** "party-night" / "season" boost; "off-season" demotes; "neutral" is unchanged. */
@@ -367,6 +370,8 @@ const MERRIEST = "Mickey's Most Merriest Celebration";
 const LEOTA = "Madame Leota's Swinging Wake – A Haunted Mansion Street Party";
 const SCREAMS = "Halloween Screams";
 const BELIEVE = "Believe... in Holiday Magic";
+// Seasonal catalog entries intentionally WITHOUT a SEASONAL_ENTERTAINMENT_EVENTS association (no registry event applies).
+const SEASONAL_WITHOUT_EVENT: ReadonlySet<string> = new Set(["Tree of Life Awakenings"]);
 const rank = (name: string, resort: ResortId, date: string | null | undefined, parkId?: ParkId | null) =>
   getSeasonalEntertainmentRank(name, { resort, date, parkId, instant: NOW });
 const prank = (parkId: ParkId, entityId: string, resort: ResortId, date: string | null | undefined) =>
@@ -395,7 +400,12 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "MVMCP night (Nov 8): Christmas party show boosted; Halloween party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-08", "mk") === "party-night" && rank(HOCUS, "WDW", "2026-11-08", "mk") === "off-season" },
   { label: "MVMCP non-party night (Nov 10, in window): Christmas party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-10", "mk") === "off-season" },
   { label: "a seasonal tag alone does not imply a party (every seasonal catalog entry needs an explicit association)", ok: () =>
-    ENTERTAINMENT_PLACES.filter((p) => p.availabilityType === "seasonal").every((p) => !!SEASONAL_ENTERTAINMENT_EVENTS[p.name]) },
+    ENTERTAINMENT_PLACES.filter((p) => p.availabilityType === "seasonal" && !SEASONAL_WITHOUT_EVENT.has(p.name)).every((p) => !!SEASONAL_ENTERTAINMENT_EVENTS[p.name]) },
+  // Phase 14.6A: the single documented exception — seasonal by darkness/season, no registry event applies (never invent one); neutral rank.
+  { label: "14.6A: Tree of Life Awakenings is seasonal with NO event association (neutral rank, never hidden or boosted by a made-up event)", ok: () =>
+    ENTERTAINMENT_PLACES.find((p) => p.name === "Tree of Life Awakenings")?.availabilityType === "seasonal" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Tree of Life Awakenings"] === undefined &&
+    ["2026-11-20", "2027-02-10", "2026-07-01"].every((d) => rank("Tree of Life Awakenings", "WDW", d, "ak") === "neutral") },
   { label: "party nights sort before general seasonal in boosted", ok: () => { const b = part("DLR", "2026-10-31", "dca").boosted; return b[0] === LEOTA; } },
   // Regular seasonal events (continuous windows)
   { label: "Halloween Time window (Oct 31, Disneyland): season boost", ok: () => rank(SCREAMS, "DLR", "2026-10-31", "disneyland") === "season" },
@@ -459,6 +469,16 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "Phase 14.4A: DLR holiday DCA shows demoted Nov 10 (starts Nov 13), boosted Nov 20", ok: () =>
     rank("Mickey's Happy Holidays", "DLR", "2026-11-10", "dca") === "off-season" &&
     rank("Disney ¡Viva Navidad! Street Party", "DLR", "2026-11-20", "dca") === "season" },
+  // Phase 14.6A: Mulan's Lunar New Year Procession — DCA festival season association; unannounced 2027 season stays neutral
+  { label: "14.6A: Mulan's Lunar New Year Procession is one DCA seasonal catalog entry with a single lunar-new-year-dca season association", ok: () =>
+    ENTERTAINMENT_PLACES.filter((p) => p.name === "Mulan's Lunar New Year Procession").length === 1 &&
+    ENTERTAINMENT_PLACES.find((p) => p.name === "Mulan's Lunar New Year Procession")?.parkId === "dca" &&
+    ENTERTAINMENT_PLACES.find((p) => p.name === "Mulan's Lunar New Year Procession")?.availabilityType === "seasonal" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Mulan's Lunar New Year Procession"]?.length === 1 &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Mulan's Lunar New Year Procession"][0].eventId === "lunar-new-year-dca" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Mulan's Lunar New Year Procession"][0].kind === "season" },
+  { label: "14.6A: Mulan's procession is neutral for an unannounced 2027 Lunar New Year date (never demoted/boosted without a season record)", ok: () =>
+    rank("Mulan's Lunar New Year Procession", "DLR", "2027-02-10", "dca") === "neutral" },
   // Phase 14.4B: Frightfully Fun Parade — confirmed absent from the 2026 Oogie Boogie Bash season
   { label: "14.4B: Frightfully Fun Parade is confirmed off-season on an OBB night (Oct 31, DCA) — absent for 2026", ok: () => rank("Frightfully Fun Parade", "DLR", "2026-10-31", "dca") === "off-season" },
   { label: "14.4B: Frightfully Fun Parade off-season throughout 2026 (today, Nov, Dec) incl. unresolved park", ok: () =>

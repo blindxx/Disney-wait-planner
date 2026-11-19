@@ -61,7 +61,6 @@ export const PROVIDER_ENTERTAINMENT_LOCATIONS: ProviderEntertainmentLocation[] =
   loc("disneyland", "7884bda0-7016-4dea-9626-d97372dff10b", MAIN_ST), // Main Street Straw Hatters
   loc("disneyland", "33cbbd09-6d93-40d7-b758-9d7b7d3fd2eb", "Fantasyland", "Royal Hall"), // Meet Disney Princesses at Royal Hall
   loc("disneyland", "5a107a57-9174-4f3f-9be7-625a5d5bb899", TOONTOWN, "Mickey’s House"), // Mickey's House and Meet Mickey Mouse
-  loc("disneyland", "72340a8a-b6d2-474f-aca5-5ea7d2d52335", "Fantasyland", "Royal Theatre"), // Storytelling at Royal Theatre
   loc("disneyland", "fdf0e3b1-2eeb-42b4-9516-5d43463d021e", MAIN_ST), // The Dapper Dans
 
   // ---- Disney California Adventure ----
@@ -112,9 +111,7 @@ export const PROVIDER_ENTERTAINMENT_LOCATIONS: ProviderEntertainmentLocation[] =
   loc("ak", "d8497541-53a2-4206-b95f-39cb238ae511", "Africa", "Harambe Village"), // Tam Tam Drummers of Harambe
   loc("ak", "a8781403-1344-4c06-89ef-b7a39b99ae59", "Africa", "Harambe Village"), // Harambe Village Street Band – Burudika
   loc("ak", "a08d9f84-fbdf-45f3-9b68-645d296de307", "Discovery Island"), // DiVine
-  loc("ak", "2a55aee6-c87a-4bda-a3d4-b022693a62a3", "Discovery Island", "Tree of Life"), // Tree of Life Awakenings
   loc("ak", "13d7c9d1-a785-403d-9ba8-71fee2f02d55", "Discovery Island", "Adventurers Outpost"), // Meet Favorite Disney Pals at Adventurers Outpost
-  loc("ak", "d8214ba6-22a7-4a92-8977-bae3779d5c4c", "Asia", "Anandapur Theater"), // Feathered Friends in Flight!
 ];
 
 const byKey = new Map<string, ProviderEntertainmentLocation>();

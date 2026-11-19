@@ -696,6 +696,23 @@ It is a findings export only: not a tracker, registry or catalog, and it never e
   any API/auth/network/validation failure writes nothing (exit 1). Consumers must check `complete`, `generatedAt`
   age and run status. DEV checks: `node apps/web/scripts/lifecycle-audit-snapshot.dev-cases.mjs`.
 
+## Entertainment catalog reconciliation (Phase 14.6A)
+
+Six-park audit of ThemeParks `/children` SHOW inventories against the active/legacy
+catalogs, mappings and provider-only locations. Added (active catalog, explicit
+mapping, tracker `DA-0006`–`DA-0010`; `DA-0006`–`DA-0009` stay `pending_implementation` until PR #220 merges and is verified on main): Mickey's Magical Friendship Faire (MK),
+Feathered Friends in Flight! and Tree of Life Awakenings (AK, the latter
+`seasonal` with deliberately NO event association, so it is neutral-ranked and
+excluded from the 14.5C lifecycle monitor), Storytelling at Royal Theatre (Disneyland),
+and Mulan's Lunar New Year Procession (DCA, `seasonal`, `lunar-new-year-dca`
+association, intentionally UNMAPPED — no provider SHOW exists out of season; map
+only after verifying the live record, never guess a UUID).
+- Mapping a formerly provider-only show to the catalog REQUIRES deleting its row
+  in `entertainmentProviderLocations.ts` (a DEV check forbids location rows for
+  curated-mapped entities); its land then comes from the catalog entry.
+- A catalogued, associated seasonal show makes its event a qualifying All
+  Entertainment option for that park (DCA now lists Lunar New Year).
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)

@@ -190,6 +190,279 @@
           ]
         }
       ]
+    },
+    {
+      "trackerId": "DA-0006",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "mk",
+      "name": "Mickey's Magical Friendship Faire",
+      "topic": "identity",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "identity",
+          "summary": "Approved missing show: recurring Cinderella Castle stage show absent from the active catalog; provider SHOW record 4c31b3ad-5dc9-437f-ac1a-0fdff36a2818 was provider-only.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official page: name, Main Street, U.S.A. location, daily listed showtimes.",
+              "url": "https://disneyworld.disney.go.com/entertainment/magic-kingdom/mickeys-magical-friendship-faire/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Provider SHOW parented to Magic Kingdom.",
+              "url": "https://api.themeparks.wiki/v1/entity/75ea578a-adc8-4116-a54d-dccb60765ef9/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry + explicit mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0007",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "ak",
+      "name": "Feathered Friends in Flight!",
+      "topic": "identity",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "identity",
+          "summary": "Approved missing show: Anandapur Theater bird show absent from the active catalog; provider SHOW d8214ba6-22a7-4a92-8977-bae3779d5c4c was provider-only with a location row.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official page: name, Asia / Anandapur Theatre, 35 minutes, scheduled times (may not run daily).",
+              "url": "https://disneyworld.disney.go.com/entertainment/animal-kingdom/feathered-friends/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Provider SHOW parented to Animal Kingdom.",
+              "url": "https://api.themeparks.wiki/v1/entity/1c84a229-8862-4648-9c71-378ddd2c7693/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry + explicit mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0008",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "ak",
+      "name": "Tree of Life Awakenings",
+      "topic": "identity",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "identity",
+          "summary": "Approved missing show: seasonal nighttime Tree of Life projection show absent from the active catalog; provider SHOW 2a55aee6-c87a-4bda-a3d4-b022693a62a3 was provider-only with a location row.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official page: offered seasonally after dusk, ~every 10 minutes; holiday edition Nov 13, 2026–Jan 3, 2027.",
+              "url": "https://disneyworld.disney.go.com/en_ca/entertainment/animal-kingdom/tree-of-life-nighttime-awakenings/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Provider SHOW parented to Animal Kingdom.",
+              "url": "https://api.themeparks.wiki/v1/entity/1c84a229-8862-4648-9c71-378ddd2c7693/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry + explicit mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0009",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "disneyland",
+      "name": "Storytelling at Royal Theatre",
+      "topic": "identity",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "identity",
+          "summary": "Approved missing show: Fantasy Faire Royal Theatre stage show absent from the active catalog; provider SHOW 72340a8a-b6d2-474f-aca5-5ea7d2d52335 was provider-only with a location row.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official page confirms the name and Royal Theatre venue (no schedule text retrievable).",
+              "url": "https://disneyland.disney.go.com/entertainment/disneyland/storytelling-royal-theatre/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Provider SHOW parented to Disneyland Park.",
+              "url": "https://api.themeparks.wiki/v1/entity/7340550b-c14d-4def-80bb-acdb51d49a66/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry + explicit mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0010",
+      "type": "entertainment",
+      "resort": "DLR",
+      "parkId": "dca",
+      "name": "Mulan's Lunar New Year Procession",
+      "topic": "seasonal",
+      "audit": {
+        "status": "monitoring",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "Re-check DCA /children when Lunar New Year 2027 dates are announced; add the mapping only after verifying the live record.",
+        "nextReview": {
+          "condition": "Provider publishes a Mulan's Lunar New Year Procession SHOW (expected with Lunar New Year 2027); verify identity then add the mapping"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "seasonal",
+          "summary": "Approved missing seasonal show: Lunar New Year procession absent from the active catalog; the provider has no matching SHOW out of season, so no provider identity can be verified.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official page: route Hollywood Land to Paradise Gardens; offered during the Lunar New Year celebration; 2026 concluded, 2027 details pending.",
+              "url": "https://disneyland.disney.go.com/entertainment/disney-california-adventure/mulans-lunar-new-year-procession"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "DCA /children (54 SHOWs) has no matching record.",
+              "url": "https://api.themeparks.wiki/v1/entity/832fcd51-ea19-4e77-85c7-75d5843b127c/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "monitoring",
+          "episode": 1,
+          "decision": "Added to the active catalog (DCA, Hollywood Land, seasonal) with a Lunar New Year season association; intentionally unmapped. Map only after the provider publishes and its identity is verified.",
+          "summary": "Catalog entry implemented in Phase 14.6A; provider identity cannot be verified until the provider publishes a SHOW record.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry, intentionally unmapped (no invented UUID).",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
+        }
+      ]
     }
   ]
 }
