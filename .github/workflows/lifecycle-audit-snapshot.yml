@@ -1,0 +1,83 @@
+# Phase 14.5E-B1 — read-only lifecycle audit snapshot bridge.
+# Reads the key-protected GET /api/catalog/lifecycle-audit and publishes a sanitized
+# snapshot to the dedicated `lifecycle-audit-snapshot` data branch (never main).
+# Setup: see README "Lifecycle audit snapshot bridge". Triggers are schedule/manual ONLY
+# (no pull_request / pull_request_target), so the secret is never reachable from forks or PRs.
+name: Lifecycle audit snapshot
+
+on:
+  schedule:
+    # 09:17 UTC: after both lifecycle monitor crons (03:00 and 06:00 UTC; Vercel may fire anywhere in the hour).
+    - cron: "17 9 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # push the data branch only; no other scope
+
+concurrency:
+  group: lifecycle-audit-snapshot
+  cancel-in-progress: false
+
+env:
+  SNAPSHOT_BRANCH: lifecycle-audit-snapshot
+  SNAPSHOT_FILE: lifecycle-audit/snapshot.json
+
+jobs:
+  snapshot:
+    if: github.repository == 'blindxx/Disney-wait-planner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out scripts (default branch)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out data branch (created on first run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          mkdir data
+          cd data
+          git init -q
+          git remote add origin "$remote"
+          if git ls-remote --exit-code --heads origin "$SNAPSHOT_BRANCH" >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin "$SNAPSHOT_BRANCH"
+            git checkout -q -B "$SNAPSHOT_BRANCH" FETCH_HEAD
+          else
+            git checkout -q --orphan "$SNAPSHOT_BRANCH"
+          fi
+
+      - name: Fetch, validate and write snapshot
+        id: snap
+        env:
+          DWP_AUDIT_BASE_URL: ${{ vars.DWP_AUDIT_BASE_URL }}
+          DWP_CATALOG_API_KEY: ${{ secrets.DWP_CATALOG_API_KEY }}
+        run: |
+          set +e
+          node apps/web/scripts/lifecycle-audit-snapshot.mjs --out "data/$SNAPSHOT_FILE"
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 0 = complete, 2 = written but incomplete (still published, flagged complete=false); anything else = nothing written
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+
+      - name: Commit and push snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$SNAPSHOT_FILE"
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -q -m "Lifecycle audit snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q origin "HEAD:refs/heads/$SNAPSHOT_BRANCH"
+
+      - name: Fail loudly when the snapshot is incomplete
+        if: steps.snap.outputs.code == '2'
+        run: |
+          echo "::error::Snapshot published but INCOMPLETE (events truncated). Review completeness in the snapshot."
+          exit 1
