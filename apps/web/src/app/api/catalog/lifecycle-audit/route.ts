@@ -5,8 +5,10 @@
  * research audit (14.5E): every automatically hidden show, unresolved candidates
  * (provider-silence / registry-conflict flags) and the unreviewed decision
  * events with their evidence and coverage limitations. Same auth pattern as
- * /api/catalog/query: `x-dwp-catalog-api-key` vs DWP_CATALOG_API_KEY, timing-safe,
- * always required. Never writes; the audit proposes registry changes through a
+ * /api/catalog/query: `x-dwp-catalog-api-key`, timing-safe, always required, but
+ * checked via `authorizeLifecycleAudit` (lifecycleAuditAuth.ts): the dedicated
+ * DWP_LIFECYCLE_AUDIT_API_KEY or, for backward compatibility, DWP_CATALOG_API_KEY
+ * (this endpoint only; other catalog routes keep DWP_CATALOG_API_KEY alone). Never writes; the audit proposes registry changes through a
  * normal commit/PR (candidates are never auto-promoted).
  *
  * Phase 14.5E-B1 (additive, auth unchanged): optional `?limit=` (1..1000, default
@@ -17,26 +19,19 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "crypto";
 import { getParkHoursPool } from "@/lib/db";
 import { LIFECYCLE_AUDIT_MAX_LIMIT, readLifecycleAudit } from "@/lib/entertainmentLifecycleStore";
 import { createPoolExecutor } from "@/lib/parkHoursStore";
+import { authorizeLifecycleAudit } from "@/lib/lifecycleAuditAuth";
 
 export const dynamic = "force-dynamic";
 
 const NO_STORE = { "Cache-Control": "no-store, max-age=0" };
 
-function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  return bufA.length === bufB.length && timingSafeEqual(bufA, bufB);
-}
-
 export async function GET(request: NextRequest) {
-  const expectedKey = process.env.DWP_CATALOG_API_KEY;
-  if (!expectedKey) return NextResponse.json({ error: "Catalog API is not configured", meta: { ok: false } }, { status: 500, headers: NO_STORE });
-  const providedKey = request.headers.get("x-dwp-catalog-api-key");
-  if (!providedKey || !safeEqual(providedKey, expectedKey)) return NextResponse.json({ error: "Unauthorized", meta: { ok: false } }, { status: 401, headers: NO_STORE });
+  const auth = authorizeLifecycleAudit(request.headers.get("x-dwp-catalog-api-key"), { DWP_LIFECYCLE_AUDIT_API_KEY: process.env.DWP_LIFECYCLE_AUDIT_API_KEY, DWP_CATALOG_API_KEY: process.env.DWP_CATALOG_API_KEY });
+  if (auth === "not_configured") return NextResponse.json({ error: "Catalog API is not configured", meta: { ok: false } }, { status: 500, headers: NO_STORE });
+  if (auth !== "ok") return NextResponse.json({ error: "Unauthorized", meta: { ok: false } }, { status: 401, headers: NO_STORE });
   if (!process.env.DATABASE_URL) return NextResponse.json({ error: "Lifecycle store is unavailable", meta: { ok: false } }, { status: 503, headers: NO_STORE });
   const rawLimit = request.nextUrl.searchParams.get("limit");
   let limit = 200;

@@ -679,7 +679,11 @@ Read-only GitHub Actions bridge (`.github/workflows/lifecycle-audit-snapshot.yml
 It is a findings export only: not a tracker, registry or catalog, and it never edits
 `audit_status`, catalogs, Smart Entry or visibility. Tracker/registry changes stay reviewed PRs.
 
-- **Secrets**: `DWP_CATALOG_API_KEY` (Actions secret) and `DWP_AUDIT_BASE_URL` (Actions variable);
+- **Secrets**: `DWP_LIFECYCLE_AUDIT_API_KEY` (Actions secret; also a server-only Vercel env var) and
+  `DWP_AUDIT_BASE_URL` (Actions variable). `/api/catalog/lifecycle-audit` alone accepts that dedicated key OR the
+  legacy `DWP_CATALOG_API_KEY` (same `x-dwp-catalog-api-key` header; `lifecycleAuditAuth.ts`: blank/unset keys are
+  never credentials, both unset → 500, timing-safe); other catalog routes and Ask Tom stay on `DWP_CATALOG_API_KEY`
+  only. DEV checks: `runDevLifecycleAuditAuthCases()` (`lifecycleAuditAuthDev.ts`);
   triggers are schedule/manual only (no PR triggers); `contents: write` is the only permission;
   the job has no database or production write access. The script prints no response bodies and aborts
   if the key appears in its output.
@@ -828,6 +832,7 @@ The following must remain server-only:
 - `TOM_API_KEY`
 - `DWP_TOM_PROXY_KEY`
 - `DWP_CATALOG_API_KEY`
+- `DWP_LIFECYCLE_AUDIT_API_KEY`
 
 Never expose these through `NEXT_PUBLIC_*`.
 

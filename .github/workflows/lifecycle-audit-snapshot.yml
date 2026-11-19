@@ -54,7 +54,7 @@ jobs:
         id: snap
         env:
           DWP_AUDIT_BASE_URL: ${{ vars.DWP_AUDIT_BASE_URL }}
-          DWP_CATALOG_API_KEY: ${{ secrets.DWP_CATALOG_API_KEY }}
+          DWP_LIFECYCLE_AUDIT_API_KEY: ${{ secrets.DWP_LIFECYCLE_AUDIT_API_KEY }}
         run: |
           set +e
           node apps/web/scripts/lifecycle-audit-snapshot.mjs --out "data/$SNAPSHOT_FILE"
