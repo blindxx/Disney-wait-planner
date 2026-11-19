@@ -155,7 +155,7 @@ app code) whenever `db-schema.sql` changes.
 **Daily park-hours refresh** (server-only)
 
 - `CRON_SECRET` — required by `/api/cron/park-hours` (Vercel Cron, 02:00 UTC daily via `apps/web/vercel.json`); the route fails closed (500) when unset. Vercel sends it as `Authorization: Bearer`.
-- `CRON_SECRET` also gates `/api/cron/entertainment-lifecycle` (Phase 14.5C, twice daily at 03:00 and 06:00 UTC so each resort's end-of-day window is observed): the scheduled entertainment lifecycle monitor, which needs `DATABASE_URL` and the lifecycle tables from `pnpm --filter web run db:migrate` (migrate Production **and** Preview before deploying). Read-only audit feed: `GET /api/catalog/lifecycle-audit` with `x-dwp-catalog-api-key` (`DWP_CATALOG_API_KEY`).
+- `CRON_SECRET` also gates `/api/cron/entertainment-lifecycle` (Phase 14.5C, twice daily at 03:00 and 06:00 UTC so each resort's end-of-day window is observed): the scheduled entertainment lifecycle monitor, which needs `DATABASE_URL` and the lifecycle tables from `pnpm --filter web run db:migrate` (migrate Production **and** Preview before deploying). Read-only audit feed: `GET /api/catalog/lifecycle-audit` with `x-dwp-catalog-api-key` (dedicated `DWP_LIFECYCLE_AUDIT_API_KEY`; legacy `DWP_CATALOG_API_KEY` still accepted on this endpoint only).
 
 **Lifecycle audit snapshot bridge** (Phase 14.5E-B1; GitHub Actions, read-only)
 
@@ -165,8 +165,10 @@ app code) whenever `db-schema.sql` changes.
 sanitized findings are exported). One-time setup (no values are committed):
 
 1. Deploy the 14.5E-B1 API first (the bridge refuses an API without the completeness metadata).
-2. Repo → Settings → Secrets and variables → Actions: secret `DWP_CATALOG_API_KEY` (same value as the production
-   key) and variable `DWP_AUDIT_BASE_URL` (`https://dwpapp.com`).
+2. Generate a new random key and set it as `DWP_LIFECYCLE_AUDIT_API_KEY` in Vercel (Production, and Preview if used;
+   redeploy). Repo → Settings → Secrets and variables → Actions: secret `DWP_LIFECYCLE_AUDIT_API_KEY` (same value)
+   and variable `DWP_AUDIT_BASE_URL` (`https://dwpapp.com`). The old `DWP_CATALOG_API_KEY` Actions secret is no longer used
+   and can be deleted once the new key works.
 3. Actions → "Lifecycle audit snapshot" → Run workflow once; confirm the data branch and file appear, and that the
    ChatGPT GitHub connector can read that branch/file (not testable from the repo).
 4. If the repo has been inactive for 60 days GitHub disables scheduled workflows; re-enable them.
