@@ -106,6 +106,15 @@ export function showResetFilters(state: AllEntertainmentFilterState): boolean {
   return state.event !== d.event || state.land !== d.land || state.operatingOnly !== d.operatingOnly || state.showOutOfSeason !== d.showOutOfSeason;
 }
 
+/**
+ * Expanded-disclosure state (schedule / all-times keys) after the Event dropdown changes: always cleared, so returning to a
+ * previously browsed event never shows a stale expanded schedule. Park switch and "Reset filters" clear it the same way;
+ * only manual toggles and nothing else (e.g. provider refreshes) change it otherwise.
+ */
+export function expandedAfterEventChange(_expanded: ReadonlySet<string>): Set<string> {
+  return new Set();
+}
+
 /** Intro copy under the filters. */
 export const ALL_ENTERTAINMENT_INTRO_DEFAULT = "Explore today's entertainment and showtimes around the park.";
 export const ALL_ENTERTAINMENT_INTRO_EVENT = "Explore entertainment and show schedules for this event.";
@@ -461,6 +470,25 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     info("mk", "mvmcp").rangeText === "Nov 8 – Dec 22, 2026" && info("mk", "mvmcp").nights?.length === 23 && EVENT_INFO_NOTE.includes("Individual performance dates and times may vary") },
   { label: "14.4.1 reset to default returns to performance-day filtering (event pool off, checkboxes shown again)", ok: () =>
     resolveEventSelection("mk", resetAllEntertainmentFilters().event, NOW) === "" && showOutOfSeasonToggle("") },
+  { label: "event switch clears disclosures: expand Broadway's schedule, switch event and back → collapsed; manual toggle and Reset still work; unrelated state never collapses it", ok: () => {
+    const DOB_ID = "curated:epcot:Disney on Broadway Concert Series", CPR_ID = "curated:epcot:Candlelight Processional";
+    let expanded: Set<string> = toggleExpanded(new Set<string>(), `schedule:${DOB_ID}`);
+    expanded = toggleExpanded(expanded, CPR_ID); // an all-times disclosure too
+    const opened = expanded.has(`schedule:${DOB_ID}`) && expanded.has(CPR_ID);
+    // a provider refresh changes entries, not the disclosure set: the set object is untouched by anything but these handlers
+    const afterRefresh = new Set(expanded);
+    const sameAfterRefresh = afterRefresh.has(`schedule:${DOB_ID}`) && afterRefresh.size === 2;
+    expanded = expandedAfterEventChange(expanded); // → Food & Wine
+    expanded = expandedAfterEventChange(expanded); // → back to Festival of the Arts
+    const collapsed = !expanded.has(`schedule:${DOB_ID}`) && !expanded.has(CPR_ID) && expanded.size === 0;
+    expanded = toggleExpanded(expanded, `schedule:${DOB_ID}`); // manual expand works again
+    const reopened = expanded.has(`schedule:${DOB_ID}`);
+    expanded = toggleExpanded(expanded, `schedule:${DOB_ID}`); // manual collapse works
+    const closed = !expanded.has(`schedule:${DOB_ID}`);
+    const input = new Set([`schedule:${DOB_ID}`]);
+    const pure = expandedAfterEventChange(input) !== input && input.size === 1; // returns a fresh set, never mutates the old one
+    return opened && sameAfterRefresh && collapsed && reopened && closed && pure;
+  } },
   { label: "intro text: default, event (takes priority, even with other filters), and other-filters-only wording", ok: () => {
     const d = resetAllEntertainmentFilters();
     return getAllEntertainmentIntroText(d) === "Explore today's entertainment and showtimes around the park." &&

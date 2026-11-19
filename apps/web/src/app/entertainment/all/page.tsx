@@ -57,6 +57,7 @@ import {
   resetAllEntertainmentFilters,
   showResetFilters,
   getAllEntertainmentIntroText,
+  expandedAfterEventChange,
   EVENT_NIGHTS_PREVIEW,
   EVENT_NO_ENTERTAINMENT_MESSAGE,
   getAllEntertainmentEventEntries,
@@ -616,7 +617,7 @@ export default function AllEntertainmentPage() {
               className="all-event-select"
               value={effectiveEvent}
               title={eventOptions.find((o) => o.value === effectiveEvent)?.label}
-              onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); }}
+              onChange={(e) => { setSelectedEvent(e.target.value); setNightsExpanded(false); setExpanded(expandedAfterEventChange); }}
               style={selectStyle}
             >
               {eventOptions.map((o) => (
