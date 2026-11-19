@@ -35,7 +35,7 @@ import {
 } from "./entertainmentSuggestions";
 import { SHOWTIME_STATUS_MESSAGES } from "./entertainmentShowtimes";
 import { getSeasonalEntertainmentRank, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
-import { getPublishedPerformanceDay } from "./publishedPerformanceSchedule";
+import { getPublishedPerformanceDay, hasPublishedSchedule } from "./publishedPerformanceSchedule";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
 import { buildParkAllEntertainment, type AllEntertainmentEntry } from "./entertainmentAll";
@@ -300,6 +300,9 @@ export function isAllEntryConfirmedOutOfSeason(
   if (entry.source !== "curated") return false;
   const place = getEntertainmentForPark(parkId).find((p) => p.name === entry.name);
   if (!place) return false;
+  // Phase 14.6B: shows promoted from provider-only keep that branch's evidence rule — verified same-day operating hours
+  // keep them visible (an official confirmed non-performance day is still hidden by the inactivity rule, never here).
+  if (hasPublishedSchedule(parkId, entry.name) && (entry.operatingHours?.length ?? 0) > 0) return false;
   return isEntertainmentConfirmedOutOfSeason(
     place,
     resort,
@@ -1132,6 +1135,11 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
       { label: "14.6B All Entertainment default: positive shown, negative hidden even with the out-of-season toggle ON, unknown shown", ok: () =>
         all(DOB_N, "2027-01-20", false) && all(CPR_N, "2026-12-01", false) && all(ETTB_NAME, "2026-10-12", false) &&
         !all(GR_NAME, "2026-03-10", false) && !all(GR_NAME, "2026-03-10", true) && all(GR_NAME, "2027-04-01", false) },
+      { label: "14.6B promoted shows keep the provider-only operating-hours override: an Operating interval on an unknown/off-season day keeps Garden Rocks visible (Nov 10), but a confirmed non-performance day (Mar 10 2026) stays hidden", ok: () => {
+        const op = (d: string, off: string) => [pe("epcot", GARDEN_ROCKS, "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival", [perf(`${d}T18:00:00${off}`, "Operating", `${d}T21:00:00${off}`)], "OPERATING")];
+        const has = (d: string, off: string) => all(GR_NAME, d, false, op(d, off));
+        return (byName(provAll("epcot", op("2026-11-10", "-05:00"), at("2026-11-10")), "epcot", GR_NAME).operatingHours?.length ?? 0) > 0 && has("2026-11-10", "-05:00") && !has("2026-03-10", "-04:00");
+      } },
       { label: "14.6B All Entertainment: out-of-season behavior preserved — hidden by default, revealed by the toggle (Candlelight Nov 19, Eat to the Beat Nov 19)", ok: () =>
         !all(CPR_N, "2026-11-19", false) && all(CPR_N, "2026-11-19", true) && !all(ETTB_NAME, "2026-11-19", false) && all(ETTB_NAME, "2026-11-19", true) &&
         getOffSeasonCuratedEntertainment("epcot", "2026-11-19", new Set(), at("2026-11-19")).some((x) => x.name === CPR_N) },
