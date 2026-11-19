@@ -555,6 +555,257 @@
           ]
         }
       ]
+    },
+    {
+      "trackerId": "DA-0011",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "epcot",
+      "name": "Garden Rocks Concert Series",
+      "topic": "identity",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After merge: verify on main, resolve; then add a 2027 schedule record only when Disney publishes the Garden Rocks 2027 lineup (never carry 2026 forward).",
+        "nextReview": {
+          "condition": "Disney publishes the 2027 Garden Rocks lineup/dates (expected before the Mar 10, 2027 festival start)"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "identity",
+          "summary": "Provider-only festival concert series (ThemeParks SHOW 0e35a7a2-c2cd-451b-88e2-afc9d370e69e) promoted to a curated EPCOT Entertainment entry; its 2026 official lineup shows a non-nightly run, so day-level visibility needs the official schedule rather than the festival window.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official 2026 lineup: acts in 2–4 day blocks (Mar 5 – Jun 1) with gaps (e.g. none Mar 10–12), so performances are not nightly.",
+              "url": "https://disneyparksblog.com/wdw/garden-rocks-concert-series-lineup-schedule-and-more/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Official 2027 post: festival Mar 10 – May 31, 2027; Garden Rocks lineup and dining-package dates still to be announced — no 2027 schedule is recorded.",
+              "url": "https://disneyparksblog.com/wdw/epcot-international-flower-and-garden-festival-dates-and-details/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "EPCOT /children lists the SHOW record.",
+              "url": "https://api.themeparks.wiki/v1/entity/47f90d2c-e191-4239-a466-5892ef59a88b/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Phase 14.6B implemented on branch (not yet merged): curated catalog entry, Flower & Garden association, explicit SHOW mapping, removal of the provider-only row, and a complete 2026 official schedule record.",
+          "decision": "Hold as pending_implementation; resolve only after the branch merges and the catalog entry, association, mapping and published schedule are verified on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Catalog entry + alias.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "2026 schedule record (2027 intentionally absent).",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0012",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "epcot",
+      "name": "Eat to the Beat Concert Series",
+      "topic": "identity",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After merge: verify on main, resolve; add a 2027 schedule record only when Disney announces Food & Wine 2027 dates and the Eat to the Beat lineup.",
+        "nextReview": {
+          "condition": "Disney announces the 2027 EPCOT Food & Wine Festival dates and Eat to the Beat lineup"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "identity",
+          "summary": "Provider-only festival concert series (ThemeParks SHOW d6bb186c-382f-4ae6-bc76-fde8f141ed69) promoted to a curated EPCOT Entertainment entry with its own narrower registry event (ends Nov 16, 2026, five days before Food & Wine).",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official 2026 full concert schedule: an act for every date Aug 27 – Nov 16, 2026; \"multiple show times each night\" but no times published.",
+              "url": "https://disneyparksblog.com/wdw/eat-to-the-beat-lineup-full-concert-schedule/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "EPCOT /children lists the SHOW record.",
+              "url": "https://api.themeparks.wiki/v1/entity/47f90d2c-e191-4239-a466-5892ef59a88b/children"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Phase 14.6B implemented on branch (not yet merged): curated catalog entry, Eat to the Beat association (child of Food & Wine in the filter), explicit SHOW mapping, removal of the provider-only row, and a complete (date-only, historical) 2026 official schedule record.",
+          "decision": "Hold as pending_implementation; resolve only after the branch merges and the catalog entry, association, mapping and published schedule are verified on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Catalog entry + alias.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "2026 schedule record (date-only; 2027 intentionally absent).",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0013",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "epcot",
+      "name": "Candlelight Processional",
+      "topic": "seasonal",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After merge: verify on main, resolve; add a 2027 record only when the 2027 narrator lineup is published.",
+        "nextReview": {
+          "condition": "Disney publishes the 2027 Candlelight Processional narrator lineup"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "seasonal",
+          "summary": "Curated seasonal show (Festival of the Holidays, unmapped — no provider SHOW) had no dated schedule; Disney published the 2026 narrator lineup and nightly times.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official 2026 narrator lineup: one narrator for every date Nov 27 – Dec 30; performances nightly at 4:45, 6:30 and 8:00 p.m. EST at America Gardens Theatre.",
+              "url": "https://disneyparksblog.com/wdw/epcot-holiday-traditions-and-candlelight-processional-narrators-announced/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Festival dates Nov 27 – Dec 30, 2026 (already in the seasonal registry).",
+              "url": "https://disneyparksblog.com/wdw/epcot-festival-of-the-holidays-dates-details/"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Phase 14.6B implemented on branch (not yet merged): complete 2026 official schedule record (dates, three times, narrators); catalog identity, association and the unmapped status are unchanged.",
+          "decision": "Hold as pending_implementation; resolve only after the branch merges and the catalog entry, association, mapping and published schedule are verified on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "2026 schedule record.",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Unchanged association and unmapped disposition.",
+              "ref": "apps/web/src/lib/seasonalEntertainment.ts"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "trackerId": "DA-0014",
+      "type": "entertainment",
+      "resort": "WDW",
+      "parkId": "epcot",
+      "name": "Disney on Broadway Concert Series",
+      "topic": "seasonal",
+      "audit": {
+        "status": "pending_implementation",
+        "episode": 1,
+        "lastReviewed": "2026-11-19",
+        "action": "After merge: verify on main, resolve; add finale-night times only when Disney publishes them.",
+        "nextReview": {
+          "condition": "Disney publishes the Feb 27 – Mar 1, 2027 finale performance details"
+        }
+      },
+      "history": [
+        {
+          "date": "2026-11-19",
+          "kind": "opened",
+          "status": "open",
+          "episode": 1,
+          "topic": "seasonal",
+          "summary": "Curated seasonal show (Festival of the Arts, unmapped — no provider SHOW) had festival dates only; Disney published the 2027 dated performer pairings and nightly times.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Official schedule: six dated pairings plus a Feb 27 – Mar 1 finale (all 46 dates of Jan 15 – Mar 1, 2027); \"Each night will feature three performances\" at 5:15, 6:30 and 7:45 p.m.; finale details still to come.",
+              "url": "https://disneyparksblog.com/disney-experiences/epcot-festival-of-the-arts-2027-disney-on-broadway-concert-series-schedule/"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Festival dates Jan 15 – Mar 1, 2027 (already in the seasonal registry).",
+              "url": "https://disneyparksblog.com/wdw/epcot-international-festival-of-the-arts-dates-and-offerings/"
+            }
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "status_changed",
+          "status": "pending_implementation",
+          "episode": 1,
+          "summary": "Phase 14.6B implemented on branch (not yet merged): complete 2027 official schedule record (dates, performers; times for pairing nights only — the finale nights are recorded date-only until Disney publishes them).",
+          "decision": "Hold as pending_implementation; resolve only after the branch merges and the catalog entry, association, mapping and published schedule are verified on main.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "2027 schedule record.",
+              "ref": "apps/web/src/lib/publishedPerformanceSchedule.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Unchanged association and unmapped disposition.",
+              "ref": "apps/web/src/lib/seasonalEntertainment.ts"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

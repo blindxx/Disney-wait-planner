@@ -226,6 +226,9 @@ export const THEMEPARKS_ENTERTAINMENT_MAPPING: EntertainmentProviderMapping[] = 
   unmapped("Candlelight Processional", "epcot", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("JOYFUL! A Celebration of the Season", "epcot", `${NOT_IN_PROVIDER} (Christmas seasonal)`),
   unmapped("Disney on Broadway Concert Series", "epcot", `${NOT_IN_PROVIDER} (Festival of the Arts concert run; EPCOT children verified 2026-11-16, no matching SHOW)`),
+  // Phase 14.6B: promoted from provider-only; SHOW records verified in EPCOT /children 2026-11-19 (festival-named provider records, same UUIDs as before).
+  mapped("Garden Rocks Concert Series", "epcot", show("0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival")),
+  mapped("Eat to the Beat Concert Series", "epcot", show("d6bb186c-382f-4ae6-bc76-fde8f141ed69", "Eat to the Beat Concert Series Presented by Enterprise® at EPCOT International Food & Wine Festival")),
 
   // ---- Hollywood Studios ----
   mapped("Fantasmic!", "hs", show("42328c39-76ab-4f03-b862-4206c8d9f7bb", "Fantasmic!")),
@@ -887,9 +890,17 @@ export function runDevThemeParksEntertainmentMappingCases(): string[] {
       ids("The Storytellers of Plaza de la Familia Celebrate The Musical World of Coco!", "dca") === "0ee981af-9e3b-4c36-80a2-a7f00fa4841f" &&
       resolveDwpEntertainmentFromThemeParksId("0ee981af-9e3b-4c36-80a2-a7f00fa4841f")?.parkId === "dca" &&
       ENTERTAINMENT_PLACES.some((p) => p.parkId === "dca" && p.name.startsWith("The Storytellers of Plaza de la Familia")));
-    check("14.4B scope: festival concert acts and the Holiday Toy Drummers stay provider-only (not curated, not mapped)",
-      ["0e35a7a2-c2cd-451b-88e2-afc9d370e69e", "d6bb186c-382f-4ae6-bc76-fde8f141ed69", "4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", "e9c263c4-80dc-4431-bfc9-581a0ff1f578"]
+    check("14.4B scope: the DCA festival acts and the Holiday Toy Drummers stay provider-only (not curated, not mapped)",
+      ["4b7f57a0-c841-43d1-8abb-d13a3b7f2597", "2fdd02e8-3835-4ef8-bd07-4c3332fb84fa", "e9c263c4-80dc-4431-bfc9-581a0ff1f578"]
         .every((id) => resolveDwpEntertainmentFromThemeParksId(id) === null));
+    check("14.6B mapping: Garden Rocks and Eat to the Beat are curated EPCOT entries mapped to their verified SHOW records (no longer provider-only); Candlelight/Disney on Broadway stay unmapped (no provider SHOW)",
+      ids("Garden Rocks Concert Series", "epcot") === "0e35a7a2-c2cd-451b-88e2-afc9d370e69e" &&
+      ids("Eat to the Beat Concert Series", "epcot") === "d6bb186c-382f-4ae6-bc76-fde8f141ed69" &&
+      resolveDwpEntertainmentFromThemeParksId("0e35a7a2-c2cd-451b-88e2-afc9d370e69e")?.dwpName === "Garden Rocks Concert Series" &&
+      resolveDwpEntertainmentFromThemeParksId("d6bb186c-382f-4ae6-bc76-fde8f141ed69")?.dwpName === "Eat to the Beat Concert Series" &&
+      ENTERTAINMENT_PLACES.filter((p) => /garden rocks|eat to the beat/i.test(p.name)).length === 2 &&
+      getThemeParksEntertainmentRefs("Candlelight Processional", "epcot").length === 0 &&
+      getThemeParksEntertainmentRefs("Disney on Broadway Concert Series", "epcot").length === 0);
     check("14.4B scope: Hurry Home is not catalogued without verified provider identity",
       !ENTERTAINMENT_PLACES.some((p) => /hurry home/i.test(p.name)));
     check("14.6A scope: Mulan's procession is catalogued once (DCA) but unmapped — no provider SHOW exists, no UUID invented",

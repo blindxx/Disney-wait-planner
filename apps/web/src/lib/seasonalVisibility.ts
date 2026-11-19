@@ -35,6 +35,7 @@ import {
 } from "./entertainmentSuggestions";
 import { SHOWTIME_STATUS_MESSAGES } from "./entertainmentShowtimes";
 import { getSeasonalEntertainmentRank, getSeasonalProviderEntertainmentRank } from "./seasonalEntertainment";
+import { getPublishedPerformanceDay } from "./publishedPerformanceSchedule";
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { getResortLocalDate } from "./resortTime";
 import { buildParkAllEntertainment, type AllEntertainmentEntry } from "./entertainmentAll";
@@ -68,6 +69,8 @@ export function isEntertainmentConfirmedOutOfSeason(
   showtimeEntries?: { dwpName: string; performances: unknown[] }[],
   instant?: Date,
 ): boolean {
+  // Phase 14.6B: an official published performance day is authoritative — never out of season.
+  if (getPublishedPerformanceDay(place.parkId, place.name, today).state === "performance") return false;
   const rank = getSeasonalEntertainmentRank(place.name, {
     resort,
     date: today,
@@ -139,6 +142,12 @@ export function isEntertainmentConfirmedInactiveToday(
   showtimeEntries?: { dwpName: string; performances: unknown[]; confirmedNoActivityToday?: boolean }[],
   instant?: Date,
 ): boolean {
+  // Phase 14.6B: the official published schedule decides for the offerings it covers. A confirmed performance day is
+  // never inactive; a confirmed non-performance day is inactive even if ThemeParks lists a performance (the provider is
+  // supplemental and cannot override the official schedule). Unknown days fall through to the provider-evidence rule.
+  const published = getPublishedPerformanceDay(place.parkId, place.name, today).state;
+  if (published === "performance") return false;
+  if (published === "no_performance") return true;
   const entry = showtimeEntries?.find((e) => e.dwpName === place.name);
   if (!entry || entry.confirmedNoActivityToday !== true || entry.performances.length > 0) return false;
   const rank = getSeasonalEntertainmentRank(place.name, { resort, date: today, parkId: place.parkId, instant: instant ?? new Date() });
@@ -233,6 +242,12 @@ export function isAllEntryConfirmedInactiveToday(
   today: string,
   instant?: Date,
 ): boolean {
+  // Phase 14.6B: official published schedule first (curated entries only; provider-only records have no published schedule).
+  if (entry.source === "curated") {
+    const published = getPublishedPerformanceDay(parkId, entry.name, today).state;
+    if (published === "performance") return false;
+    if (published === "no_performance") return true;
+  }
   if (entry.showtime.confirmedNoActivityToday !== true) return false;
   if (entry.showtime.performances.length > 0 || (entry.operatingHours?.length ?? 0) > 0) return false;
   const ctx = { resort, date: today, parkId, instant: instant ?? new Date() };
@@ -430,6 +445,12 @@ const hsEntry = (entityId: string, name: string, showtimes: ThemeParksShowtime[]
 const byId = (all: { entries: AllEntertainmentEntry[] }, id: string) => all.entries.find((e) => e.id === `provider:${id}`)!;
 const hiddenP = (all: { entries: AllEntertainmentEntry[] }, id: string, park: ParkId, date: string, at: Date) =>
   isAllEntryConfirmedOutOfSeason(byId(all, id), park, "WDW", date, at);
+// Phase 14.6B: Garden Rocks / Eat to the Beat are curated entries (mapped to their SHOWs), so they appear as `curated:` entries.
+const GR_NAME = "Garden Rocks Concert Series";
+const ETTB_NAME = "Eat to the Beat Concert Series";
+const byName = (all: { entries: AllEntertainmentEntry[] }, parkId: ParkId, name: string) => all.entries.find((e) => e.id === `curated:${parkId}:${name}`)!;
+const hiddenC = (all: { entries: AllEntertainmentEntry[] }, name: string, date: string, at: Date) =>
+  isAllEntryConfirmedOutOfSeason(byName(all, "epcot", name), "epcot", "WDW", date, at);
 
 const GARDEN_ROCKS = "0e35a7a2-c2cd-451b-88e2-afc9d370e69e";
 const EAT_TO_THE_BEAT = "d6bb186c-382f-4ae6-bc76-fde8f141ed69";
@@ -852,26 +873,25 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
   { label: "14.4B festivals: default OFF hides out-of-season festival acts (Garden Rocks, Jammin' Chefs, SuperKitties, Toy Drummers on Nov 10)", ok: () => {
     const epcot = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival")], NOW);
     const dca = provAll("dca", [pe("dca", JAMMIN_CHEFS, "Cookin' with the Jammin’ Chefs"), pe("dca", SUPERKITTIES, "Confection Purrfection with the SuperKitties"), pe("dca", TOY_DRUMMERS, "Holiday Toy Drummers")], NOW);
-    return byId(epcot, GARDEN_ROCKS).source === "provider_only" && hiddenP(epcot, GARDEN_ROCKS, "epcot", TODAY_WDW, NOW) &&
+    return byName(epcot, "epcot", GR_NAME).source === "curated" && hiddenC(epcot, GR_NAME, TODAY_WDW, NOW) &&
       [JAMMIN_CHEFS, SUPERKITTIES, TOY_DRUMMERS].every((id) => isAllEntryConfirmedOutOfSeason(byId(dca, id), "dca", "DLR", TODAY_DLR, NOW));
   } },
   { label: "14.4B festivals: toggle ON reveals them (and OFF keeps unclassified provider-only shows)", ok: () => {
     const epcot = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks"), pe("epcot", "11111111-1111-4111-8111-111111111111", "Some Street Band", [], "OPERATING")], NOW);
-    const off = applyAllEntertainmentSeasonalVisibility(epcot.entries, "epcot", "WDW", TODAY_WDW, false, NOW).filter((e) => e.source === "provider_only").map((e) => e.name);
-    const on = applyAllEntertainmentSeasonalVisibility(epcot.entries, "epcot", "WDW", TODAY_WDW, true, NOW).filter((e) => e.source === "provider_only").map((e) => e.name);
-    return off.join() === "Some Street Band" && on.sort().join() === ["Garden Rocks", "Some Street Band"].sort().join();
+    const names = (on: boolean) => applyAllEntertainmentSeasonalVisibility(epcot.entries, "epcot", "WDW", TODAY_WDW, on, NOW).filter((e) => e.name === GR_NAME || e.source === "provider_only").map((e) => e.name);
+    return names(false).join() === "Some Street Band" && names(true).sort().join() === [GR_NAME, "Some Street Band"].sort().join();
   } },
   { label: "14.4B festivals: Eat to the Beat visible Nov 10 (in its Aug 27–Nov 16 run), hidden Nov 18 although Food & Wine runs to Nov 21", ok: () => {
     const n10 = NOW; const n18 = new Date("2026-11-18T17:00:00Z");
     const a = provAll("epcot", [pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat Concert Series")], n10);
     const b = provAll("epcot", [pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat Concert Series")], n18);
-    return !hiddenP(a, EAT_TO_THE_BEAT, "epcot", "2026-11-10", n10) && hiddenP(b, EAT_TO_THE_BEAT, "epcot", "2026-11-18", n18);
+    return !hiddenC(a, ETTB_NAME, "2026-11-10", n10) && hiddenC(b, ETTB_NAME, "2026-11-18", n18);
   } },
   { label: "14.4B festivals: verified same-day performance overrides general seasonal hiding (Eat to the Beat Nov 18, Garden Rocks Nov 10)", ok: () => {
     const n18 = new Date("2026-11-18T17:00:00Z");
     const a = provAll("epcot", [pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat", [perf("2026-11-18T18:00:00-05:00")], "OPERATING")], n18);
-    const b = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks", [perf("2026-11-10T18:00:00-05:00", "Operating", "2026-11-10T21:00:00-05:00")], "OPERATING")], NOW);
-    return !hiddenP(a, EAT_TO_THE_BEAT, "epcot", "2026-11-18", n18) && !hiddenP(b, GARDEN_ROCKS, "epcot", TODAY_WDW, NOW);
+    const b = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks", [perf("2026-11-10T18:00:00-05:00")], "OPERATING")], NOW);
+    return !hiddenC(a, ETTB_NAME, "2026-11-18", n18) && !hiddenC(b, GR_NAME, TODAY_WDW, NOW);
   } },
   { label: "14.4B festivals: in-window festival act is visible but never assumed to perform (no fabricated times — select-days Confection Purrfection)", ok: () => {
     const early = new Date("2026-03-10T17:00:00Z"); // festival Mar 6–Apr 27, 2026 in progress
@@ -886,8 +906,8 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
     const g28 = new Date("2028-04-01T17:00:00Z");
     const h = provAll("epcot", [pe("epcot", GARDEN_ROCKS, "Garden Rocks")], g28);
     return !isAllEntryConfirmedOutOfSeason(byId(f, JAMMIN_CHEFS), "dca", "DLR", "2027-04-01", n) &&
-      !isAllEntryConfirmedOutOfSeason(byId(g, GARDEN_ROCKS), "epcot", "WDW", "2027-04-01", n) &&
-      !isAllEntryConfirmedOutOfSeason(byId(h, GARDEN_ROCKS), "epcot", "WDW", "2028-04-01", g28);
+      !hiddenC(g, GR_NAME, "2027-04-01", n) &&
+      !hiddenC(h, GR_NAME, "2028-04-01", g28);
   } },
   { label: "14.4B festivals: park-qualified — a DCA festival uuid in an EPCOT inventory is unclassified (not hidden)", ok: () => {
     const e = provAll("epcot", [pe("epcot", JAMMIN_CHEFS, "Cookin' with the Jammin’ Chefs")], NOW);
@@ -1072,6 +1092,60 @@ export const DEV_SEASONAL_VISIBILITY_CASES: DevSeasonalVisibilityCase[] = [
         const filtered = MK.filter((p) => p.name !== "Mickey's Most Merriest Celebration");
         const { party, regular } = partitionPartyEntertainment(filtered, "WDW", MVMCP_NIGHT, at("2026-11-17T17:00:00Z"));
         return ![...party, ...regular].some((x) => x.name === "Mickey's Most Merriest Celebration") && party.length + regular.length === filtered.length;
+      } },
+    ] as DevSeasonalVisibilityCase[];
+  })(),
+
+  // ── Phase 14.6B: official published schedules (Disney on Broadway, Garden Rocks, Eat to the Beat, Candlelight) ──
+  ...(() => {
+    const at = (date: string) => new Date(`${date}T17:00:00Z`); // 12:00/13:00 resort-local on that date
+    const place = (name: string) => getEntertainmentForPark("epcot").find((p) => p.name === name)!;
+    /** Waits & Shows rule for one show on one resort-local date (optional provider entries). */
+    const ws = (name: string, date: string, entries?: { dwpName: string; performances: unknown[]; confirmedNoActivityToday?: boolean }[]) =>
+      isEntertainmentHiddenToday(place(name), "WDW", date, entries, at(date));
+    /** All Entertainment default rule: is the show listed on `date` (toggle off/on) given live provider entries? */
+    const all = (name: string, date: string, toggle: boolean, live: ThemeParksLive["entries"] = [], tweak?: (e: AllEntertainmentEntry) => AllEntertainmentEntry) => {
+      const entries = provAll("epcot", live, at(date)).entries.map((e) => (tweak && e.name === name ? tweak(e) : e));
+      return applyAllEntertainmentSeasonalVisibility(entries, "epcot", "WDW", date, toggle, at(date)).some((e) => e.name === name);
+    };
+    const gr = (date: string, perfs: ThemeParksShowtime[] = []) => pe("epcot", GARDEN_ROCKS, "Garden Rocks Concert Series at EPCOT International Flower & Garden Festival", perfs, perfs.length ? "OPERATING" : "CLOSED");
+    const DOB_N = "Disney on Broadway Concert Series", CPR_N = "Candlelight Processional";
+    return [
+      { label: "14.6B Waits & Shows positive: confirmed performance days are shown (Broadway Jan 20 2027, Candlelight Dec 1 2026, Garden Rocks Mar 7 2026, Eat to the Beat Oct 12 2026)", ok: () =>
+        !ws(DOB_N, "2027-01-20") && !ws(CPR_N, "2026-12-01") && !ws(GR_NAME, "2026-03-07") && !ws(ETTB_NAME, "2026-10-12") },
+      { label: "14.6B Waits & Shows negative: a confirmed non-performance day inside the festival hides Garden Rocks (Mar 10, 2026) although the season rank says 'season'", ok: () =>
+        getSeasonalEntertainmentRank(GR_NAME, { resort: "WDW", date: "2026-03-10", parkId: "epcot", instant: at("2026-03-10") }) === "season" && ws(GR_NAME, "2026-03-10") },
+      { label: "14.6B Waits & Shows unknown: no record (Garden Rocks 2027 in-window, unannounced) stays visible — missing data never infers non-performance", ok: () =>
+        !ws(GR_NAME, "2027-04-01") && !ws(GR_NAME, "2027-05-31") && !ws(ETTB_NAME, "2027-09-12") /* Food & Wine 2027 unannounced: neutral rank, visible */ },
+      { label: "14.6B Waits & Shows: outside the season still hides via the existing seasonal rule (Broadway Nov 19 2026, Candlelight Nov 19 2026, Eat to the Beat Nov 19 2026)", ok: () =>
+        ws(DOB_N, "2026-11-19") && ws(CPR_N, "2026-11-19") && ws(ETTB_NAME, "2026-11-19") && ws(GR_NAME, "2026-11-19") },
+      { label: "14.6B provider conflict (hide): ThemeParks listing a Garden Rocks performance on a confirmed non-performance day does not reveal it (Waits & Shows and All, toggle off or on)", ok: () => {
+        const prov = [gr("2026-03-10", [perf("2026-03-10T19:00:00-04:00")])];
+        return ws(GR_NAME, "2026-03-10", [{ dwpName: GR_NAME, performances: [{}] }]) &&
+          !all(GR_NAME, "2026-03-10", false, prov) && !all(GR_NAME, "2026-03-10", true, prov);
+      } },
+      { label: "14.6B provider conflict (show): provider 'no activity' evidence cannot hide a confirmed Garden Rocks performance day (Waits & Shows and All)", ok: () =>
+        !ws(GR_NAME, "2026-03-07", [{ dwpName: GR_NAME, performances: [], confirmedNoActivityToday: true }]) &&
+        all(GR_NAME, "2026-03-07", false, [gr("2026-03-07")], (e) => ({ ...e, showtime: { ...e.showtime, confirmedNoActivityToday: true } })) },
+      { label: "14.6B unknown day: provider inactivity evidence still decides where no official record exists (Garden Rocks 2027 in-window)", ok: () =>
+        ws(GR_NAME, "2027-04-01", [{ dwpName: GR_NAME, performances: [], confirmedNoActivityToday: true }]) && !ws(GR_NAME, "2027-04-01", [{ dwpName: GR_NAME, performances: [], confirmedNoActivityToday: false }]) },
+      { label: "14.6B All Entertainment default: positive shown, negative hidden even with the out-of-season toggle ON, unknown shown", ok: () =>
+        all(DOB_N, "2027-01-20", false) && all(CPR_N, "2026-12-01", false) && all(ETTB_NAME, "2026-10-12", false) &&
+        !all(GR_NAME, "2026-03-10", false) && !all(GR_NAME, "2026-03-10", true) && all(GR_NAME, "2027-04-01", false) },
+      { label: "14.6B All Entertainment: out-of-season behavior preserved — hidden by default, revealed by the toggle (Candlelight Nov 19, Eat to the Beat Nov 19)", ok: () =>
+        !all(CPR_N, "2026-11-19", false) && all(CPR_N, "2026-11-19", true) && !all(ETTB_NAME, "2026-11-19", false) && all(ETTB_NAME, "2026-11-19", true) &&
+        getOffSeasonCuratedEntertainment("epcot", "2026-11-19", new Set(), at("2026-11-19")).some((x) => x.name === CPR_N) },
+      { label: "14.6B finale: date-only confirmed Broadway nights stay visible (Feb 27 2027) while the day after the run (Mar 2) hides as off-season", ok: () =>
+        !ws(DOB_N, "2027-02-27") && ws(DOB_N, "2027-03-02") && all(DOB_N, "2027-03-01", false) && !all(DOB_N, "2027-03-02", false) },
+      { label: "14.6B duplicate prevention: Garden Rocks / Eat to the Beat SHOW records resolve to exactly one curated card each, never also provider-only", ok: () => {
+        const a = provAll("epcot", [gr("2026-03-07"), pe("epcot", EAT_TO_THE_BEAT, "Eat to the Beat Concert Series Presented by Enterprise® at EPCOT International Food & Wine Festival")], at("2026-03-07"));
+        const count = (n: string) => a.entries.filter((e) => e.name === n).length;
+        return count(GR_NAME) === 1 && count(ETTB_NAME) === 1 && !a.entries.some((e) => e.id === `provider:${GARDEN_ROCKS}` || e.id === `provider:${EAT_TO_THE_BEAT}`) &&
+          byName(a, "epcot", GR_NAME).source === "curated" && !a.entries.some((e) => e.source === "provider_only" && /garden rocks|eat to the beat/i.test(e.name));
+      } },
+      { label: "14.6B compatibility: provider-only festival acts that remain (DCA) and unclassified provider-only records are unaffected", ok: () => {
+        const dca = provAll("dca", [pe("dca", JAMMIN_CHEFS, "Cookin' with the Jammin’ Chefs")], NOW);
+        return byId(dca, JAMMIN_CHEFS).source === "provider_only" && isAllEntryConfirmedOutOfSeason(byId(dca, JAMMIN_CHEFS), "dca", "DLR", TODAY_DLR, NOW);
       } },
     ] as DevSeasonalVisibilityCase[];
   })(),

@@ -200,6 +200,8 @@ export function runDevEntertainmentLifecycleDetectorCases(): string[] {
   const seasonal = ENTERTAINMENT_PLACES.filter((p) => p.availabilityType === "seasonal" || p.availabilityTheme);
   check("catalog has seasonal entries and none is lifecycle-eligible", seasonal.length > 0 && seasonal.every((p) => !isLifecycleEligible(p.parkId as ParkId, p.name)));
   check("Disney on Broadway Concert Series (festival-associated) is exempt", !isLifecycleEligible("epcot", "Disney on Broadway Concert Series"));
+  check("14.6B: Garden Rocks, Eat to the Beat and Candlelight Processional (festival-associated seasonal, mapped or not) are exempt from the inactivity monitor",
+    ["Garden Rocks Concert Series", "Eat to the Beat Concert Series", "Candlelight Processional"].every((n) => !isLifecycleEligible("epcot", n)));
   check("14.6A: Tree of Life Awakenings (seasonal, mapped, no event association) is excluded from the inactivity monitor", !isLifecycleEligible("ak", "Tree of Life Awakenings") && resolveLifecycleShow("ak", "Tree of Life Awakenings") !== null);
   const legacy = getLegacyEntertainmentPlaces();
   check("legacy catalog entries are never eligible and do not resolve as active shows", legacy.length > 0 && legacy.every((p) => !isLifecycleEligible(p.parkId as ParkId, p.name) && resolveLifecycleShow(p.parkId as ParkId, p.name) === null));

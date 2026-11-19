@@ -48,6 +48,7 @@ import { PARTIAL_SHOWTIMES_NOTE } from "../../../lib/entertainmentShowtimes";
 import { getSettingsDefaults } from "../../../lib/settingsDefaults";
 import { isValidParkId, PARK_TO_RESORT } from "../../../lib/parkMetadata";
 import { getResortLocalDate } from "../../../lib/resortTime";
+import { getPublishedScheduleLines } from "../../../lib/publishedPerformanceSchedule";
 import { applyAllEntertainmentSeasonalVisibility, getOffSeasonCuratedEntertainment, makeOffSeasonEntry } from "../../../lib/seasonalVisibility";
 import { filterLifecycleHiddenEntries, getLifecycleHiddenNames, legacyIdentityOptions, mergeLegacyComebackEntries, performingNamesFromAllEntries, splitLegacyComebackEntries } from "../../../lib/entertainmentLifecycleVisibility";
 import {
@@ -191,7 +192,12 @@ function AllEntertainmentCard({
   const providerStatus = allEntryProviderStatus(entry);
   const nonOperating = providerStatus && providerStatus !== "OPERATING" ? humanizeStatus(providerStatus) : null;
   const locationLabel = allEntryLocationLabel(entry);
-  const { showFull, showShowtimes, showtimesStale, hoursStale, staleScope } = allEntryLayout(view, expanded, stale);
+  const layout = allEntryLayout(view, expanded, stale);
+  const { showFull, showtimesStale, hoursStale, staleScope } = layout;
+  // Phase 14.6B: official published schedule lines for curated shows that have one (also on confirmed non-performance days
+  // and ahead of the season for trip planning). They replace the "Showtimes not tracked" placeholder of provider-less shows.
+  const publishedLines = entry.source === "curated" ? getPublishedScheduleLines(entry.showtime.parkId, entry.name, now) : [];
+  const showShowtimes = layout.showShowtimes && !(publishedLines.length > 0 && entry.showtime.status === "unmapped");
   const timesId = showtimesRegionId(entry.id);
 
   return (
@@ -243,6 +249,11 @@ function AllEntertainmentCard({
           {showtimesStale && <span title="Showtimes may be out of date"> (may be outdated)</span>}
         </div>
       )}
+      {publishedLines.map((line) => (
+        <div key={line} style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text)", marginTop: "4px" }}>
+          {line}
+        </div>
+      ))}
       {view.hoursText && (
         <div style={{ fontSize: "13px", lineHeight: "1.3", color: "var(--text-muted)", marginTop: showShowtimes ? "2px" : "4px" }}>
           {view.hoursText}

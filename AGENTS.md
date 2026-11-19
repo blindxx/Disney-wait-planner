@@ -713,6 +713,50 @@ only after verifying the live record, never guess a UUID).
 - A catalogued, associated seasonal show makes its event a qualifying All
   Entertainment option for that park (DCA now lists Lunar New Year).
 
+## Published performance schedules (Phase 14.6B)
+
+`apps/web/src/lib/publishedPerformanceSchedule.ts` is the ONE reusable official-schedule model
+(keyed by park + canonical entertainment name + season year + resort-local date; optional
+`times` and performer/narrator names; sources + verification dates). It is not a catalog: records
+point at an existing `ENTERTAINMENT_PLACES` entry by exact `(parkId, name)`, name their
+`SEASONAL_EVENTS` event + `seasonYear`, and must equal that registry season window
+(validator `validatePublishedPerformanceSchedules`). Covered: Disney on Broadway Concert Series
+(Arts 2027), Candlelight Processional (Holidays 2026), Garden Rocks Concert Series (Flower &
+Garden 2026) and Eat to the Beat Concert Series (Food & Wine 2026). Garden Rocks and Eat to the
+Beat were promoted from provider-only to curated, mapped entries (SHOW UUIDs unchanged; their
+provider-only rows were removed so no card is duplicated); Candlelight and Disney on Broadway have
+no provider SHOW and stay unmapped.
+
+- **Three-valued resolution** (`getPublishedPerformanceDay`): `performance` (listed day inside the
+  record's window), `no_performance` (inside a `complete` record's window, not listed), `unknown`
+  (everything else: no record for that season/year, outside every window, `partial` record).
+  `complete` requires a quoted `completenessBasis` (the source publishes every performance date).
+  Never infer daily performances from festival dates (Garden Rocks 2026 is NOT nightly), never
+  carry a previous season forward (a date resolves only from the record whose own window contains
+  it; Garden Rocks / Eat to the Beat 2027 and Candlelight 2027 are deliberately absent until
+  Disney publishes them), never state a time the source does not state (`times: []` = confirmed
+  date-only; Eat to the Beat/Garden Rocks 2026 and the Broadway finale nights are date-only).
+- **Authority.** For these offerings the official schedule decides Waits & Shows
+  (`isEntertainmentHiddenToday`) and default All Entertainment
+  (`applyAllEntertainmentSeasonalVisibility`) visibility: confirmed performance → shown (never out
+  of season/inactive), confirmed non-performance → hidden regardless of ThemeParks and of the
+  out-of-season toggle, unknown → the existing seasonal/provider rules unchanged. ThemeParks.wiki
+  is supplemental: it cannot hide a confirmed performance day or reveal a confirmed
+  non-performance day. Festival filtering (`getAllEntertainmentEventEntries`) is unchanged — it
+  retains the associated show on every day; cards add official lines via
+  `getPublishedScheduleLines` ("Official schedule: …", "No performance today (official schedule)",
+  "Next: …" for the next confirmed date — trip planning, distinct from today's live showtimes; or
+  "Last official run ended …; no newer schedule recorded" once a run is over) and
+  replace the "Showtimes not tracked" placeholder only where such lines exist.
+- Official = Disney-owned domains only (validator). Seasonal association/windows, lifecycle
+  exemption (festival-associated seasonal shows are never monitored), identity/aliases
+  (`garden rocks`, `eat to the beat`), My Plans, Tom and `/api/catalog/query` keep using the same
+  catalog/registry sources; planner ordering and Tom schedule context are intentionally unchanged.
+- To add a season: append a record (sources, `verifiedOn`, window equal to the registry season,
+  completeness basis), add/confirm the registry season, update the tracker item, and run
+  `runDevPublishedPerformanceScheduleCases()`, `runDevSeasonalVisibilityCases()`,
+  `runDevAllEntertainmentEventFilterCases()`.
+
 ## Catalog taxonomy
 
 - DWP's curated catalogs (Attractions, Dining, Entertainment, Experiences)
