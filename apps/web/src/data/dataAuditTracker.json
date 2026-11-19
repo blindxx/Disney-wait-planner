@@ -199,10 +199,10 @@
       "name": "Mickey's Magical Friendship Faire",
       "topic": "identity",
       "audit": {
-        "status": "resolved",
+        "status": "pending_implementation",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "resolvedOn": "2026-11-19"
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
       },
       "history": [
         {
@@ -227,17 +227,20 @@
         },
         {
           "date": "2026-11-19",
-          "kind": "resolved",
-          "status": "resolved",
+          "kind": "status_changed",
+          "status": "pending_implementation",
           "episode": 1,
-          "decision": "Added to the active Entertainment catalog (Magic Kingdom, Main Street, U.S.A., regular) and mapped to the verified provider SHOW.",
-          "summary": "Catalog entry, provider mapping and location implemented in Phase 14.6A; provider-only location row removed so the show is not duplicated.",
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
           "evidence": [
             {
               "date": "2026-11-19",
               "note": "Active catalog entry + explicit mapping.",
               "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
             }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
           ]
         }
       ]
@@ -250,10 +253,10 @@
       "name": "Feathered Friends in Flight!",
       "topic": "identity",
       "audit": {
-        "status": "resolved",
+        "status": "pending_implementation",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "resolvedOn": "2026-11-19"
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
       },
       "history": [
         {
@@ -278,17 +281,20 @@
         },
         {
           "date": "2026-11-19",
-          "kind": "resolved",
-          "status": "resolved",
+          "kind": "status_changed",
+          "status": "pending_implementation",
           "episode": 1,
-          "decision": "Added to the active Entertainment catalog (Animal Kingdom, Asia, regular), mapped to the verified provider SHOW; provider-location row removed.",
-          "summary": "Catalog entry, provider mapping and location implemented in Phase 14.6A; provider-only location row removed so the show is not duplicated.",
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
           "evidence": [
             {
               "date": "2026-11-19",
               "note": "Active catalog entry + explicit mapping.",
               "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
             }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
           ]
         }
       ]
@@ -301,10 +307,10 @@
       "name": "Tree of Life Awakenings",
       "topic": "identity",
       "audit": {
-        "status": "resolved",
+        "status": "pending_implementation",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "resolvedOn": "2026-11-19"
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
       },
       "history": [
         {
@@ -329,17 +335,20 @@
         },
         {
           "date": "2026-11-19",
-          "kind": "resolved",
-          "status": "resolved",
+          "kind": "status_changed",
+          "status": "pending_implementation",
           "episode": 1,
-          "decision": "Added to the active Entertainment catalog (Animal Kingdom, Discovery Island, limited, no event association) and mapped to the verified provider SHOW; provider-location row removed.",
-          "summary": "Catalog entry, provider mapping and location implemented in Phase 14.6A; provider-only location row removed so the show is not duplicated.",
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
           "evidence": [
             {
               "date": "2026-11-19",
               "note": "Active catalog entry + explicit mapping.",
               "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
             }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
           ]
         }
       ]
@@ -352,10 +361,10 @@
       "name": "Storytelling at Royal Theatre",
       "topic": "identity",
       "audit": {
-        "status": "resolved",
+        "status": "pending_implementation",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "resolvedOn": "2026-11-19"
+        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
       },
       "history": [
         {
@@ -380,17 +389,20 @@
         },
         {
           "date": "2026-11-19",
-          "kind": "resolved",
-          "status": "resolved",
+          "kind": "status_changed",
+          "status": "pending_implementation",
           "episode": 1,
-          "decision": "Added to the active Entertainment catalog (Disneyland Park, Fantasyland, regular) and mapped to the verified provider SHOW; provider-location row removed. Official page confirms name/venue only; land from the existing verified provider-location record.",
-          "summary": "Catalog entry, provider mapping and location implemented in Phase 14.6A; provider-only location row removed so the show is not duplicated.",
+          "summary": "Catalog entry, provider mapping and location implemented on branch in PR #220; not resolved until the PR merges and is verified on main.",
+          "decision": "Hold as pending_implementation; resolve only after PR merge and verification of the catalog/mapping on main.",
           "evidence": [
             {
               "date": "2026-11-19",
               "note": "Active catalog entry + explicit mapping.",
               "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
             }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
           ]
         }
       ]
@@ -445,6 +457,9 @@
               "note": "Active catalog entry, intentionally unmapped (no invented UUID).",
               "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
             }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
           ]
         }
       ]

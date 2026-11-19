@@ -700,9 +700,10 @@ It is a findings export only: not a tracker, registry or catalog, and it never e
 
 Six-park audit of ThemeParks `/children` SHOW inventories against the active/legacy
 catalogs, mappings and provider-only locations. Added (active catalog, explicit
-mapping, tracker `DA-0006`–`DA-0010`): Mickey's Magical Friendship Faire (MK),
+mapping, tracker `DA-0006`–`DA-0010`; `DA-0006`–`DA-0009` stay `pending_implementation` until PR #220 merges and is verified on main): Mickey's Magical Friendship Faire (MK),
 Feathered Friends in Flight! and Tree of Life Awakenings (AK, the latter
-`limited`, no event association), Storytelling at Royal Theatre (Disneyland),
+`seasonal` with deliberately NO event association, so it is neutral-ranked and
+excluded from the 14.5C lifecycle monitor), Storytelling at Royal Theatre (Disneyland),
 and Mulan's Lunar New Year Procession (DCA, `seasonal`, `lunar-new-year-dca`
 association, intentionally UNMAPPED — no provider SHOW exists out of season; map
 only after verifying the live record, never guess a UUID).

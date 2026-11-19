@@ -370,6 +370,8 @@ const MERRIEST = "Mickey's Most Merriest Celebration";
 const LEOTA = "Madame Leota's Swinging Wake – A Haunted Mansion Street Party";
 const SCREAMS = "Halloween Screams";
 const BELIEVE = "Believe... in Holiday Magic";
+// Seasonal catalog entries intentionally WITHOUT a SEASONAL_ENTERTAINMENT_EVENTS association (no registry event applies).
+const SEASONAL_WITHOUT_EVENT: ReadonlySet<string> = new Set(["Tree of Life Awakenings"]);
 const rank = (name: string, resort: ResortId, date: string | null | undefined, parkId?: ParkId | null) =>
   getSeasonalEntertainmentRank(name, { resort, date, parkId, instant: NOW });
 const prank = (parkId: ParkId, entityId: string, resort: ResortId, date: string | null | undefined) =>
@@ -398,7 +400,12 @@ export const DEV_SEASONAL_ENTERTAINMENT_CASES: DevSeasonalEntertainmentCase[] = 
   { label: "MVMCP night (Nov 8): Christmas party show boosted; Halloween party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-08", "mk") === "party-night" && rank(HOCUS, "WDW", "2026-11-08", "mk") === "off-season" },
   { label: "MVMCP non-party night (Nov 10, in window): Christmas party show demoted", ok: () => rank(MERRIEST, "WDW", "2026-11-10", "mk") === "off-season" },
   { label: "a seasonal tag alone does not imply a party (every seasonal catalog entry needs an explicit association)", ok: () =>
-    ENTERTAINMENT_PLACES.filter((p) => p.availabilityType === "seasonal").every((p) => !!SEASONAL_ENTERTAINMENT_EVENTS[p.name]) },
+    ENTERTAINMENT_PLACES.filter((p) => p.availabilityType === "seasonal" && !SEASONAL_WITHOUT_EVENT.has(p.name)).every((p) => !!SEASONAL_ENTERTAINMENT_EVENTS[p.name]) },
+  // Phase 14.6A: the single documented exception — seasonal by darkness/season, no registry event applies (never invent one); neutral rank.
+  { label: "14.6A: Tree of Life Awakenings is seasonal with NO event association (neutral rank, never hidden or boosted by a made-up event)", ok: () =>
+    ENTERTAINMENT_PLACES.find((p) => p.name === "Tree of Life Awakenings")?.availabilityType === "seasonal" &&
+    SEASONAL_ENTERTAINMENT_EVENTS["Tree of Life Awakenings"] === undefined &&
+    ["2026-11-20", "2027-02-10", "2026-07-01"].every((d) => rank("Tree of Life Awakenings", "WDW", d, "ak") === "neutral") },
   { label: "party nights sort before general seasonal in boosted", ok: () => { const b = part("DLR", "2026-10-31", "dca").boosted; return b[0] === LEOTA; } },
   // Regular seasonal events (continuous windows)
   { label: "Halloween Time window (Oct 31, Disneyland): season boost", ok: () => rank(SCREAMS, "DLR", "2026-10-31", "disneyland") === "season" },

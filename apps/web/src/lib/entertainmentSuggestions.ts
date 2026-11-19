@@ -241,9 +241,10 @@ export const ENTERTAINMENT_PLACES: EntertainmentPlace[] = [
   // Phase 14.6A: Anandapur Theater bird show (official disneyworld.com page: Asia; "may not run daily"). Provider SHOW verified 2026-11-19.
   { name: "Feathered Friends in Flight!", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Asia", availabilityType: "regular" },
   // Phase 14.6A: nighttime projection show on the Tree of Life, "offered seasonally" after dusk (official disneyworld.com page; holiday
-  // edition Nov 13, 2026–Jan 3, 2027). Not tied to a ticketed event or registry season, so "limited" without an event association;
-  // the 14.5C lifecycle monitor handles dark periods. Provider SHOW verified 2026-11-19.
-  { name: "Tree of Life Awakenings", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "limited" },
+  // edition Nov 13, 2026–Jan 3, 2027). Seasonal availability, but no registry event or party applies, so deliberately NO
+  // SEASONAL_ENTERTAINMENT_EVENTS association (none invented). Being "seasonal" keeps it out of the 14.5C lifecycle monitor
+  // (dark periods are not inactivity evidence). Provider SHOW verified 2026-11-19.
+  { name: "Tree of Life Awakenings", resort: "WDW", location: "Animal Kingdom", parkId: "ak", land: "Discovery Island", availabilityType: "seasonal" },
 
   // Galaxy's Edge's Savi's Workshop – Handbuilt Lightsabers and Droid Depot
   // moved to the Experience catalog in EXP.2 (see module doc comment above
