@@ -106,6 +106,21 @@ export function showResetFilters(state: AllEntertainmentFilterState): boolean {
   return state.event !== d.event || state.land !== d.land || state.operatingOnly !== d.operatingOnly || state.showOutOfSeason !== d.showOutOfSeason;
 }
 
+/** Intro copy under the filters. */
+export const ALL_ENTERTAINMENT_INTRO_DEFAULT = "Explore today's entertainment and showtimes around the park.";
+export const ALL_ENTERTAINMENT_INTRO_EVENT = "Explore entertainment and show schedules for this event.";
+export const ALL_ENTERTAINMENT_INTRO_FILTERED = "Explore entertainment that matches your filters.";
+
+/**
+ * Intro text for the active filters: an event selection takes priority; otherwise any other non-default filter
+ * (land, Operating only, out-of-season toggle — the same notion as "Reset filters" being shown); else the default.
+ * Pass the EFFECTIVE selections (a stale event/land already resolved to its default).
+ */
+export function getAllEntertainmentIntroText(state: AllEntertainmentFilterState): string {
+  if (state.event !== ALL_ENTERTAINMENT_EVENT_ALL) return ALL_ENTERTAINMENT_INTRO_EVENT;
+  return showResetFilters(state) ? ALL_ENTERTAINMENT_INTRO_FILTERED : ALL_ENTERTAINMENT_INTRO_DEFAULT;
+}
+
 /**
  * Land/operating options effectively applied: in event browsing mode the
  * checkbox states are ignored (full associated catalog); the land filter stays.
@@ -446,6 +461,18 @@ export const DEV_ALL_ENTERTAINMENT_EVENT_FILTER_CASES: DevAllEntertainmentEventC
     info("mk", "mvmcp").rangeText === "Nov 8 – Dec 22, 2026" && info("mk", "mvmcp").nights?.length === 23 && EVENT_INFO_NOTE.includes("Individual performance dates and times may vary") },
   { label: "14.4.1 reset to default returns to performance-day filtering (event pool off, checkboxes shown again)", ok: () =>
     resolveEventSelection("mk", resetAllEntertainmentFilters().event, NOW) === "" && showOutOfSeasonToggle("") },
+  { label: "intro text: default, event (takes priority, even with other filters), and other-filters-only wording", ok: () => {
+    const d = resetAllEntertainmentFilters();
+    return getAllEntertainmentIntroText(d) === "Explore today's entertainment and showtimes around the park." &&
+      getAllEntertainmentIntroText({ ...d, event: "mvmcp" }) === "Explore entertainment and show schedules for this event." &&
+      getAllEntertainmentIntroText({ ...d, event: "mvmcp", land: "Fantasyland", operatingOnly: true, showOutOfSeason: true }) === "Explore entertainment and show schedules for this event." &&
+      [{ land: "Fantasyland" }, { operatingOnly: true }, { showOutOfSeason: true }, { land: "World Showcase", operatingOnly: true }]
+        .every((o) => getAllEntertainmentIntroText({ ...d, ...o }) === "Explore entertainment that matches your filters.") &&
+      getAllEntertainmentIntroText(resetAllEntertainmentFilters()) === ALL_ENTERTAINMENT_INTRO_DEFAULT;
+  } },
+  { label: "intro text follows reset: after Reset filters the default copy returns", ok: () =>
+    getAllEntertainmentIntroText({ event: "epcot-food-and-wine", land: "World Showcase", operatingOnly: true, showOutOfSeason: true }) === ALL_ENTERTAINMENT_INTRO_EVENT &&
+    getAllEntertainmentIntroText(resetAllEntertainmentFilters()) === ALL_ENTERTAINMENT_INTRO_DEFAULT },
   { label: "14.4D info is null for All Entertainment / stale selections", ok: () => describeAllEntertainmentEvent("mk", "", NOW) === null && describeAllEntertainmentEvent("hs", "mnsshp", NOW) === null },
 
   // ── Phase 14.6B: festival filters retain their published-schedule show ──

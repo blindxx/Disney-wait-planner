@@ -56,6 +56,7 @@ import {
   EVENT_INFO_NOTE,
   resetAllEntertainmentFilters,
   showResetFilters,
+  getAllEntertainmentIntroText,
   EVENT_NIGHTS_PREVIEW,
   EVENT_NO_ENTERTAINMENT_MESSAGE,
   getAllEntertainmentEventEntries,
@@ -486,6 +487,7 @@ export default function AllEntertainmentPage() {
     setOperatingOnly(d.operatingOnly);
     setShowOutOfSeason(d.showOutOfSeason);
     setNightsExpanded(false);
+    setExpanded(new Set()); // collapse open schedule / all-times disclosures, like a park switch does
     eventSelectRef.current?.focus(); // the button unmounts; keep keyboard focus in the filter bar
   }
 
@@ -666,7 +668,7 @@ export default function AllEntertainmentPage() {
         )}
 
         <p style={{ fontSize: "12px", color: "var(--text-faint)", marginTop: 0, marginBottom: "10px" }}>
-          Explore today&apos;s entertainment and showtimes throughout the park.
+          {getAllEntertainmentIntroText({ event: effectiveEvent, land: effectiveLand, operatingOnly, showOutOfSeason })}
         </p>
 
         <div className="entertainment-grid">
