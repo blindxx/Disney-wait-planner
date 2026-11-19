@@ -199,10 +199,10 @@
       "name": "Mickey's Magical Friendship Faire",
       "topic": "identity",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -242,6 +242,29 @@
           "relatedPrs": [
             "blindxx/Disney-wait-planner#220"
           ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "PR #220 merged to main (2026-11-19); the active catalog entry, explicit ThemeParks SHOW mapping and removal of the redundant provider-location row were verified on main.",
+          "decision": "Resolved: catalog entry and verified provider mapping are live on main; no further action.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry on main.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping on main.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
         }
       ]
     },
@@ -253,10 +276,10 @@
       "name": "Feathered Friends in Flight!",
       "topic": "identity",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -296,6 +319,29 @@
           "relatedPrs": [
             "blindxx/Disney-wait-planner#220"
           ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "PR #220 merged to main (2026-11-19); the active catalog entry, explicit ThemeParks SHOW mapping and removal of the redundant provider-location row were verified on main.",
+          "decision": "Resolved: catalog entry and verified provider mapping are live on main; no further action.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry on main.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping on main.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
         }
       ]
     },
@@ -307,10 +353,10 @@
       "name": "Tree of Life Awakenings",
       "topic": "identity",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -350,6 +396,29 @@
           "relatedPrs": [
             "blindxx/Disney-wait-planner#220"
           ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "PR #220 merged to main (2026-11-19); the active catalog entry, explicit ThemeParks SHOW mapping and removal of the redundant provider-location row were verified on main.",
+          "decision": "Resolved: catalog entry and verified provider mapping are live on main; no further action.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry on main.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping on main.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
         }
       ]
     },
@@ -361,10 +430,10 @@
       "name": "Storytelling at Royal Theatre",
       "topic": "identity",
       "audit": {
-        "status": "pending_implementation",
+        "status": "resolved",
         "episode": 1,
         "lastReviewed": "2026-11-19",
-        "action": "After PR #220 merges, verify the catalog entry and provider mapping on main (DEV checks pass), then resolve."
+        "resolvedOn": "2026-11-19"
       },
       "history": [
         {
@@ -398,6 +467,29 @@
             {
               "date": "2026-11-19",
               "note": "Active catalog entry + explicit mapping.",
+              "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
+            }
+          ],
+          "relatedPrs": [
+            "blindxx/Disney-wait-planner#220"
+          ]
+        },
+        {
+          "date": "2026-11-19",
+          "kind": "resolved",
+          "status": "resolved",
+          "episode": 1,
+          "summary": "PR #220 merged to main (2026-11-19); the active catalog entry, explicit ThemeParks SHOW mapping and removal of the redundant provider-location row were verified on main.",
+          "decision": "Resolved: catalog entry and verified provider mapping are live on main; no further action.",
+          "evidence": [
+            {
+              "date": "2026-11-19",
+              "note": "Active catalog entry on main.",
+              "ref": "apps/web/src/lib/entertainmentSuggestions.ts"
+            },
+            {
+              "date": "2026-11-19",
+              "note": "Explicit park-qualified SHOW mapping on main.",
               "ref": "apps/web/src/lib/themeParksEntertainmentMapping.ts"
             }
           ],
