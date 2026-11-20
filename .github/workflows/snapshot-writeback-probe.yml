@@ -1,0 +1,106 @@
+# TEMPORARY diagnostic (remove after testing): proves Vercel Cron → GitHub workflow_dispatch → isolated branch writeback.
+# Dispatch-only (no schedule/PR triggers). Writes ONLY probe/result.json (+ a Vercel deploy-exclusion config)
+# on test/snapshot-writeback. It never touches main or lifecycle-audit-snapshot and calls no DWP API.
+name: Snapshot writeback probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      trigger_id:
+        description: "Trigger identifier (est-11am | est-12pm | est-1pm | manual)"
+        required: true
+        type: string
+      dispatched_at:
+        description: "ISO timestamp from the dispatcher"
+        required: false
+        type: string
+
+permissions:
+  contents: write # push the probe branch only
+
+concurrency:
+  group: snapshot-writeback-probe
+  cancel-in-progress: false
+
+env:
+  PROBE_BRANCH: test/snapshot-writeback
+  PROBE_FILE: probe/result.json
+
+jobs:
+  probe:
+    if: github.repository == 'blindxx/Disney-wait-planner'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Guard branch name
+        run: |
+          set -euo pipefail
+          case "$PROBE_BRANCH" in
+            main|lifecycle-audit-snapshot) echo "::error::refusing protected branch"; exit 1;;
+            test/snapshot-writeback) ;;
+            *) echo "::error::unexpected probe branch"; exit 1;;
+          esac
+
+      - name: Check out probe branch (created on first run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir data && cd data
+          git init -q
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads origin "$PROBE_BRANCH" >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin "$PROBE_BRANCH"
+            git checkout -q -B "$PROBE_BRANCH" FETCH_HEAD
+          else
+            git checkout -q --orphan "$PROBE_BRANCH"
+          fi
+          # Keep Vercel from deploying this branch (same project root as main: apps/web). Create-only.
+          if [ ! -f apps/web/vercel.json ]; then
+            mkdir -p apps/web
+            printf '%s\n' '{"git":{"deploymentEnabled":{"test/snapshot-writeback":false}}}' > apps/web/vercel.json
+          fi
+
+      - name: Write result
+        env:
+          TRIGGER_ID: ${{ inputs.trigger_id }}
+          DISPATCHED_AT: ${{ inputs.dispatched_at }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$TRIGGER_ID" in est-11am|est-12pm|est-1pm|manual) ;; *) echo "::error::bad trigger_id"; exit 1;; esac
+          mkdir -p data/probe
+          node -e '
+            const fs = require("fs");
+            const f = "data/" + process.env.PROBE_FILE;
+            let doc = { results: {} };
+            try { const p = JSON.parse(fs.readFileSync(f, "utf8")); if (p && typeof p.results === "object") doc = p; } catch {}
+            const e = process.env;
+            const now = new Date().toISOString();
+            doc.results[e.TRIGGER_ID] = {
+              triggerId: e.TRIGGER_ID,
+              dispatchedAt: e.DISPATCHED_AT || null,
+              workflowStartedAt: now,
+              event: e.GITHUB_EVENT_NAME,
+              workflowSha: e.GITHUB_SHA,
+              ref: e.GITHUB_REF,
+              runId: e.GITHUB_RUN_ID,
+              runAttempt: e.GITHUB_RUN_ATTEMPT,
+              runUrl: e.RUN_URL,
+              actor: e.GITHUB_ACTOR,
+            };
+            doc.updatedAt = now;
+            fs.writeFileSync(f, JSON.stringify(doc, null, 2) + "\n");
+          '
+
+      - name: Commit and push probe branch
+        run: |
+          set -euo pipefail
+          cd data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$PROBE_FILE" apps/web/vercel.json
+          git commit -q -m "Snapshot writeback probe ${TRIGGER_ID:-} $(date -u +%Y-%m-%dT%H:%MZ)" || { echo "no change"; exit 0; }
+          git push -q origin "HEAD:refs/heads/$PROBE_BRANCH"
+        env:
+          TRIGGER_ID: ${{ inputs.trigger_id }}
