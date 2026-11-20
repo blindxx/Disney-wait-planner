@@ -786,11 +786,17 @@ published"), confirmed no-performance, or "not published" (unknown) — plus unp
 effective park only when a performance is CONFIRMED that date. Past/invalid dates show nothing. DEV checks:
 `runDevPlannerPublishedScheduleCases()`.
 
-- **Tom is intentionally NOT extended.** Tom's backend is a separate repo and nothing here verifies that it
-  interprets new `context.schedule` fields; `context.schedule.entertainment_showtimes` is `today_only` and its
-  `note` tells Tom no other-date showtimes exist. Do not add published-schedule fields to `/api/tom/ask` or claim
-  Tom uses them until the Tom repo ships and verifies a matching contract (a 14.6C DEV case in
-  `runDevTomScheduleContextCases()` locks the current shape).
+- **Ask Tom** (`tomScheduleContext.ts`, Tom's merged contract tom-morrow-bot#198): `context.schedule.published_performances`
+  = `{scope:"date_specific", source, days:[{dayId, dayLabel, date, park, shows:[{name, state, times?, performer_label?,
+  performers?, note?}]}]}`, built synchronously from the SAME resolver through `getPlannerPublishedScheduleFacts` (shared
+  with My Plans; no second model). Dated today-or-future planner days only; planned covered shows in any state plus the
+  park's other covered shows with a CONFIRMED state (performance/no_performance); `unknown` is sent only for planned shows
+  and never means "does not perform"; `times: []` = confirmed date-only; no times/performers on non-performance. Bounded
+  to Tom's limits (8 days, 8 shows/day; Tom ignores the rest), one entry per day id, only contract fields. Tom reports
+  `context_used: ["published_schedule"]`, which is NOT an attribution trigger (`scheduleUsedByAnswer` honors only
+  "schedule"): official data never carries ThemeParks attribution. Today-only provider showtimes, park hours and planner
+  ownership are unchanged. Change the shape only together with Tom's `_schedule_parse_published`. DEV checks: the 14.6C
+  cases in `runDevTomScheduleContextCases()` (including a mirror of Tom's validation).
 
 ## Catalog taxonomy
 

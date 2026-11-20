@@ -41,11 +41,19 @@ import { getEntertainmentProviderMapping } from "./themeParksEntertainmentMappin
 import { getParkHoursForDate } from "./parkHoursService";
 import { getParkEntertainmentShowtimes } from "./entertainmentShowtimesService";
 import { THEMEPARKS_ATTRIBUTION_NAME, THEMEPARKS_ATTRIBUTION_URL } from "./themeParksProviders";
+import { getPlannerPublishedScheduleFacts, type PlannerScheduleItemInput } from "./plannerPublishedSchedule";
 import type { ParkDateHours, ParkHoursWindow } from "./parkHours";
 import type { ParkEntertainmentShowtimes } from "./entertainmentShowtimes";
 
 export const MAX_HOURS_TARGETS = 4;
 export const MAX_SHOWTIME_PARKS = 2;
+/**
+ * Phase 14.6C published_performances limits: Tom's deployed parser reads only the first 8 days and the first 8
+ * shows per day (tom-morrow-bot `_SCHEDULE_PUB_MAX_DAYS` / `_SCHEDULE_PUB_MAX_SHOWS`), so DWP never sends more.
+ */
+export const MAX_PUBLISHED_DAYS = 8;
+export const MAX_PUBLISHED_SHOWS = 8;
+export const PUBLISHED_PERFORMANCES_SOURCE = "Official Disney schedule via Disney Wait Planner";
 
 export interface TomScheduleWindow {
   type: string;
@@ -80,6 +88,36 @@ export interface TomScheduleShowtimeEntry {
   incomplete: boolean;
 }
 
+/**
+ * Tom's validated `published_performances` contract (tom-morrow-bot #198): official, date-specific schedule from
+ * DWP's 14.6B resolver — NOT provider data. `performance` = the official schedule lists the date (`times: []` =
+ * confirmed date-only, times not published); `no_performance` = a COMPLETE official schedule does not list it;
+ * `unknown` = nothing official is known for that date (never "does not perform"). Only these fields are sent.
+ */
+export interface TomPublishedShow {
+  name: string;
+  state: "performance" | "no_performance" | "unknown";
+  /** performance only: resort-local 24h "HH:mm"; required list there ([] = date-only). */
+  times?: string[];
+  performer_label?: string;
+  performers?: string[];
+  note?: string;
+}
+export interface TomPublishedDay {
+  dayId: string;
+  dayLabel: string;
+  /** Exact planner date, resort-local YYYY-MM-DD. */
+  date: string;
+  /** The show's canonical park (the planner day's effective park for catalog shows of that park). */
+  park: ParkId;
+  shows: TomPublishedShow[];
+}
+export interface TomPublishedPerformances {
+  scope: "date_specific";
+  source: string;
+  days: TomPublishedDay[];
+}
+
 export interface TomScheduleContext {
   source: "ThemeParks.wiki via Disney Wait Planner";
   attribution: { name: string; url: string };
@@ -98,6 +136,8 @@ export interface TomScheduleContext {
       entries: TomScheduleShowtimeEntry[];
     }>;
   };
+  /** Official date-specific schedules (Phase 14.6C). Absent when no planner day has a covered show to report. */
+  published_performances?: TomPublishedPerformances;
   note: string;
 }
 
@@ -225,6 +265,47 @@ async function fetchParkShowtimesEntry(
   };
 }
 
+const PUBLISHED_NOTE =
+  " published_performances is Disney's OFFICIAL date-specific schedule (not provider showtimes): 'unknown' means no official schedule is published for that date, never that the show does not perform.";
+
+/**
+ * Official date-specific `published_performances` for the planner's dated (today-or-future) days, built ONLY from
+ * the 14.6B resolver via the shared planner facts: the day's planned covered shows (any state) plus the park's
+ * other covered shows with a CONFIRMED state (performance / no_performance). Unknown is sent only for planned
+ * shows. Deduped per (day, park), soonest-first, bounded to Tom's limits. Pure; undefined when nothing to report.
+ */
+function buildPublishedPerformances(targets: Target[], planner: Record<string, unknown>, instant: Date): TomPublishedPerformances | undefined {
+  const plans = Array.isArray(planner.plans) ? planner.plans : [];
+  const days: TomPublishedDay[] = [];
+  const seenDay = new Set<string>();
+  for (const t of targets) {
+    if (days.length >= MAX_PUBLISHED_DAYS) break;
+    if (seenDay.has(t.dayId)) continue;
+    seenDay.add(t.dayId);
+    const items: PlannerScheduleItemInput[] = [];
+    for (const p of plans) {
+      const it = obj(p);
+      if (it && it.dayId === t.dayId && typeof it.name === "string") items.push({ name: it.name, type: typeof it.type === "string" ? it.type : undefined });
+    }
+    const facts = getPlannerPublishedScheduleFacts(t.date, t.park, t.resort, items, instant, undefined, ["performance", "no_performance"]);
+    const byPark = new Map<ParkId, TomPublishedShow[]>();
+    for (const f of facts) {
+      const show: TomPublishedShow = { name: f.name, state: f.state };
+      if (f.state === "performance") {
+        show.times = [...f.times];
+        if (f.performers.length > 0) { show.performer_label = f.performerLabel; show.performers = [...f.performers]; }
+        if (f.note) show.note = f.note;
+      }
+      byPark.set(f.parkId, [...(byPark.get(f.parkId) ?? []), show]);
+    }
+    for (const [park, shows] of byPark) {
+      if (days.length >= MAX_PUBLISHED_DAYS) break;
+      days.push({ dayId: t.dayId, dayLabel: t.dayLabel, date: t.date, park, shows: shows.slice(0, MAX_PUBLISHED_SHOWS) });
+    }
+  }
+  return days.length > 0 ? { scope: "date_specific", source: PUBLISHED_PERFORMANCES_SOURCE, days } : undefined;
+}
+
 /**
  * Build the `context.schedule` object for a Tom request from the (already
  * sanitized) planner context, or null when nothing schedule-relevant exists.
@@ -286,13 +367,19 @@ export async function buildTomScheduleContext(
       if (entry) showParks.push(entry);
     }
 
+    // Official date-specific schedules: synchronous (no provider call) and isolated — a failure here never
+    // affects hours/showtimes.
+    let published: TomPublishedPerformances | undefined;
+    try { published = buildPublishedPerformances(targets, plannerContext, instant); } catch { published = undefined; }
+
     return {
       source: "ThemeParks.wiki via Disney Wait Planner",
       attribution: { name: THEMEPARKS_ATTRIBUTION_NAME, url: THEMEPARKS_ATTRIBUTION_URL },
       hours,
       not_fetched: notFetched,
       ...(showParks.length > 0 ? { entertainment_showtimes: { scope: "today_only" as const, parks: showParks } } : {}),
-      note: NOTE,
+      ...(published ? { published_performances: published } : {}),
+      note: published ? NOTE + PUBLISHED_NOTE : NOTE,
     };
   } catch {
     return null;
@@ -337,6 +424,12 @@ export async function buildTomScheduleContextWithDeadline(
  * DWP never parses the question or answer text to guess this.
  */
 export const TOM_SCHEDULE_USED_SIGNAL = "schedule";
+/**
+ * Tom reports `"published_schedule"` when an answer used `published_performances` (official Disney data). It is a
+ * DIFFERENT signal from "schedule" and is deliberately not an attribution trigger: `scheduleUsedByAnswer` only
+ * honors "schedule", so official schedule answers never carry ThemeParks attribution.
+ */
+export const TOM_PUBLISHED_USED_SIGNAL = "published_schedule";
 
 /**
  * ThemeParks attribution applies only when schedule data carrying provider
@@ -804,18 +897,90 @@ export async function runDevTomScheduleContextCases(): Promise<string[]> {
     check("12.8.1: lookup answer-use signal", showtimesLookupUsedByAnswer({ context_used: ["dwp_showtimes_lookup"] }) && showtimesLookupUsedByAnswer({ meta: { context_used: ["dwp_showtimes_lookup"] } }) && !showtimesLookupUsedByAnswer({ context_used: ["schedule"] }) && !showtimesLookupUsedByAnswer(null));
   }
 
-  // Phase 14.6C contract lock: the Tom backend's handling of new context fields is unverified, so official
-  // published schedules (14.6B) are NOT added to context.schedule. A future EPCOT day with a planned covered
-  // show must keep the verified shape: hours only, no showtimes (today-only), no published-schedule fields.
+  // Phase 14.6C published_performances: official, date-specific schedules (14.6B resolver) in Tom's merged contract
+  // (tom-morrow-bot #198). `tomAccepts` mirrors Tom's `_schedule_parse_published` validation so a DWP payload Tom would
+  // drop (or partly drop) fails here.
   {
-    const planned = { days: [day("d1", "2027-01-20", "epcot")], plans: [{ dayId: "d1", name: "Disney on Broadway Concert Series", type: "entertainment" }], dayAutoFallbacks: {} };
-    showAsked.length = 0;
-    const c = await buildTomScheduleContext(planned, { instant: NOW, getHours: hoursFor({}), getShowtimes: getShowtimes("Disney on Broadway Concert Series") });
-    const keys = Object.keys(c ?? {}).sort().join();
-    const json = JSON.stringify(c);
-    check("14.6C: future covered-show day keeps the verified context.schedule keys (no published-schedule field)", keys === "attribution,hours,not_fetched,note,source" && !/Ashley Brown|Josh Strickland|17:15|published|official/i.test(json.replace(NOTE, "")));
-    check("14.6C: no showtimes fetched or sent for a future date (today-only scope unchanged)", showAsked.length === 0 && !c?.entertainment_showtimes && /today only/.test(c?.note ?? ""));
-    check("14.6C: no attribution signal from planner-only context (no provider-confirmed facts, answer-use not reported)", !scheduleUsedByAnswer(c, { context_used: ["planner"] }));
+    const CPR = "Candlelight Processional", DOB = "Disney on Broadway Concert Series", GR = "Garden Rocks Concert Series";
+    const HHMM = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+    const tomAccepts = (pp: TomPublishedPerformances | undefined): boolean => {
+      if (!pp || pp.scope !== "date_specific" || !pp.source?.trim() || !Array.isArray(pp.days) || pp.days.length === 0 || pp.days.length > 8) return false;
+      return pp.days.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.date) && typeof d.park === "string" && d.park.trim() !== "" && typeof d.dayId === "string" &&
+        d.shows.length > 0 && d.shows.length <= 8 && d.shows.every((sh) => typeof sh.name === "string" && sh.name.trim() !== "" &&
+          (sh.state === "performance" ? Array.isArray(sh.times) && sh.times.every((t) => HHMM.test(t)) : sh.times === undefined && sh.performers === undefined) &&
+          Object.keys(sh).every((k) => ["name", "state", "times", "performer_label", "performers", "note"].includes(k))) &&
+        Object.keys(d).sort().join() === "date,dayId,dayLabel,park,shows");
+    };
+    const build = (days: ReturnType<typeof day>[], plans: Array<Record<string, unknown>> = [], instant = NOW) => {
+      showAsked.length = 0;
+      return buildTomScheduleContext({ days, plans, dayAutoFallbacks: {} }, { instant, getHours: hoursFor({}), getShowtimes: getShowtimes("Fantasmic!") });
+    };
+    const shows = (c: TomScheduleContext | null, i = 0) => c?.published_performances?.days[i]?.shows ?? [];
+
+    // Positive: exact date/park/show/times/performers; contract-only fields; source; provider paths untouched.
+    let c = await build([day("d1", "2027-01-20", "epcot")]);
+    const pd = c?.published_performances?.days[0];
+    check("14.6C: positive day carries exact dayId/date/park, canonical show, official times and performers", !!pd && pd.dayId === "d1" && pd.date === "2027-01-20" && pd.park === "epcot" &&
+      pd.shows.length === 1 && pd.shows[0].name === DOB && pd.shows[0].state === "performance" && pd.shows[0].times?.join() === "17:15,18:30,19:45" &&
+      pd.shows[0].performer_label === "Featuring" && pd.shows[0].performers?.join() === "Ashley Brown,Josh Strickland");
+    check("14.6C: scope/source set and the payload passes Tom's validation", c?.published_performances?.scope === "date_specific" && c.published_performances.source === PUBLISHED_PERFORMANCES_SOURCE && tomAccepts(c?.published_performances));
+    check("14.6C: top-level keys add only published_performances; no showtimes fetched/sent for a future date (today-only unchanged)", Object.keys(c ?? {}).sort().join() === "attribution,hours,not_fetched,note,published_performances,source" &&
+      showAsked.length === 0 && !c?.entertainment_showtimes && /today only/.test(c?.note ?? "") && /never that the show does not perform/.test(c?.note ?? ""));
+    check("14.6C: hours still fetched for the same day (park hours unchanged)", c?.hours.length === 1 && c.hours[0].date === "2027-01-20");
+
+    // Negative: confirmed non-performance (complete record, no times/performers keys); unplanned unknown shows are not sent.
+    c = await build([day("d1", "2026-03-10", "epcot")], [], new Date("2026-03-01T17:00:00Z"));
+    check("14.6C: negative day is sent as no_performance with no times/performers", shows(c).length === 1 && shows(c)[0].name === GR && shows(c)[0].state === "no_performance" &&
+      shows(c)[0].times === undefined && shows(c)[0].performers === undefined && tomAccepts(c?.published_performances));
+
+    // Unknown: planned only; never confirmed non-performance; no ghost times; unplanned unknown omitted entirely.
+    c = await build([day("d1", "2027-04-17", "epcot")], [{ dayId: "d1", name: "Candlelight 5:00 PM", type: "entertainment" }]);
+    check("14.6C: planned show with no published schedule is unknown (annotated name resolves), with no times", shows(c).length === 1 && shows(c)[0].name === CPR && shows(c)[0].state === "unknown" &&
+      shows(c)[0].times === undefined && tomAccepts(c?.published_performances));
+    c = await build([day("d1", "2027-04-17", "epcot")]);
+    check("14.6C: unplanned unknown shows are omitted (no published block at all)", c?.published_performances === undefined && !JSON.stringify(c).includes("published_performances"));
+
+    // Date-only (finale) keeps times:[] + the source note; no performer fields.
+    c = await build([day("d1", "2027-02-27", "epcot")]);
+    check("14.6C: date-only performance sends times [] (never a fabricated time) and the source note", shows(c)[0]?.state === "performance" && shows(c)[0].times?.length === 0 &&
+      shows(c)[0].performers === undefined && /Newsies/.test(shows(c)[0].note ?? "") && tomAccepts(c?.published_performances));
+
+    // Year boundary + several days: exact dates only, no carry-forward across seasons.
+    c = await build([day("a", "2026-12-30", "epcot"), day("b", "2026-12-31", "epcot"), day("c", "2027-01-20", "epcot")],
+      [{ dayId: "b", name: "Candlelight Processional", type: "entertainment" }], new Date("2026-12-01T17:00:00Z"));
+    const dd = c?.published_performances?.days ?? [];
+    check("14.6C: year boundary — Dec 30 performs, Dec 31 (planned) unknown, Jan 20 2027 Broadway", dd.length === 3 && dd[0].date === "2026-12-30" && dd[0].shows[0].state === "performance" && dd[0].shows[0].performers?.length === 1 &&
+      dd[1].date === "2026-12-31" && dd[1].shows[0].state === "unknown" && dd[2].date === "2027-01-20" && dd[2].shows[0].name === DOB && tomAccepts(c?.published_performances));
+
+    // Park/identity matching: other-park days get nothing; a planned covered show keeps its own canonical park.
+    c = await build([day("m", "2027-01-20", "mk")]);
+    check("14.6C: a Magic Kingdom day gets no published schedule (covered shows are EPCOT)", c?.published_performances === undefined);
+    c = await build([day("m", "2026-12-01", "mk")], [{ dayId: "m", name: "Candlelight Processional", type: "entertainment" }], new Date("2026-11-19T17:00:00Z"));
+    check("14.6C: a planned EPCOT show on another park's day is sent with its own canonical park", c?.published_performances?.days.length === 1 && c.published_performances.days[0].park === "epcot" && c.published_performances.days[0].dayId === "m");
+    c = await build([day("p", "2026-10-01", "epcot"), day("bad", "2027-02-30", "epcot")], [], NOW);
+    check("14.6C: past and invalid planner dates are never sent", c?.published_performances === undefined);
+
+    // Dedupe and Tom's limits (8 days, 8 shows/day).
+    const many = Array.from({ length: 10 }, (_v, i) => day(`d${i}`, `2027-01-${String(15 + i).padStart(2, "0")}`, "epcot"));
+    c = await build([...many, day("d0", "2027-01-15", "epcot")]);
+    const ids = (c?.published_performances?.days ?? []).map((d) => d.dayId);
+    check("14.6C: bounded to 8 days, soonest first, one entry per day id", ids.length === MAX_PUBLISHED_DAYS && new Set(ids).size === ids.length && ids[0] === "d0" && ids[7] === "d7" && tomAccepts(c?.published_performances));
+    check("14.6C: day cap is Tom's cap (8) and shows/day cap is 8", MAX_PUBLISHED_DAYS === 8 && MAX_PUBLISHED_SHOWS === 8 && (c?.published_performances?.days ?? []).every((d) => d.shows.length <= MAX_PUBLISHED_SHOWS));
+    c = await build([day("x", "2027-01-20", "epcot"), day("y", "2027-01-20", "epcot")]);
+    check("14.6C: distinct planner days on the same date each get their own entry", c?.published_performances?.days.map((d) => d.dayId).join() === "x,y");
+
+    // Malformed planner data never throws or disturbs hours; official data never reads provider showtimes.
+    c = await build([day("d1", "2027-01-20", "epcot")], [{ dayId: "d1", name: 7, type: {} }, { dayId: "d1" }, { dayId: 5, name: "Candlelight Processional" }, null as unknown as Record<string, unknown>, { dayId: "d1", name: "Garden Rocks", type: 3 }]);
+    check("14.6C: malformed plan items are ignored (the one valid planned show still resolves); context and hours still built", c !== null && c.hours.length === 1 &&
+      shows(c).map((x) => `${x.name}:${x.state}`).join() === `${GR}:unknown,${DOB}:performance` && tomAccepts(c?.published_performances));
+
+    // Attribution: official context_used never triggers provider attribution; "schedule" behavior is unchanged.
+    const withHours = await buildTomScheduleContext({ days: [day("d1", "2027-01-20", "epcot")], plans: [], dayAutoFallbacks: {} },
+      { instant: NOW, getHours: hoursFor({ "epcot:2027-01-20": mkHours("epcot", "2027-01-20", "hours") }), getShowtimes: getShowtimes("Fantasmic!") });
+    check("14.6C: provider data present + Tom reports only published_schedule → no ThemeParks attribution", scheduleHasProviderData(withHours) &&
+      !scheduleUsedByAnswer(withHours, { context_used: [TOM_PUBLISHED_USED_SIGNAL] }) && !scheduleUsedByAnswer(withHours, { meta: { context_used: ["published_schedule"] } }) && TOM_PUBLISHED_USED_SIGNAL === "published_schedule");
+    check("14.6C: reporting both signals still attributes via 'schedule' only; published alone never does", scheduleUsedByAnswer(withHours, { context_used: ["schedule", "published_schedule"] }) &&
+      !scheduleHasProviderData({ ...(await build([day("d1", "2027-01-20", "epcot")]))!, hours: [] }));
   }
 
   return failures;

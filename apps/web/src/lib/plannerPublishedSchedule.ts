@@ -34,6 +34,21 @@ import {
 import { PARK_TO_RESORT } from "./parkMetadata";
 import { comparePlannerDateToResortToday } from "./resortTime";
 
+/** Structured resolver facts for one covered show on one planner day (shared by My Plans and the Tom context). */
+export interface PlannerPublishedScheduleFact {
+  name: string;
+  parkId: ParkId;
+  source: "planned" | "park";
+  state: PublishedDayState;
+  /** performance only: resort-local 24h "HH:mm"; `[]` = confirmed date-only (times NOT published). */
+  times: string[];
+  performers: string[];
+  performerLabel: string;
+  note?: string;
+  /** Official source page for the record containing the date (performance/no_performance/partial only). */
+  sourceUrl?: string;
+}
+
 export interface PlannerPublishedScheduleRow {
   name: string;
   parkId: ParkId;
@@ -50,41 +65,51 @@ export interface PlannerScheduleItemInput {
   type?: PlannerItemType | string;
 }
 
-function describe(state: PublishedDayState, r: ReturnType<typeof getPublishedPerformanceDay>): string[] {
-  if (state === "performance") {
-    const lines = [r.times.length > 0 ? r.times.map(formatPublishedTime).join(" • ") : "Performing (times not published)"];
-    if (r.performers.length > 0) lines.push(`${r.record!.performerLabel}: ${r.performers.join(" & ")}`);
-    if (r.note) lines.push(r.note);
+function describe(f: PlannerPublishedScheduleFact): string[] {
+  if (f.state === "performance") {
+    const lines = [f.times.length > 0 ? f.times.map(formatPublishedTime).join(" • ") : "Performing (times not published)"];
+    if (f.performers.length > 0) lines.push(`${f.performerLabel}: ${f.performers.join(" & ")}`);
+    if (f.note) lines.push(f.note);
     return lines;
   }
-  if (state === "no_performance") return ["No performance on this date (official schedule)"];
+  if (f.state === "no_performance") return ["No performance on this date (official schedule)"];
   return ["Official schedule not published for this date"];
 }
 
 /**
- * Rows for one planner day. `date` is the day's own planner date; `parkId` its effective park (may be null for
- * an unresolved Auto day: planned rows still resolve by the item's own canonical park). `resort` is the day's
+ * Facts for one planner day. `date` is the day's own planner date; `parkId` its effective park (may be null for
+ * an unresolved Auto day: planned shows still resolve by the item's own canonical park). `resort` is the day's
  * resort context for item resolution. `instant` is only used for the resort-local past/today/future test.
+ * Planned covered shows are always returned (any state, itinerary order); unplanned covered shows of the
+ * effective park are returned only when their state is in `unplannedStates` (default: confirmed performance).
  */
-export function getPlannerPublishedScheduleRows(
+export function getPlannerPublishedScheduleFacts(
   date: string | null | undefined,
   parkId: ParkId | null | undefined,
   resort: ResortId,
   items: readonly PlannerScheduleItemInput[],
   instant: Date = new Date(),
   records = PUBLISHED_PERFORMANCE_SCHEDULES,
-): PlannerPublishedScheduleRow[] {
+  unplannedStates: readonly PublishedDayState[] = ["performance"],
+): PlannerPublishedScheduleFact[] {
   if (!date) return [];
   const rel = comparePlannerDateToResortToday(parkId ? (PARK_TO_RESORT[parkId] as ResortId) : resort, date, instant);
   if (rel !== "today" && rel !== "future") return [];
 
-  const rows: PlannerPublishedScheduleRow[] = [];
+  const facts: PlannerPublishedScheduleFact[] = [];
   const seen = new Set<string>();
-  const row = (name: string, park: ParkId, source: "planned" | "park"): PlannerPublishedScheduleRow | null => {
+  const fact = (name: string, park: ParkId, source: "planned" | "park"): PlannerPublishedScheduleFact | null => {
     const r = getPublishedPerformanceDay(park, name, date, records);
-    if (source === "park" && r.state !== "performance") return null;
+    if (source === "park" && !unplannedStates.includes(r.state)) return null;
     const sourceUrl = r.record?.sources[0]?.url;
-    return { name, parkId: park, source, state: r.state, lines: describe(r.state, r), ...(sourceUrl ? { sourceUrl } : {}) };
+    return {
+      name, parkId: park, source, state: r.state,
+      times: r.state === "performance" ? r.times : [],
+      performers: r.state === "performance" ? r.performers : [],
+      performerLabel: r.record?.performerLabel ?? "Performers",
+      ...(r.state === "performance" && r.note ? { note: r.note } : {}),
+      ...(sourceUrl ? { sourceUrl } : {}),
+    };
   };
 
   for (const item of items) {
@@ -98,8 +123,8 @@ export function getPlannerPublishedScheduleRows(
     const key = `${park}:${meta.canonicalName}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const planned = row(meta.canonicalName, park, "planned");
-    if (planned) rows.push(planned);
+    const planned = fact(meta.canonicalName, park, "planned");
+    if (planned) facts.push(planned);
   }
 
   if (parkId) {
@@ -108,11 +133,26 @@ export function getPlannerPublishedScheduleRows(
       const key = `${parkId}:${name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const r = row(name, parkId, "park");
-      if (r) rows.push(r);
+      const f = fact(name, parkId, "park");
+      if (f) facts.push(f);
     }
   }
-  return rows;
+  return facts;
+}
+
+/** My Plans display rows: the shared facts (confirmed performances for unplanned shows) with display lines. */
+export function getPlannerPublishedScheduleRows(
+  date: string | null | undefined,
+  parkId: ParkId | null | undefined,
+  resort: ResortId,
+  items: readonly PlannerScheduleItemInput[],
+  instant: Date = new Date(),
+  records = PUBLISHED_PERFORMANCE_SCHEDULES,
+): PlannerPublishedScheduleRow[] {
+  return getPlannerPublishedScheduleFacts(date, parkId, resort, items, instant, records).map((f) => ({
+    name: f.name, parkId: f.parkId, source: f.source, state: f.state, lines: describe(f),
+    ...(f.sourceUrl ? { sourceUrl: f.sourceUrl } : {}),
+  }));
 }
 
 // ── DEV checks ───────────────────────────────────────────────────────────
