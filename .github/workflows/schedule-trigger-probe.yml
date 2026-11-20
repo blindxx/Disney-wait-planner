@@ -1,0 +1,22 @@
+# Temporary scheduler diagnostic. Remove after verifying automatic execution.
+name: Schedule trigger probe
+
+on:
+  schedule:
+    # Offset from lifecycle snapshot's five-minute boundaries.
+    - cron: "2-57/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Show trigger information
+        run: |
+          echo "event=${{ github.event_name }}"
+          echo "utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "repository=${{ github.repository }}"
