@@ -7,8 +7,8 @@ name: Lifecycle audit snapshot
 
 on:
   schedule:
-    # 09:17 UTC: after both lifecycle monitor crons (03:00 and 06:00 UTC; Vercel may fire anywhere in the hour).
-    - cron: "17 9 * * *"
+    # TEMPORARY trigger test: every 5 minutes. Restore 09:17 UTC daily after proving a scheduled run.
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
