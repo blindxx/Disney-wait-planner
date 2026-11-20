@@ -179,6 +179,26 @@ The ChatGPT audit must check `completeness.complete`, `generatedAt` age (`staleA
 latest run before trusting the snapshot. The job holds no production write access; nothing here changes catalogs,
 the tracker or `audit_status`.
 
+**TEMPORARY scheduler diagnostic — snapshot probe (remove after testing)**
+
+Tests Vercel Cron → `GET /api/cron/snapshot-probe?trigger=est-11am|est-12pm|est-1pm` (`0 16/17/18 * * *` UTC = 11/12/1 EST,
+`apps/web/vercel.json`) → GitHub `workflow_dispatch` of `.github/workflows/snapshot-writeback-probe.yml` → `probe/result.json`
+on the isolated `test/snapshot-writeback` branch. No lifecycle audit API call; existing crons/workflows are untouched.
+
+- **Vercel env (Production, server-only):** `CRON_SECRET` (already set) and `GITHUB_PROBE_DISPATCH_TOKEN`: a fine-grained PAT
+  limited to this one repository with only **Actions: Read and write** (Metadata read is implicit). No Contents permission;
+  the workflow pushes with its own `GITHUB_TOKEN`. Never use `NEXT_PUBLIC_*`. Redeploy after setting it.
+- **Must be on `main` and deployed to Production:** `workflow_dispatch` needs the workflow file on `main` (the route dispatches ref `main`),
+  and Vercel only runs crons for the Production deployment.
+- **Two separate results.** The route returns 200 `dispatch: "accepted"` only when GitHub answered 204 (502 `dispatch: "failed"` otherwise);
+  that is NOT workflow success. Confirm the run in Actions → "Snapshot writeback probe" and the per-trigger entry in `probe/result.json`
+  (`dispatchedAt` vs `workflowStartedAt`). Vercel cron logs show the dispatch half.
+- **Isolation:** the workflow refuses `main`/`lifecycle-audit-snapshot`, writes only `probe/result.json` plus
+  `apps/web/vercel.json` (`{"git":{"deploymentEnabled":{"test/snapshot-writeback":false}}}`, created if missing) so the probe branch is never deployed.
+- **Manual test:** Actions → "Snapshot writeback probe" → Run workflow with `trigger_id` `manual`; and, to test the route,
+  `curl -H "Authorization: Bearer $CRON_SECRET" "https://dwpapp.com/api/cron/snapshot-probe?trigger=est-11am"` (run locally with the secret in your shell; expect 401 without it, 400 for an unknown trigger).
+- **Cleanup:** delete the three vercel.json cron entries, the route, the workflow, this section, the `GITHUB_PROBE_DISPATCH_TOKEN` env var/PAT and the `test/snapshot-writeback` branch.
+
 **Ask Tom** (server-only — never expose these as `NEXT_PUBLIC_*`)
 
 - `TOM_API_URL` — Tom Railway API base URL

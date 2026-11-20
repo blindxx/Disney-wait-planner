@@ -11,6 +11,18 @@
     {
       "path": "/api/cron/entertainment-lifecycle?window=dlr",
       "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/snapshot-probe?trigger=est-11am",
+      "schedule": "0 16 * * *"
+    },
+    {
+      "path": "/api/cron/snapshot-probe?trigger=est-12pm",
+      "schedule": "0 17 * * *"
+    },
+    {
+      "path": "/api/cron/snapshot-probe?trigger=est-1pm",
+      "schedule": "0 18 * * *"
     }
   ]
 }
