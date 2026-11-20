@@ -4,7 +4,7 @@ name: Schedule trigger probe
 on:
   schedule:
     # Offset from lifecycle snapshot's five-minute boundaries.
-    - cron: "2-57/5 * * * *"
+    - cron: "3-58/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
