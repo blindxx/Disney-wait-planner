@@ -697,7 +697,10 @@ It is a findings export only: not a tracker, registry or catalog, and it never e
   legacy `DWP_CATALOG_API_KEY` (same `x-dwp-catalog-api-key` header; `lifecycleAuditAuth.ts`: blank/unset keys are
   never credentials, both unset → 500, timing-safe); other catalog routes and Ask Tom stay on `DWP_CATALOG_API_KEY`
   only. DEV checks: `runDevLifecycleAuditAuthCases()` (`lifecycleAuditAuthDev.ts`);
-  triggers are schedule/manual only (no PR triggers); `contents: write` is the only permission;
+  triggers are `workflow_dispatch` only (no PR or GitHub `schedule` triggers). Vercel Cron is the authoritative
+  scheduler: `/api/cron/lifecycle-snapshot-dispatch` (`0 9 * * *` UTC, after the park-hours and lifecycle crons;
+  `CRON_SECRET`, dispatch via server-only `GITHUB_PROBE_DISPATCH_TOKEN`) dispatches the workflow on `main`; a move to
+  Vercel Schedules is planned after Phase 14.8; `contents: write` is the only permission;
   the job has no database or production write access. The script prints no response bodies and aborts
   if the key appears in its output.
 - **Sanitization**: shape-based (`sanitizeEvidence`): scalars/bounded arrays only, sensitive-looking keys

@@ -159,7 +159,7 @@ app code) whenever `db-schema.sql` changes.
 
 **Lifecycle audit snapshot bridge** (Phase 14.5E-B1; GitHub Actions, read-only)
 
-`.github/workflows/lifecycle-audit-snapshot.yml` (daily 09:17 UTC + manual run) reads the protected
+`.github/workflows/lifecycle-audit-snapshot.yml` (dispatched daily by Vercel Cron — see "Lifecycle snapshot dispatch" below — plus manual run) reads the protected
 `GET /api/catalog/lifecycle-audit` and publishes a sanitized, additive snapshot to the dedicated
 `lifecycle-audit-snapshot` branch at `lifecycle-audit/snapshot.json` (never `main`; the repo is public, so only
 sanitized findings are exported). One-time setup (no values are committed):
@@ -174,41 +174,22 @@ sanitized findings are exported). One-time setup (no values are committed):
 4. The workflow also creates `apps/web/vercel.json` on the data branch (`{"git":{"deploymentEnabled":{"lifecycle-audit-snapshot":false}}}`)
    when missing (first creation or recovery) so Vercel never deploys it; an existing file is preserved and
    `snapshot.json` stays the only routinely updated file. `main`/feature-branch deployments are unaffected.
-5. If the repo has been inactive for 60 days GitHub disables scheduled workflows; re-enable them.
+5. The workflow has no GitHub `schedule` trigger (only `workflow_dispatch`), so GitHub's 60-day inactivity disabling of scheduled workflows does not apply.
 The ChatGPT audit must check `completeness.complete`, `generatedAt` age (`staleAfterHours`, 48) and a failed/missing
 latest run before trusting the snapshot. The job holds no production write access; nothing here changes catalogs,
 the tracker or `audit_status`.
 
-**TEMPORARY scheduler diagnostic — snapshot probe (remove after testing)**
+**Lifecycle snapshot dispatch (Phase 14.5E; Vercel Cron is authoritative)**
 
-Tests Vercel Cron → `GET /api/cron/snapshot-probe?trigger=est-11am|est-12pm|est-1pm` (`0 16/17/18 * * *` UTC = 11/12/1 EST,
-`apps/web/vercel.json`) → GitHub `workflow_dispatch` of `.github/workflows/snapshot-writeback-probe.yml` → `probe/result.json`
-on the isolated `test/snapshot-writeback` branch. No lifecycle audit API call; existing crons/workflows are untouched.
-
-- **Vercel env (Production, server-only):** `CRON_SECRET` (already set) and `GITHUB_PROBE_DISPATCH_TOKEN`: a fine-grained PAT
-  limited to this one repository with only **Actions: Read and write** (Metadata read is implicit). No Contents permission;
-  the workflow pushes with its own `GITHUB_TOKEN`. Never use `NEXT_PUBLIC_*`. Redeploy after setting it.
-- **Must be on `main` and deployed to Production:** `workflow_dispatch` needs the workflow file on `main` (the route dispatches ref `main`),
-  and Vercel only runs crons for the Production deployment.
-- **Two separate results.** The route returns 200 `dispatch: "accepted"` only when GitHub answered 204 (502 `dispatch: "failed"` otherwise);
-  that is NOT workflow success. Confirm the run in Actions → "Snapshot writeback probe" and the per-trigger entry in `probe/result.json`
-  (`dispatchedAt` vs `workflowStartedAt`). Vercel cron logs show the dispatch half.
-- **Isolation:** the workflow refuses `main`/`lifecycle-audit-snapshot`, writes only `probe/result.json` plus
-  `apps/web/vercel.json` (`{"git":{"deploymentEnabled":{"test/snapshot-writeback":false}}}`, created if missing) so the probe branch is never deployed.
-- **Manual test:** Actions → "Snapshot writeback probe" → Run workflow with `trigger_id` `manual`; and, to test the route,
-  `curl -H "Authorization: Bearer $CRON_SECRET" "https://dwpapp.com/api/cron/snapshot-probe?trigger=est-11am"` (run locally with the secret in your shell; expect 401 without it, 400 for an unknown trigger).
-- **Cleanup:** delete the three vercel.json cron entries, the route, the workflow, this section, the `GITHUB_PROBE_DISPATCH_TOKEN` env var/PAT and the `test/snapshot-writeback` branch.
-
-**Lifecycle snapshot dispatch (Phase 14.5E, TEMPORARY test schedule)**
-
-Vercel Cron (`apps/web/vercel.json`, `0 18 * * *` = 18:00 UTC / 1 PM EST; Hobby may fire anywhere within the hour) →
+Vercel Cron (`apps/web/vercel.json`, `0 9 * * *` = 09:00 UTC daily; Hobby may fire anywhere within the hour) →
 `/api/cron/lifecycle-snapshot-dispatch` → GitHub `workflow_dispatch` of `.github/workflows/lifecycle-audit-snapshot.yml` on `main`.
 The route only dispatches; processing, validation, completeness, concurrency and the writeback to `lifecycle-audit-snapshot` stay in the workflow.
-Auth: `CRON_SECRET` (fails closed: unset → 500, bad header → 401, before any outbound call). Reuses server-only `GITHUB_PROBE_DISPATCH_TOKEN`; no new credentials.
+Timing: 09:00 UTC runs after the 02:00 park-hours and the 03:00 (WDW) / 06:00 (Disneyland Resort) lifecycle monitor crons, so the snapshot sees the completed daily evaluations. Auth: `CRON_SECRET` (fails closed: unset → 500, bad header → 401, before any outbound call). Reuses server-only `GITHUB_PROBE_DISPATCH_TOKEN`; no new credentials.
 
 - **200 `dispatch: "accepted"` = GitHub answered 204 only**, not workflow success (502 `failed` otherwise). Confirm in Actions → "Lifecycle audit snapshot" (event `workflow_dispatch`, started within the hour after the cron) and the updated `lifecycle-audit/snapshot.json` (`generatedAt`) on `lifecycle-audit-snapshot`.
 - **Production verification:** after deploy, check Vercel → Cron Jobs for the entry, its log for the 200 body, then the Actions run. Manual: `curl -H "Authorization: Bearer $CRON_SECRET" https://dwpapp.com/api/cron/lifecycle-snapshot-dispatch` (401 without the header).
-- **Cleanup (separate phase, after a successful automatic run):** pick the permanent daily schedule, then remove the three `snapshot-probe` crons, route and workflow, the five-minute GitHub `schedule`, and the probe token/branch.
+- **Scheduling:** Vercel Cron is the only scheduler; the workflow has no GitHub `schedule` trigger. `GITHUB_PROBE_DISPATCH_TOKEN` (fine-grained PAT, this repo only, **Actions: Read and write**; name kept for continuity) must stay set in Production. A migration to Vercel Schedules is planned after Phase 14.8.
+- **Manual run:** Actions → "Lifecycle audit snapshot" → Run workflow.
 
 **Ask Tom** (server-only — never expose these as `NEXT_PUBLIC_*`)
 
