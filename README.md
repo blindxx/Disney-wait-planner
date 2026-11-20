@@ -199,6 +199,17 @@ on the isolated `test/snapshot-writeback` branch. No lifecycle audit API call; e
   `curl -H "Authorization: Bearer $CRON_SECRET" "https://dwpapp.com/api/cron/snapshot-probe?trigger=est-11am"` (run locally with the secret in your shell; expect 401 without it, 400 for an unknown trigger).
 - **Cleanup:** delete the three vercel.json cron entries, the route, the workflow, this section, the `GITHUB_PROBE_DISPATCH_TOKEN` env var/PAT and the `test/snapshot-writeback` branch.
 
+**Lifecycle snapshot dispatch (Phase 14.5E, TEMPORARY test schedule)**
+
+Vercel Cron (`apps/web/vercel.json`, `0 18 * * *` = 18:00 UTC / 1 PM EST; Hobby may fire anywhere within the hour) →
+`/api/cron/lifecycle-snapshot-dispatch` → GitHub `workflow_dispatch` of `.github/workflows/lifecycle-audit-snapshot.yml` on `main`.
+The route only dispatches; processing, validation, completeness, concurrency and the writeback to `lifecycle-audit-snapshot` stay in the workflow.
+Auth: `CRON_SECRET` (fails closed: unset → 500, bad header → 401, before any outbound call). Reuses server-only `GITHUB_PROBE_DISPATCH_TOKEN`; no new credentials.
+
+- **200 `dispatch: "accepted"` = GitHub answered 204 only**, not workflow success (502 `failed` otherwise). Confirm in Actions → "Lifecycle audit snapshot" (event `workflow_dispatch`, started within the hour after the cron) and the updated `lifecycle-audit/snapshot.json` (`generatedAt`) on `lifecycle-audit-snapshot`.
+- **Production verification:** after deploy, check Vercel → Cron Jobs for the entry, its log for the 200 body, then the Actions run. Manual: `curl -H "Authorization: Bearer $CRON_SECRET" https://dwpapp.com/api/cron/lifecycle-snapshot-dispatch` (401 without the header).
+- **Cleanup (separate phase, after a successful automatic run):** pick the permanent daily schedule, then remove the three `snapshot-probe` crons, route and workflow, the five-minute GitHub `schedule`, and the probe token/branch.
+
 **Ask Tom** (server-only — never expose these as `NEXT_PUBLIC_*`)
 
 - `TOM_API_URL` — Tom Railway API base URL
