@@ -1,14 +1,12 @@
 # Phase 14.5E-B1 — read-only lifecycle audit snapshot bridge.
 # Reads the key-protected GET /api/catalog/lifecycle-audit and publishes a sanitized
 # snapshot to the dedicated `lifecycle-audit-snapshot` data branch (never main).
-# Setup: see README "Lifecycle audit snapshot bridge". Triggers are schedule/manual ONLY
+# Setup: see README "Lifecycle audit snapshot bridge". Triggers are workflow_dispatch ONLY
 # (no pull_request / pull_request_target), so the secret is never reachable from forks or PRs.
+# Scheduling is owned by Vercel Cron (/api/cron/lifecycle-snapshot-dispatch), which dispatches this workflow.
 name: Lifecycle audit snapshot
 
 on:
-  schedule:
-    # TEMPORARY trigger test: every 5 minutes. Restore 09:17 UTC daily after proving a scheduled run.
-    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:

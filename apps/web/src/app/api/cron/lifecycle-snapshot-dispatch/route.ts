@@ -3,7 +3,8 @@
  * existing `.github/workflows/lifecycle-audit-snapshot.yml` on `main`.
  *
  * Dispatch only: all snapshot processing, validation, completeness handling, concurrency and the
- * writeback to `lifecycle-audit-snapshot` stay in that workflow. Same pattern as `snapshot-probe`.
+ * writeback to `lifecycle-audit-snapshot` stay in that workflow.
+ * Vercel Cron (`apps/web/vercel.json`) is the authoritative scheduler for this workflow.
  *
  * Fails CLOSED like the other cron routes (CRON_SECRET unset → 500, bad header → 401, both before
  * any outbound call). A 200 means ONLY that GitHub accepted the dispatch (HTTP 204); it says nothing
