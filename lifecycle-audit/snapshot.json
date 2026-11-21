@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "note": "Read-only sanitized export of /api/catalog/lifecycle-audit for the monthly Data Audit. Findings only: never a catalog, tracker or visibility decision. Reconcile via a reviewed PR against dataAuditTracker.json / entertainmentLifecycleRegistry.json.",
-  "generatedAt": "2026-11-20T18:33:32.778Z",
-  "fetchedAt": "2026-11-20T18:33:32.831Z",
+  "generatedAt": "2026-11-21T09:01:48.642Z",
+  "fetchedAt": "2026-11-21T09:01:48.700Z",
   "staleAfterHours": 48,
   "completeness": {
     "eventLimit": 1000,
