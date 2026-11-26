@@ -1,20 +1,59 @@
 {
   "schemaVersion": 1,
   "note": "Read-only sanitized export of /api/catalog/lifecycle-audit for the monthly Data Audit. Findings only: never a catalog, tracker or visibility decision. Reconcile via a reviewed PR against dataAuditTracker.json / entertainmentLifecycleRegistry.json.",
-  "generatedAt": "2026-11-25T09:01:50.513Z",
-  "fetchedAt": "2026-11-25T09:01:50.566Z",
+  "generatedAt": "2026-11-26T09:01:51.806Z",
+  "fetchedAt": "2026-11-26T09:01:51.873Z",
   "staleAfterHours": 48,
   "completeness": {
     "eventLimit": 1000,
-    "eventsReturned": 0,
-    "unreviewedTotal": 0,
+    "eventsReturned": 1,
+    "unreviewedTotal": 1,
     "eventsTruncated": false,
     "complete": true,
-    "retainedEvents": 0,
-    "eventsInLatestFetch": 0
+    "retainedEvents": 1,
+    "eventsInLatestFetch": 1
   },
   "hidden": [],
   "legacyComebacks": [],
-  "flagged": [],
-  "events": []
+  "flagged": [
+    {
+      "parkId": "disneyland",
+      "showName": "Mickey's Mix Magic",
+      "auditFlag": "provider_silence",
+      "silentDays": 10,
+      "inactiveDays": 0,
+      "status": "visible",
+      "silenceFlaggedAt": "2026-11-26T06:26:43.838Z"
+    }
+  ],
+  "events": [
+    {
+      "eventId": "disneyland:silence_flag:2026-11-25:mickey-s-mix-magic",
+      "parkId": "disneyland",
+      "showName": "Mickey's Mix Magic",
+      "eventType": "silence_flag",
+      "localDate": "2026-11-25",
+      "occurredAt": "2026-11-26T06:26:51.185Z",
+      "evidenceSummary": {
+        "threshold": 10,
+        "windowEnd": "2026-11-25",
+        "silentDays": 10,
+        "dormantDays": 10,
+        "windowStart": "2026-10-27",
+        "inactiveDays": 0,
+        "identityBasis": "validated_mapping",
+        "cycleResetDate": null,
+        "identityEstablished": true
+      },
+      "coverageLimitations": [
+        "provider evidence only: ThemeParks.wiki/Queue-Times observations are never independent confirmation",
+        "missing history, empty schedules, unknown/partial data and elapsed time are never counted as inactivity",
+        "an automatic hide is provisional until the scheduled research audit verifies it",
+        "provider silence alone cannot hide a show; a secondary history evaluation was requested"
+      ],
+      "firstSeenAt": "2026-11-26T09:01:51.873Z",
+      "lastSeenAt": "2026-11-26T09:01:51.873Z",
+      "inLatestFetch": true
+    }
+  ]
 }
