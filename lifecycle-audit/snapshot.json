@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "note": "Read-only sanitized export of /api/catalog/lifecycle-audit for the monthly Data Audit. Findings only: never a catalog, tracker or visibility decision. Reconcile via a reviewed PR against dataAuditTracker.json / entertainmentLifecycleRegistry.json.",
-  "generatedAt": "2026-11-27T09:01:49.218Z",
-  "fetchedAt": "2026-11-27T09:01:49.252Z",
+  "generatedAt": "2026-11-28T09:01:49.466Z",
+  "fetchedAt": "2026-11-28T09:01:49.507Z",
   "staleAfterHours": 48,
   "completeness": {
     "eventLimit": 1000,
@@ -20,7 +20,7 @@
       "parkId": "disneyland",
       "showName": "Mickey's Mix Magic",
       "auditFlag": "provider_silence",
-      "silentDays": 11,
+      "silentDays": 12,
       "inactiveDays": 0,
       "status": "visible",
       "silenceFlaggedAt": "2026-11-26T06:26:43.838Z"
@@ -52,7 +52,7 @@
         "provider silence alone cannot hide a show; a secondary history evaluation was requested"
       ],
       "firstSeenAt": "2026-11-27T09:01:49.252Z",
-      "lastSeenAt": "2026-11-27T09:01:49.252Z",
+      "lastSeenAt": "2026-11-28T09:01:49.507Z",
       "inLatestFetch": true
     },
     {
@@ -80,7 +80,7 @@
         "provider silence alone cannot hide a show; a secondary history evaluation was requested"
       ],
       "firstSeenAt": "2026-11-26T09:01:51.873Z",
-      "lastSeenAt": "2026-11-27T09:01:49.252Z",
+      "lastSeenAt": "2026-11-28T09:01:49.507Z",
       "inLatestFetch": true
     }
   ]
